@@ -40,7 +40,7 @@ using namespace nstl;
 
 void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     const auto &jcp = kernel_->jcp;
-	auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
+    auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto weights = CTX_IN_MEM(const data_t *, ZENDNN_ARG_WEIGHTS);
     auto bias = CTX_IN_MEM(const data_t *, ZENDNN_ARG_BIAS);
     auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
@@ -64,6 +64,14 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                " stride_w=",jcp.stride_w, " l_pad=",jcp.l_pad, " t_pad=",jcp.t_pad,
                " f_pad=",jcp.f_pad, " ngroups=",jcp.ngroups, " ic=",jcp.ic, " oc=",jcp.oc,
                " [cpu/convolution]");
+
+    int filter_offset = pd()->dst_md()->offset0;
+    int total_filters = pd()->dst_md()->format_desc.blocking.strides[3];
+    bool concat = true;
+
+    if (total_filters == jcp.oc) {
+       concat = false;
+    }
 
     //TBD: To add support for gemm, ref, direct, winograd, fft
     //we need to move else part to [ZENDNN ALGO] code
@@ -222,7 +230,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 (float *)batchNormOffset,
                 (float *)dst,
                 jcp.oh,
-                jcp.ow
+                jcp.ow,
+                concat,
+                filter_offset,
+                total_filters
             );
         }
         else if ((jcp.reluFused == true) &&
@@ -250,7 +261,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 (float *)batchNormOffset,
                 (float *)dst,
                 jcp.oh,
-                jcp.ow
+                jcp.ow,
+                concat,
+                filter_offset,
+                total_filters
             );
         }
         else if (bias != NULL && !jcp.with_eltwise) {
@@ -275,7 +289,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                      (float *)bias,
                      (float *)dst,
                      jcp.oh,
-                     jcp.ow
+                     jcp.ow,
+                     concat,
+                     filter_offset,
+                     total_filters
                  );
             }
             else {
@@ -299,7 +316,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                      (float *)bias,
                      (float *)dst,
                      jcp.oh,
-                     jcp.ow
+                     jcp.ow,
+                     concat,
+                     filter_offset,
+                     total_filters
                  );
             }
         }
@@ -326,7 +346,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                     (float *)bias,
                     (float *)dst,
                     jcp.oh,
-                    jcp.ow
+                    jcp.ow,
+                    concat,
+                    filter_offset,
+                    total_filters
                 );
             }
             else {
@@ -350,7 +373,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                     (float *)bias,
                     (float *)dst,
                     jcp.oh,
-                    jcp.ow
+                    jcp.ow,
+                    concat,
+                    filter_offset,
+                    total_filters
                 );
             }
         }
@@ -375,7 +401,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 jcp.stride_w,
                 (float *)dst,
                 jcp.oh,
-                jcp.ow
+                jcp.ow,
+                concat,
+                filter_offset,
+                total_filters
             );
         }
     }

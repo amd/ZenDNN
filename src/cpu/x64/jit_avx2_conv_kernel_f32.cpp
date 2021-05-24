@@ -648,8 +648,13 @@ status_t jit_avx2_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
     jcp.src_tag
             = src_d.matches_one_of_tag(dat_tag_ncx, dat_tag_nxc, dat_tag_nCx8c);
     jcp.wei_tag = weights_d.matches_one_of_tag(wei_tag_OIxio, wei_tag_Oxio);
-    jcp.dst_tag = dst_d.matches_one_of_tag(dat_tag_nxc, dat_tag_nCx8c);
-
+    jcp.dst_tag = [&]() {
+      const dims_t strides = {-1,-1,-1,-1,-1};
+      for (const auto tag : {dat_tag_nxc, dat_tag_nCx8c}) {
+          if (dst_d.matches_tag(tag, strides)) return tag;
+      }
+      return format_tag::undef;
+    }();
     jcp.typesize_in = types::data_type_size(src_d.data_type());
     jcp.typesize_out = types::data_type_size(dst_d.data_type());
 
