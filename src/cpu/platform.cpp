@@ -1,0 +1,201 @@
+/*******************************************************************************
+* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
+* Copyright 2020 Intel Corporation
+* Copyright 2020 FUJITSU LIMITED
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*******************************************************************************/
+
+#if ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_THREADPOOL
+#include <algorithm>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__GLIBC__)
+#include <sched.h>
+#endif
+#endif
+
+#include "cpu/platform.hpp"
+
+#if ZENDNN_X64
+#include "cpu/x64/cpu_isa_traits.hpp"
+#elif ZENDNN_AARCH64
+#include "cpu/aarch64/cpu_isa_traits.hpp"
+#endif
+
+namespace zendnn {
+namespace impl {
+namespace cpu {
+namespace platform {
+
+const char *get_isa_info() {
+#if ZENDNN_X64
+    return x64::get_isa_info();
+#elif ZENDNN_AARCH64
+    return aarch64::get_isa_info();
+#else
+    return "Generic";
+#endif
+}
+
+zendnn_cpu_isa_t get_effective_cpu_isa() {
+#if ZENDNN_X64
+    return x64::get_effective_cpu_isa();
+#elif ZENDNN_AARCH64
+    return aarch64::get_effective_cpu_isa();
+#else
+    return zendnn_cpu_isa_all;
+#endif
+}
+
+status_t set_max_cpu_isa(zendnn_cpu_isa_t isa) {
+#if ZENDNN_X64
+    return x64::set_max_cpu_isa(isa);
+#else
+    return status::unimplemented;
+#endif
+}
+
+status_t set_cpu_isa_hints(zendnn_cpu_isa_hints_t isa_hints) {
+#if ZENDNN_X64
+    return x64::set_cpu_isa_hints(isa_hints);
+#else
+    return status::unimplemented;
+#endif
+}
+
+zendnn_cpu_isa_hints_t get_cpu_isa_hints() {
+#if ZENDNN_X64
+    return x64::get_cpu_isa_hints();
+#else
+    return zendnn_cpu_isa_no_hints;
+#endif
+}
+
+bool prefer_ymm_requested() {
+#if ZENDNN_X64
+    const bool prefer_ymm = x64::get_cpu_isa_hints() == zendnn_cpu_isa_prefer_ymm;
+    return prefer_ymm;
+#else
+    return false;
+#endif
+}
+
+bool has_data_type_support(data_type_t data_type) {
+    switch (data_type) {
+        case data_type::bf16:
+#if ZENDNN_X64
+            return x64::mayiuse(x64::avx512_core);
+#else
+            return false;
+#endif
+        case data_type::f16: return false;
+        default: return true;
+    }
+}
+
+float s8s8_weights_scale_factor() {
+#if ZENDNN_X64
+    return x64::mayiuse(x64::avx512_core_vnni) ? 1.0f : 0.5f;
+#else
+    return 1.0f;
+#endif
+}
+
+unsigned get_per_core_cache_size(int level) {
+    auto guess = [](int level) {
+        switch (level) {
+            case 1: return 32U * 1024;
+            case 2: return 512U * 1024;
+            case 3: return 1024U * 1024;
+            default: return 0U;
+        }
+    };
+
+#if ZENDNN_X64
+    using namespace x64;
+    if (cpu().getDataCacheLevels() == 0) return guess(level);
+
+    if (level > 0 && (unsigned)level <= cpu().getDataCacheLevels()) {
+        unsigned l = level - 1;
+        return cpu().getDataCacheSize(l) / cpu().getCoresSharingDataCache(l);
+    } else
+        return 0;
+#else
+    return guess(level);
+#endif
+}
+
+unsigned get_num_cores() {
+#if ZENDNN_X64
+    return x64::cpu().getNumCores(Xbyak::util::CoreLevel);
+#else
+    return 1;
+#endif
+}
+
+#if ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_THREADPOOL
+// The purpose of this function is to return the potential maximum number of
+// threads in user's threadpool. It is assumed that the number of threads in an
+// actual threadpool will not exceed the number cores in a socket reported by
+// the OS, which may or may not be equal to the number of total physical cores
+// in a socket depending on the OS configuration (read -- VM environment). In
+// order to simulate the number of cores available in such environment, this
+// function supports process affinity.
+unsigned get_max_threads_to_use() {
+    int num_cores_per_socket = (int)zendnn::impl::cpu::platform::get_num_cores();
+#if defined(_WIN32)
+    DWORD_PTR proc_affinity_mask;
+    DWORD_PTR sys_affinity_mask;
+    if (GetProcessAffinityMask(
+                GetCurrentProcess(), &proc_affinity_mask, &sys_affinity_mask)) {
+        int masked_nthr = 0;
+        for (int i = 0; i < CHAR_BIT * sizeof(proc_affinity_mask);
+                i++, proc_affinity_mask >>= 1)
+            masked_nthr += proc_affinity_mask & 1;
+        return std::min(masked_nthr, num_cores_per_socket);
+    }
+#elif defined(__GLIBC__)
+    cpu_set_t cpu_set;
+    // Check if the affinity of the process has been set using, e.g.,
+    // numactl.
+    if (::sched_getaffinity(0, sizeof(cpu_set_t), &cpu_set) == 0)
+        return std::min(CPU_COUNT(&cpu_set), num_cores_per_socket);
+#endif
+    return num_cores_per_socket;
+}
+#endif
+
+int get_vector_register_size() {
+#if ZENDNN_X64
+    using namespace x64;
+    if (mayiuse(avx512_common)) return cpu_isa_traits<avx512_common>::vlen;
+    if (mayiuse(avx)) return cpu_isa_traits<avx>::vlen;
+    if (mayiuse(sse41)) return cpu_isa_traits<sse41>::vlen;
+#elif ZENDNN_AARCH64
+    using namespace aarch64;
+    if (mayiuse(asimd)) return cpu_isa_traits<asimd>::vlen;
+    if (mayiuse(sve_512)) return cpu_isa_traits<sve_512>::vlen;
+#endif
+    return 0;
+}
+
+} // namespace platform
+} // namespace cpu
+} // namespace impl
+} // namespace zendnn
