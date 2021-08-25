@@ -110,6 +110,7 @@ const std::map<conv_impl_key_t, std::vector<pd_create_f>> impl_list_map {
 #if ZENDNN_DIRECT_CONV
             CPU_INSTANCE_X64(jit_avx2_1x1_convolution_fwd_t)
             CPU_INSTANCE_X64(jit_avx2_convolution_fwd_t)
+            CPU_INSTANCE_X64(gemm_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_fwd_t<f32>)
 #endif //ZENDNN_DIRECT_CONV
             CPU_INSTANCE_X64(zendnn_convolution_fwd_t)
