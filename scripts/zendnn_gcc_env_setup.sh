@@ -165,6 +165,16 @@ else
     echo "ZENDNN_TF_INTEROP_THREADS=$ZENDNN_TF_INTEROP_THREADS"
 fi
 
+#Disabling export of GCC BLIS and ZenDNN library and other paths when building
+#TensorFlow with --config=zendnn option
+if [ -z "$ZENDNN_TF_GCC_CONFIG_BUILD" ];
+then
+    export ZENDNN_TF_GCC_CONFIG_BUILD=0
+    echo "ZENDNN_TF_GCC_CONFIG_BUILD=$ZENDNN_TF_GCC_CONFIG_BUILD"
+else
+    echo "ZENDNN_TF_GCC_CONFIG_BUILD=$ZENDNN_TF_GCC_CONFIG_BUILD"
+fi
+
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
 #to optimize the use of system resources. ZenDNN depend on a number of threads
@@ -301,9 +311,12 @@ echo "ZENDNN_TEST_COMMON_BENCHMARK_LOC: $ZENDNN_TEST_COMMON_BENCHMARK_LOC"
 
 #----------------------------------------------------------------------------
 # Export PATH and LD_LIBRARY_PATH
-export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
-export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
+if [ $ZENDNN_TF_GCC_CONFIG_BUILD -eq 0 ]
+then
+    export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
+    export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
+fi
 
 echo "LD_LIBRARY_PATH: "$LD_LIBRARY_PATH
 
