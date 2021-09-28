@@ -1068,8 +1068,8 @@ typedef enum {
     zendnn_OIdhw16i32o2i = zendnn_ABcde16b32a2b,
     zendnn_OIdhw16i48o2i = zendnn_ABcde16b48a2b,
     zendnn_OIdhw16i64o2i = zendnn_ABcde16b64a2b,
-	/// 4D CNN activations tensor, an alias to #zendnn_hwcn
-	zendnn_hwcn = zendnn_cdba,
+    /// 4D CNN activations tensor, an alias to #zendnn_cdba
+    zendnn_hwcn = zendnn_cdba,
 } zendnn_format_tag_t;
 
 /// @} zendnn_api_memory
@@ -1154,6 +1154,10 @@ typedef enum {
     zendnn_reduction,
     /// A PReLU primitive.
     zendnn_prelu,
+
+    /* add new primitive */
+    /// An embedding bag primitive.
+    zendnn_embedding_bag,
 
     /// Parameter to allow internal only primitives without undefined behavior.
     /// This parameter is chosen to be valid for so long as sizeof(int) >= 2.
@@ -1312,6 +1316,11 @@ typedef enum {
     zendnn_reduction_norm_lp_power_p_max,
     /// Reduction using lp norm without final pth-root
     zendnn_reduction_norm_lp_power_p_sum,
+
+    /* add new primitive */
+    zendnn_embedding_bag_sum  = 0x3000,
+    zendnn_embedding_bag_mean,
+    zendnn_embedding_bag_max,
 } zendnn_alg_kind_t;
 
 /// Flags for normalization primitives.
@@ -2228,6 +2237,47 @@ typedef struct {
 
 /// @} zendnn_api_reduction
 
+/* add new primitive */
+
+/// @addtogroup zendnn_api_embedding_bag
+/// @{
+
+/// A descriptor of embedding bag operation.
+typedef struct {
+    /// The kind of primitive. Used for self-identifying the primitive
+    /// descriptor. Must be #zendnn_embedding_bag.
+    zendnn_primitive_kind_t primitive_kind;
+
+    /// The kind of propagation. Possible values: #zendnn_forward_inference
+    zendnn_prop_kind_t prop_kind;
+
+    /// The kind of embedding_bag algorithm. Possible values:
+    /// #zendnn_embedding_bag_max, #zendnn_embedding_bag_min, or
+    /// #zendnn_embedding_bag_sum,
+    zendnn_alg_kind_t alg_kind;
+
+    /// input (embedding table) memory descriptor.
+    zendnn_memory_desc_t input_desc;
+
+    /// indices memory descriptor.
+    zendnn_memory_desc_t indices_desc;
+
+    /// offsets memory descriptor.
+    zendnn_memory_desc_t offsets_desc;
+
+    /// weights memory descriptor.
+    zendnn_memory_desc_t weights_desc;
+
+    /// Destination memory descriptor.
+    zendnn_memory_desc_t dst_desc;
+
+    /// Algorithm specific parameters.
+    int32_t padding_idx; //padding index, set to -1 if no padding index
+    bool  is_weights; // true if weight memory descriptor provided
+
+} zendnn_embedding_bag_desc_t;
+
+/// @} zendnn_api_embedding_bag
 /// @} zendnn_api_primitives
 
 /// @addtogroup zendnn_api_engine
@@ -2270,7 +2320,7 @@ typedef struct zendnn_primitive_desc_iterator *zendnn_primitive_desc_iterator_t;
 
 /// @brief A constant primitive descriptor iterator handle.
 typedef const struct zendnn_primitive_desc_iterator
-        *const_zendnn_primitive_desc_iterator_t;
+    *const_zendnn_primitive_desc_iterator_t;
 
 /// @struct zendnn_primitive_desc
 /// @brief An opaque structure to describe a primitive descriptor.
@@ -2389,6 +2439,9 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 /// A special mnemonic for RNN input recurrent cell state vector. An alias for
 /// #ZENDNN_ARG_SRC_2.
 #define ZENDNN_ARG_SRC_ITER_C ZENDNN_ARG_SRC_2
+
+/// Source argument #3.
+#define ZENDNN_ARG_SRC_3 4
 
 /// Destination argument #0.
 #define ZENDNN_ARG_DST_0 17
@@ -2653,6 +2706,9 @@ typedef enum {
     zendnn_query_pooling_v2_d, ///< pooling version 2 descriptor
     zendnn_query_reduction_d, ///< reduction descriptor
     zendnn_query_prelu_d, ///< prelu descriptor
+
+    /* add new primitive */
+    zendnn_query_embedding_bag_d, ///< embedding_bag descriptor
 
     // memory descriptor section
     zendnn_query_some_md = 128, ///< stub

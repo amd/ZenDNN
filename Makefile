@@ -196,6 +196,12 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_maxpool_blocked $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_maxpool_blocked.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_PATH)/lib/ -lblis-mt
+# add new primitive
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) \
+	-o $(OUTDIR)/$(TESTDIR)/embedding_bag_test $(INCDIRS) \
+	-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp \
+	-L_out/lib -lamdZenDNN \
+	-L$(BLIS_PATH)/lib/ -lblis-mt
 
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \

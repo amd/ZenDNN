@@ -319,6 +319,10 @@ struct primitive : public handle<zendnn_primitive_t> {
         reduction = zendnn_reduction,
         /// A PReLU primitive.
         prelu = zendnn_prelu,
+
+        /* add new primitive */
+        /// An embedding bag primitive.
+        embedding_bag = zendnn_embedding_bag,
     };
 
     using handle::handle;
@@ -623,6 +627,11 @@ enum class algorithm {
     reduction_norm_lp_power_p_max = zendnn_reduction_norm_lp_power_p_max,
     /// Reduction using norm_lp_power_p_sum operation
     reduction_norm_lp_power_p_sum = zendnn_reduction_norm_lp_power_p_sum,
+
+    /* add new primitive */
+    embedding_bag_sum  = zendnn_embedding_bag_sum,
+    embedding_bag_mean = zendnn_embedding_bag_mean,
+    embedding_bag_max  = zendnn_embedding_bag_max,
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.
@@ -10903,8 +10912,224 @@ struct reduction : public primitive {
     /// @param pd Primitive descriptor for a reduction primitive.
     reduction(const primitive_desc &pd) : primitive(pd) {}
 };
-
+  
 /// @} zendnn_api_reduction
+
+/* add new primitive */
+/// @addtogroup zendnn_api_embedding_bag EmbeddingBag
+///
+/// A primitive to get embeding_bag using sum, mean and max operations.
+///
+/// @sa @ref dev_guide_embedding_bag in developer guide
+///
+/// @{
+
+/// EmbeddingBag.
+struct embedding_bag : public primitive {
+    /// Descriptor for embedding_bag.
+    struct desc {
+        zendnn_embedding_bag_desc_t data;
+
+        /// Default constructor. Produces an empty object.
+        desc() = default;
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        /// @param weights_desc Weights memory descriptor.
+        /// @param padding_idx Padding Index.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &weights_desc,
+             const memory::desc &dst_desc,
+             int32_t            padding_idx) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   &weights_desc.data,
+                                                   &dst_desc.data,
+                                                   padding_idx),
+                    "could not create an embedding_bag descriptor");
+        }
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        /// @param padding_idx Padding Index.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &dst_desc,
+             int32_t            padding_idx) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   nullptr,
+                                                   &dst_desc.data,
+                                                   padding_idx),
+                    "could not create an embedding_bag descriptor");
+        }
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        /// @param weights_desc Weights memory descriptor. This can be omitted
+        ///     if there are no weights.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &weights_desc,
+             const memory::desc &dst_desc) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   &weights_desc.data,
+                                                   &dst_desc.data,
+                                                   -1),
+                    "could not create an embedding_bag descriptor");
+        }
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &dst_desc) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   nullptr,
+                                                   &dst_desc.data,
+                                                   -1),
+                    "could not create an embedding_bag descriptor");
+
+        }
+    };
+
+    /// Primitive descriptor for an embedding_bag primitive.
+    struct primitive_desc : public zendnn::primitive_desc {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an embedding_bag primitive.
+        ///
+        /// @param adesc Descriptor for an embedding_bag primitive.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                bool allow_empty = false)
+            : zendnn::primitive_desc(
+                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an embedding_bag primitive.
+        ///
+        /// @param adesc Descriptor for an embedding_bag primitive.
+        /// @param aengine Engine to use.
+        /// @param attr Primitive attributes to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine, bool allow_empty = false)
+            : zendnn::primitive_desc(
+                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an embedding_bag primitive
+        /// from a C API primitive descriptor that must have a matching kind.
+        ///
+        /// @param pd C API primitive descriptor for a embedding_bag primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+          : zendnn::primitive_desc(pd, zendnn::primitive::kind::embedding_bag){}
+
+    };
+
+    /// Default constructor. Produces an empty object.
+    embedding_bag() = default;
+
+    /// Constructs an embedding_bag primitive.
+    /// @param pd Primitive descriptor for an embedding_bag primitive.
+    embedding_bag(const primitive_desc &pd) : primitive(pd) {}
+};
+
+/// @} zendnn_api_embedding_bag
 
 /// @} zendnn_api_primitives
 

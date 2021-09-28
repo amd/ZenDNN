@@ -3301,7 +3301,50 @@ zendnn_status_t ZENDNN_API zendnn_reduction_desc_init(zendnn_reduction_desc_t *d
         zendnn_alg_kind_t alg_kind, const zendnn_memory_desc_t *src_desc,
         const zendnn_memory_desc_t *dst_desc, float p, float eps);
 
+
 /// @} zendnn_api_reduction
+
+/* add new primitive */
+
+/// @addtogroup zendnn_api_embedding_bag EmbedddingBag
+/// @{
+
+/// Initializes a descriptor for an embedding_bag primitive.
+///
+/// @note
+///     Destination memory descriptor is allowed to be initialized with
+///     #zendnn_format_tag_any or with format_kind set to
+///     #zendnn_format_kind_any. The embedding_bag primitive does not
+///     allocate memory to destination and it should be pre-allocated.
+///
+/// @param desc Output descriptor for an embeding_bag primitive
+/// @param prop_kind Propagation kind. currently only forward_inference is
+///     supported.
+/// @param alg_kind embedding_bag algorithm kind. Possible values:
+///     #zendnn_embedding_bag_max, #zendnn_embedding_bag_sum,
+///     #zendnn_embedding_bag_mean,
+/// @param input_desc Input (embedding table) memory descriptor.
+/// @param indices_desc Indices memory descriptor.
+/// @param offsets_desc Offsets memory descriptor.
+/// @param weights_desc Weights memory descriptor. This can be nullptr if
+///     no weights vector is present.
+/// @param dst_desc Destination memory descriptor.
+/// @param padding_idx Padding Index. If no padding index is present then
+///     this should be -1.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+///
+zendnn_status_t ZENDNN_API
+zendnn_embedding_bag_desc_init(zendnn_embedding_bag_desc_t *desc,
+                               zendnn_prop_kind_t prop_kind,
+                               zendnn_alg_kind_t alg_kind,
+                               const zendnn_memory_desc_t *input_desc,
+                               const zendnn_memory_desc_t *indices_desc,
+                               const zendnn_memory_desc_t *offsets_desc,
+                               const zendnn_memory_desc_t *weights_desc,
+                               const zendnn_memory_desc_t *dst_desc,
+                               int32_t padding_idx);
+/// @} zendnn_api_embedding_bag
 
 /// @} zendnn_api_primitives
 

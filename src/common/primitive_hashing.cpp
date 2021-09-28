@@ -725,6 +725,24 @@ size_t get_desc_hash(const zero_pad_desc_t &desc) {
     return seed;
 }
 
+/* add for new primitive */
+size_t get_desc_hash(const embedding_bag_desc_t &desc) {
+    size_t seed = 0;
+    // Kinds
+    seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
+    seed = hash_combine(seed, static_cast<size_t>(desc.alg_kind));
+    // Memory descriptors
+    seed = hash_combine(seed, get_md_hash(desc.input_desc));
+    seed = hash_combine(seed, get_md_hash(desc.indices_desc));
+    seed = hash_combine(seed, get_md_hash(desc.offsets_desc));
+    seed = hash_combine(seed, get_md_hash(desc.weights_desc));
+    seed = hash_combine(seed, get_md_hash(desc.dst_desc));
+
+    seed = hash_combine(seed, static_cast<size_t>(desc.padding_idx));
+
+    return seed;
+}
+
 } // namespace primitive_hashing
 } // namespace impl
 } // namespace zendnn

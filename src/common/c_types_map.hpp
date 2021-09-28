@@ -146,6 +146,10 @@ const alg_kind_t reduction_norm_lp_power_p_max
         = zendnn_reduction_norm_lp_power_p_max;
 const alg_kind_t reduction_norm_lp_power_p_sum
         = zendnn_reduction_norm_lp_power_p_sum;
+/* add new primitive */
+const alg_kind_t embedding_bag_sum  = zendnn_embedding_bag_sum;
+const alg_kind_t embedding_bag_mean = zendnn_embedding_bag_mean;
+const alg_kind_t embedding_bag_max  = zendnn_embedding_bag_max;
 } // namespace alg_kind
 
 using data_type_t = zendnn_data_type_t;
@@ -988,6 +992,8 @@ const primitive_kind_t logsoftmax = zendnn_logsoftmax;
 const primitive_kind_t matmul = zendnn_matmul;
 const primitive_kind_t resampling = zendnn_resampling;
 const primitive_kind_t reduction = zendnn_reduction;
+/* add new primitive */
+const primitive_kind_t embedding_bag = zendnn_embedding_bag;
 
 // Internal only primitive kinds.
 const primitive_kind_t internal_only_start = (primitive_kind_t)(1 << 12);
@@ -1037,7 +1043,8 @@ const query_t logsoftmax_d = zendnn_query_logsoftmax_d;
 const query_t matmul_d = zendnn_query_matmul_d;
 const query_t resampling_d = zendnn_query_resampling_d;
 const query_t reduction_d = zendnn_query_reduction_d;
-
+/* add new primitive */
+const query_t embedding_bag_d = zendnn_query_embedding_bag_d;
 const query_t some_md = zendnn_query_some_md;
 const query_t src_md = zendnn_query_src_md;
 const query_t diff_src_md = zendnn_query_diff_src_md;
@@ -1081,6 +1088,9 @@ using reduction_desc_t = zendnn_reduction_desc_t;
 using rnn_direction_t = zendnn_rnn_direction_t;
 using rnn_desc_t = zendnn_rnn_desc_t;
 
+/* add new primitive */
+using embedding_bag_desc_t = zendnn_embedding_bag_desc_t;
+
 /* Internal type, declared in gemm_types.hpp */
 using gemm_desc_t = zendnn_gemm_desc_t;
 
@@ -1119,6 +1129,8 @@ struct op_desc_t {
         resampling_desc_t resampling;
         zero_pad_desc_t zero_pad;
         reduction_desc_t reduction;
+        /* add new primitive */
+        embedding_bag_desc_t embedding_bag;
     };
 
 #define DECL_CTOR_AND_CONVERTERS(c_type) \

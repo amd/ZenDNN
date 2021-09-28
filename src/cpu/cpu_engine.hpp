@@ -65,7 +65,8 @@ DECLARE_IMPL_LIST(resampling);
 DECLARE_IMPL_LIST(rnn);
 DECLARE_IMPL_LIST(shuffle);
 DECLARE_IMPL_LIST(softmax);
-
+/* add new primitive */
+DECLARE_IMPL_LIST(embedding_bag);
 #undef DECLARE_IMPL_LIST
 
 class cpu_engine_impl_list_t {
@@ -104,6 +105,8 @@ public:
             CASE(rnn);
             CASE(shuffle);
             CASE(softmax);
+            /* add new primitive */
+            CASE(embedding_bag);
             default: assert(!"unknown primitive kind"); return empty_list;
         }
 #undef CASE

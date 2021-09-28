@@ -135,6 +135,8 @@ PKIND_TRAITS_INST(logsoftmax);
 PKIND_TRAITS_INST(matmul);
 PKIND_TRAITS_INST(resampling);
 PKIND_TRAITS_INST(reduction);
+/* add new primitive */
+PKIND_TRAITS_INST(embedding_bag);
 #undef PKIND_TRAITS_INST
 
 } // namespace impl

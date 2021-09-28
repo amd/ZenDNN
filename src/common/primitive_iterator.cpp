@@ -40,11 +40,13 @@ status_t zendnn_primitive_desc_iterator_create(
     if (utils::any_null(iterator, op_desc, engine)) return invalid_arguments;
 
     using namespace primitive_kind;
+
+    /* add new primitive */
     bool known_primitive_kind = utils::one_of(op_desc->kind,
             batch_normalization, binary, convolution, deconvolution, eltwise,
             gemm, inner_product, layer_normalization, lrn, logsoftmax, matmul,
             pooling, pooling_v2, prelu, reduction, resampling, rnn, shuffle,
-            softmax);
+            softmax, embedding_bag);
     if (!known_primitive_kind) return invalid_arguments;
 
     auto it = new primitive_desc_iterator_t(engine, op_desc, attr,
