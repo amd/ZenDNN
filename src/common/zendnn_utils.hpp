@@ -41,6 +41,7 @@ class zendnnEnv {
     uint    omp_num_threads;
     uint    zen_num_threads;
     bool    zenBlockedFormat;
+    bool    zenBlockedNHWC;
     bool    zenMemPoolEnable;
     bool    zenLibMemPoolEnable;
     bool    zenINT8format;
@@ -50,6 +51,7 @@ class zendnnEnv {
         omp_num_threads = 1;
         zen_num_threads = 1;
         zenBlockedFormat = false;
+        zenBlockedNHWC = false;
         zenMemPoolEnable = true;
         zenLibMemPoolEnable = true;
         zenINT8format = false;

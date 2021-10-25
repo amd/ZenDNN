@@ -41,6 +41,9 @@ zendnnEnv readEnv() {
     //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
     envObj.zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
 
+    //ZENDNN_BLOCKED_NHWC is added to support NHWC data format for DIRECT ALGO
+    envObj.zenBlockedNHWC = zendnn_getenv_int("ZENDNN_NHWC_BLOCKED",0);
+
     return envObj;
 }
 
