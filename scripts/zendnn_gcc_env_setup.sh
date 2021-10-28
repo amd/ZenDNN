@@ -152,6 +152,11 @@ fi
 export ZENDNN_TF_VERSION="1.15"
 echo "ZENDNN_TF_VERSION=$ZENDNN_TF_VERSION"
 
+#By default setting ZENDNN_PT_VERSION as 1.9.0
+export ZENDNN_PT_VERSION="1.9.0"
+echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
+
+
 #By default TF-ZenDNN will set inter_op_parallelism threads as '1' irrespective
 #of TF config setting or TF environment variable 'TF_NUM_INTEROP_THREADS'
 #setting. This is to avoid the performance penalty from concurrent execution
