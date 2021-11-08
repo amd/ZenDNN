@@ -156,20 +156,6 @@ echo "ZENDNN_TF_VERSION=$ZENDNN_TF_VERSION"
 export ZENDNN_PT_VERSION="1.9.0"
 echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
 
-
-#By default TF-ZenDNN will set inter_op_parallelism threads as '1' irrespective
-#of TF config setting or TF environment variable 'TF_NUM_INTEROP_THREADS'
-#setting. This is to avoid the performance penalty from concurrent execution
-#of OPs using AMD BLIS. To override the default value '1', following variable
-#can be used
-if [ -z "$ZENDNN_TF_INTEROP_THREADS" ];
-then
-    export ZENDNN_TF_INTEROP_THREADS=1
-    echo "ZENDNN_TF_INTEROP_THREADS=$ZENDNN_TF_INTEROP_THREADS"
-else
-    echo "ZENDNN_TF_INTEROP_THREADS=$ZENDNN_TF_INTEROP_THREADS"
-fi
-
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
 #to optimize the use of system resources. ZenDNN depend on a number of threads
