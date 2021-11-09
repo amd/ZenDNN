@@ -308,6 +308,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                " group_count=", group_count);
 
 
+    unsigned int grp_start = 0;
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
         bool transpose_filter = (TransB_Array[i] == CblasNoTrans)?0:1;
@@ -315,18 +316,15 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
         unsigned long n = N_Array[i];
         unsigned long k = K_Array[i];
 
-        unsigned long A_offset = m*k;
-        unsigned long B_offset = k*n;
-        unsigned long C_offset = m*n;
-
         for (int j=0; j<group_size[i]; j++) {
             zenMatmulSplit(zenEnvObj, Layout, transpose_input, transpose_filter,
                            m, k, n, alpha_Array[i],
-                           A_Array[i] + (A_offset*j), lda_Array[i],
-                           B_Array[i] + (B_offset*j), ldb_Array[i],
+                           A_Array[grp_start + j], lda_Array[i],
+                           B_Array[grp_start + j], ldb_Array[i],
                            NULL, false, beta_Array[i],
-                           C_Array[i] + (C_offset*j), ldc_Array[i]);
+                           C_Array[grp_start + j], ldc_Array[i]);
         }
+        grp_start +=group_size[i];
     }
 
 }
@@ -348,6 +346,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                " Layout=", Layout ? "CblasRowMajor," : "CblasColMajor,",
                " group_count=", group_count);
 
+    unsigned int grp_start = 0;
     int thread_qty = zenEnvObj.omp_num_threads;
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
@@ -356,10 +355,6 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
         unsigned long m = M_Array[i];
         unsigned long n = N_Array[i];
         unsigned long k = K_Array[i];
-
-        unsigned long A_offset = m*k;
-        unsigned long B_offset = k*n;
-        unsigned long C_offset = m*n;
 
         unsigned int loopCount = (group_size[i]%thread_qty)==0 ?
                                  group_size[i]/thread_qty:
@@ -374,25 +369,26 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 if (threadOffset >= group_size[i]) {
                     break;
                 }
-#ifdef ZENDNN_GEMM
+#if ZENDNN_GEMM
                 zendnn_sgemm(transpose_input ? 'T' : 'N',
                              transpose_filter ? 'T' : 'N', m, n, k,
                              alpha_Array[i],
-                             A_Array[i] + (A_offset*threadOffset), lda_Array[i],
-                             B_Array[i] + (B_offset*threadOffset), ldb_Array[i],
+                             A_Array[grp_start + threadOffset], lda_Array[i],
+                             B_Array[grp_start + threadOffset], ldb_Array[i],
                              beta_Array[i],
-                             C_Array[i] + (C_offset*threadOffset), ldc_Array[i]);
+                             C_Array[grp_start + threadOffset], ldc_Array[i]);
 #else
-                cblas_sgemm(Layout ? CblasRowMajor, CblasColMajor,
+                cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
                             TransA_Array[i], TransB_Array[i], m, n, k,
                             alpha_Array[i],
-                            A_Array[i] + (A_offset*threadOffset), lda_Array[i],
-                            B_Array[i] + (B_offset*threadOffset), ldb_Array[i],
+                            A_Array[grp_start + threadOffset], lda_Array[i],
+                            B_Array[grp_start + threadOffset], ldb_Array[i],
                             beta_Array[i],
-                            C_Array[i] + (C_offset*threadOffset), ldc_Array[i]);
+                            C_Array[grp_start + threadOffset], ldc_Array[i]);
 #endif
             }
         }
+        grp_start +=group_size[i];
     }
 }
 
@@ -413,6 +409,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                Layout ? "CblasRowMajor" : "CblasColMajor",
                " group_count=", group_count);
 
+    unsigned int grp_start = 0;
     int thread_qty = zenEnvObj.omp_num_threads;
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
@@ -420,10 +417,6 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
         unsigned long m = M_Array[i];
         unsigned long n = N_Array[i];
         unsigned long k = K_Array[i];
-
-        unsigned long A_offset = m*k;
-        unsigned long B_offset = k*n;;
-        unsigned long C_offset = m*n;
 
         int outer_threads = (thread_qty>group_size[i])?(group_size[i]):(thread_qty);
         unsigned int loopCount = (group_size[i]%outer_threads)==0 ?
@@ -469,14 +462,15 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                 cblas_sgemm(Layout ? CblasRowMajor : CblasColMajor,
                             TransA_Array[i], TransB_Array[i], m, n, k,
                             alpha_Array[i],
-                            A_Array[i] + (A_offset*threadOffset), lda_Array[i],
-                            B_Array[i] + (B_offset*threadOffset), ldb_Array[i],
+                            A_Array[grp_start + threadOffset], lda_Array[i],
+                            B_Array[grp_start + threadOffset], ldb_Array[i],
                             beta_Array[i],
-                            C_Array[i] + (C_offset*threadOffset), ldc_Array[i]);
+                            C_Array[grp_start + threadOffset], ldc_Array[i]);
 #endif
 
             }
         }
+        grp_start +=group_size[i];
     }
 }
 
