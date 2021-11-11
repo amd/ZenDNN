@@ -763,13 +763,7 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     const auto dat_tag_nxc = utils::pick(ndims - 3, nwc, nhwc, ndhwc);
     const auto dat_tag_nCx8c = utils::pick(ndims - 3, nCw8c, nChw8c, nCdhw8c);
     jcp.src_tag = src_d.matches_one_of_tag(dat_tag_nxc, dat_tag_nCx8c);
-    jcp.dst_tag = [&]() {
-      const dims_t strides = {-1,-1,-1,-1,-1};
-      for (const auto tag : {dat_tag_nxc, dat_tag_nCx8c}) {
-        if (dst_d.matches_tag(tag, strides)) return tag;
-      }
-      return format_tag::undef;
-    }();
+    jcp.dst_tag = dst_d.matches_one_of_tag(dat_tag_nxc, dat_tag_nCx8c);
     const bool is_data_layout_nxc
             = utils::everyone_is(dat_tag_nxc, jcp.src_tag, jcp.dst_tag);
     const auto dat_tag = is_data_layout_nxc ? dat_tag_nxc : dat_tag_nCx8c;

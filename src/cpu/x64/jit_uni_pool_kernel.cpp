@@ -148,8 +148,9 @@ status_t jit_uni_pool_kernel<isa>::init_conf(jit_pool_conf_t &jpp,
 
     const auto fmt_tag = src_d.matches_one_of_tag(
             blocked_fmt_tag, ncsp_fmt_tag, nspc_fmt_tag);
-    const dims_t strides = {-1,-1,-1,-1,-1};
-    if (!dst_d.matches_tag(fmt_tag, strides)) return status::unimplemented;
+
+    if (!dst_d.matches_tag(fmt_tag)) return status::unimplemented;
+
     if (fmt_tag == ncsp_fmt_tag) {
         // transform input to blocked f32, call f32 jit, transform result to
         // plain output
