@@ -1,13 +1,13 @@
 #*******************************************************************************
-# Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 #*******************************************************************************
 
 #!/bin/bash
 
 #-----------------------------------------------------------------------------
-#   zendnn_gcc_env_setup.sh
+#   zendnn_TF_env_setup.sh
 #   Prerequisite: This script needs to run first to setup environment variables
-#                 before any GCC build or TF setup
+#                 before TensorFlow GCC build
 #
 #   This script does following:
 #   -Checks if important env variables are declared
@@ -16,7 +16,6 @@
 #   -Sets important environment variables for benchmarking:
 #       -OMP_NUM_THREADS, OMP_WAIT_POLICY, OMP_PROC_BIND
 #   -Calls script to gather HW, OS, Kernel, Bios information
-#   -exports LD_LIBRARY_PATH
 #----------------------------------------------------------------------------
 
 #Function to check mandatory prerequisites
@@ -148,13 +147,25 @@ else
     echo "OMP_PROC_BIND=$OMP_PROC_BIND"
 fi
 
-#By default setting ZENDNN_TF_VERSION as 1.15
-export ZENDNN_TF_VERSION="1.15"
+#By default setting ZENDNN_TF_VERSION as 2.5
+export ZENDNN_TF_VERSION="2.5"
 echo "ZENDNN_TF_VERSION=$ZENDNN_TF_VERSION"
 
-#By default setting ZENDNN_PT_VERSION as 1.9.0
-export ZENDNN_PT_VERSION="1.9.0"
-echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
+#Disabling export of GCC BLIS and ZenDNN library and other paths when building
+#TensorFlow with --config=zendnn option
+if [ -z "$ZENDNN_TF_GCC_CONFIG_BUILD" ];
+then
+    export ZENDNN_TF_GCC_CONFIG_BUILD=1
+fi
+echo "ZENDNN_TF_GCC_CONFIG_BUILD=$ZENDNN_TF_GCC_CONFIG_BUILD"
+
+#Use local copy of ZenDNN library source code when building
+#Tensorflow with --config=zendnn
+if [ -z "$ZENDNN_TF_USE_LOCAL_ZENDNN" ];
+then
+    export ZENDNN_TF_USE_LOCAL_ZENDNN=1
+fi
+echo "ZENDNN_TF_USE_LOCAL_ZENDNN=$ZENDNN_TF_USE_LOCAL_ZENDNN"
 
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
@@ -231,14 +242,6 @@ else
     echo "ZENDNN_UTILS_GIT_ROOT: $ZENDNN_UTILS_GIT_ROOT"
 fi
 
-if [ -z "$ZENDNN_BLIS_PATH" ];
-then
-    echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"
-    return
-else
-    echo "ZENDNN_BLIS_PATH: $ZENDNN_BLIS_PATH"
-fi
-
 #Change ZENDNN_PARENT_FOLDER as per need in future
 #Current assumption, TF is located parallel to ZenDNN
 cd ..
@@ -259,21 +262,6 @@ echo "TF_GIT_ROOT: $TF_GIT_ROOT"
 export BENCHMARKS_GIT_ROOT=$ZENDNN_PARENT_FOLDER/benchmarks
 echo "BENCHMARKS_GIT_ROOT: $BENCHMARKS_GIT_ROOT"
 
-export PYTORCH_GIT_ROOT=$ZENDNN_PARENT_FOLDER/pytorch
-echo "PYTORCH_GIT_ROOT: $PYTORCH_GIT_ROOT"
-
-export PYTORCH_BENCHMARK_GIT_ROOT=$ZENDNN_PARENT_FOLDER/pytorch-benchmarks
-echo "PYTORCH_BENCHMARK_GIT_ROOT: $PYTORCH_BENCHMARK_GIT_ROOT"
-
-export ONNXRUNTIME_GIT_ROOT=$ZENDNN_PARENT_FOLDER/onnxruntime
-echo "ONNXRUNTIME_GIT_ROOT: $ONNXRUNTIME_GIT_ROOT"
-
-export ZENDNN_ONNXRT_VERSION="1.8.0"
-echo "ZENDNN_ONNXRT_VERSION: $ZENDNN_ONNXRT_VERSION"
-
-export ZENDNN_ONNX_VERSION="1.9.0"
-echo "ZENDNN_ONNX_VERSION: $ZENDNN_ONNX_VERSION"
-
 # Primitive Caching Capacity
 export ZENDNN_PRIMITIVE_CACHE_CAPACITY=1024
 echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
@@ -293,12 +281,6 @@ export ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC=FALSE
 echo "ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC: $ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC"
 export ZENDNN_TEST_COMMON_BENCHMARK_LOC=/home/amd/benchmark_data
 echo "ZENDNN_TEST_COMMON_BENCHMARK_LOC: $ZENDNN_TEST_COMMON_BENCHMARK_LOC"
-
-#----------------------------------------------------------------------------
-# Export PATH and LD_LIBRARY_PATH
-export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
-export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
 
 echo "LD_LIBRARY_PATH: "$LD_LIBRARY_PATH
 
