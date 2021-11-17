@@ -34,31 +34,6 @@ using namespace zendnn;
 #define ZENDNN_DIRECT_CONV              1
 #define ZENDNN_BLOCKED_POOLING          1
 
-//class to read environment variables for zendnnn
-//In future this will be used with operator memory desc
-class zendnnEnv {
-  public:
-    uint    omp_num_threads;
-    uint    zen_num_threads;
-    bool    zenBlockedFormat;
-    bool    zenBlockedNHWC;
-    bool    zenMemPoolEnable;
-    bool    zenLibMemPoolEnable;
-    bool    zenINT8format;
-
-    //setting default values
-    zendnnEnv() {
-        omp_num_threads = 1;
-        zen_num_threads = 1;
-        zenBlockedFormat = false;
-        zenBlockedNHWC = false;
-        zenMemPoolEnable = true;
-        zenLibMemPoolEnable = true;
-        zenINT8format = false;
-    }
-};
-
-
 #ifdef BLIS_EXPERT
 //class to use blis expert interface
 class blis_expert {

@@ -21,7 +21,6 @@ int ZenLibMemoryPool::zenLibMemPoolCount = 0;
 
 //Read env variables for zendnn
 zendnnEnv readEnv() {
-
     zendnnEnv envObj;
     envObj.omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
     if (getenv("ZEN_NUM_THREADS")) {
@@ -29,6 +28,8 @@ zendnnEnv readEnv() {
         //Overriding OMP_NUM_THREADS if ZEN_NUM_THREADS is exported
         envObj.omp_num_threads = envObj.zen_num_threads;
     }
+
+    //ZENDNN_BLOCKED_FORMAT is to enable/disable BLOCKED Format.
     envObj.zenBlockedFormat = zendnn_getenv_int("ZENDNN_BLOCKED_FORMAT", 0);
 
     //TODO: change ZENDNN_MEMPOOL_ENABLE to ZENDNN_TF_MEMPOOL_ENABLE
@@ -43,6 +44,11 @@ zendnnEnv readEnv() {
 
     //ZENDNN_BLOCKED_NHWC is added to support NHWC data format for DIRECT ALGO
     envObj.zenBlockedNHWC = zendnn_getenv_int("ZENDNN_NHWC_BLOCKED",0);
+
+    //ZENDNN Library gives preference to NHWC-BLOCKED Format over BLOCKED Format.
+    if (envObj.zenBlockedNHWC) {
+        envObj.zenBlockedFormat=0;
+    }
 
     return envObj;
 }
