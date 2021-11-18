@@ -15,7 +15,8 @@
 using namespace zendnn;
 
 //ZenClip clips the output values based on upperbound
-void zenClipOp(zendnnEnv zenEnvObj,float *out_layer,float upper_bound,unsigned long size) {
+void zenClipOp(zendnnEnv zenEnvObj,float *out_layer,float upper_bound,
+               unsigned long size) {
     int remainder = size%8;
     #pragma omp parallel for num_threads(omp_get_max_threads())
     for (unsigned long i=0; i < size-remainder; i+=8) {
@@ -159,20 +160,6 @@ void zenPostOps(
                     }
             }
         }
-
-        //#TODO - Environment variable to be replaced as parameter in Zenpostops for July release
-        bool bound = zendnn_getenv_int("ZENDNN_RELU_UPPERBOUND");
-        bool int8_enable = zendnn_getenv_int("ZENDNN_INT8_SUPPORT");
-        if(bound && int8_enable)
-        {
-           #pragma omp parallel for num_threads(no_of_threads)
-           for (i = 0; i < total_size; i += total_filters)
-               #pragma omp simd
-               for (int c = 0; c < no_of_filter; c++) {
-                   out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] > 6.0 ?
-                                                     6.0 :  out_layer[ biasOffset + i + c];
-               }
-         }
     }
     else  {
         struct timeval start, end;
