@@ -16,9 +16,6 @@
 using namespace zendnn;
 #define BLIS_NORMAL_PATH1        1024
 #define BLIS_NORMAL_PATH2        4096
-#define BLIS_DIRECT_MATMUL          0
-
-#define ZENDNN_GEMM                 0
 
 zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
                              int64_t K, float alpha, const float *A, int64_t lda, const float *B,
@@ -73,14 +70,15 @@ void zenMatMul_gemm(
     //currently we take a different approach by splitting and parallelizing
     //MatMul with pipelining
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    bool blis_direct_matmul = BLIS_DIRECT_MATMUL;
+    unsigned int blis_direct_matmul = zenEnvObj.zenGEMMalgo;
 
     //Currently zendnn_sgemm is used only for m==1
     //TODO: Need to run perf analysis on zendnn_sgemm and use it
     // accordingly
-    if (blis_direct_matmul || (m==1)) {
+    if ((blis_direct_matmul==1) || (m==1)) {
 
-        if (blis_direct_matmul) {
+        if (blis_direct_matmul==1) {
+
             //Perform MatMul using AMD BLIS
             cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
                         transpose_input ? CblasTrans : CblasNoTrans,
@@ -158,18 +156,20 @@ void zenMatMul_gemm_wrapper(
     float *output,
     const int ldc
 ) {
+
+    // Get the number of threads that could be used for parallelization
+    zendnnEnv zenEnvObj = readEnv();
+    unsigned int blis_direct_matmul = zenEnvObj.zenGEMMalgo;
+
     // prologue code for time profiling of this kernel
     struct timeval start, end;
     gettimeofday(&start, 0);
 
-#if !BLIS_DIRECT_MATMUL
-    if (false == Layout) { //CblasRowMajor
+    if (false == Layout && !(blis_direct_matmul==1)) { //CblasColMajor
         zenMatMul_gemm(!Layout, transpose_filter, transpose_input, n, k, m,
                        alpha, filter, ldb, input, lda, bias, relu, beta, output, ldc);
     }
-    else
-#endif
-    {
+    else {
         zenMatMul_gemm(Layout, transpose_input, transpose_filter, m, k, n,
                        alpha, input, lda, filter, ldb, bias, relu, beta, output, ldc);
     }
@@ -346,8 +346,9 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                " Layout=", Layout ? "CblasRowMajor," : "CblasColMajor,",
                " group_count=", group_count);
 
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned int grp_start = 0;
-    int thread_qty = zenEnvObj.omp_num_threads;
+
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
         bool transpose_filter = (TransB_Array[i] == CblasNoTrans)?0:1;
@@ -369,23 +370,27 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 if (threadOffset >= group_size[i]) {
                     break;
                 }
-#if ZENDNN_GEMM
-                zendnn_sgemm(transpose_input ? 'T' : 'N',
-                             transpose_filter ? 'T' : 'N', m, n, k,
-                             alpha_Array[i],
-                             A_Array[grp_start + threadOffset], lda_Array[i],
-                             B_Array[grp_start + threadOffset], ldb_Array[i],
-                             beta_Array[i],
-                             C_Array[grp_start + threadOffset], ldc_Array[i]);
-#else
-                cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
-                            TransA_Array[i], TransB_Array[i], m, n, k,
-                            alpha_Array[i],
-                            A_Array[grp_start + threadOffset], lda_Array[i],
-                            B_Array[grp_start + threadOffset], ldb_Array[i],
-                            beta_Array[i],
-                            C_Array[grp_start + threadOffset], ldc_Array[i]);
-#endif
+
+                //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
+                // jit based kernel will be called.
+                // default ZENDNN_GEMM_ALGO is set to 0
+                // refer src/common/zendnn_utils.cpp
+                if (zenEnvObj.zenGEMMalgo == 3)
+                    zendnn_sgemm(transpose_input ? 'T' : 'N',
+                                 transpose_filter ? 'T' : 'N', m, n, k,
+                                 alpha_Array[i],
+                                 A_Array[grp_start + threadOffset], lda_Array[i],
+                                 B_Array[grp_start + threadOffset], ldb_Array[i],
+                                 beta_Array[i],
+                                 C_Array[grp_start + threadOffset], ldc_Array[i]);
+                else
+                    cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
+                                TransA_Array[i], TransB_Array[i], m, n, k,
+                                alpha_Array[i],
+                                A_Array[grp_start + threadOffset], lda_Array[i],
+                                B_Array[grp_start + threadOffset], ldb_Array[i],
+                                beta_Array[i],
+                                C_Array[grp_start + threadOffset], ldc_Array[i]);
             }
         }
         grp_start +=group_size[i];
@@ -410,7 +415,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                " group_count=", group_count);
 
     unsigned int grp_start = 0;
-    int thread_qty = zenEnvObj.omp_num_threads;
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
         bool transpose_filter = (TransB_Array[i] == CblasNoTrans)?0:1;
@@ -432,7 +437,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
             int inner_threads = 1;
             //If inner_threads*outer_threads < OMP_NUM_THREADS, inner_threads will be incremented for few parent threads
             //This make sure that all the threads are utilized
-            int temp = thread_qty - (inner_threads*outer_threads);
+            unsigned int temp = thread_qty - (inner_threads*outer_threads);
             int thread_loop = (temp%outer_threads)?(temp/outer_threads):((
                                   temp/outer_threads)+1);
             for (int j=0; j<thread_loop; j++) {
@@ -562,62 +567,69 @@ void zenMatmulSplit(
                " K=", k, " N=", n, " lda=", lda, " ldb=", ldb, " ldc=", ldc,
                " relu=", relu, " alpha=", alpha, " beta=", beta);
 
-    int blis_num_threads = 1;
+    //l2 is level 2 no. of threads for nested parallelism.
+    // thread_qty is level 1 no. of threads
+    // Currently nested parallelism is disabled. If l2 is
+    // more than 1, then thread_qty is set to 1.
+    unsigned int l2_num_threads = 1;
 
-#if ZENDNN_GEMM
-    blis_num_threads = thread_qty;
-    thread_qty = (thread_qty%blis_num_threads)==0?(thread_qty/blis_num_threads):
-                 (thread_qty/blis_num_threads)+1;
-    omp_set_max_active_levels(2);
-
-#else
-
-#if BLIS_EXPERT
-    //If M, N and K >=1024, NORMAL path of BLIS give optimal performance. This is
-    //based on heuristic with different model and different BS
-    //blis_m_kernel and blis_n_kernel is choosen based on the BLIS mxn kernel(6x16).
-    //For optimal performance a thread need to work with atleast m=6 and n=16
-    //for mxn kernel. if m/6 < n/16, there is no benifit in splitting m, as it will
-    //make more skinny matix sizes.
-    //If (m < 6 || n < 16), there is no benefit of splitting,
-    //as residual kernel will be called instead of optimal 6x16 kernel
-    //Zen2 has 16 registers which can store 128 floats, BLIS uses
-    //96(6x16=12 ymm registers) for output and 32 floats (4 ymm  registers)
-    //are used to load A and B
-    //TODO: check 1024 value with SSP64 or more than 32 threads
-    int blis_m_kernel = 6;
-    int blis_n_kernel = 16;
-    if ((m/blis_m_kernel < n/blis_n_kernel) || (m >=BLIS_NORMAL_PATH1 &&
-            n>=BLIS_NORMAL_PATH1 &&  k>=BLIS_NORMAL_PATH1) || (m >BLIS_NORMAL_PATH2 ||
-                    n >BLIS_NORMAL_PATH2)) {
-        blis_num_threads = thread_qty;
+    //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
+    // enabled, then zendnn_sgemm jit based kernel will be
+    // called.
+    // default ZENDNN_GEMM_ALGO is set to 0
+    // refer src/common/zendnn_utils.cpp
+    if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
+        l2_num_threads = thread_qty;
+        thread_qty = 1;
+        omp_set_max_active_levels(2);
     }
     else {
-        //If m is large enough to accomodate total threads*6, then go for split.
-        if (m > (thread_qty*blis_m_kernel)) {
-            blis_num_threads = 1;
+
+#if BLIS_EXPERT
+        //If M, N and K >=1024, NORMAL path of BLIS give optimal performance. This is
+        //based on heuristic with different model and different BS
+        //blis_m_kernel and blis_n_kernel is choosen based on the BLIS mxn kernel(6x16).
+        //For optimal performance a thread need to work with atleast m=6 and n=16
+        //for mxn kernel. if m/6 < n/16, there is no benifit in splitting m, as it will
+        //make more skinny matix sizes.
+        //If (m < 6 || n < 16), there is no benefit of splitting,
+        //as residual kernel will be called instead of optimal 6x16 kernel
+        //Zen2 has 16 registers which can store 128 floats, BLIS uses
+        //96(6x16=12 ymm registers) for output and 32 floats (4 ymm  registers)
+        //are used to load A and B
+        //TODO: check 1024 value with SSP64 or more than 32 threads
+        int blis_m_kernel = 6;
+        int blis_n_kernel = 16;
+        if ((m/blis_m_kernel < n/blis_n_kernel) || (m >=BLIS_NORMAL_PATH1 &&
+                n>=BLIS_NORMAL_PATH1 &&  k>=BLIS_NORMAL_PATH1) || (m >BLIS_NORMAL_PATH2 ||
+                        n >BLIS_NORMAL_PATH2)) {
+            l2_num_threads = thread_qty;
         }
-        else { // create nested parallelism
-            //TODO: Need to check below code with nested parallelism model
-            //temp = ((m%BLIS_KERNEL_DIMS_M)==0?m/BLIS_KERNEL_DIMS_M:
-            //              ((m/BLIS_KERNEL_DIMS_M)+1));
-            //blis_num_threads = thread_qty/(temp);
-            blis_num_threads = thread_qty;
+        else {
+            //If m is large enough to accomodate total threads*6, then go for split.
+            if (m > (thread_qty*blis_m_kernel)) {
+                l2_num_threads = 1;
+            }
+            else { // create nested parallelism
+                //TODO: Need to check below code with nested parallelism model
+                //temp = ((m%BLIS_KERNEL_DIMS_M)==0?m/BLIS_KERNEL_DIMS_M:
+                //              ((m/BLIS_KERNEL_DIMS_M)+1));
+                //l2_num_threads = thread_qty/(temp);
+                l2_num_threads = thread_qty;
+            }
         }
-    }
-    thread_qty = (thread_qty%blis_num_threads)==0?(thread_qty/blis_num_threads):
-                 (thread_qty/blis_num_threads)+1;
-    omp_set_max_active_levels(2);
+        thread_qty = (thread_qty%l2_num_threads)==0?(thread_qty/l2_num_threads):
+                     (thread_qty/l2_num_threads)+1;
+        omp_set_max_active_levels(2);
 #else
-    //UnOptimized path, added to support CBLAS interface
-    //TODO: Check if this can be removed completely
-    if (thread_qty > m) {
-        thread_qty = m;
-    }
-    omp_set_max_active_levels(1);
+        //UnOptimized path, added to support CBLAS interface
+        //TODO: Check if this can be removed completely
+        l2_num_threads = thread_qty;
+        thread_qty = 1;
+        omp_set_max_active_levels(2);
 #endif
 
-#endif
+    }
 
     float *data_col = NULL;
     data_col = (float *)input;
@@ -627,21 +639,16 @@ void zenMatmulSplit(
 
     #pragma omp parallel num_threads(thread_qty)
     {
-
-        if ((thread_qty%blis_num_threads)!=0 && omp_get_num_threads()==(thread_qty-1)) {
-            blis_num_threads = thread_qty%blis_num_threads;
+        if ((thread_qty%l2_num_threads)!=0 && omp_get_num_threads()==(thread_qty-1)) {
+            l2_num_threads = thread_qty%l2_num_threads;
         }
-
-#if !ZENDNN_GEMM
 #if BLIS_EXPERT
         //creating blis expert interface
-        blis_expert blis_obj(blis_num_threads,
+        blis_expert blis_obj(l2_num_threads,
                              transpose_input?BLIS_TRANSPOSE:BLIS_NO_TRANSPOSE,
                              transpose_filter?BLIS_TRANSPOSE:BLIS_NO_TRANSPOSE,
                              alpha, beta);
 #endif
-#endif
-
         unsigned int m_per_thread = m/thread_qty;
         if (m_merge_count_rem && (omp_get_thread_num() < m_merge_count_rem)) {
             m_per_thread++;
@@ -659,48 +666,49 @@ void zenMatmulSplit(
         unsigned long outputOffset = ((unsigned long)ldc * threadOffset);
 
         unsigned long gemmRows = m_per_thread;
-#if ZENDNN_GEMM
-        zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                     gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
-                     ldb, beta, output+outputOffset, ldc);
 
-#else
+        if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
+            zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
+                         gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
+                         ldb, beta, output+outputOffset, ldc);
+        }
+        else {
 #if BLIS_EXPERT
-        if (transpose_input)
-            bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
-                                                k,
-                                                data_col+inputOffset,
-                                                1, lda, &blis_obj.a);
-        else
-            bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
-                                                k,
-                                                data_col+inputOffset,
-                                                lda, 1, &blis_obj.a);
+            if (transpose_input)
+                bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
+                                                    k,
+                                                    data_col+inputOffset,
+                                                    1, lda, &blis_obj.a);
+            else
+                bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
+                                                    k,
+                                                    data_col+inputOffset,
+                                                    lda, 1, &blis_obj.a);
 
-        if (transpose_filter)
-            bli_obj_create_with_attached_buffer(blis_obj.dt, k,
-                                                n,
-                                                (void *)filter,
-                                                1, ldb, &blis_obj.b);
+            if (transpose_filter)
+                bli_obj_create_with_attached_buffer(blis_obj.dt, k,
+                                                    n,
+                                                    (void *)filter,
+                                                    1, ldb, &blis_obj.b);
 
-        else
-            bli_obj_create_with_attached_buffer(blis_obj.dt, k,
-                                                n,
-                                                (void *)filter,
-                                                ldb, 1, &blis_obj.b);
-        bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows, n,
-                                            output+outputOffset, ldc, 1, &blis_obj.c);
-        bli_gemm_ex(&blis_obj.alpha, &blis_obj.a, &blis_obj.b, &blis_obj.beta,
-                    &blis_obj.c, NULL, &blis_obj.rntm);
+            else
+                bli_obj_create_with_attached_buffer(blis_obj.dt, k,
+                                                    n,
+                                                    (void *)filter,
+                                                    ldb, 1, &blis_obj.b);
+            bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows, n,
+                                                output+outputOffset, ldc, 1, &blis_obj.c);
+            bli_gemm_ex(&blis_obj.alpha, &blis_obj.a, &blis_obj.b, &blis_obj.beta,
+                        &blis_obj.c, NULL, &blis_obj.rntm);
 
 #else
-        cblas_sgemm(Layout ? CblasRowMajor : CblasColMajor,
-                    transpose_input ? CblasTrans : CblasNoTrans,
-                    transpose_filter ? CblasTrans : CblasNoTrans, gemmRows, n, k,
-                    alpha, input + inputOffset, lda, filter, ldb, beta,
-                    output + outputOffset, ldc);
+            cblas_sgemm(Layout ? CblasRowMajor : CblasColMajor,
+                        transpose_input ? CblasTrans : CblasNoTrans,
+                        transpose_filter ? CblasTrans : CblasNoTrans, gemmRows, n, k,
+                        alpha, input + inputOffset, lda, filter, ldb, beta,
+                        output + outputOffset, ldc);
 #endif
-#endif
+        }
 
         //Below Bias and activation code can be eliminated if not required
         unsigned long biasOffset = outputOffset;
@@ -708,7 +716,7 @@ void zenMatmulSplit(
             zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
                        ldc, biasOffset,
                        bias, relu, NULL,
-                       blis_num_threads);
+                       l2_num_threads);
     }
 }
 

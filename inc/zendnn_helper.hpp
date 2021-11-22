@@ -15,6 +15,7 @@ class zendnnEnv {
   public:
     uint    omp_num_threads;
     uint    zen_num_threads;
+    uint    zenGEMMalgo;
     bool    zenBlockedFormat;
     bool    zenBlockedNHWC;
     bool    zenMemPoolEnable;
@@ -25,6 +26,7 @@ class zendnnEnv {
     zendnnEnv() {
         omp_num_threads = 1;
         zen_num_threads = 1;
+        zenGEMMalgo = 0;
         zenBlockedFormat = false;
         zenBlockedNHWC = false;
         zenMemPoolEnable = true;
