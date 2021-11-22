@@ -1,4 +1,9 @@
 /*******************************************************************************
+* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -181,9 +186,13 @@ class Cpu {
 	{
 		return (val >> base) & ((1u << (end - base)) - 1);
 	}
+
+	// Initially, Number of cores reported on AMD system was 0.
+	// The issue is fixed with this modified version of setNumCores()
 	void setNumCores()
 	{
-		if ((type_ & tINTEL) == 0) return;
+		// This function support CPU type: AMD and Intel
+		if ((type_ & tINTEL || type_ & tAMD) == 0) return;
 
 		unsigned int data[4] = {};
 
@@ -221,7 +230,57 @@ class Cpu {
 	}
 	void setCacheHierarchy()
 	{
-		if ((type_ & tINTEL) == 0) return;
+		// If CPU is other than AMD or Intel, return null.
+		if ((type_ & tINTEL || type_ & tAMD) == 0) return;
+
+		// Code to calculate Cache Size for AMD CPUs
+                if(type_ & tAMD) {
+		    // To store CPUID
+		    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+		    // There are 3 Data Cache Levels (L1, L2, L3)
+		    dataCacheLevels_ = 3;
+                    // Get CPUID with leaf 0x8000001D (for modern AMD CPUs)
+		    // Sub leaf value ranges from 0 to 3
+		    // Sub leaf value 0 refers to L1 Data Cache
+		    // Sub leaf value 1 refers to L1 Instruction Cache
+		    // Sub leaf value 2 refers to L2 Cache
+		    // Sub leaf value 3 refers to L3 Cache
+		    int leaf = 0x8000001D;
+		    // For legacy AMD CPU, use leaf 0x80000005 for L1 cache
+		    // and 0x80000006 for L2 and L3 cache
+		    int cache_index = 0;
+		    for(int sub_leaf = 0; sub_leaf <= dataCacheLevels_; ++sub_leaf) {
+			// Skip sub_leaf = 1 as it refers to
+			// L1 Instruction Cache (not required)
+			if(sub_leaf == 1) {
+			    continue;
+			}
+			// Get CPUID with specified leaf and sub_leaf value
+		        __cpuid_count(leaf, sub_leaf, eax, ebx, ecx, edx);
+			// ebx = (Line Size - 1, bits 0 to 11) +
+			//       (Partitions - 1, bits 12 to 21) +
+			//       (Associativity - 1, bits 22 to 31)
+			// edx = Cache Sets - 1
+			// Cache Size = Line Size * Partitions * Associativity * Cache Sets
+                        dataCacheSize_[cache_index] =
+                                        (extractBit(ebx, 22, 31) + 1)
+                                        * (extractBit(ebx, 12, 21) + 1)
+                                        * (extractBit(ebx, 0, 11) + 1)
+                                        * (ecx + 1);
+			// Calculate the number of cores sharing the current data cache
+			// eax = Bits 14 to 25: Number of cores * Number of threads
+			int smt_width = numCores_[0];
+			int logical_cores = numCores_[1];
+			int actual_logical_cores = extractBit(eax, 14, 25) + 1;
+			if (logical_cores != 0) {
+				actual_logical_cores = (std::min)(actual_logical_cores, logical_cores);
+			}
+			coresSharignDataCache_[cache_index] = (std::max)(actual_logical_cores / smt_width, 1);
+			++cache_index;
+		    }
+		    return;
+		}
+
 		const unsigned int NO_CACHE = 0;
 		const unsigned int DATA_CACHE = 1;
 //		const unsigned int INSTRUCTION_CACHE = 2;
