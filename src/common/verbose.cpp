@@ -55,6 +55,7 @@
 #include "shuffle_pd.hpp"
 #include "softmax_pd.hpp"
 #include "sum_pd.hpp"
+#include "embedding_bag_pd.hpp"
 
 #include "cpu/platform.hpp"
 #include "zendnn_private.hpp"
@@ -754,8 +755,9 @@ static void init_info_mem(const engine_t *e, pd_t *s, char *buffer) {
 
     zendnn_md2dim_str(prb_str, ZENDNN_VERBOSE_PRB_LEN, s->dst_md());
 
-    verbose_templ(buffer, e, s->kind(), s->name(), prop_kind::undef, dat_str,
-            attr_str, aux_str, prb_str);
+    verbose_templ(buffer, e, s->kind(), s->name(),
+                  prop_kind::forward_inference, dat_str,
+                  attr_str, aux_str, prb_str);
 }
 
 template <typename pd_t>
@@ -826,7 +828,7 @@ static void init_info_pooling(engine_t *e, pd_t *s, char *buffer) {
 
     attr2str(attr_str, ZENDNN_VERBOSE_ATTR_LEN, attr_written, s->attr());
 
-    
+
 
     if (s->is_3d()) {
         DPRINT(prb_str, ZENDNN_VERBOSE_PRB_LEN, prb_written,
@@ -1080,7 +1082,7 @@ static void init_info_matmul(const engine_t *e, pd_t *s, char *buffer) {
     }
 
     attr2str(attr_str, ZENDNN_VERBOSE_ATTR_LEN, attr_written, s->attr());
-	}
+        }
     verbose_templ(buffer, e, s->kind(), s->name(), prop_kind::undef, dat_str,
             attr_str, aux_str, prb_str);
 }
@@ -1148,6 +1150,32 @@ static void init_info_reduction(const engine_t *e, pd_t *s, char *buffer) {
             attr_str, aux_str, prb_str);
 }
 
+template <typename pd_t>
+static void init_info_embedding_bag(const engine_t *e, pd_t *s, char *buffer) {
+    DECL_DAT_AUX_PRB_STRS();
+
+    { // src
+        for (int i = 0; i < s->n_inputs(); ++i) {
+            auto md = s->src_md(i);
+            DPRINT(dat_str, ZENDNN_VERBOSE_DAT_LEN, dat_written, "src_");
+            MD2STR(dat_str, ZENDNN_VERBOSE_DAT_LEN, dat_written, md);
+            DPRINT(dat_str, ZENDNN_VERBOSE_DAT_LEN, dat_written, " ");
+        }
+    }
+    { // dst
+        auto md = s->dst_md();
+        DPRINT(dat_str, ZENDNN_VERBOSE_DAT_LEN, dat_written, "dst_");
+        MD2STR(dat_str, ZENDNN_VERBOSE_DAT_LEN, dat_written, md);
+    }
+
+
+    DPRINT(aux_str, ZENDNN_VERBOSE_AUX_LEN, aux_written, "alg:%s",
+	   zendnn_alg_kind2str(s->desc()->alg_kind));
+
+    verbose_templ(buffer, e, s->kind(), s->name(), prop_kind::undef, dat_str,
+            attr_str, aux_str, prb_str);
+}
+
 #undef DPRINT
 } // namespace
 
@@ -1187,6 +1215,7 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
             CASE(shuffle);
             CASE(softmax);
             CASE(sum);
+            CASE(embedding_bag);
             case primitive_kind::zero_pad:
                 init_info_zero_pad(engine, pd, &str_[0]);
                 break;

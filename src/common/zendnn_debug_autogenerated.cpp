@@ -846,6 +846,7 @@ const char *zendnn_prim_kind2str(zendnn_primitive_kind_t v) {
     if (v == zendnn_reduction) return "reduction";
     if (v == zendnn_prelu) return "prelu";
     if (v == zendnn_primitive_kind_max) return "primitive_kind_max";
+    if (v == zendnn_embedding_bag) return "embedding_bag";
     assert(!"unknown prim_kind");
     return "unknown prim_kind";
 }
@@ -922,6 +923,10 @@ const char *zendnn_alg_kind2str(zendnn_alg_kind_t v) {
     if (v == zendnn_reduction_norm_lp_sum) return "reduction_norm_lp_sum";
     if (v == zendnn_reduction_norm_lp_power_p_max) return "reduction_norm_lp_power_p_max";
     if (v == zendnn_reduction_norm_lp_power_p_sum) return "reduction_norm_lp_power_p_sum";
+    if (v == zendnn_embedding_bag_sum) return "embedding_bag_sum";
+    if (v == zendnn_embedding_bag_mean) return "embedding_bag_mean";
+    if (v == zendnn_embedding_bag_max) return "embedding_bag_max";
+
     assert(!"unknown alg_kind");
     return "unknown alg_kind";
 }

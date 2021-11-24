@@ -1,20 +1,11 @@
 /*******************************************************************************
 * Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 *
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
 *******************************************************************************/
+
 #include "cpu/cpu_engine.hpp"
 #include "cpu/ref_embedding_bag.hpp"
+#include "cpu/avx2_embedding_bag.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -28,6 +19,7 @@ using namespace zendnn::impl::data_type;
 
 // clang-format off
 const pd_create_f impl_list[] = {
+    CPU_INSTANCE(avx2_embedding_bag_t<f32>)
     CPU_INSTANCE(ref_embedding_bag_t<f32>)
     /* eol */
     nullptr,
@@ -35,7 +27,7 @@ const pd_create_f impl_list[] = {
 // clang-format on
 } //namespace
 
-const pd_create_f*
+const pd_create_f *
 get_embedding_bag_impl_list(const embedding_bag_desc_t *desc) {
     UNUSED(desc);
     return impl_list;

@@ -218,6 +218,8 @@ enum {
     key_deconv_zp,
     key_eltwise_diff_dst,
     key_eltwise_src,
+    key_embed_bag_indices,
+    key_embed_bag_weights,
     key_fusion_forward_scratchpad,
     key_fusion_inout_buffer,
     key_gemm_int_c_in_acc_dt,

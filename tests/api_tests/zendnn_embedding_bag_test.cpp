@@ -1,18 +1,8 @@
 /*******************************************************************************
 * Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 *
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
 *******************************************************************************/
+
 /* Steps:
  *  1. create engin and stream
  *  2. create user memory (input, indices, offsets, weights)
@@ -46,92 +36,119 @@
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
 
+#define   API_SUCCESS          (0)
+#define   API_FAILURE          (1)
+
 using namespace std;
 using namespace zendnn;
 
-/* add new primitive */
-/* emable writing output to files */
-#define    WRITE_OUTPUT_FILE  1
-
-/* use same seed each time for same random number sequence */
-#define    RAND_SEED          (1760)
-
 /* parameters */
-#define    NUM_EMBEDDING      (2048)
-#define    DIM_EMBEDDING      (10)
-#define    NUM_INDICES        (256)
-#define    NUM_BAGS           (8)
-#define    PADDING_INDEX      (23)
+struct emb_params {
+    int32_t   num_embedding = 10;
+    int32_t   dim_embedding = 20;
+    int32_t   num_indices   = 12;
+    int32_t   num_bags      = 3;
+    int32_t   padding_idx   = 1;
+    int32_t   indices[12]   = {0,1,5, 1,4,2,6, 1,3,9,8,7};
+    int32_t   offsets[3]    = {0,3,7};
+    float     weights[12]   = {1,2,3,4,5,6,7,8,9,10,11,12};
+};
+
+/* expected otput */
+float expected_output_sum_wt_pd[]    = {6840, 33380, 124420};
+float expected_output_mean_nwt_npd[] = {1010, 1510, 2450};
+float expected_output_max_nwt_pd[]   = {2210, 2610, 3810};
+
+/* functor for float comparison */
+class compare_float_t {
+public:
+    compare_float_t(float tol = 1e-05):tolerance{tol} {}
+
+    bool operator()(float a, float b) {
+        if(isnan(a) || isnan(b))
+            return false;
+        if((a -b) > tolerance)
+            return false;
+        if((b -a) > tolerance)
+            return false;
+
+        return true;
+    }
+
+private:
+    float tolerance;
+};
 
 /* create embedding table */
-memory create_embedding_table(engine eng, int num_embedding, int dim_embedding) {
+memory create_embedding_table(engine eng, emb_params &params) {
+
+    int32_t  &num_embedding = params.num_embedding;
+    int32_t  &dim_embedding = params.dim_embedding;
+
     auto table = memory({{num_embedding, dim_embedding},
         memory::data_type::f32,
         memory::format_tag::ab}, eng);
 
     float *hndl = (float *)table.get_data_handle();
 
-    for (auto i = 0; i < num_embedding*dim_embedding; ++i) {
-        hndl[i] = float(rand())/float(num_embedding);
+    for(auto i = 0; i < num_embedding*dim_embedding; ++i) {
+        hndl[i] = float(i+1);
     }
 
     return table;
 }
 
 /* create indices */
-memory create_indices(engine eng, int num_indices, int num_embedding) {
+memory create_indices(engine eng, emb_params &params) {
+
+    int32_t &num_indices = params.num_indices;
+
     auto indices = memory({{num_indices},
         memory::data_type::s32,
         memory::format_tag::a}, eng);
 
-    int *hndl = (int *)indices.get_data_handle();
+    int32_t *hndl = (int32_t *)indices.get_data_handle();
 
     /* indices should be in the range of 0 to num_embedding */
-    for (auto i = 0; i < num_indices; ++i) {
-        hndl[i] = rand() % num_embedding;
+    for(auto i = 0; i < num_indices; ++i) {
+        hndl[i] = params.indices[i];
     }
 
     return indices;
 }
 
 /* create offsets */
-memory create_offsets(engine eng, int num_bags, int num_indices) {
+memory create_offsets(engine eng, emb_params &params) {
+
+    int32_t &num_bags = params.num_bags;
+
     auto offsets = memory({{num_bags},
         memory::data_type::s32,
         memory::format_tag::a}, eng);
 
-    int *hndl = (int *)offsets.get_data_handle();
+    int32_t *hndl = (int32_t *)offsets.get_data_handle();
 
-    /* divide indices into equal intevals */
-    int intrval = num_indices/(num_bags + 1);
-
-    if (intrval < 1) {
-        zendnnError(ZENDNN_TESTLOG, "error in create_offsets,",
-                    "offset inverval should at least be 1");
-        exit(1);
-    }
-
-    /* first offset is always zero */
-    hndl[0] = 0;
-    for (auto i = 1; i < num_bags; ++i) {
-        hndl[i] = hndl[i-1] + intrval;
+    /* first offset should always be zero */
+    for(auto i = 0; i < num_bags; ++i) {
+        hndl[i] = params.offsets[i];
     }
 
     return offsets;
 }
 
 /* create weights */
-memory create_weights(engine eng, int num_indices) {
+memory create_weights(engine eng, emb_params &params) {
+
+    int32_t &num_indices = params.num_indices;
     auto weights = memory({{num_indices},
         memory::data_type::f32,
         memory::format_tag::a}, eng);
 
-    int *hndl = (int *)weights.get_data_handle();
+    float *hndl = (float *)weights.get_data_handle();
 
     /* weights are in the range [0.5-1.0] */
-    for (auto i = 0; i < num_indices; ++i) {
-        auto r   = float(rand())/float(RAND_MAX);
-        hndl[i]  = (r > 0.5) ? r : r + 0.5;
+    for(auto i = 0; i < num_indices; ++i) {
+        hndl[i]  = params.weights[i];
     }
 
     return weights;
@@ -139,7 +156,11 @@ memory create_weights(engine eng, int num_indices) {
 }
 
 /* create output */
-memory create_output(engine eng, int num_bags, int dim_embedding) {
+memory create_output(engine eng, emb_params &params) {
+
+    int32_t &num_bags      = params.num_bags;
+    int32_t &dim_embedding = params.dim_embedding;
+
     /* create destination buffer */
     auto dst = memory({{num_bags, dim_embedding},
         memory::data_type::f32,
@@ -148,53 +169,36 @@ memory create_output(engine eng, int num_bags, int dim_embedding) {
     return dst;
 }
 
-/* write output to a file */
-void write_to_file(string fname, memory mem) {
-    ofstream file;
+/* sum the bags for verification */
+std::vector<float> sum_bags(memory &dst)
+{
+    std::vector<float> sum;
 
-    file.open(fname);
-    if (!file) {
-        zendnnError(ZENDNN_TESTLOG, "failed to open ", fname);
-        return;
-    }
+    auto dst_dims       = dst.get_desc().dims();
+    auto num_bags       = dst_dims[0];
+    auto dim_embedding  = dst_dims[1];
 
-    /* get the memory data type */
-    size_t size = mem.get_desc().get_size();
+    float *hndl         = (float *)dst.get_data_handle();
 
-    memory::data_type dtype = mem.get_desc().data_type();
-
-    switch (dtype) {
-    case memory::data_type::f32: {
-        size /= sizeof(float);
-        float *hndl = (float *)mem.get_data_handle();
-        for (auto i = 0; i < size; ++i) {
-            file << hndl[i] << "\n";
+    int32_t idx_base    = 0;
+    for(auto bag = 0; bag < num_bags; ++bag) {
+        float bag_sum = 0.0;
+        for(auto j = 0; j < dim_embedding; ++j) {
+            bag_sum += hndl[idx_base +j];
         }
-    }
-    break;
 
-    case memory::data_type::s32: {
-        size /= sizeof(int);
-        int *hndl = (int *)mem.get_data_handle();
-        for (auto i = 0; i < size; ++i) {
-            file << hndl[i] << " ";
-        }
-    }
-    break;
-
-    default:
-        zendnnInfo(ZENDNN_TESTLOG,
-                   "unsupported data type for file write to ", fname);
+        sum.push_back(bag_sum);
+        idx_base += dim_embedding;
     }
 
-    file.close();
+    return sum;
 }
 
 /* execute embedding_bag */
 void exec_embedding_bag(engine eng, stream s, memory table,
                         memory indices, memory offsets, memory weights,
                         memory bags, algorithm alg,
-                        bool is_weights, bool is_padding_idx) {
+                        bool is_weights, int32_t padding_idx) {
 
     auto table_md   = memory::desc(table.get_desc());
     auto indices_md = memory::desc(indices.get_desc());
@@ -204,8 +208,8 @@ void exec_embedding_bag(engine eng, stream s, memory table,
 
     auto emdb_d = embedding_bag::desc();
 
-    if (!is_weights) {
-        if (!is_padding_idx)
+    if(!is_weights) {
+        if(padding_idx < 0)
             emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
                                          table_md,
                                          indices_md,
@@ -217,9 +221,9 @@ void exec_embedding_bag(engine eng, stream s, memory table,
                                          indices_md,
                                          offsets_md,
                                          bags_md,
-                                         PADDING_INDEX);
+                                         padding_idx);
     } else {
-        if (!is_padding_idx)
+        if(padding_idx < 0)
             emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
                                          table_md,
                                          indices_md,
@@ -233,13 +237,13 @@ void exec_embedding_bag(engine eng, stream s, memory table,
                                          offsets_md,
                                          weights_md,
                                          bags_md,
-                                         PADDING_INDEX);
+                                         padding_idx);
     }
 
     auto emdb_pd = embedding_bag::primitive_desc(emdb_d, eng);
     auto emdb    = embedding_bag(emdb_pd);
 
-    if (!is_weights) {
+    if(!is_weights) {
         emdb.execute(s, {{ZENDNN_ARG_SRC_0, table},
             {ZENDNN_ARG_SRC_1, indices},
             {ZENDNN_ARG_SRC_2, offsets},
@@ -253,40 +257,12 @@ void exec_embedding_bag(engine eng, stream s, memory table,
             {ZENDNN_ARG_DST, bags}
         });
     }
-
-    /* if enabled write output to file */
-#if WRITE_OUTPUT_FILE
-    string fname = string(getenv("ZENDNN_GIT_ROOT")) +
-                   string("/_out/tests/ref_embeding_bag_out");
-    switch (alg) {
-    case algorithm::embedding_bag_sum:
-        fname += "_sum";
-        break;
-    case algorithm::embedding_bag_mean:
-        fname += "_mean";
-        break;
-    case algorithm::embedding_bag_max:
-        fname += "_max";
-        break;
-    default:
-        zendnnInfo(ZENDNN_TESTLOG, "unknown algorithm type");
-    }
-
-    if (is_weights) {
-        fname += "_w";
-    }
-    if (is_padding_idx) {
-        fname += "_pd";
-    }
-
-    zendnnInfo(ZENDNN_TESTLOG, "writing output to ", fname);
-
-    write_to_file(fname, bags);
-#endif
-
 }
 
 int main(int argc, char **argv) {
+
+    int status = API_SUCCESS;
+
     zendnnInfo(ZENDNN_TESTLOG, "ZenDNN API test for embedding_bag starts");
 
     /* create engine kind */
@@ -298,38 +274,85 @@ int main(int argc, char **argv) {
     stream s(eng);
     zendnnVerbose(ZENDNN_TESTLOG, "stream created");
 
-    /* initialize random number generator */
-    srand(RAND_SEED);
+    /* get the parameters */
+    emb_params params;
 
     /* create embedding table */
-    memory table = create_embedding_table(eng, NUM_EMBEDDING, DIM_EMBEDDING);
+    memory table = create_embedding_table(eng, params);
 
     /* create indices */
-    memory indices = create_indices(eng, NUM_INDICES, NUM_EMBEDDING);
+    memory indices = create_indices(eng, params);
 
     /* create offsets */
-    memory offsets = create_offsets(eng, NUM_BAGS, NUM_INDICES);
+    memory offsets = create_offsets(eng, params);
 
     /* create weights */
-    memory weights = create_weights(eng, NUM_INDICES);
+    memory weights = create_weights(eng, params);
 
     /* create output */
-    memory bags    = create_output(eng, NUM_BAGS, DIM_EMBEDDING);
+    memory bags    = create_output(eng, params);
 
     zendnnVerbose(ZENDNN_TESTLOG, "all memory buffers created");
 
-    /* test embedding bag without weights and padding index */
-    exec_embedding_bag(eng, s, table, indices,
-                       offsets, weights, bags,
-                       algorithm::embedding_bag_sum, false, true);
-    exec_embedding_bag(eng, s, table, indices,
-                       offsets, weights, bags,
-                       algorithm::embedding_bag_mean, false, true);
-    exec_embedding_bag(eng, s, table, indices,
-                       offsets, weights, bags,
-                       algorithm::embedding_bag_max, false, true);
+    compare_float_t cmp;
+
+    /* test embedding bag */
+    {
+        zendnnVerbose(ZENDNN_TESTLOG,
+                      "testing sum with weights and pading index");
+        exec_embedding_bag(eng, s, table, indices,
+                           offsets, weights, bags,
+                           algorithm::embedding_bag_sum, true,
+                           params.padding_idx);
+
+        auto sum = sum_bags(bags);
+        for(int i = 0; i < params.num_bags; ++i) {
+            if(!cmp(sum[i],expected_output_sum_wt_pd[i])) {
+                zendnnError(ZENDNN_TESTLOG, "Expected:",
+                            expected_output_sum_wt_pd[i],
+                            " Actual:", sum[i]);
+                status = API_FAILURE;
+            }
+        }
+    }
+
+    {
+        zendnnVerbose(ZENDNN_TESTLOG,
+                      "testing mean with no weights, no pading index");
+        exec_embedding_bag(eng, s, table, indices,
+                           offsets, weights, bags,
+                           algorithm::embedding_bag_mean, false, -1);
+
+        auto sum = sum_bags(bags);
+        for(int i = 0; i < params.num_bags; ++i) {
+            if(!cmp(sum[i],expected_output_mean_nwt_npd[i])) {
+                zendnnError(ZENDNN_TESTLOG, "Expected:",
+                            expected_output_mean_nwt_npd[i],
+                            " Actual:", sum[i]);
+                status = API_FAILURE;
+            }
+        }
+    }
+
+    {
+        zendnnVerbose(ZENDNN_TESTLOG,
+                      "testing max with no weights but padding index");
+        exec_embedding_bag(eng, s, table, indices,
+                           offsets, weights, bags,
+                           algorithm::embedding_bag_max, false,
+                           params.padding_idx);
+
+        auto sum = sum_bags(bags);
+        for(int i = 0; i < params.num_bags; ++i) {
+            if(!cmp(sum[i],expected_output_max_nwt_pd[i])) {
+                zendnnError(ZENDNN_TESTLOG, "Expected:",
+                            expected_output_max_nwt_pd[i],
+                            " Actual:", sum[i]);
+                status = API_FAILURE;
+            }
+        }
+    }
 
     zendnnInfo(ZENDNN_TESTLOG, "ZenDNN API test for embedding_bag ends");
-    return 0;
-
+    return status;
 }
