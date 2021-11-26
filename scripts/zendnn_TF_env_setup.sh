@@ -205,9 +205,9 @@ echo "ZENDNN_NHWC_BLOCKED=$ZENDNN_NHWC_BLOCKED"
 export ZENDNN_INT8_SUPPORT=0
 echo "ZENDNN_INT8_SUPPORT=$ZENDNN_INT8_SUPPORT"
 
-# INT8 Relu6 fusion support is disabled by default
-export ZENDNN_RELU_UPPERBOUND=0
-echo "ZENDNN_RELU_UPPERBOUND=$ZENDNN_RELU_UPPERBOUND"
+# ZENDNN_GEMM_ALGO is set to 0 by default
+export ZENDNN_GEMM_ALGO=0
+echo "ZENDNN_GEMM_ALGO=$ZENDNN_GEMM_ALGO"
 
 # Switch to enable Conv, Add fusion on users discretion. Currently it is
 # safe to enable this switch for resnet50v1_5, resnet101, and
