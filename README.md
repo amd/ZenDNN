@@ -3,34 +3,44 @@
 
 Zen Deep Neural Network Library (ZenDNN)
 ========================================
-ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems. ZenDNN leverages oneDNN/DNNL v2.2's basic infrastructure and APIs. ZenDNN optimizes several APIs and adds new APIs, which are currently integrated into TensorFlow and ONNXRT. ZenDNN uses AMD BLIS (BLAS like Library Instantiation Software) library for its BLAS (Basic Linear Algebra Subprograms) API needs.
+ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems. ZenDNN leverages oneDNN/DNNL v2.2's basic infrastructure and APIs. ZenDNN optimizes several APIs and adds new APIs, which are currently integrated into TensorFlow, ONNXRT, and PyTorch. ZenDNN uses AMD BLIS (BLAS-like Library Instantiation Software) library for its BLAS (Basic Linear Algebra Subprograms) API needs.
 
 # Table of Contents
 
+- [Zen Deep Neural Network Library (ZenDNN)](#zen-deep-neural-network-library-zendnn)
+- [Table of Contents](#table-of-contents)
 - [Scope](#scope)
 - [Release Highlights](#release-highlights)
 - [Supported OS and Compilers](#supported-os-and-compilers)
+  - [OS](#os)
+  - [Compilers](#compilers)
 - [Prerequisites](#prerequisites)
 - [AOCC and AMD-BLIS Library Installation](#aocc-and-amd-blis-library-installation)
+  - [General Convention](#general-convention)
+  - [AMD-BLIS Library Setup](#amd-blis-library-setup)
+  - [AOCC Installation](#aocc-installation)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Build from Source](#build-from-source)
+  - [AOCC compiler](#aocc-compiler)
+  - [GCC compiler](#gcc-compiler)
+  - [Validate the build](#validate-the-build)
 - [Logs](#logs)
 - [License](#license)
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC CPUs on the Linux® platform. ZenDNN v3.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average) that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, the execution will fall back to the native path of the framework.
+The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v3.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average) that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* Python v3.8.10 has been used to generate the TensorFlow v2.5 wheel file (*.whl).
-* Python v3.7.9 has been used to generate the TensorFlow v1.15 wheel file (*.whl).
-* Python v3.8.5 has been used to generate the ONNXRT v1.5.1 wheel file (*.whl).
+* ZenDNN library is integrated with TensorFlow (v2.7), ONNXRT v1.8.0, and PyTorch (v1.9.0).
+* Python v3.6-v3.9 has been used to generate the TensorFlow v2.7 wheel files (*.whl).
+* Python v3.8 has been used to generate the ONNXRT v1.8.0 wheel file (*.whl).
+* Python v3.6-v3.9 has been used to generate the PyTorch v1.9.0 wheel files (*.whl).
 * NHWC (default format) and Blocked Format (NCHWc8) are supported.
-* ZenDNN library is integrated with TensorFlow (v2.5, v1.15) and ONNXRT v1.5.1
 
-ZenDNN library is intended to be used in conjunction with the frameworks mentioned above, you cannot use it independently.
+ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
 The latest information on the ZenDNN release and installers is available on AMD Developer Central (https://developer.amd.com/zendnn/).
 
@@ -48,13 +58,7 @@ Theoretically, any Linux based OS with GLIBC version later than 2.17 could be su
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* Conda must be installed and initialized with its path set properly so that the Conda env can be activated from the terminal.
-  * Note: If Conda is not available, zendnn_release_setup.sh script will fail.
-* The whl file must be generated with the same Python version for the following binaries:
-	* Python 3.8.10 for TensorFlow v2.5
-	* Python 3.7.9 for TensorFlow v1.15
-	* Python 3.8.5 for ONNXRT v1.5.1
-* AOCC 3.0 and AMD-BLIS 3.0.6 must be installed.
+* AOCC 3.0 and AOCL (AMD-BLIS) 3.0.6 must be installed for PyTorch and ONNXRT binary packages.
   * Note: While GCC 7.5 and later are also supported compilers, AOCC is recommended for optimal performance of the ZenDNN library.
 
 
@@ -79,107 +83,137 @@ Complete the following steps to setup the AOOC compiled BLIS library:
 1. Execute the command `cd <compdir>`
 2.  Download aocl-linux-aocc-3.0-6.tar.gz.
 3. Execute the following commands:
-`tar -xvf aocl-linux-aocc-3.0-6.tar.gz`
-  `cd aocl-linux-aocc-3.0-6`
-  `tar -xvf aocl-blis-linux-aocc-3.0-6.tar.gz`
-  `cd amd-blis`
+    ```bash
+    tar -xvf aocl-linux-aocc-3.0-6.tar.gz
+    cd aocl-linux-aocc-3.0-6
+    tar -xvf aocl-blis-linux-aocc-3.0-6.tar.gz
+    cd amd-blis
+	```
 This will set up the environment for BLIS AOCC path:
-`export ZENDNN_BLIS_PATH=$(pwd)`
+```bash
+export ZENDNN_BLIS_PATH=$(pwd)
+```
 For example:
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis`
-
+```bash
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis
+```
 Complete the following steps to setup the GCC compiled BLIS library:
 1. Execute the command `cd <compdir>`.
 2. Download aocl-linux-gcc-3.0-6.tar.gz.
 3. Execute the following commands:
-`tar -xvf aocl-linux-gcc-3.0-6.tar.gz`
-`cd aocl-linux-gcc-3.0-6`
-`tar -xvf aocl-blis-linux-gcc-3.0-6.tar.gz`
-`cd amd-blis`
+    ```bash
+    tar -xvf aocl-linux-gcc-3.0-6.tar.gz
+    cd aocl-linux-gcc-3.0-6
+    tar -xvf aocl-blis-linux-gcc-3.0-6.tar.gz
+    cd amd-blis
+    ```
 This will set up the environment for BLIS GCC path:
-`export ZENDNN_BLIS_PATH=$(pwd)`
+```bash
+export ZENDNN_BLIS_PATH=$(pwd)
+```
 For example:
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis`
+```bash
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis
+```
 
 ## AOCC Installation
 Complete the following steps to install AOCC:
 1. Execute the command `cd <compdir>`.
-2. Download aocc-compiler-3.0.0.tar from the AMD Developer Central (https://developer.amd.com/
-amd-aocc/).
-3. Execute the command `tar -xvf aocc-compiler-3.0.0.tar`.
-4. Execute the command `cd aocc-compiler-3.0.0`.
+2. Download aocc-compiler-3.0.0.tar from the AMD Developer Central (https://developer.amd.com/amd-aocc/).
+3. Execute the command
+   ```bash
+   tar -xvf aocc-compiler-3.0.0.tar
+   ```
+4. Execute the command
+   ```bash
+   cd aocc-compiler-3.0.0
+   ```
 This will install the compiler and display the AOCC set up instructions.
-5. Execute the command `bash install.sh`.
+1. Execute the command
+   ```bash
+   bash install.sh
+   ```
 This will set up the environment for the AOCC path:
- `export ZENDNN_AOCC_COMP_PATH=$(pwd)`
+```bash
+ export ZENDNN_AOCC_COMP_PATH=$(pwd)
+ ```
 For example:
-`export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0`
+```bash
+export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0
+```
 The bashrc file can be edited to setup ZENDNN_AOCC_COMP_PATH environment path.
 For example, in the case of AOCC compiled AMD-BLIS:
-`export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0`
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis`
+```bash
+export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis
+```
 For example, in the case of GCC compiled AMD-BLIS:
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis`
+```bash
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis
+```
 
 
 # Runtime Dependencies
-To use ZenDNN, the following runtime libraries must be installed:
+ZenDNN has the following runtime dependencies:
 * GNU C library (glibc.so)
 * GNU Standard C++ library (libstdc++.so)
 * Dynamic linking library (libdl.so)
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python 3.8.10 for TensorFlow v2.5
-* Python 3.7.9 for TensorFlow v1.15
-* Python 3.8.5 for ONNXRT v1.5.1
+* Python v3.6-v3.9 for TensorFlow v2.7
+* Python v3.6-v3.9 for PyTorch v1.9.0
+* Python v3.8 for ONNXRT v1.8.0
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
 # Build from Source
 Clone ZenDNN git:
-`git clone https://github.com/amd/ZenDNN.git`
-`cd ZenDNN`
+```bash
+git clone https://github.com/amd/ZenDNN.git
+cd ZenDNN
+```
 
 ## AOCC compiler
 **ZENDNN_AOCC_COMP_PATH** and **ZENDNN_BLIS_PATH** should be defined.
 example:
-`export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0`
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis`
-`make clean`
-`source scripts/zendnn_aocc_build.sh`
+```bash
+export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis
+make clean
+source scripts/zendnn_aocc_build.sh
+```
 When new terminal is opened, user need to set up environment variables:
-`source scripts/zendnn_aocc_env_setup.sh`
+```bash
+source scripts/zendnn_aocc_env_setup.sh
+```
 
 ## GCC compiler
 **ZENDNN_BLIS_PATH** should be defined.
 example:
-`export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis`
-`make clean`
-`source scripts/zendnn_gcc_build.sh`
+```bash
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis
+make clean
+source scripts/zendnn_gcc_build.sh
+```
 When new terminal is opened, user need to set up environment variables:
-`source scripts/zendnn_gcc_env_setup.sh`
-
+```bash
+source scripts/zendnn_gcc_env_setup.sh
+```
 Please note above scripts must be sourced only from ZenDNN Folder.
 
 ## Validate the build
 After the library is built on Linux host, user can run unit tests using:
-`source scripts/runApiTest.sh`
+```bash
+source scripts/runApiTest.sh
+```
 Corresponding tests are located in the **tests/api_tests** directory. These unit tests don't produce any information/logs in the terminal. Library logs can be enabled with:
-`ZENDNN_LOG_OPTS=ALL:2 source scripts/runApiTest.sh`
+```bash
+ZENDNN_LOG_OPTS=ALL:2 source scripts/runApiTest.sh
+```
 
 # Logs
 Logging is disabled in the ZenDNN library by default. It can be enabled using the environment variable **ZENDNN_LOG_OPTS** before running any tests. Logging behavior can be specified by setting the environment variable **ZENDNN_LOG_OPTS** to a comma-delimited list of ACTOR:DBGLVL pairs.
-
-For example:
-* To turn on info logging, use **ZENDNN_LOG_OPTS=ALL:2**
-* To turn off all logging, use **ZENDNN_LOG_OPTS=ALL:-1**
-* To only log errors, use **ZENDNN_LOG_OPTS=ALL:0**
-* To only log info for ALGO, use **ZENDNN_LOG_OPTS=ALL:-1,ALGO:2**
-* To only log info for CORE, use **ZENDNN_LOG_OPTS=ALL:-1,CORE:2**
-* To only log info for API, use **ZENDNN_LOG_OPTS=ALL:-1,API:2**
-* To only log info for PROF (profile), use **ZENDNN_LOG_OPTS=ALL:-1,PROF:2**
-* To only log info for FWK, use **ZENDNN_LOG_OPTS=ALL:-1,FWK:2**
 
 The different ACTORS are as follows:
 | ACTORS  | Usage
@@ -191,8 +225,20 @@ The different ACTORS are as follows:
 | PROF    | Logs the performance of operations in millisecond
 | FWK     | Logs all the framework (TensorFlow, ONNXRT, and PyTorch) specific calls
 
+For example:
+* To turn on info logging, use **ZENDNN_LOG_OPTS=ALL:2**
+* To turn off all logging, use **ZENDNN_LOG_OPTS=ALL:-1**
+* To only log errors, use **ZENDNN_LOG_OPTS=ALL:0**
+* To only log info for ALGO, use **ZENDNN_LOG_OPTS=ALL:-1,ALGO:2**
+* To only log info for CORE, use **ZENDNN_LOG_OPTS=ALL:-1,CORE:2**
+* To only log info for API, use **ZENDNN_LOG_OPTS=ALL:-1,API:2**
+* To only log info for PROF (profile), use **ZENDNN_LOG_OPTS=ALL:-1,PROF:2**
+* To only log info for FWK, use **ZENDNN_LOG_OPTS=ALL:-1,FWK:2**
+
+
+
 The Different Debug Levels (DBGLVL) are as follows:
-```
+```bash
 enum LogLevel {
 	LOG_LEVEL_DISABLED = -1,
 	LOG_LEVEL_ERROR    =  0,
