@@ -66,8 +66,6 @@ class blis_expert {
 };
 #endif
 
-zendnnEnv readEnv();
-
 //This is for supporting future integration with streams
 //TODO: Test with maximum no of possible streams and tune
 //      ZEN_LIB_MEM_POOL_LIMIT accordingly

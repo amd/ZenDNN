@@ -8,6 +8,7 @@
 #include <math.h>
 #include <sys/sysinfo.h>
 #include <string>
+#include "zendnn_helper.hpp"
 #include "zendnn_utils.hpp"
 
 #ifndef ZENDNN_PRIVATE_HPP
@@ -19,24 +20,6 @@ extern "C"
 
     bool padding_zone(int top_y, int top_x, int width_orig, int height_orig,
                       int padding_w, int padding_h);
-
-    void max_pooling(
-        const float *input,
-        const int number_of_images,
-        const int number_of_channel,
-        const int height,
-        const int width,
-        const int kernel_height,
-        const int kernel_width,
-        const int stride_width,
-        const int stride_height,
-        const int padding_height_top,
-        const int padding_height_bottom,
-        const int padding_width_left,
-        const int padding_width_right,
-        float *output,
-        const int data_format
-    );
 
     void maxPoolingRef(
         const float *input,
@@ -54,24 +37,6 @@ extern "C"
         const int padding_width_right,
         float *output,
         const bool data_format // 1 for NCHW and 0 for NHWC
-    );
-
-    void avg_pooling(
-        const float *input,
-        const int number_of_images,
-        const int number_of_channel,
-        const int height,
-        const int width,
-        const int kernel_height,
-        const int kernel_width,
-        const int stride_width,
-        const int stride_height,
-        const int padding_height_top,
-        const int padding_height_bottom,
-        const int padding_width_left,
-        const int padding_width_right,
-        float *output,
-        const int data_format
     );
 
     void avgPoolingRef(
@@ -171,82 +136,6 @@ extern "C"
     void NHWC2NCHW(const float *nchw_data, int N, int C, int H, int W,
                    float *nhwc_data);
 
-
-    void zenConvolution2D(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
-    void zenConvolution2DwithBias(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        const float *bias,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
-
-    void zenConvolution2DwithBiasRelu(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        const float *bias,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
     void zenConvolution2DwithBiasSum(
         const float *in_layer,
         const int no_of_images,
@@ -296,89 +185,6 @@ extern "C"
         const int filter_offset = 0,
         const int total_filters = 0
     );
-
-    void zenConvolution2DwithBatchNorm(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        const float *scale,
-        const float *mean,
-        const float *offset,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
-    void zenConvolution2DwithBatchNormRelu(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        const float *scale,
-        const float *mean,
-        const float *offset,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
-    void zenConvolution2DwithBatchNormsum(
-        const float *in_layer,
-        const int no_of_images,
-        const int channels,
-        const int height,
-        const int width,
-        const float *filter,
-        const int no_of_filter,
-        const int kernel_h,
-        const int kernel_w,
-        const int pad_t,
-        const int pad_l,
-        const int pad_b,
-        const int pad_r,
-        const int stride_h,
-        const int stride_w,
-        const float *scale,
-        const float *mean,
-        const float *offset,
-        const float *elemetwise_input,
-        float *out_layer,
-        const int out_height,
-        const int out_width,
-        const bool concat = false,
-        const int filter_offset = 0,
-        const int total_filters = 0
-    );
-
 
     void zenConvolution2D_Latency_blocked_layout(
         zendnnEnv zenEnvObj,
@@ -684,26 +490,6 @@ extern "C"
         const int ldc
     );
 
-    void zenBatchMatMul(
-        bool Layout,
-        bool TransA,
-        bool TransB,
-        int *M_Array,
-        int *N_Array,
-        int *K_Array,
-        const float *alpha_Array,
-        const float **A_Array,
-        int *lda_Array,
-        const float **B_Array,
-        int *ldb_Array,
-        const float *beta_Array,
-        float **C_Array,
-        int *ldc_Array,
-        int group_count,
-        int *group_size
-    );
-
-
     void zenConvolution2D_direct(
         zendnnEnv zenEnvObj,
         const float *in_layer,
@@ -780,31 +566,6 @@ extern "C"
         const bool relu,
         const float *scale,
         const float *elementwise_input
-    );
-
-    void zenPostOps(
-        zendnnEnv zenEnvObj,
-        float *out_layer,
-        const float *elemtwise_input,
-        const int out_height,
-        const int out_width,
-        const int no_of_filter,
-        const int total_filters,
-        unsigned long biasOffset,
-        const float *bias,
-        const bool relu,
-        const float *scale,
-        const int no_of_threads,
-        const float *offset = NULL,
-        const float  *mean = NULL,
-        const int batch_size = 1
-    );
-
-    void zenClipOp(
-        zendnnEnv zenEnvObj,
-        float *out_layer,
-        float upperbound,
-        unsigned long size
     );
 
     void zenMatmulSplit(
