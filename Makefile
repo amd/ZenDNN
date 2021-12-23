@@ -157,9 +157,7 @@ $(OBJECT_FILES): $(OUTDIR)/$(OBJDIR)/%.o: %.cpp
 	@# ^^^ Use $(CFLAGS), not $(LDFLAGS), when compiling.
 
 clean:
-	rm -fr $(OUTDIR)/$(OBJDIR)
-	rm -fr $(OUTDIR)/$(LIBDIR)
-	rm -fr $(OUTDIR)/$(TESTDIR)
+	rm -fr $(OUTDIR)
 
 create_dir:
 	@mkdir -p $(OUTDIR)/$(LIBDIR)
