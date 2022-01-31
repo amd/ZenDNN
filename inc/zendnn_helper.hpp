@@ -18,7 +18,7 @@ class zendnnEnv {
     uint    zenGEMMalgo;
     bool    zenBlockedFormat;
     bool    zenBlockedNHWC;
-    bool    zenMemPoolEnable;
+    uint    zenEnableMemPool;
     bool    zenLibMemPoolEnable;
     bool    zenINT8format;
 
@@ -29,7 +29,7 @@ class zendnnEnv {
         zenGEMMalgo = 0;
         zenBlockedFormat = false;
         zenBlockedNHWC = false;
-        zenMemPoolEnable = true;
+        zenEnableMemPool = 1;
         zenLibMemPoolEnable = true;
         zenINT8format = false;
     }

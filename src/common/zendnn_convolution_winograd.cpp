@@ -647,7 +647,7 @@ void winograd_2x2_3x3(
     ZenLibMemoryPool *zenLibPoolBuffer;
 
     //ZenLibMemPool Optimization reuse tmp buffers from the pool. By default
-    //  its enabled, export ZENDNN_MEMPOOL_ENABLE=0 will disable memory
+    //  its enabled, export ZENDNN_ENABLE_MEMPOOL=0 will disable memory
     //  pool optimization
     //  Cases where buffers in pool are not free or requested size is more
     //  than available buffer size in Pool, control will fall back to

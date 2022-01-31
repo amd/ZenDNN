@@ -32,12 +32,18 @@ zendnnEnv readEnv() {
     //ZENDNN_BLOCKED_FORMAT is to enable/disable BLOCKED Format.
     envObj.zenBlockedFormat = zendnn_getenv_int("ZENDNN_BLOCKED_FORMAT", 0);
 
-    //TODO: change ZENDNN_MEMPOOL_ENABLE to ZENDNN_TF_MEMPOOL_ENABLE
-    //use ZENDNN_ONNX_MEMPOOL_ENABLE for ONNX
-    envObj.zenMemPoolEnable = zendnn_getenv_int("ZENDNN_MEMPOOL_ENABLE", 1);
+    //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
+    //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
+    //Possible values for ZENDNN_ENABLE_MEMPOOL
+    // 0 (GAM-TPA disable)
+    // 1 (Node level Memory Reuse)
+    // 2 (Graph level Memory Reuse)
+    envObj.zenEnableMemPool = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
+    if(envObj.zenEnableMemPool < 0 || envObj.zenEnableMemPool > 2)
+        envObj.zenEnableMemPool = 1;
 
     //TODO: Unified FWK and LIB mempool for next release
-    envObj.zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_MEMPOOL_ENABLE", 1);
+    envObj.zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
 
     //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
     envObj.zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
