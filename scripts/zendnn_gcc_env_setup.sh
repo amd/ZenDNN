@@ -169,8 +169,8 @@ export ZENDNN_INFERENCE_ONLY=1
 echo "ZENDNN_INFERENCE_ONLY=$ZENDNN_INFERENCE_ONLY"
 
 #Disable TF memory pool optimization, By default, its enabled
-export ZENDNN_MEMPOOL_ENABLE=1
-echo "ZENDNN_MEMPOOL_ENABLE=$ZENDNN_MEMPOOL_ENABLE"
+export ZENDNN_ENABLE_MEMPOOL=1
+echo "ZENDNN_ENABLE_MEMPOOL=$ZENDNN_ENABLE_MEMPOOL"
 
 #Set the max no. of tensors that can be used inside TF memory pool, Default is
 #set to 16
