@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <zendnn_private.hpp>
@@ -9,6 +9,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <vector>
+#include <cmath>
 #include "zendnn_logging.hpp"
 #include "zendnn.hpp"
 
@@ -36,6 +37,7 @@ void zenMatmulSplit(
     const int ldb,
     const float *bias,
     const bool relu,
+    const bool gelu,
     const float beta,
     float *output,
     const int ldc
@@ -55,6 +57,7 @@ void zenMatMul_gemm(
     const int ldb,
     const float *bias,
     const bool relu,
+    const bool gelu,
     const float beta,
     float *output,
     const int ldc
@@ -123,10 +126,18 @@ void zenMatMul_gemm(
                 }
             }
         }
+
+        if (gelu) {
+            long int out_values = m*n;
+            #pragma omp parallel for num_threads(thread_qty)
+            for (long int i=0; i<out_values; i++) {
+                output[i] = activation_gelu(output[i]);
+            }
+        }
     }
     else {
         zenMatmulSplit(zenEnvObj, Layout, transpose_input, transpose_filter,
-                       m, k, n, alpha, input, lda, filter, ldb, bias, relu, beta,
+                       m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
                        output, ldc);
     }
 
@@ -152,6 +163,7 @@ void zenMatMul_gemm_wrapper(
     const int ldb,
     const float *bias,
     const bool relu,
+    const bool gelu,
     const float beta,
     float *output,
     const int ldc
@@ -167,11 +179,11 @@ void zenMatMul_gemm_wrapper(
 
     if (false == Layout && !(blis_direct_matmul==1)) { //CblasColMajor
         zenMatMul_gemm(!Layout, transpose_filter, transpose_input, n, k, m,
-                       alpha, filter, ldb, input, lda, bias, relu, beta, output, ldc);
+                       alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
     }
     else {
         zenMatMul_gemm(Layout, transpose_input, transpose_filter, m, k, n,
-                       alpha, input, lda, filter, ldb, bias, relu, beta, output, ldc);
+                       alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
     }
 
     // Code for time profiling of this kernel
@@ -184,6 +196,7 @@ void zenMatMul_gemm_wrapper(
                " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
                " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
                " ldc=", ldc, " alpha=", alpha, " beta=", beta,
+               " relu=", relu, " gelu=", gelu,
                " Time=", elapsed, "ms");
 }
 
@@ -216,7 +229,7 @@ void zenMatMul(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, NULL, 0, beta,
+                               filter + (i*no_of_channels*no_of_filters), ldb, NULL, false, false, beta,
                                output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -250,7 +263,7 @@ void zenMatMulWithBias(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input+(i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, false,
                                beta, output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -284,9 +297,44 @@ void zenMatMulWithBiasReLU(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, true,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, true, false,
                                beta, output + (i*no_of_images*no_of_filters), ldc);
 }
+
+void zenMatMulWithBiasGeLU(
+    const bool Layout,
+    const bool transpose_input,
+    const bool transpose_filter,
+    const int batch_size,
+    const int no_of_images,
+    const int no_of_channels,
+    const int no_of_filters,
+    const float alpha,
+    const float *input,
+    const int lda,
+    const float *filter,
+    const int ldb,
+    const float *bias,
+    const float beta,
+    float *output,
+    const int ldc
+) {
+    //Check for NULL pointers
+    if ((input == NULL)|| (filter == NULL) || (output == NULL) || (bias == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenMatMul Memory is not defined for input or filter or output or bias");
+        return;
+    }
+    // Perform zen matmul fusing biasadd and ReLU activation. 'true' parameter
+    // enables ReLU activation on the MatMul output.
+    for (int i=0; i<batch_size; ++i)
+        zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
+                               no_of_images, no_of_channels, no_of_filters, alpha,
+                               input + (i*no_of_images*no_of_channels), lda,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, true,
+                               beta, output + (i*no_of_images*no_of_filters), ldc);
+}
+
 
 
 //This version internally call zenMatmulSplit for each SGEMM in single batch
@@ -321,7 +369,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            m, k, n, alpha_Array[i],
                            A_Array[grp_start + j], lda_Array[i],
                            B_Array[grp_start + j], ldb_Array[i],
-                           NULL, false, beta_Array[i],
+                           NULL, false, false, beta_Array[i],
                            C_Array[grp_start + j], ldc_Array[i]);
         }
         grp_start +=group_size[i];
@@ -461,7 +509,8 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                                alpha_Array[i]
                                A_Array[i] + (A_offset*threadOffset), lda_Array[i],
                                B_Array[i] + (B_offset*threadOffset), ldb_Array[i], NULL,
-                               false, beta_Array[i], C_Array[i] + (C_offset*threadOffset), ldc_Array[i]);
+                               false, false, beta_Array[i], C_Array[i] + (C_offset*threadOffset),
+                               ldc_Array[i]);
 #else
                 omp_set_max_active_levels(1);
                 cblas_sgemm(Layout ? CblasRowMajor : CblasColMajor,
@@ -553,6 +602,7 @@ void zenMatmulSplit(
     const int ldb,
     const float *bias,
     const bool relu,
+    const bool gelu,
     const float beta,
     float *output,
     const int ldc
@@ -565,7 +615,7 @@ void zenMatmulSplit(
                Layout? "CblasRowMajor" : "CblasColMajor", " transpose_input=",
                transpose_input, " transpose_filter=", transpose_filter, " M=", m,
                " K=", k, " N=", n, " lda=", lda, " ldb=", ldb, " ldc=", ldc,
-               " relu=", relu, " alpha=", alpha, " beta=", beta);
+               " relu=", relu, " gelu=", gelu, " alpha=", alpha, " beta=", beta);
 
     //l2 is level 2 no. of threads for nested parallelism.
     // thread_qty is level 1 no. of threads
@@ -712,10 +762,10 @@ void zenMatmulSplit(
 
         //Below Bias and activation code can be eliminated if not required
         unsigned long biasOffset = outputOffset;
-        if (!(!bias && !relu))
+        if (!(!bias && !relu && !gelu))
             zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
                        ldc, biasOffset,
-                       bias, relu, NULL,
+                       bias, relu, gelu, NULL,
                        l2_num_threads);
     }
 }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #pragma once
@@ -287,6 +287,7 @@ extern "C" {
         unsigned long biasOffset,
         const float *bias,
         const bool relu,
+        const bool gelu,
         const float *scale,
         const int no_of_threads,
         const float *offset = NULL,
@@ -300,4 +301,6 @@ extern "C" {
         float upperbound,
         unsigned long size
     );
+
+    float activation_gelu(float input);
 }

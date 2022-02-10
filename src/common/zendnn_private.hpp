@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <stdio.h>
@@ -452,6 +452,25 @@ extern "C"
     );
 
     void zenMatMulWithBiasReLU(
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int batch,
+        const int no_of_images,
+        const int no_of_channels,
+        const int no_of_filters,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const float beta,
+        float *output,
+        const int ldc
+    );
+
+    void zenMatMulWithBiasGeLU(
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,

@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <omp.h>
@@ -142,7 +142,7 @@ void zenConvolution2Dbase(
             zenPostOps(zenEnvObj, out_layer, elementwise_input,out_height, out_width,
                        no_of_filter, no_of_filter,
                        biasOffset, bias,
-                       relu, scale, blis_num_threads);
+                       relu, false, scale, blis_num_threads);
         }
     }
     free(data_col);
@@ -275,7 +275,7 @@ void zenConvolution2DbaseVer5(
         zenPostOps(zenEnvObj, out_layer, elementwise_input,out_height,
                    out_width*outBatchSize,
                    no_of_filter, no_of_filter,
-                   biasOffset, bias, relu, scale, thread_qty);
+                   biasOffset, bias, relu, false, scale, thread_qty);
 
     }
     free(data_col);
@@ -394,7 +394,7 @@ void zenConvolution2DsmallGemm(
                     zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, gemmRowsLast,
                                no_of_filter, no_of_filter,
                                biasOffset, bias,
-                               relu, scale, 1);
+                               relu, false, scale, 1);
                 }
                 else {
                     im2rowNHWCsplit(in_layer+inputOffset, channels, height, width, kernel_h,
@@ -412,7 +412,7 @@ void zenConvolution2DsmallGemm(
                     zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, gemmRowsLast,
                                no_of_filter, no_of_filter,
                                biasOffset, bias,
-                               relu, scale, 1);
+                               relu, false, scale, 1);
                 }
 
             }
@@ -651,7 +651,7 @@ void zenConvolution2DsmallGemmVer2(
                     zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, gemmRowsLast,
                                no_of_filter, ldc,
                                biasOffset, bias,
-                               relu, scale, blis_num_threads);
+                               relu, false, scale, blis_num_threads);
                 }
                 else {
                     if (!(kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
@@ -686,7 +686,7 @@ void zenConvolution2DsmallGemmVer2(
                     unsigned long biasOffset = outputOffset+offset;
                     zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, gemmRows,
                                no_of_filter, ldc,
-                               biasOffset, bias, relu,
+                               biasOffset, bias, relu, false,
                                scale, blis_num_threads);
                 }
 
@@ -870,7 +870,7 @@ void zenConvolution2DGemm1x1Direct(
         unsigned long biasOffset = outputOffset+offset;
         zenPostOps(zenEnvObj, out_layer, elementwise_input,gemmRows, 1, no_of_filter,
                    ldc, biasOffset,
-                   bias, relu, scale,
+                   bias, relu, false, scale,
                    blis_num_threads);
     }
 
@@ -1135,7 +1135,7 @@ void zenConvolution2DsmallGemmMerge(
             unsigned long biasOffset = outputOffset+offset;
             zenPostOps(zenEnvObj, out_layer, elementwise_input,gemmRowsLast, 1,
                        no_of_filter, ldc,
-                       biasOffset, bias, relu,
+                       biasOffset, bias, relu, false,
                        scale, blis_num_threads);
             continue;
         }
@@ -1322,7 +1322,7 @@ void zenConvolution2DsmallGemm1x1(
         unsigned long biasOffset = outputOffset+offset;
         zenPostOps(zenEnvObj, out_layer, elementwise_input,gemmRows, 1, no_of_filter,
                    ldc, biasOffset,
-                   bias, relu, scale,
+                   bias, relu, false, scale,
                    blis_num_threads);
     }
 #if 0
@@ -1749,7 +1749,7 @@ void zenConvolution2DsmallGemmSplit(
                     zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, merge_height,
                                no_of_filter, ldc,
                                biasOffset, bias,
-                               relu, scale, blis_num_threads);
+                               relu, false, scale, blis_num_threads);
                     merge_count = 0;
                 }
                 h_pad += stride_h;
@@ -2157,7 +2157,7 @@ void zenConvolution2DlatencyVer3(
         unsigned long biasOffset = (width_col*no_of_filter*k);
         zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, 1, no_of_filter,
                    no_of_filter, biasOffset,
-                   bias, relu, scale,
+                   bias, relu, false, scale,
                    inner_threads,0,0,images);
     }
     free(data_col);
@@ -2384,7 +2384,7 @@ void zenConvolution2DlatencyVer4(
             zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, height_count,
                        no_of_filter, ldc,
                        biasOffset, bias,
-                       relu, scale, inner_threads);
+                       relu, false, scale, inner_threads);
         }
     }
     if (!(kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
@@ -2564,7 +2564,7 @@ void zenConvolution2DlatencyVer5(
         zenPostOps(zenEnvObj, out_layer,elementwise_input, width_col*height_merge_count,
                    1,
                    no_of_filter, ldc, biasOffset,
-                   bias, relu, scale, blis_num_threads);
+                   bias, relu, false, scale, blis_num_threads);
     }
 
     free(data_col);
@@ -2760,7 +2760,7 @@ void zenConvolution2DsmallGemmSplitLatency(
                 unsigned biasOffset = outOffset;
                 zenPostOps(zenEnvObj, out_layer, elementwise_input,out_count, 1, no_of_filter,
                            ldc, biasOffset,
-                           bias, relu, scale,
+                           bias, relu, false, scale,
                            inner_threads);
 
                 data_col = col_data_old + patchHeightOffset;
@@ -2981,7 +2981,7 @@ void zenConvolution2DsmallGemmMergeLatency(
                 zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, mergeChunkSize,
                            no_of_filter, ldc,
                            biasOffset, bias,
-                           relu, scale, inner_threads,0,0,images);
+                           relu, false, scale, inner_threads,0,0,images);
                 data_col = col_data_old + patchHeightOffset;
             }
         }

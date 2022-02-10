@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <zendnn_private.hpp>
@@ -155,7 +155,7 @@ void zenConvolution2D_direct(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, scale, 1,0,0,no_of_images);
+                       relu, false, scale, 1,0,0,no_of_images);
         }
     }
     free(data_col);
@@ -301,7 +301,7 @@ void zenConvolution2D_directVer2(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, scale, 1,0,0,no_of_images);
+                       relu, false, scale, 1,0,0,no_of_images);
         }
     }
     //free(directOut);
@@ -438,7 +438,7 @@ void zenConvolution2D_directVer3(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, scale, 1,0,0,no_of_images);
+                       relu, false, scale, 1,0,0,no_of_images);
         }
     }
     //free(directOut);

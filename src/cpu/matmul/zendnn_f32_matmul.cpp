@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -64,14 +64,16 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
 
-    if (!ok) return status::unimplemented;
+    if (!ok) {
+        return status::unimplemented;
+    }
 
     // set state
     params_.dst_is_acc_ = true;
     if (!has_runtime_dims_or_strides())
         params_.can_fuse_src_batch_dims_
-                = matmul_helper_t(src_md(), weights_md(), dst_md())
-                          .can_fuse_src_batch_dims();
+            = matmul_helper_t(src_md(), weights_md(), dst_md())
+              .can_fuse_src_batch_dims();
 
     return check_and_configure_attributes();
 }
@@ -82,7 +84,7 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     auto check_attr_oscale = [&]() -> bool {
         const auto &oscale = attr()->output_scales_;
         return oscale.mask_ == 0
-                || (oscale.mask_ == (1 << 1) && batched() == false);
+        || (oscale.mask_ == (1 << 1) && batched() == false);
     };
 
     auto check_attr_post_ops = [&]() -> bool {
@@ -92,15 +94,21 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
             return p.contain(sum, idx) && params_.gemm_applies_output_scales_;
         };
         switch (p.len()) {
-            case 0: return true;
-            case 1: return check_sum(0) || p.contain(eltwise, 0);
-            case 2: return check_sum(0) && p.contain(eltwise, 1);
-            default: return false;
+        case 0:
+            return true;
+        case 1:
+            return check_sum(0) || p.contain(eltwise, 0);
+        case 2:
+            return check_sum(0) && p.contain(eltwise, 1);
+        default:
+            return false;
         }
     };
 
     // check basic attributes
-    if (!check_attr_oscale()) return status::unimplemented;
+    if (!check_attr_oscale()) {
+        return status::unimplemented;
+    }
 
     // set state
     CHECK(params_.pp_attr_.copy_from(*attr()));
@@ -111,8 +119,9 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
 #else
         = attr()->output_scales_.mask_ == 0 && !with_bias();
 #endif
-    if (params_.gemm_applies_output_scales_)
+    if (params_.gemm_applies_output_scales_) {
         params_.pp_attr_.output_scales_.set(1.f);
+    }
 
     // check post-ops
     if (check_attr_post_ops()) {
@@ -124,13 +133,14 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
             // drop sum from pp_attributes, as it will be applied by gemm
             po.entry_.erase(po.entry_.begin());
         }
-    } else {
+    }
+    else {
         return status::unimplemented;
     }
 
     // set state
     params_.has_pp_kernel_
-            = with_bias() || !params_.pp_attr_.has_default_values();
+        = with_bias() || !params_.pp_attr_.has_default_values();
 
     return status::success;
 }
@@ -192,25 +202,41 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     zendnnInfo(ZENDNN_CORELOG, " alpha: :", alpha, " beta: ", beta,
                " Layout: ", Layout ? "CblasRowMajor" : "CblasColMajor");
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
+
+    int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
+    bool has_eltwise_relu = elementwise_index>=0 ?
+                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                            alg_kind::eltwise_relu : 0;
+    bool has_eltwise_gelu = elementwise_index>=0 ?
+                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                            alg_kind::eltwise_gelu : 0;
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     if ((float *)bias == NULL) {
         //MatMul without Bias
         zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, M, K,
-                N, alpha, (float *)src, lda, (float *)weights, ldb, beta,
-                (float *)dst, ldc);
+                  N, alpha, (float *)src, lda, (float *)weights, ldb, beta,
+                  (float *)dst, ldc);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
         zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
-                (float *)bias, beta, (float *)dst, ldc);
+                          batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                          (float *)bias, beta, (float *)dst, ldc);
     }
     else {
-        //MatMul with BiasRelu
-        zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
-                (float *)bias, beta, (float *)dst, ldc);
+        if (has_eltwise_relu) {
+            //MatMul with BiasRelu
+            zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc);
+        }
+        else {
+            //MatMul with BiasGelu
+            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc);
+        }
     }
 #else //ZENDNN_ENABLE
     const bool parallel_over_batch = batch > 1;

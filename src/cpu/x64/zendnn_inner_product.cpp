@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -60,6 +60,15 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     bool wei_tr = wmd.format_desc.blocking.strides[0] != 1;
 
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
+
+    int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
+    bool has_eltwise_relu = elementwise_index>=0 ?
+                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                            alg_kind::eltwise_relu : 0;
+    bool has_eltwise_gelu = elementwise_index>=0 ?
+                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                            alg_kind::eltwise_gelu : 0;
+
     const float *scales = pd()->attr()->output_scales_.scales_;
 
     // The mask value of 0 implies a common output scaling factor for the
@@ -88,12 +97,25 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             (float *)dst, OC);
     }
     else {
-        zendnnInfo(ZENDNN_CORELOG,
-                   "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasReLU [cpu/inner_product]");
-        zenMatMulWithBiasReLU(
-            Layout, false, wei_tr, 1, MB, IC, OC, alpha, (float *)src, IC,
-            (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
-            (float *)dst, OC);
+        if (has_eltwise_relu) {
+            //MatMul with BiasRelu
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasReLU [cpu/inner_product]");
+            zenMatMulWithBiasReLU(
+                Layout, false, wei_tr, 1, MB, IC, OC, alpha, (float *)src, IC,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)dst, OC);
+        }
+        else {
+            //MatMul with BiasGelu
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
+            zenMatMulWithBiasGeLU(
+                Layout, false, wei_tr, 1, MB, IC, OC, alpha, (float *)src, IC,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)dst, OC);
+
+        }
     }
 
     return status::success;
