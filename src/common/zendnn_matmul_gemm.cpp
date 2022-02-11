@@ -503,25 +503,25 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     std::vector<CBLAS_TRANSPOSE> TransB_Array(
         group_count, TransB ? CblasTrans : CblasNoTrans);
 
-#if 0
-    //Direct call to BLIS cblas_sgemm_batch is not performing well
-    //TODO: check with BLIS team for optimal cblas_sgemm_batch function
-    cblas_sgemm_batch(Layout?CblasRowMajor:CblasColMajor, &TransA_Array[0],
-                      &TransB_Array[0], M_Array,
-                      N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
-                      B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
-                      group_count, group_size);
-#else
-
-    //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
-    //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-    //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-    zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                          M_Array, N_Array, K_Array, alpha_Array,
-                          A_Array, lda_Array, B_Array, ldb_Array,
-                          beta_Array, C_Array, ldc_Array,
+    if (zenEnvObj.zenGEMMalgo == 1) {
+        //Direct call to BLIS cblas_sgemm_batch is not performing well
+        //TODO: check with BLIS team for optimal cblas_sgemm_batch function
+        cblas_sgemm_batch(Layout?CblasRowMajor:CblasColMajor, &TransA_Array[0],
+                          &TransB_Array[0], M_Array,
+                          N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
+                          B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
                           group_count, group_size);
-#endif
+    }
+    else {
+        //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
+        //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+        //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+        zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                              M_Array, N_Array, K_Array, alpha_Array,
+                              A_Array, lda_Array, B_Array, ldb_Array,
+                              beta_Array, C_Array, ldc_Array,
+                              group_count, group_size);
+    }
 
     // Code for time profiling of this kernel
     gettimeofday(&end, 0);
