@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 #include <iostream>
 #include "zendnn.h"
 
+#include "zendnn_helper.hpp"
 #include "c_types_map.hpp"
 #include "utils.hpp"
 
@@ -30,6 +31,7 @@ zendnn_status_t
 zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
                                prop_kind_t prop_kind,
                                alg_kind_t alg_kind,
+                               uint32_t num_threads,
                                const memory_desc_t *input_desc,
                                const memory_desc_t *indices_desc,
                                const memory_desc_t *offsets_desc,
@@ -93,7 +95,16 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
         emd.weights_desc = memory_desc_t();
     }
 
+    // get parallel threads
+    zendnn::zendnnEnv zenEnvObj = readEnv();
+    if (num_threads) {
+        emd.num_threads = num_threads < zenEnvObj.omp_num_threads ?
+                            num_threads : zenEnvObj.omp_num_threads;
+    }
+    else {
+        emd.num_threads = zenEnvObj.omp_num_threads;
+    }
+
     *desc = emd;
     return success;
 }
-

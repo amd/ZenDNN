@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -2274,6 +2274,8 @@ typedef struct {
     /// Algorithm specific parameters.
     int32_t padding_idx; //padding index, set to -1 if no padding index
     bool  is_weights; // true if weight memory descriptor provided
+
+    int32_t num_threads; // no of parallel threads
 
 } zendnn_embedding_bag_desc_t;
 

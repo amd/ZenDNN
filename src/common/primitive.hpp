@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -46,7 +46,10 @@ struct resource_mapper_t;
 struct primitive_t : public c_compatible {
     using primitive_list_t = std::vector<const primitive_t *>;
 
-    primitive_t(const primitive_desc_t *pd) : pd_(pd->clone()) {}
+    primitive_t(const primitive_desc_t *pd) : pd_(pd->clone()) {
+        cum_exec_time_ = 0.0;
+    }
+
     virtual ~primitive_t() = default;
 
     virtual status_t init(engine_t *engine) { return status::success; }
@@ -67,6 +70,12 @@ struct primitive_t : public c_compatible {
     }
 
     bool use_global_scratchpad() const { return use_global_scratchpad_; }
+
+    double add_cum_exec_time(double elapsed_time) const {
+        cum_exec_time_ += elapsed_time;
+        return cum_exec_time_;
+    }
+    double cum_exec_time() const { return cum_exec_time_; }
 
 protected:
     template <typename impl_type, typename pd_t>
@@ -132,6 +141,9 @@ protected:
 
     std::shared_ptr<primitive_desc_t> pd_;
     bool use_global_scratchpad_;
+
+    mutable double cum_exec_time_;
+
 
 private:
     primitive_t() = delete;
@@ -268,6 +280,14 @@ struct zendnn_primitive : public zendnn::impl::c_compatible {
 
     void release() {
         if (--counter_ == 0) { delete this; }
+    }
+
+    double add_cum_exec_time(double elapsed_time) const {
+        return primitive_->add_cum_exec_time(elapsed_time);
+    }
+
+    double cum_exec_time() const {
+        return primitive_->cum_exec_time();
     }
 
 protected:

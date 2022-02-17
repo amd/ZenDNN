@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
 *
 *******************************************************************************/
 
@@ -49,6 +49,7 @@ struct emb_params {
     int32_t   num_indices   = 12;
     int32_t   num_bags      = 3;
     int32_t   padding_idx   = 1;
+    uint32_t  num_threads   = 8;
     int32_t   indices[12]   = {0,1,5, 1,4,2,6, 1,3,9,8,7};
     int32_t   offsets[3]    = {0,3,7};
     float     weights[12]   = {1,2,3,4,5,6,7,8,9,10,11,12};
@@ -197,7 +198,7 @@ std::vector<float> sum_bags(memory &dst)
 /* execute embedding_bag */
 void exec_embedding_bag(engine eng, stream s, memory table,
                         memory indices, memory offsets, memory weights,
-                        memory bags, algorithm alg,
+                        memory bags, algorithm alg, uint32_t num_threads,
                         bool is_weights, int32_t padding_idx) {
 
     auto table_md   = memory::desc(table.get_desc());
@@ -210,13 +211,17 @@ void exec_embedding_bag(engine eng, stream s, memory table,
 
     if(!is_weights) {
         if(padding_idx < 0)
-            emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
+            emdb_d = embedding_bag::desc(prop_kind::forward_inference,
+                                         alg,
+                                         num_threads,
                                          table_md,
                                          indices_md,
                                          offsets_md,
                                          bags_md);
         else
-            emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
+            emdb_d = embedding_bag::desc(prop_kind::forward_inference,
+                                         alg,
+                                         num_threads,
                                          table_md,
                                          indices_md,
                                          offsets_md,
@@ -224,14 +229,18 @@ void exec_embedding_bag(engine eng, stream s, memory table,
                                          padding_idx);
     } else {
         if(padding_idx < 0)
-            emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
+            emdb_d = embedding_bag::desc(prop_kind::forward_inference,
+                                         alg,
+                                         num_threads,
                                          table_md,
                                          indices_md,
                                          offsets_md,
                                          weights_md,
                                          bags_md);
         else
-            emdb_d = embedding_bag::desc(prop_kind::forward_inference, alg,
+            emdb_d = embedding_bag::desc(prop_kind::forward_inference,
+                                         alg,
+                                         num_threads,
                                          table_md,
                                          indices_md,
                                          offsets_md,
@@ -302,8 +311,8 @@ int main(int argc, char **argv) {
                       "testing sum with weights and pading index");
         exec_embedding_bag(eng, s, table, indices,
                            offsets, weights, bags,
-                           algorithm::embedding_bag_sum, true,
-                           params.padding_idx);
+                           algorithm::embedding_bag_sum, params.num_threads,
+                           true, params.padding_idx);
 
         auto sum = sum_bags(bags);
         for(int i = 0; i < params.num_bags; ++i) {
@@ -321,7 +330,8 @@ int main(int argc, char **argv) {
                       "testing mean with no weights, no pading index");
         exec_embedding_bag(eng, s, table, indices,
                            offsets, weights, bags,
-                           algorithm::embedding_bag_mean, false, -1);
+                           algorithm::embedding_bag_mean, params.num_threads,
+                           false, -1);
 
         auto sum = sum_bags(bags);
         for(int i = 0; i < params.num_bags; ++i) {
@@ -339,8 +349,8 @@ int main(int argc, char **argv) {
                       "testing max with no weights but padding index");
         exec_embedding_bag(eng, s, table, indices,
                            offsets, weights, bags,
-                           algorithm::embedding_bag_max, false,
-                           params.padding_idx);
+                           algorithm::embedding_bag_max, params.num_threads,
+                           false, params.padding_idx);
 
         auto sum = sum_bags(bags);
         for(int i = 0; i < params.num_bags; ++i) {
@@ -353,6 +363,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    zendnnInfo(ZENDNN_TESTLOG, "ZenDNN API test for embedding_bag ends");
+    if (status == API_SUCCESS)
+      zendnnInfo(ZENDNN_TESTLOG,
+                 "ZenDNN API test for embedding_bag successful.");
+    else
+      zendnnInfo(ZENDNN_TESTLOG,
+                 "ZenDNN API test for embedding_bag fails.");
+
     return status;
 }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -3323,6 +3323,8 @@ zendnn_status_t ZENDNN_API zendnn_reduction_desc_init(zendnn_reduction_desc_t *d
 /// @param alg_kind embedding_bag algorithm kind. Possible values:
 ///     #zendnn_embedding_bag_max, #zendnn_embedding_bag_sum,
 ///     #zendnn_embedding_bag_mean,
+/// @param num_threads Parallel threads for the primitive (zero for default
+///              omp threads)
 /// @param input_desc Input (embedding table) memory descriptor.
 /// @param indices_desc Indices memory descriptor.
 /// @param offsets_desc Offsets memory descriptor.
@@ -3338,6 +3340,7 @@ zendnn_status_t ZENDNN_API
 zendnn_embedding_bag_desc_init(zendnn_embedding_bag_desc_t *desc,
                                zendnn_prop_kind_t prop_kind,
                                zendnn_alg_kind_t alg_kind,
+                               uint32_t num_threads,
                                const zendnn_memory_desc_t *input_desc,
                                const zendnn_memory_desc_t *indices_desc,
                                const zendnn_memory_desc_t *offsets_desc,

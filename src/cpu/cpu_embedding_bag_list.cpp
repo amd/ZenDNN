@@ -1,11 +1,12 @@
 /*******************************************************************************
-* Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
 *
 *******************************************************************************/
 
 #include "cpu/cpu_engine.hpp"
 #include "cpu/ref_embedding_bag.hpp"
 #include "cpu/avx2_embedding_bag.hpp"
+#include "cpu/avx2_embedding_bag_v2.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -19,6 +20,7 @@ using namespace zendnn::impl::data_type;
 
 // clang-format off
 const pd_create_f impl_list[] = {
+    CPU_INSTANCE(avx2_embedding_bag_v2_t<f32>)
     CPU_INSTANCE(avx2_embedding_bag_t<f32>)
     CPU_INSTANCE(ref_embedding_bag_t<f32>)
     /* eol */

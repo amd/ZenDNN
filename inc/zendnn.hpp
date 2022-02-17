@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -10912,7 +10912,7 @@ struct reduction : public primitive {
     /// @param pd Primitive descriptor for a reduction primitive.
     reduction(const primitive_desc &pd) : primitive(pd) {}
 };
-  
+
 /// @} zendnn_api_reduction
 
 /* add new primitive */
@@ -10946,12 +10946,15 @@ struct embedding_bag : public primitive {
         /// @param aprop_kind possible value forward_inference
         /// @param aalgorithm embedding_mag algorithm kind. Possible values:
         ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        /// (zero for default omp threads)
         /// @param input_desc Input (embedding table) memory descriptor.
         /// @param indices_desc Indices memory descriptor.
         /// @param offsets_desc Offsets memory descriptor.
         /// @param weights_desc Weights memory descriptor.
         /// @param padding_idx Padding Index.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
              const memory::desc &input_desc,
              const memory::desc &indices_desc,
              const memory::desc &offsets_desc,
@@ -10962,6 +10965,7 @@ struct embedding_bag : public primitive {
                     zendnn_embedding_bag_desc_init(&data,
                                                    convert_to_c(aprop_kind),
                                                    convert_to_c(aalgorithm),
+                                                   num_threads,
                                                    &input_desc.data,
                                                    &indices_desc.data,
                                                    &offsets_desc.data,
@@ -10984,11 +10988,14 @@ struct embedding_bag : public primitive {
         /// @param aprop_kind possible value forward_inference
         /// @param aalgorithm embedding_mag algorithm kind. Possible values:
         ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        /// (zero for default  omp threads)
         /// @param input_desc Input (embedding table) memory descriptor.
         /// @param indices_desc Indices memory descriptor.
         /// @param offsets_desc Offsets memory descriptor.
         /// @param padding_idx Padding Index.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
              const memory::desc &input_desc,
              const memory::desc &indices_desc,
              const memory::desc &offsets_desc,
@@ -10998,6 +11005,7 @@ struct embedding_bag : public primitive {
                     zendnn_embedding_bag_desc_init(&data,
                                                    convert_to_c(aprop_kind),
                                                    convert_to_c(aalgorithm),
+                                                   num_threads,
                                                    &input_desc.data,
                                                    &indices_desc.data,
                                                    &offsets_desc.data,
@@ -11020,12 +11028,15 @@ struct embedding_bag : public primitive {
         /// @param aprop_kind possible value forward_inference
         /// @param aalgorithm embedding_mag algorithm kind. Possible values:
         ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        ///     (zero for default omp threads)
         /// @param input_desc Input (embedding table) memory descriptor.
         /// @param indices_desc Indices memory descriptor.
         /// @param offsets_desc Offsets memory descriptor.
         /// @param weights_desc Weights memory descriptor. This can be omitted
         ///     if there are no weights.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
              const memory::desc &input_desc,
              const memory::desc &indices_desc,
              const memory::desc &offsets_desc,
@@ -11035,6 +11046,7 @@ struct embedding_bag : public primitive {
                     zendnn_embedding_bag_desc_init(&data,
                                                    convert_to_c(aprop_kind),
                                                    convert_to_c(aalgorithm),
+                                                   num_threads,
                                                    &input_desc.data,
                                                    &indices_desc.data,
                                                    &offsets_desc.data,
@@ -11057,10 +11069,13 @@ struct embedding_bag : public primitive {
         /// @param aprop_kind possible value forward_inference
         /// @param aalgorithm embedding_mag algorithm kind. Possible values:
         ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        ///     (zero for default omp threads)
         /// @param input_desc Input (embedding table) memory descriptor.
         /// @param indices_desc Indices memory descriptor.
         /// @param offsets_desc Offsets memory descriptor.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
              const memory::desc &input_desc,
              const memory::desc &indices_desc,
              const memory::desc &offsets_desc,
@@ -11069,6 +11084,7 @@ struct embedding_bag : public primitive {
                     zendnn_embedding_bag_desc_init(&data,
                                                    convert_to_c(aprop_kind),
                                                    convert_to_c(aalgorithm),
+                                                   num_threads,
                                                    &input_desc.data,
                                                    &indices_desc.data,
                                                    &offsets_desc.data,
