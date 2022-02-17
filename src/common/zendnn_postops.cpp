@@ -42,14 +42,14 @@ float activation_gelu(float input) {
 }
 
 float apply_activation(float input, bool relu, bool gelu) {
-    float out = 0;
+
     if (relu) {
-        out = input>0?input:0;
+        return input>0?input:0;
     }
     if (gelu) {
-        out = activation_gelu(input);
+        return activation_gelu(input);
     }
-    return out;
+    return input;
 }
 
 void zenPostOps(
@@ -206,7 +206,17 @@ void zenPostOps(
                                 out_layer[index+m + n]  = scale[index_filter + n]*(out_layer[index+m + n] -
                                                           mean[index_filter + n])
                                                           + offset[index_filter + n]  + elementwise_input[index+m + n];
-                                out_layer[ index+m +n ] = apply_activation(out_layer[index+m +n], relu, gelu);
+                                if (relu) {
+                                    if (out_layer[index + m + n] < 0) {
+                                        out_layer[index + m + n] = 0;
+                                    }
+                                }
+                                if (gelu) {
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
+                                                                   2/M_PI) *
+                                                               (out_layer[index + m + n] + 0.044715 * powf(
+                                                                    out_layer[index + m + n],3))));
+                                }
                             }
                         }
                     }
@@ -223,7 +233,21 @@ void zenPostOps(
                                 out_layer[index+m +n]  = scale[index_filter + n]*(out_layer[index+m+n] -
                                                          mean[index_filter + n])
                                                          + offset[index_filter + n];
-                                out_layer[ index+m +n ] = apply_activation(out_layer[index+m +n], relu, gelu);
+                                if (relu) {
+                                    if (out_layer[index + m + n] < 0) {
+                                        out_layer[index + m + n] = 0;
+                                    }
+                                }
+                                //TODO Enabling any code here with function call causes result
+                                // missmatch for int_validation for blocked format where convolution is
+                                // followed by post_op.
+                                // e.g. float temp  = activation_gelu(out_layer[index + m + n]);
+                                if (gelu) {
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
+                                                                   2/M_PI) *
+                                                               (out_layer[index + m + n] + 0.044715 * powf(
+                                                                    out_layer[index + m + n],3))));
+                                }
                             }
                         }
                     }
@@ -272,7 +296,17 @@ void zenPostOps(
                         for (int m=0; m< blocked_out_height_width; m=m+8) {
                             for (int n=0; n < 8; n++) {
                                 out_layer[index+m+n] = out_layer[index+m+n] + bias[index_filter + n];
-                                out_layer[ index+m +n ] = apply_activation(out_layer[index+m +n], relu, gelu);
+                                if (relu) {
+                                    if (out_layer[index + m + n] < 0) {
+                                        out_layer[index + m + n] = 0;
+                                    }
+                                }
+                                if (gelu) {
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
+                                                                   2/M_PI) *
+                                                               (out_layer[index + m + n] + 0.044715 * powf(
+                                                                    out_layer[index + m + n],3))));
+                                }
                             }
                         }
                     }
@@ -302,7 +336,17 @@ void zenPostOps(
                             for (int n=0; n < 8; n++) {
                                 out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
                                                            elementwise_input[index + m + n];
-                                out_layer[ index+m +n ] = apply_activation(out_layer[index+m +n], relu, gelu);
+                                if (relu) {
+                                    if (out_layer[index + m + n] < 0) {
+                                        out_layer[index + m + n] = 0;
+                                    }
+                                }
+                                if (gelu) {
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
+                                                                   2/M_PI) *
+                                                               (out_layer[index + m + n] + 0.044715 * powf(
+                                                                    out_layer[index + m + n],3))));
+                                }
                             }
                         }
                     }
@@ -331,7 +375,17 @@ void zenPostOps(
                         #pragma omp simd
                         for (int m=0; m< blocked_out_height_width; m++) {
                             out_layer[index + m ] = out_layer[index + m ] + elementwise_input[index + m ];
-                            out_layer[ index+m ] = apply_activation(out_layer[index+m], relu, gelu);
+                            if (relu) {
+                                if (out_layer[index + m ] < 0) {
+                                    out_layer[index + m ] = 0;
+                                }
+                            }
+                            if (gelu) {
+                                out_layer[index + m ] = 0.5 * out_layer[index + m ] * (1 + tanhf(sqrtf(
+                                                            2/M_PI) *
+                                                        (out_layer[index + m ] + 0.044715 * powf(
+                                                             out_layer[index + m ],3))));
+                            }
                         }
                     }
             }
