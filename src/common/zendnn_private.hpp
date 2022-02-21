@@ -409,6 +409,7 @@ extern "C"
         const int ldb,
         const float *bias,
         const bool relu,
+        const bool gelu,
         const float beta,
         float *output,
         const int ldc
