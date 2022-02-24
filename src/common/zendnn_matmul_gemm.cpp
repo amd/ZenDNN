@@ -17,6 +17,7 @@
 using namespace zendnn;
 #define BLIS_NORMAL_PATH1        1024
 #define BLIS_NORMAL_PATH2        4096
+extern float gelu_const;
 
 zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
                              int64_t K, float alpha, const float *A, int64_t lda, const float *B,
@@ -131,7 +132,8 @@ void zenMatMul_gemm(
             long int out_values = m*n;
             #pragma omp parallel for num_threads(thread_qty)
             for (long int i=0; i<out_values; i++) {
-                output[i] = activation_gelu(output[i]);
+                output[i] = 0.5 *  output[i] * (1 + tanhf(gelu_const * (output[i] + 0.044715 *
+                                                powf(output[i], 3))));;
             }
         }
     }

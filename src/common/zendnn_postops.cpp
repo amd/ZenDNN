@@ -13,6 +13,8 @@
 #define ALIGNED_OFFSET          64
 
 using namespace zendnn;
+float gelu_const = sqrtf(2/M_PI);
+
 
 //ZenClip clips the output values based on upperbound
 void zenClipOp(zendnnEnv zenEnvObj,float *out_layer,float upper_bound,
@@ -35,23 +37,6 @@ void zenClipOp(zendnnEnv zenEnvObj,float *out_layer,float upper_bound,
     }
 }
 
-float activation_gelu(float input) {
-    float out = 0.5 * input * (1 + tanhf(sqrtf(2/M_PI) * (input + 0.044715 * powf(
-            input,3))));
-    return out;
-}
-
-float apply_activation(float input, bool relu, bool gelu) {
-
-    if (relu) {
-        return input>0?input:0;
-    }
-    if (gelu) {
-        return activation_gelu(input);
-    }
-    return input;
-}
-
 void zenPostOps(
     zendnnEnv zenEnvObj,
     float *out_layer,
@@ -71,115 +56,192 @@ void zenPostOps(
     const int batch_size
 ) {
 
-    bool activation = false;
-    if (relu || gelu) {
-        activation = true;
-    }
-
-    if (!zenEnvObj.zenBlockedFormat) {  // GEMM Path
+    if (!zenEnvObj.zenBlockedFormat) {  // NHWC Path
 
         unsigned long i;
         unsigned long total_size = (unsigned long)out_height*out_width*total_filters;
         if (!elementwise_input) {
-            if (bias != NULL && activation == true && scale != NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                          bias[c];
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
+            if (relu) {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
+                else if (bias != NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
+                else if (bias == NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
             }
-            else if (bias != NULL && activation == false  && scale != NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                          bias[c];
-                    }
+            else if (gelu) {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c];
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
+                else if (bias != NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
+                else if (bias == NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
             }
-            else if (bias != NULL && activation == true && scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
-            }
-            else if (bias != NULL && activation == false &&  scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
-                    }
-            }
-            else if (bias == NULL && activation == true && scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
+            else {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c];
+                        }
+                }
+                else if (bias != NULL &&  scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                        }
+                }
             }
         }
         else {
-            if (bias != NULL && activation == true && scale != NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                          bias[c] + elementwise_input[biasOffset + i + c];
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
+            if (relu) {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c] + elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
+                else if (bias != NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                                                              elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
+                else if (bias == NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] +
+                                                              elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
+                                                              ?out_layer[ biasOffset + i + c ]:0;
+                        }
+                }
             }
-            else if (bias != NULL && activation == false && scale != NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                          bias[c] + elementwise_input[biasOffset + i + c];
-                    }
+            else if (gelu) {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c] + elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
+                else if (bias != NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                                                              elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
+                else if (bias == NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] +
+                                                              elementwise_input[biasOffset + i + c];
+                            out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                              (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                      + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                        }
+                }
+
             }
-            else if (bias != NULL && activation == true && scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
-                                                          elementwise_input[biasOffset + i + c];
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
-            }
-            else if (bias != NULL && activation == false && scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
-                                                          elementwise_input[biasOffset + i + c];
-                    }
-            }
-            else if (bias == NULL && activation == true && scale == NULL) {
-                #pragma omp parallel for num_threads(no_of_threads)
-                for (i = 0; i < total_size; i += total_filters)
-                    #pragma omp simd
-                    for (int c = 0; c < no_of_filter; c++) {
-                        out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] +
-                                                          elementwise_input[biasOffset + i + c];
-                        out_layer[ biasOffset + i + c ] = apply_activation(out_layer[ biasOffset + i +
-                                                          c], relu, gelu);
-                    }
+            else {
+                if (bias != NULL && scale != NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                              bias[c] + elementwise_input[biasOffset + i + c];
+                        }
+                }
+                else if (bias != NULL && scale == NULL) {
+                    #pragma omp parallel for num_threads(no_of_threads)
+                    for (i = 0; i < total_size; i += total_filters)
+                        #pragma omp simd
+                        for (int c = 0; c < no_of_filter; c++) {
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                                                              elementwise_input[biasOffset + i + c];
+                        }
+                }
             }
         }
     }
@@ -193,8 +255,88 @@ void zenPostOps(
         unsigned long index = 0;
         unsigned long blocked_out_height_width = 8*out_height*out_width;
         if (scale) {
-            if (activation && elementwise_input) { // Batchnorm and element wise
 
+            if (relu) {
+                if (elementwise_input) { // Batchnorm and element wise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index + m + n]  = scale[index_filter + n]*(out_layer[index + m + n] -
+                                                                mean[index_filter + n])
+                                                                + offset[index_filter + n]  + elementwise_input[index + m + n];
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
+                                                             0;
+                                }
+                            }
+                        }
+                }
+                else { // Batchnorm Only
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index + m +n]  = scale[index_filter + n]*(out_layer[index + m + n] -
+                                                               mean[index_filter + n])
+                                                               + offset[index_filter + n];
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
+                                                             0;
+                                }
+                            }
+                        }
+                }
+            }
+            else if (gelu) {
+                if (elementwise_input) { // Batchnorm and element wise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index+m + n]  = scale[index_filter + n]*(out_layer[index+m + n] -
+                                                              mean[index_filter + n])
+                                                              + offset[index_filter + n]  + elementwise_input[index+m + n];
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
+                                                                   gelu_const *
+                                                                   (out_layer[index + m + n] + 0.044715 * powf(
+                                                                        out_layer[index + m + n],3))));
+                                }
+                            }
+                        }
+                }
+                else { // Batchnorm Only
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index+m +n]  = scale[index_filter + n]*(out_layer[index+m+n] -
+                                                             mean[index_filter + n])
+                                                             + offset[index_filter + n];
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
+                                                                   gelu_const *
+                                                                   (out_layer[index + m + n] + 0.044715 * powf(
+                                                                        out_layer[index + m + n],3))));
+                                }
+                            }
+                        }
+                }
+            }
+            else if (elementwise_input) { // Batchnorm and element wise
                 #pragma omp parallel for num_threads(no_of_threads) collapse(2)
                 for (int i=0; i< batch_size; i++)
                     for (int r=0; r< filter_block; r++) {
@@ -206,69 +348,11 @@ void zenPostOps(
                                 out_layer[index+m + n]  = scale[index_filter + n]*(out_layer[index+m + n] -
                                                           mean[index_filter + n])
                                                           + offset[index_filter + n]  + elementwise_input[index+m + n];
-                                if (relu) {
-                                    if (out_layer[index + m + n] < 0) {
-                                        out_layer[index + m + n] = 0;
-                                    }
-                                }
-                                if (gelu) {
-                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
-                                                                   2/M_PI) *
-                                                               (out_layer[index + m + n] + 0.044715 * powf(
-                                                                    out_layer[index + m + n],3))));
-                                }
                             }
                         }
                     }
             }
-            else if (activation &&  !elementwise_input) { // Batchnorm Only
-                #pragma omp parallel for num_threads(no_of_threads) collapse(2)
-                for (int i=0; i< batch_size; i++)
-                    for (int r=0; r< filter_block; r++) {
-                        index = blocked_out_height_width*(i*filter_block + r);
-                        unsigned long index_filter = 8*r;
-                        #pragma omp simd
-                        for (int m=0; m< blocked_out_height_width; m=m+8) {
-                            for (int n=0; n < 8; n++) {
-                                out_layer[index+m +n]  = scale[index_filter + n]*(out_layer[index+m+n] -
-                                                         mean[index_filter + n])
-                                                         + offset[index_filter + n];
-                                if (relu) {
-                                    if (out_layer[index + m + n] < 0) {
-                                        out_layer[index + m + n] = 0;
-                                    }
-                                }
-                                //TODO Enabling any code here with function call causes result
-                                // missmatch for int_validation for blocked format where convolution is
-                                // followed by post_op.
-                                // e.g. float temp  = activation_gelu(out_layer[index + m + n]);
-                                if (gelu) {
-                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
-                                                                   2/M_PI) *
-                                                               (out_layer[index + m + n] + 0.044715 * powf(
-                                                                    out_layer[index + m + n],3))));
-                                }
-                            }
-                        }
-                    }
-            }
-            else if (!activation &&  elementwise_input) { // Batchnorm and element wise
-                #pragma omp parallel for num_threads(no_of_threads) collapse(2)
-                for (int i=0; i< batch_size; i++)
-                    for (int r=0; r< filter_block; r++) {
-                        index = blocked_out_height_width*(i*filter_block + r);
-                        unsigned long index_filter = 8*r;
-                        #pragma omp simd
-                        for (int m=0; m< blocked_out_height_width; m=m+8) {
-                            for (int n=0; n < 8; n++) {
-                                out_layer[index+m + n]  = scale[index_filter + n]*(out_layer[index+m + n] -
-                                                          mean[index_filter + n])
-                                                          + offset[index_filter + n]  + elementwise_input[index+m + n];
-                            }
-                        }
-                    }
-            }
-            else if (!activation && !elementwise_input) {
+            else if (!elementwise_input) {
                 #pragma omp parallel for num_threads(no_of_threads) collapse(2)
                 for (int i=0; i< batch_size; i++)
                     for (int r=0; r< filter_block; r++) {
@@ -286,32 +370,111 @@ void zenPostOps(
             }
         }
         else {
-            if (activation && bias && !elementwise_input) { // bias
-                #pragma omp parallel for num_threads(no_of_threads) collapse(2)
-                for (int i=0; i< batch_size; i++)
-                    for (int r=0; r< filter_block; r++) {
-                        index = blocked_out_height_width*(i*filter_block + r);
-                        unsigned long index_filter = 8*r;
-                        #pragma omp simd
-                        for (int m=0; m< blocked_out_height_width; m=m+8) {
-                            for (int n=0; n < 8; n++) {
-                                out_layer[index+m+n] = out_layer[index+m+n] + bias[index_filter + n];
-                                if (relu) {
-                                    if (out_layer[index + m + n] < 0) {
-                                        out_layer[index + m + n] = 0;
-                                    }
-                                }
-                                if (gelu) {
-                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
-                                                                   2/M_PI) *
-                                                               (out_layer[index + m + n] + 0.044715 * powf(
-                                                                    out_layer[index + m + n],3))));
+
+            if (relu) {
+                if (bias && !elementwise_input) { // bias
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
+                                    out_layer[index + m + n] = out_layer[index + m + n]>0 ? out_layer[index + m +
+                                                               n] :
+                                                               0;
                                 }
                             }
                         }
-                    }
+                }
+                else if (bias && elementwise_input) { // bias and element wise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                                               elementwise_input[index + m + n];
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
+                                                             0;
+                                }
+                            }
+                        }
+                }
+                else if (!bias && elementwise_input)  { // Elementwise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m++) {
+                                out_layer[index + m] = out_layer[index + m ] + elementwise_input[index + m ];
+                                out_layer[index + m] = out_layer[index + m]>0 ? out_layer[index + m] : 0;
+                            }
+                        }
+                }
             }
-            else if (!activation && bias && !elementwise_input) { // bias
+            else if (gelu) {
+                if (bias && !elementwise_input) { // bias
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index+m+n] = out_layer[index+m+n] + bias[index_filter + n];
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
+                                                                   gelu_const *
+                                                                   (out_layer[index + m + n] + 0.044715 * powf(
+                                                                        out_layer[index + m + n],3))));
+                                }
+                            }
+                        }
+                }
+                else if (bias && elementwise_input) { // bias and element wise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m=m+8) {
+                                for (int n=0; n < 8; n++) {
+                                    out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                                               elementwise_input[index + m + n];
+                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
+                                                                   gelu_const *
+                                                                   (out_layer[index + m + n] + 0.044715 * powf(
+                                                                        out_layer[index + m + n],3))));
+                                }
+                            }
+                        }
+                }
+                else if (!bias && elementwise_input)  { // Elementwise
+                    #pragma omp parallel for num_threads(no_of_threads) collapse(2)
+                    for (int i=0; i< batch_size; i++)
+                        for (int r=0; r< filter_block; r++) {
+                            index = blocked_out_height_width*(i*filter_block + r);
+                            unsigned long index_filter = 8*r;
+                            #pragma omp simd
+                            for (int m=0; m< blocked_out_height_width; m++) {
+                                out_layer[index + m ] = out_layer[index + m ] + elementwise_input[index + m ];
+                                out_layer[index + m ] = 0.5 * out_layer[index + m ] * (1 + tanhf(gelu_const *
+                                                        (out_layer[index + m ] + 0.044715 * powf(
+                                                             out_layer[index + m ],3))));
+                            }
+                        }
+                }
+            }
+            else if (bias && !elementwise_input) { // bias
                 #pragma omp parallel for num_threads(no_of_threads) collapse(2)
                 for (int i=0; i< batch_size; i++)
                     for (int r=0; r< filter_block; r++) {
@@ -325,33 +488,7 @@ void zenPostOps(
                         }
                     }
             }
-            else if (activation && bias && elementwise_input) { // bias and element wise
-                #pragma omp parallel for num_threads(no_of_threads) collapse(2)
-                for (int i=0; i< batch_size; i++)
-                    for (int r=0; r< filter_block; r++) {
-                        index = blocked_out_height_width*(i*filter_block + r);
-                        unsigned long index_filter = 8*r;
-                        #pragma omp simd
-                        for (int m=0; m< blocked_out_height_width; m=m+8) {
-                            for (int n=0; n < 8; n++) {
-                                out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
-                                                           elementwise_input[index + m + n];
-                                if (relu) {
-                                    if (out_layer[index + m + n] < 0) {
-                                        out_layer[index + m + n] = 0;
-                                    }
-                                }
-                                if (gelu) {
-                                    out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(sqrtf(
-                                                                   2/M_PI) *
-                                                               (out_layer[index + m + n] + 0.044715 * powf(
-                                                                    out_layer[index + m + n],3))));
-                                }
-                            }
-                        }
-                    }
-            }
-            else if (!activation && bias && elementwise_input) { // bias and element wise
+            else if (bias && elementwise_input) { // bias and element wise
                 #pragma omp parallel for num_threads(no_of_threads) collapse(2)
                 for (int i=0; i< batch_size; i++)
                     for (int r=0; r< filter_block; r++) {
@@ -366,30 +503,7 @@ void zenPostOps(
                         }
                     }
             }
-            else if (activation && !bias && elementwise_input)  { // Elementwise
-                #pragma omp parallel for num_threads(no_of_threads) collapse(2)
-                for (int i=0; i< batch_size; i++)
-                    for (int r=0; r< filter_block; r++) {
-                        index = blocked_out_height_width*(i*filter_block + r);
-                        unsigned long index_filter = 8*r;
-                        #pragma omp simd
-                        for (int m=0; m< blocked_out_height_width; m++) {
-                            out_layer[index + m ] = out_layer[index + m ] + elementwise_input[index + m ];
-                            if (relu) {
-                                if (out_layer[index + m ] < 0) {
-                                    out_layer[index + m ] = 0;
-                                }
-                            }
-                            if (gelu) {
-                                out_layer[index + m ] = 0.5 * out_layer[index + m ] * (1 + tanhf(sqrtf(
-                                                            2/M_PI) *
-                                                        (out_layer[index + m ] + 0.044715 * powf(
-                                                             out_layer[index + m ],3))));
-                            }
-                        }
-                    }
-            }
-            else if (!activation && !bias && elementwise_input)  { // Elementwise
+            else if (!bias && elementwise_input)  { // Elementwise
                 #pragma omp parallel for num_threads(no_of_threads) collapse(2)
                 for (int i=0; i< batch_size; i++)
                     for (int r=0; r< filter_block; r++) {

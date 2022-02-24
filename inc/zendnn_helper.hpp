@@ -302,5 +302,4 @@ extern "C" {
         unsigned long size
     );
 
-    float activation_gelu(float input);
 }
