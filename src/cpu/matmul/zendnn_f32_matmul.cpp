@@ -163,19 +163,19 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const bool batched = pd()->batched();
 
-    const dim_t M = dst_d.dims()[batched + 0];
-    const dim_t N = dst_d.dims()[batched + 1];
-    const dim_t K = src_d.dims()[batched + 1];
+    const dim_t M = dst_d.dims()[dst_d.ndims() - 2];
+    const dim_t N = dst_d.dims()[dst_d.ndims() - 1];
+    const dim_t K = src_d.dims()[src_d.ndims() - 1];
 
-    const auto &src_strides = &src_d.blocking_desc().strides[batched];
-    const auto &weights_strides = &weights_d.blocking_desc().strides[batched];
+    const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
+    const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() - 2];
 
     const char *transA
-        = src_strides[1] == 1 && src_d.dims()[batched + 0] > 1 ? "N" : "T";
+        = src_strides[1] == 1 &&
+           src_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
     const char *transB
-        = weights_strides[1] == 1 && weights_d.dims()[batched + 0] > 1
-          ? "N"
-          : "T";
+        = weights_strides[1] == 1 &&
+           weights_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
 
     const int M_s32 = (int)M;
     const int N_s32 = (int)N;
@@ -183,24 +183,24 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const int lda = (int)src_strides[*transA == 'N' ? 0 : 1];
     const int ldb = (int)weights_strides[*transB == 'N' ? 0 : 1];
-    const int ldc = (int)dst_bd.strides[batched + 0];
+    const int ldc = (int)dst_bd.strides[dst_d.ndims() - 2];
 
     float alpha = params.get_gemm_alpha(scales);
     const float beta = params.gemm_beta_;
     //TODO(aakar): Modify f32_matmul API to include Layout
     const bool Layout = true; // CblasRowMajor
 
-    const dim_t batch = batched ? src_d.dims()[0] : 1;
+    const dim_t batch = batched ? src_d.dims()[dst_d.ndims() - 3] : 1;
     const auto src_batch_stride = src_d.blocking_desc().strides[0];
     const auto weights_batch_stride = weights_d.blocking_desc().strides[0];
     const auto dst_batch_stride = dst_d.blocking_desc().strides[0];
 
-    zendnnInfo(ZENDNN_CORELOG, "zendnn_gemm_f32_matmul_t::execute_ref");
-    zendnnInfo(ZENDNN_CORELOG, "M: :",M, " N: ",N, " K: ", K);
-    zendnnInfo(ZENDNN_CORELOG, "M_s32: :",M_s32, " N_s32: ",N_s32, " K_s32: ",
-               K_s32);
-    zendnnInfo(ZENDNN_CORELOG, " alpha: :", alpha, " beta: ", beta,
-               " Layout: ", Layout ? "CblasRowMajor" : "CblasColMajor");
+    zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::execute_ref");
+    zendnnInfo(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
+               " transA: ", transA, " transB: ", transB,
+               " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
+               " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
+               " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)");
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
 
     int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
