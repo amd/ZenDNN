@@ -487,7 +487,8 @@ extern "C"
         const float *bias,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        const int geluType
     );
 
     void zenMatMul_refWrapper(

@@ -65,9 +65,15 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     bool has_eltwise_relu = elementwise_index>=0 ?
                             pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                             alg_kind::eltwise_relu : 0;
+
+    //alg_kind::eltwise_gelu is same as alg_kind::eltwise_gelu_tanh
     bool has_eltwise_gelu = elementwise_index>=0 ?
                             pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                             alg_kind::eltwise_gelu : 0;
+
+    bool has_eltwise_gelu_erf = elementwise_index>=0 ?
+                                pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                                alg_kind::eltwise_gelu_erf : 0;
 
     const float *scales = pd()->attr()->output_scales_.scales_;
 
@@ -106,15 +112,30 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
                 (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
                 (float *)dst, OC);
         }
-        else {
+        else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 1 refers to tanh based gelu
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
                 Layout, false, wei_tr, 1, MB, IC, OC, alpha, (float *)src, IC,
                 (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
-                (float *)dst, OC);
+                (float *)dst, OC, 1);
 
+        }
+        else if (has_eltwise_gelu_erf) {
+            //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 2 refers to erf based gelu
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
+            zenMatMulWithBiasGeLU(
+                Layout, false, wei_tr, 1, MB, IC, OC, alpha, (float *)src, IC,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)dst, OC, 2);
+
+        }
+        else {
+            return status::unimplemented;
         }
     }
 

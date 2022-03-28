@@ -38,7 +38,7 @@ void zenMatmulSplit(
     const int ldb,
     const float *bias,
     const bool relu,
-    const bool gelu,
+    const int gelu,
     const float beta,
     float *output,
     const int ldc
@@ -58,7 +58,7 @@ void zenMatMul_gemm(
     const int ldb,
     const float *bias,
     const bool relu,
-    const bool gelu,
+    const int gelu,
     const float beta,
     float *output,
     const int ldc
@@ -130,10 +130,21 @@ void zenMatMul_gemm(
 
         if (gelu) {
             long int out_values = m*n;
-            #pragma omp parallel for num_threads(thread_qty)
-            for (long int i=0; i<out_values; i++) {
-                output[i] = 0.5 *  output[i] * (1 + tanhf(gelu_const * (output[i] + 0.044715 *
-                                                powf(output[i], 3))));;
+
+            //gelu=1 is tanh based gelu, else(i.e gelu=2) is
+            // erf based
+            if (gelu == 1) {
+                #pragma omp parallel for num_threads(thread_qty)
+                for (long int i=0; i<out_values; i++) {
+                    output[i] = 0.5 *  output[i] * (1 + tanhf(gelu_const * (output[i] + 0.044715 *
+                                                    powf(output[i], 3))));;
+                }
+            }
+            else {
+                #pragma omp parallel for num_threads(thread_qty)
+                for (long int i=0; i<out_values; i++) {
+                    output[i] = 0.5 *  output[i] * (1 + erff(output[i]/1.414213));
+                }
             }
         }
     }
@@ -165,7 +176,7 @@ void zenMatMul_gemm_wrapper(
     const int ldb,
     const float *bias,
     const bool relu,
-    const bool gelu,
+    const int gelu,
     const float beta,
     float *output,
     const int ldc
@@ -231,7 +242,7 @@ void zenMatMul(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, NULL, false, false, beta,
+                               filter + (i*no_of_channels*no_of_filters), ldb, NULL, false, 0, beta,
                                output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -265,7 +276,7 @@ void zenMatMulWithBias(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input+(i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, false,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, 0,
                                beta, output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -299,7 +310,7 @@ void zenMatMulWithBiasReLU(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, true, false,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, true, 0,
                                beta, output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -319,7 +330,8 @@ void zenMatMulWithBiasGeLU(
     const float *bias,
     const float beta,
     float *output,
-    const int ldc
+    const int ldc,
+    const int geluType
 ) {
     //Check for NULL pointers
     if ((input == NULL)|| (filter == NULL) || (output == NULL) || (bias == NULL)) {
@@ -333,7 +345,7 @@ void zenMatMulWithBiasGeLU(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, true,
+                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, geluType,
                                beta, output + (i*no_of_images*no_of_filters), ldc);
 }
 
@@ -604,7 +616,7 @@ void zenMatmulSplit(
     const int ldb,
     const float *bias,
     const bool relu,
-    const bool gelu,
+    const int gelu,
     const float beta,
     float *output,
     const int ldc

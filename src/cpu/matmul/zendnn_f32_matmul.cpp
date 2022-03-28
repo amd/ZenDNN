@@ -168,14 +168,15 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const dim_t K = src_d.dims()[src_d.ndims() - 1];
 
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
-    const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() - 2];
+    const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
+                                                2];
 
     const char *transA
         = src_strides[1] == 1 &&
-           src_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
+          src_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
     const char *transB
         = weights_strides[1] == 1 &&
-           weights_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
+          weights_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
 
     const int M_s32 = (int)M;
     const int N_s32 = (int)N;
@@ -207,9 +208,16 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     bool has_eltwise_relu = elementwise_index>=0 ?
                             pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                             alg_kind::eltwise_relu : 0;
+
+    //alg_kind::eltwise_gelu is same as alg_kind::eltwise_gelu_tanh
     bool has_eltwise_gelu = elementwise_index>=0 ?
                             pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                             alg_kind::eltwise_gelu : 0;
+
+    bool has_eltwise_gelu_erf = elementwise_index>=0 ?
+                                pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
+                                alg_kind::eltwise_gelu_erf : 0;
+
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     if ((float *)bias == NULL) {
@@ -231,11 +239,27 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                   batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc);
         }
-        else {
+        else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 1 refers to tanh based gelu
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc);
+                                  (float *)bias, beta, (float *)dst, ldc, 1);
+
+        }
+        else if (has_eltwise_gelu_erf) {
+            //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 2 refers to erf based gelu
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
+            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc, 2);
+        }
+        else {
+            return status::unimplemented;
         }
     }
 #else //ZENDNN_ENABLE

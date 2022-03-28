@@ -287,7 +287,7 @@ extern "C" {
         unsigned long biasOffset,
         const float *bias,
         const bool relu,
-        const bool gelu,
+        const int gelu,
         const float *scale,
         const int no_of_threads,
         const float *offset = NULL,
