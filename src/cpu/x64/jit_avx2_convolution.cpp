@@ -68,7 +68,7 @@ void jit_avx2_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     const size_t work_amount
             = jcp.mb * jcp.ngroups * ocb_work * jcp.od * jcp.oh;
 
-    zendnnInfo(ZENDNN_CORELOG, "ZenDNN Ref implementation path in jit_avx2_convolution_fwd_t::execute_forward [cpu/jit_avx2_convolution_fwd]");
+    zendnnInfo(ZENDNN_CORELOG, "ZenDNN implementation path in jit_avx2_convolution_fwd_t::execute_forward [cpu/jit_avx2_convolution_fwd]");
     zendnnInfo(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih,
                " iw=",jcp.iw, " id=",jcp.id, " oh=",jcp.oh,
                " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
