@@ -53,7 +53,8 @@ struct gemm_convolution_fwd_t : public primitive_t {
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops,
                             data_type::f32)
-                    && post_ops_ok();
+                    && post_ops_ok()
+                    && bias_md_.ndims != 0;
 
             if (!ok) return status::unimplemented;
 
