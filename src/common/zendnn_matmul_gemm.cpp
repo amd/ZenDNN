@@ -13,7 +13,6 @@
 #include "zendnn_logging.hpp"
 #include "zendnn.hpp"
 
-
 using namespace zendnn;
 #define BLIS_NORMAL_PATH1        1024
 #define BLIS_NORMAL_PATH2        4096
@@ -94,58 +93,11 @@ void zenMatMul_gemm(
                          m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
 
         }
-
-        // For biasadd fusion
-        if (NULL != bias) {
-            // BiasAdd is to be fused, hence populate the output with bias
-            if (1 < m) {
-                // for batch size more than 1, parallelize bias update for
-                // each image
-                #pragma omp parallel for num_threads(thread_qty)
-                for (int i=0; i<m; i++) {
-                    for (int j=0; j<n; j++) {
-                        output[i*n+j] += bias[j];
-                    }
-                }
-            }
-            else {
-                // for batch size is one
-                #pragma omp parallel for num_threads(thread_qty)
-                for (int j=0; j<n; j++) {
-                    output[j] += bias[j];
-                }
-            }
-        }
-
-        // For activation (currently ReLU only) fusion
-        if (relu) {
-            long int out_values = m*n;
-            #pragma omp parallel for num_threads(thread_qty)
-            for (long int i=0; i<out_values; i++) {
-                if (0 > output[i]) {
-                    output[i] = 0;
-                }
-            }
-        }
-
-        if (gelu) {
-            long int out_values = m*n;
-
-            //gelu=1 is tanh based gelu, else(i.e gelu=2) is
-            // erf based
-            if (gelu == 1) {
-                #pragma omp parallel for num_threads(thread_qty)
-                for (long int i=0; i<out_values; i++) {
-                    output[i] = 0.5 *  output[i] * (1 + tanhf(gelu_const * (output[i] + 0.044715 *
-                                                    powf(output[i], 3))));;
-                }
-            }
-            else {
-                #pragma omp parallel for num_threads(thread_qty)
-                for (long int i=0; i<out_values; i++) {
-                    output[i] = 0.5 *  output[i] * (1 + erff(output[i]/1.414213));
-                }
-            }
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                       ldc, 0,
+                       bias, relu, gelu, NULL,
+                       thread_qty);
         }
     }
     else {
@@ -566,9 +518,10 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     std::vector<CBLAS_TRANSPOSE> TransB_Array(
         group_count, TransB ? CblasTrans : CblasNoTrans);
 
-    if (zenEnvObj.zenGEMMalgo == 1) {
-        //Direct call to BLIS cblas_sgemm_batch is not performing well
-        //TODO: check with BLIS team for optimal cblas_sgemm_batch function
+    //if (zenEnvObj.zenGEMMalgo == 1) {
+    //Direct call to BLIS cblas_sgemm_batch is not performing well
+    //TODO: check with BLIS team for optimal cblas_sgemm_batch function
+    if (0) {
         cblas_sgemm_batch(Layout?CblasRowMajor:CblasColMajor, &TransA_Array[0],
                           &TransB_Array[0], M_Array,
                           N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
@@ -776,11 +729,12 @@ void zenMatmulSplit(
 
         //Below Bias and activation code can be eliminated if not required
         unsigned long biasOffset = outputOffset;
-        if (!(!bias && !relu && !gelu))
+        if (bias || relu || gelu) {
             zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
                        ldc, biasOffset,
                        bias, relu, gelu, NULL,
                        l2_num_threads);
+        }
     }
 }
 
