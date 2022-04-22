@@ -9,230 +9,13 @@
 #include <time.h>
 #include <sys/time.h>
 #include "zendnn_logging.hpp"
-#include <immintrin.h>
 
-//Disabling LIBM path for vector match implementation
-//TODO Enable and test for results and performance
-#define LIBM_ENABLE     0
-
-#if LIBM_ENABLE
-extern "C"
-{
-    __m256 amd_vrs8_tanhf(__m256);
-}
-#endif
-
-#define GELU_VECTOR_ENABLE    1
-
-float gelu_const = sqrtf(2/M_PI);
-
-#if GELU_VECTOR_ENABLE
-#define COMPUTE_BIAS(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + bias[c]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + bias[c]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + bias[c]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + bias[c]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + bias[c]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + bias[c]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + bias[c]; \
-    }
-
-#define COMPUTE_SCALE_BIAS(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1]*scale[c] + bias[c]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2]*scale[c] + bias[c]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3]*scale[c] + bias[c]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4]*scale[c] + bias[c]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5]*scale[c] + bias[c]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6]*scale[c] + bias[c]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7]*scale[c] + bias[c]; \
-    }
-
-#define COMPUTE_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + elementwise_input[offset+c+7]; \
-    }
-
-#define COMPUTE_BIAS_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + bias[c] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + bias[c] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + bias[c] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + bias[c] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + bias[c] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + bias[c] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + bias[c] + elementwise_input[offset+c+7]; \
-    }
-
-#define COMPUTE_SCALE_BIAS_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1]*scale[c] + bias[c] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2]*scale[c] + bias[c] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3]*scale[c] + bias[c] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4]*scale[c] + bias[c] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5]*scale[c] + bias[c] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6]*scale[c] + bias[c] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7]*scale[c] + bias[c] + elementwise_input[offset+c+7]; \
-    }
-#else
-#define COMPUTE_BIAS(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c]; \
-    }
-
-#define COMPUTE_SCALE_BIAS(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c]; \
-    }
-
-#define COMPUTE_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + elementwise_input[offset + c]; \
-    }
-
-#define COMPUTE_BIAS_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c] + elementwise_input[offset + c]; \
-    }
-
-#define COMPUTE_SCALE_BIAS_ADD(out_layer, scale, bias, elementwise_input, offset, c) \
-    { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c] + elementwise_input[offset + c]; \
-    }
-#endif
-
-#define COMPUTE_NONE(out_layer, scale, bias, elementwise_input, offset, c) \
-{ \
-}
-
-#if LIBM_ENABLE
-#define COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp) \
-    { \
-        __m256 input_vrs8, result_tanh_vrs8; \
-        float tmp[8]; \
-        unsigned int offset = biasOffset + i; \
-        int c = 0; \
-        for (c = 0; (c+8) <= no_of_filter; c+=8) { \
-                          \
-            compute_postOp(out_layer, scale, bias, elementwise_input, offset, c); \
-                                    \
-            tmp[0] = gelu_const * (out_layer[offset+c] + 0.044715 * \
-                                   out_layer[offset+c]*out_layer[offset+c]*out_layer[offset+c]); \
-            tmp[1] = gelu_const * (out_layer[offset+c+1] + 0.044715 * out_layer[offset \
-                                   +c+1]*out_layer[offset+c+1]*out_layer[offset+c+1]); \
-            tmp[2] = gelu_const * (out_layer[offset+c+2] + 0.044715 * out_layer[offset \
-                                   +c+2]*out_layer[offset+c+2]*out_layer[offset+c+2]); \
-            tmp[3] = gelu_const * (out_layer[offset+c+3] + 0.044715 * out_layer[offset \
-                                   +c+3]*out_layer[offset+c+3]*out_layer[offset+c+3]); \
-            tmp[4] = gelu_const * (out_layer[offset+c+4] + 0.044715 * out_layer[offset \
-                                   +c+4]*out_layer[offset+c+4]*out_layer[offset+c+4]); \
-            tmp[5] = gelu_const * (out_layer[offset+c+5] + 0.044715 * out_layer[offset \
-                                   +c+5]*out_layer[offset+c+5]*out_layer[offset+c+5]); \
-            tmp[6] = gelu_const * (out_layer[offset+c+6] + 0.044715 * out_layer[offset \
-                                   +c+6]*out_layer[offset+c+6]*out_layer[offset+c+6]); \
-            tmp[7] = gelu_const * (out_layer[offset+c+7] + 0.044715 * out_layer[offset \
-                                   +c+7]*out_layer[offset+c+7]*out_layer[offset+c+7]); \
-                                               \
-            input_vrs8 = _mm256_loadu_ps(tmp); \
-            result_tanh_vrs8 = amd_vrs8_tanhf(input_vrs8); \
-            _mm256_storeu_ps(tmp, result_tanh_vrs8); \
-                                              \
-            out_layer[offset+c] = 0.5*out_layer[offset+c]*(1+tmp[0]); \
-            out_layer[offset+c+1] = 0.5*out_layer[offset+c+1]*(1+tmp[1]); \
-            out_layer[offset+c+2] = 0.5*out_layer[offset+c+2]*(1+tmp[2]); \
-            out_layer[offset+c+3] = 0.5*out_layer[offset+c+3]*(1+tmp[3]); \
-            out_layer[offset+c+4] = 0.5*out_layer[offset+c+4]*(1+tmp[4]); \
-            out_layer[offset+c+5] = 0.5*out_layer[offset+c+5]*(1+tmp[5]); \
-            out_layer[offset+c+6] = 0.5*out_layer[offset+c+6]*(1+tmp[6]); \
-            out_layer[offset+c+7] = 0.5*out_layer[offset+c+7]*(1+tmp[7]); \
-        } \
-        for( ;c<no_of_filter; c++) \
-        { \
-            compute_postOp(out_layer, scale, bias, elementwise_input, offset, c); \
-            out_layer[ offset + c ] = 0.5 * out_layer[ offset + c ] * \
-                                      (1 + tanhf(gelu_const * (out_layer[ offset + c ] \
-                                       + 0.044715 * powf(out_layer[ offset + c ],3)))); \
-        } \
-    }
-#elif GELU_VECTOR_ENABLE
-#define COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp) \
-    { \
-        float tmp[8]; \
-        unsigned int offset = biasOffset + i; \
-        int c = 0; \
-        for (c = 0; (c+8) <= no_of_filter; c+=8) { \
-                          \
-            compute_postOp(out_layer, scale, bias, elementwise_input, offset, c); \
-                                    \
-            tmp[0] = gelu_const * (out_layer[offset+c] + 0.044715 * \
-                                   out_layer[offset+c]*out_layer[offset+c]*out_layer[offset+c]); \
-            tmp[1] = gelu_const * (out_layer[offset+c+1] + 0.044715 * out_layer[offset \
-                                   +c+1]*out_layer[offset+c+1]*out_layer[offset+c+1]); \
-            tmp[2] = gelu_const * (out_layer[offset+c+2] + 0.044715 * out_layer[offset \
-                                   +c+2]*out_layer[offset+c+2]*out_layer[offset+c+2]); \
-            tmp[3] = gelu_const * (out_layer[offset+c+3] + 0.044715 * out_layer[offset \
-                                   +c+3]*out_layer[offset+c+3]*out_layer[offset+c+3]); \
-            tmp[4] = gelu_const * (out_layer[offset+c+4] + 0.044715 * out_layer[offset \
-                                   +c+4]*out_layer[offset+c+4]*out_layer[offset+c+4]); \
-            tmp[5] = gelu_const * (out_layer[offset+c+5] + 0.044715 * out_layer[offset \
-                                   +c+5]*out_layer[offset+c+5]*out_layer[offset+c+5]); \
-            tmp[6] = gelu_const * (out_layer[offset+c+6] + 0.044715 * out_layer[offset \
-                                   +c+6]*out_layer[offset+c+6]*out_layer[offset+c+6]); \
-            tmp[7] = gelu_const * (out_layer[offset+c+7] + 0.044715 * out_layer[offset \
-                                   +c+7]*out_layer[offset+c+7]*out_layer[offset+c+7]); \
-                                               \
-            tmp[0] = tanhf(tmp[0]); \
-            tmp[1] = tanhf(tmp[1]); \
-            tmp[2] = tanhf(tmp[2]); \
-            tmp[3] = tanhf(tmp[3]); \
-            tmp[4] = tanhf(tmp[4]); \
-            tmp[5] = tanhf(tmp[5]); \
-            tmp[6] = tanhf(tmp[6]); \
-            tmp[7] = tanhf(tmp[7]); \
-                      \
-            out_layer[offset+c] = 0.5*out_layer[offset+c]*(1+tmp[0]); \
-            out_layer[offset+c+1] = 0.5*out_layer[offset+c+1]*(1+tmp[1]); \
-            out_layer[offset+c+2] = 0.5*out_layer[offset+c+2]*(1+tmp[2]); \
-            out_layer[offset+c+3] = 0.5*out_layer[offset+c+3]*(1+tmp[3]); \
-            out_layer[offset+c+4] = 0.5*out_layer[offset+c+4]*(1+tmp[4]); \
-            out_layer[offset+c+5] = 0.5*out_layer[offset+c+5]*(1+tmp[5]); \
-            out_layer[offset+c+6] = 0.5*out_layer[offset+c+6]*(1+tmp[6]); \
-            out_layer[offset+c+7] = 0.5*out_layer[offset+c+7]*(1+tmp[7]); \
-        } \
-        for( ;c<no_of_filter; c++) \
-        { \
-            compute_postOp(out_layer, scale, bias, elementwise_input, offset, c); \
-            out_layer[ offset + c ] = 0.5 * out_layer[ offset + c ] * \
-                                      (1 + tanhf(gelu_const * (out_layer[ offset + c ] \
-                                       + 0.044715 * powf(out_layer[ offset + c ],3)))); \
-        } \
-    }
-#else
-#define COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp) \
-    { \
-        unsigned int offset = biasOffset + i; \
-        for (int c = 0; c < no_of_filter; c++) { \
-            compute_postOp(out_layer, scale, bias, elementwise_input, offset, c); \
-            out_layer[ offset + c ] = 0.5 * out_layer[ offset + c ] * \
-                                      (1 + tanhf(gelu_const * (out_layer[ offset + c ] \
-                                       + 0.044715 * powf(out_layer[ offset + c ],3)))); \
-        } \
-    }
-#endif
+#define ALIGNED_OFFSET          64
 
 using namespace zendnn;
+float gelu_const = sqrtf(2/M_PI);
+
+
 //ZenClip clips the output values based on upperbound
 void zenClipOp(zendnnEnv zenEnvObj,float *out_layer,float upper_bound,
                unsigned long size) {
@@ -317,24 +100,36 @@ void zenPostOps(
                 if (gelu==1) {
                     if (bias != NULL && scale != NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
-                        for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                no_of_filter, COMPUTE_SCALE_BIAS);
-                        }
+                        for (i = 0; i < total_size; i += total_filters)
+                            #pragma omp simd
+                            for (int c = 0; c < no_of_filter; c++) {
+                                out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                                  bias[c];
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                            }
                     }
                     else if (bias != NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
-                        for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                no_of_filter, COMPUTE_BIAS);
-                        }
+                        for (i = 0; i < total_size; i += total_filters)
+                            #pragma omp simd
+                            for (int c = 0; c < no_of_filter; c++) {
+                                out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                            }
                     }
                     else if (bias == NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
-                        for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                no_of_filter, COMPUTE_NONE);
-                        }
+                        for (i = 0; i < total_size; i += total_filters)
+                            #pragma omp simd
+                            for (int c = 0; c < no_of_filter; c++) {
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
+                            }
                     }
                 }
                 else { //erf based gelu
@@ -436,8 +231,11 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                    no_of_filter, COMPUTE_SCALE_BIAS_ADD);
+                                out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
+                                                                  bias[c] + elementwise_input[biasOffset + i + c];
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
                             }
                     }
                     else if (bias != NULL && scale == NULL) {
@@ -445,8 +243,11 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                    no_of_filter, COMPUTE_BIAS_ADD);
+                                out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                                                                  elementwise_input[biasOffset + i + c];
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
                             }
                     }
                     else if (bias == NULL && scale == NULL) {
@@ -454,8 +255,11 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU_APPROX(out_layer, scale, bias, elementwise_input, biasOffset, i,
-                                                    no_of_filter, COMPUTE_ADD);
+                                out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] +
+                                                                  elementwise_input[biasOffset + i + c];
+                                out_layer[ biasOffset + i + c ] = 0.5 * out_layer[ biasOffset + i + c ] *
+                                                                  (1 + tanhf(gelu_const * (out_layer[ biasOffset + i + c ]
+                                                                          + 0.044715 * powf(out_layer[ biasOffset + i + c ],3))));
                             }
                     }
                 }
