@@ -367,7 +367,7 @@ void zenConvolution2DsmallGemm(
                                           (out_height*out_width)*
                                           threadOffset);
 
-            int gemmRows = BLIS_SMALL_MATRIX/width_col;
+            int gemmRows = (BLIS_SMALL_MATRIX/width_col)?(BLIS_SMALL_MATRIX/width_col):1;
             int gemmRowsLast = (height_col%gemmRows)==0? gemmRows : (height_col%gemmRows);
             int height_colLoop = (height_col%gemmRows)==0? (height_col/gemmRows) :
                                  (height_col/gemmRows)+1;
@@ -607,7 +607,7 @@ void zenConvolution2DsmallGemmVer2(
             unsigned long outputOffset = ((unsigned long)ldc*
                                           (out_height*out_width)* threadOffset);
 
-            int gemmRows = BLIS_SMALL_MATRIX/width_col;
+            int gemmRows = (BLIS_SMALL_MATRIX/width_col)?(BLIS_SMALL_MATRIX/width_col):1;
             int gemmRowsLast = (height_col%gemmRows)==0? gemmRows : (height_col%gemmRows);
             int height_colLoop = (height_col%gemmRows)==0? (height_col/gemmRows) :
                                  (height_col/gemmRows)+1;
