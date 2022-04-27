@@ -22,6 +22,16 @@ then
     return
 fi
 
+#check again if ZENDNN_LIBM_PATH is defined, otherwise return
+if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
+then
+    if [ -z "$ZENDNN_LIBM_PATH" ];
+    then
+        echo "Error: Environment variable ZENDNN_LIBM_PATH needs to be set"
+        return
+    fi
+fi
+
 #echo "make clean"
 #make clean
 
@@ -30,4 +40,3 @@ make -j AOCC=1
 
 echo "make test AOCC=1"
 make test AOCC=1
-

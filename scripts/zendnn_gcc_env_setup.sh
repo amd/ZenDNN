@@ -212,6 +212,10 @@ echo "ZENDNN_TF_CONV_ADD_FUSION_SAFE=$ZENDNN_TF_CONV_ADD_FUSION_SAFE"
 export TF_ZEN_PRIMITIVE_REUSE_DISABLE=FALSE
 echo "TF_ZEN_PRIMITIVE_REUSE_DISABLE=$TF_ZEN_PRIMITIVE_REUSE_DISABLE"
 
+#Disable LIBM, By default, its enabled
+export ZENDNN_ENABLE_LIBM=1
+echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
+
 #Check if below declaration of ZENDNN_GIT_ROOT is correct
 export ZENDNN_GIT_ROOT=$(pwd)
 if [ -z "$ZENDNN_GIT_ROOT" ];
@@ -241,6 +245,18 @@ then
     return
 else
     echo "ZENDNN_BLIS_PATH: $ZENDNN_BLIS_PATH"
+fi
+
+#check if ZENDNN_LIBM_PATH is defined, otherwise return Error
+if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
+then
+    if [ -z "$ZENDNN_LIBM_PATH" ];
+    then
+        echo "Error: Environment variable ZENDNN_LIBM_PATH needs to be set"
+        return
+    else
+        echo "ZENDNN_LIBM_PATH: $ZENDNN_LIBM_PATH"
+    fi
 fi
 
 #Change ZENDNN_PARENT_FOLDER as per need in future
@@ -302,6 +318,10 @@ echo "ZENDNN_TEST_COMMON_BENCHMARK_LOC: $ZENDNN_TEST_COMMON_BENCHMARK_LOC"
 # Export PATH and LD_LIBRARY_PATH
 export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
 export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
+if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
+then
+    export LD_LIBRARY_PATH=$ZENDNN_LIBM_PATH/lib/:$LD_LIBRARY_PATH
+fi
 export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
 
 echo "LD_LIBRARY_PATH: "$LD_LIBRARY_PATH

@@ -11,10 +11,6 @@
 #include "zendnn_logging.hpp"
 #include <immintrin.h>
 
-//Disabling LIBM path for vector match implementation
-//TODO Enable and test for results and performance
-#define LIBM_ENABLE     0
-
 #if LIBM_ENABLE
 extern "C"
 {
