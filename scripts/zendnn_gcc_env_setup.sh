@@ -173,8 +173,8 @@ export ZENDNN_ENABLE_MEMPOOL=1
 echo "ZENDNN_ENABLE_MEMPOOL=$ZENDNN_ENABLE_MEMPOOL"
 
 #Set the max no. of tensors that can be used inside TF memory pool, Default is
-#set to 16
-export ZENDNN_TENSOR_POOL_LIMIT=16
+#set to 64
+export ZENDNN_TENSOR_POOL_LIMIT=64
 echo "ZENDNN_TENSOR_POOL_LIMIT=$ZENDNN_TENSOR_POOL_LIMIT"
 
 #Enable fixed max size allocation for Persistent tensor with TF memory pool
@@ -215,6 +215,10 @@ echo "TF_ZEN_PRIMITIVE_REUSE_DISABLE=$TF_ZEN_PRIMITIVE_REUSE_DISABLE"
 #Disable LIBM, By default, its enabled
 export ZENDNN_ENABLE_LIBM=1
 echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
+
+#Set the no. of InterOp threads, Default is set to 1
+export ZENDNN_TF_INTEROP_THREADS=1
+echo "ZENDNN_TF_INTEROP_THREADS=$ZENDNN_TF_INTEROP_THREADS"
 
 #Check if below declaration of ZENDNN_GIT_ROOT is correct
 export ZENDNN_GIT_ROOT=$(pwd)
