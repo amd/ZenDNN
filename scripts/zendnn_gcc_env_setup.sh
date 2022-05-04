@@ -198,8 +198,8 @@ echo "ZENDNN_INT8_SUPPORT=$ZENDNN_INT8_SUPPORT"
 export ZENDNN_RELU_UPPERBOUND=0
 echo "ZENDNN_RELU_UPPERBOUND=$ZENDNN_RELU_UPPERBOUND"
 
-# ZENDNN_GEMM_ALGO is set to 0 by default
-export ZENDNN_GEMM_ALGO=0
+# ZENDNN_GEMM_ALGO is set to 3 by default
+export ZENDNN_GEMM_ALGO=3
 echo "ZENDNN_GEMM_ALGO=$ZENDNN_GEMM_ALGO"
 
 # Switch to enable Conv, Add fusion on users discretion. Currently it is

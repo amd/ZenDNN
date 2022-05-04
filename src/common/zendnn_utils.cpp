@@ -57,10 +57,10 @@ zendnnEnv readEnv() {
     }
 
     //ZENDNN_GEMM_ALGO is to enable specific GEMM ALGO.
-    //Currently ZenDNN support three ALGO for GEMM execution
-    // Default value is set to 0, where library decide the optimal path
-    // based on the matrix sizes. However, this can be overridden with specific
-    // path.
+    //Currently ZenDNN support three ALGO path for GEMM execution
+    // If value is set to 0, library decide the optimal path
+    // based on the matrix sizes and other parameter settings. However, 
+    // this can be overridden with specific path.
     // 1. DIRECT BLIS: MatMul is redirected to BLIS GEMM directly (zenGEMMalgo=1)
     // 2. ZenDNN+BLIS (zenGEMMalgo=2)
     //      Case 1:
@@ -68,10 +68,10 @@ zendnnEnv readEnv() {
     //              BLIS is used for single thread GEMM execution
     //      Case 2:
     //              MatMul is redirected to BLIS directly
-    // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=3)
-    envObj.zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", 0);
-    if (envObj.zenGEMMalgo<0 || envObj.zenGEMMalgo>3) {
-        envObj.zenGEMMalgo = 0;
+    // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=3) (current default)
+    envObj.zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", 3);
+    if (envObj.zenGEMMalgo<=0 || envObj.zenGEMMalgo>3) {
+        envObj.zenGEMMalgo = 3;
     }
 
     return envObj;

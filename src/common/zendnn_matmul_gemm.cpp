@@ -387,7 +387,6 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
 
                 //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
                 // jit based kernel will be called.
-                // default ZENDNN_GEMM_ALGO is set to 0
                 // refer src/common/zendnn_utils.cpp
                 if (zenEnvObj.zenGEMMalgo == 3)
                     zendnn_sgemm(transpose_input ? 'T' : 'N',
@@ -593,7 +592,6 @@ void zenMatmulSplit(
     //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
     // enabled, then zendnn_sgemm jit based kernel will be
     // called.
-    // default ZENDNN_GEMM_ALGO is set to 0
     // refer src/common/zendnn_utils.cpp
     if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
         l2_num_threads = thread_qty;
