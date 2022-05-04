@@ -3282,8 +3282,7 @@ void zenConvolution2DwithBias(
     const int total_filters
 ) {
     //TODO: perform other checks...eg. for all input dimansions
-    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL) ||
-            (bias == NULL)) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DwithBias Memory is not defined for in_layer or filter or out_layer");
         return;
@@ -3324,8 +3323,7 @@ void zenConvolution2DwithBiasRelu(
 ) {
 
     //TODO: perform other checks...eg. for all input dimansions
-    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL) ||
-            (bias == NULL)) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DwithBiasRelu Memory is not defined for in_layer or filter or out_layer");
         return;
@@ -3364,8 +3362,7 @@ void zenConvolution2DwithBiasSum(
     const int total_filters
 ) {
     //TODO: perform other checks...eg. for all input dimansions
-    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL) ||
-            (bias == NULL)) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DwithBiasSum Memory is not defined for in_layer or filter or out_layer");
         return;
@@ -3406,8 +3403,7 @@ void zenConvolution2DwithBiasSumRelu(
 ) {
 
     //TODO: perform other checks...eg. for all input dimansions
-    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL) ||
-            (bias == NULL)) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DwithBiasSumRelu Memory is not defined for in_layer or filter or out_layer");
         return;

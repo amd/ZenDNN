@@ -437,6 +437,11 @@ size_t get_desc_hash(const convolution_desc_t &desc) {
     seed = get_array_hash(seed, desc.padding[1], ZENDNN_MAX_NDIMS);
     // Accumulator type
     seed = hash_combine(seed, static_cast<size_t>(desc.accum_data_type));
+    seed = hash_combine(seed, static_cast<size_t>(desc.reluFused));
+    seed = hash_combine(seed, static_cast<size_t>(desc.batchNormFused));
+    seed = hash_combine(seed, get_md_hash(desc.batchNormScale_desc));
+    seed = hash_combine(seed, get_md_hash(desc.batchNormMean_desc));
+    seed = hash_combine(seed, get_md_hash(desc.batchNormOffset_desc));
     // Combined hash for (de-)convolution desc
     return seed;
 }

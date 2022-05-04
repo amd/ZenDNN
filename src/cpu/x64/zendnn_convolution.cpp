@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -57,8 +57,10 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     const memory_desc_wrapper batchNormMean_d(pd()->weights_md(3));
     const memory_desc_wrapper batchNormOffset_d(pd()->weights_md(4));
 
-    zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::execute_forward [cpu/convolution]");
-    zendnnInfo(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
+    zendnnInfo(ZENDNN_CORELOG,
+               "ZENDNN implementation path in zendnn_convolution_fwd_t::execute_forward [cpu/convolution]");
+    zendnnInfo(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih,
+               " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
                " kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
                " stride_w=",jcp.stride_w, " l_pad=",jcp.l_pad, " t_pad=",jcp.t_pad,
@@ -70,7 +72,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     bool concat = true;
 
     if (total_filters == jcp.oc) {
-       concat = false;
+        concat = false;
     }
 
     //TBD: To add support for gemm, ref, direct, winograd, fft
@@ -79,7 +81,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         if ((jcp.reluFused == false) &&
                 (jcp.batchNormFused == true)) {
             //Only BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRef [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRef [cpu/convolution]");
             zenConvolution2DwithBatchNormRef(
                 (float *)src,
                 jcp.mb,
@@ -107,7 +110,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         else if ((jcp.reluFused == true) &&
                  (jcp.batchNormFused == true)) {
             //ReLU and  BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormReluRef [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormReluRef [cpu/convolution]");
             zenConvolution2DwithBatchNormReluRef(
                 (float *)src,
                 jcp.mb,
@@ -133,7 +137,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else if (bias != NULL && !jcp.with_eltwise) {
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRef [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRef [cpu/convolution]");
             zenConvolution2DwithBiasRef(
                 (float *)src,
                 jcp.mb,
@@ -157,7 +162,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else if (bias != NULL && jcp.with_eltwise) {
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasReluRef [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasReluRef [cpu/convolution]");
             zenConvolution2DwithBiasReluRef(
                 (float *)src,
                 jcp.mb,
@@ -181,7 +187,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else {
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DRef [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DRef [cpu/convolution]");
             zenConvolution2DRef(
                 (float *)src,
                 jcp.mb,
@@ -208,7 +215,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         if ((jcp.reluFused == false) &&
                 (jcp.batchNormFused == true)) {
             //Only BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNorm [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNorm [cpu/convolution]");
             zenConvolution2DwithBatchNorm(
                 (float *)src,
                 jcp.mb,
@@ -239,7 +247,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         else if ((jcp.reluFused == true) &&
                  (jcp.batchNormFused == true)) {
             //ReLU and  BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRelu [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRelu [cpu/convolution]");
             zenConvolution2DwithBatchNormRelu(
                 (float *)src,
                 jcp.mb,
@@ -267,66 +276,99 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 total_filters
             );
         }
+        else if ((jcp.reluFused == true)) {
+            //ReLU fused with conv
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithRelu [cpu/convolution]");
+            zenConvolution2DwithBiasRelu(
+                (float *)src,
+                jcp.mb,
+                jcp.ic,
+                jcp.ih,
+                jcp.iw,
+                weights,
+                jcp.oc,
+                jcp.kh,
+                jcp.kw,
+                jcp.t_pad,
+                jcp.l_pad,
+                jcp.b_pad,
+                jcp.r_pad,
+                jcp.stride_h,
+                jcp.stride_w,
+                NULL,
+                (float *)dst,
+                jcp.oh,
+                jcp.ow,
+                concat,
+                filter_offset,
+                total_filters
+            );
+
+        }
         else if (bias != NULL && !jcp.with_eltwise) {
             if (!jcp.with_sum) {
-                 zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBias [cpu/convolution]");
-                 zenConvolution2DwithBias(
-                     (float *)src,
-                     jcp.mb,
-                     jcp.ic,
-                     jcp.ih,
-                     jcp.iw,
-                     weights,
-                     jcp.oc,
-                     jcp.kh,
-                     jcp.kw,
-                     jcp.t_pad,
-                     jcp.l_pad,
-                     jcp.b_pad,
-                     jcp.r_pad,
-                     jcp.stride_h,
-                     jcp.stride_w,
-                     (float *)bias,
-                     (float *)dst,
-                     jcp.oh,
-                     jcp.ow,
-                     concat,
-                     filter_offset,
-                     total_filters
-                 );
+                zendnnInfo(ZENDNN_CORELOG,
+                           "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBias [cpu/convolution]");
+                zenConvolution2DwithBias(
+                    (float *)src,
+                    jcp.mb,
+                    jcp.ic,
+                    jcp.ih,
+                    jcp.iw,
+                    weights,
+                    jcp.oc,
+                    jcp.kh,
+                    jcp.kw,
+                    jcp.t_pad,
+                    jcp.l_pad,
+                    jcp.b_pad,
+                    jcp.r_pad,
+                    jcp.stride_h,
+                    jcp.stride_w,
+                    (float *)bias,
+                    (float *)dst,
+                    jcp.oh,
+                    jcp.ow,
+                    concat,
+                    filter_offset,
+                    total_filters
+                );
             }
             else {
-                 zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSum [cpu/convolution]");
-                 zenConvolution2DwithBiasSum(
-                     (float *)src,
-                     jcp.mb,
-                     jcp.ic,
-                     jcp.ih,
-                     jcp.iw,
-                     weights,
-                     jcp.oc,
-                     jcp.kh,
-                     jcp.kw,
-                     jcp.t_pad,
-                     jcp.l_pad,
-                     jcp.b_pad,
-                     jcp.r_pad,
-                     jcp.stride_h,
-                     jcp.stride_w,
-                     (float *)bias,
-                     (float *)dst,
-                     jcp.oh,
-                     jcp.ow,
-                     concat,
-                     filter_offset,
-                     total_filters
-                 );
+                zendnnInfo(ZENDNN_CORELOG,
+                           "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSum [cpu/convolution]");
+                zenConvolution2DwithBiasSum(
+                    (float *)src,
+                    jcp.mb,
+                    jcp.ic,
+                    jcp.ih,
+                    jcp.iw,
+                    weights,
+                    jcp.oc,
+                    jcp.kh,
+                    jcp.kw,
+                    jcp.t_pad,
+                    jcp.l_pad,
+                    jcp.b_pad,
+                    jcp.r_pad,
+                    jcp.stride_h,
+                    jcp.stride_w,
+                    (float *)bias,
+                    (float *)dst,
+                    jcp.oh,
+                    jcp.ow,
+                    concat,
+                    filter_offset,
+                    total_filters
+                );
             }
         }
         else if (bias != NULL && jcp.with_eltwise) {
             if (!jcp.with_sum) {
                 //Only ReLU fused with conv
-                zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRelu [cpu/convolution]");
+                zendnnInfo(ZENDNN_CORELOG,
+                           "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRelu [cpu/convolution]");
                 zenConvolution2DwithBiasRelu(
                     (float *)src,
                     jcp.mb,
@@ -353,7 +395,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 );
             }
             else {
-                zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSumRelu [cpu/convolution]");
+                zendnnInfo(ZENDNN_CORELOG,
+                           "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSumRelu [cpu/convolution]");
                 zenConvolution2DwithBiasSumRelu(
                     (float *)src,
                     jcp.mb,
@@ -382,7 +425,8 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         }
         else {
             //Convolution
-            zendnnInfo(ZENDNN_CORELOG, "zendnn_convolution_fwd_t::execute_forward zenConvolution2D [cpu/convolution]");
+            zendnnInfo(ZENDNN_CORELOG,
+                       "zendnn_convolution_fwd_t::execute_forward zenConvolution2D [cpu/convolution]");
             zenConvolution2D(
                 (float *)src,
                 jcp.mb,
@@ -409,7 +453,9 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         }
     }
 
-    if (pd()->wants_zero_pad_dst()) ctx.zero_pad_output(ZENDNN_ARG_DST);
+    if (pd()->wants_zero_pad_dst()) {
+        ctx.zero_pad_output(ZENDNN_ARG_DST);
+    }
 }
 
 } // namespace x64
