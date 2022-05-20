@@ -51,6 +51,8 @@ ifeq ($(AOCC), 0)
 	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2 -flto
+	else
+		COMMONFLAGS += -march=znver1 -flto
 	endif
 else
 	CXXFLAGS := -std=c++14 -O0 -march=$(ZNVER) -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
@@ -70,6 +72,8 @@ ifeq ($(AOCC), 0)
 	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
+	else
+		COMMONFLAGS += -march=znver1
 	endif
 else
 	CXXFLAGS := -std=c++14 -O3 -march=$(ZNVER) -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -DNDEBUG
