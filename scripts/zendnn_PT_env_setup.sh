@@ -140,8 +140,8 @@ fi
 export GOMP_CPU_AFFINITY="0-63"
 echo "GOMP_CPU_AFFINITY=$GOMP_CPU_AFFINITY"
 
-#By default setting ZENDNN_PT_VERSION as 1.9.0
-export ZENDNN_PT_VERSION="1.9.0"
+#By default setting ZENDNN_PT_VERSION as 1.11.0
+export ZENDNN_PT_VERSION="1.11.0"
 echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
 #Use local copy of ZenDNN library source code when building
 #pytorch wih zendnn
