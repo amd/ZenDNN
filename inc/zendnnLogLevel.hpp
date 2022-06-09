@@ -19,7 +19,8 @@ enum LogLevel {
     LOG_LEVEL_ERROR     =  0,
     LOG_LEVEL_WARNING   =  1,
     LOG_LEVEL_INFO      =  2,
-    LOG_LEVEL_VERBOSE0  =  3
+    LOG_LEVEL_VERBOSE0  =  3,
+    LOG_LEVEL_VERBOSE1  =  4
 };
 
 #define LOG_LEVEL_VERBOSE(n) (LOG_LEVEL_VERBOSE0 + n)
