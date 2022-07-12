@@ -42,30 +42,29 @@
 using namespace std;
 using namespace zendnn;
 
-/* parameters */
-struct emb_params {
-    int32_t   num_embedding = 10;
-    int32_t   dim_embedding = 20;
-    int32_t   num_indices   = 12;
-    int32_t   num_bags      = 3;
-    int32_t   padding_idx   = 1;
-    uint32_t  num_threads   = 8;
-    int32_t   indices[12]   = {0,1,5, 1,4,2,6, 1,3,9,8,7};
-    int32_t   offsets[3]    = {0,3,7};
-    float     weights[12]   = {1,2,3,4,5,6,7,8,9,10,11,12};
-};
+/* ground truth */
+std::vector<float> exp_sum_nwt_npd_128{546.56,1058.56,1570.56,2082.56,2594.56};
+std::vector<float> exp_sum_wt_npd_128{883.84,1651.84,2419.84,3187.84,3955.84};
+std::vector<float> exp_sum_nwt_npd_64{232.32,488.32,744.32,1000.32,1256.32};
+std::vector<float> exp_sum_wt_npd_64{380.48,764.48,1148.48,1532.48,1916.48};
+std::vector<float> exp_sum_nwt_npd_10{30.9,70.9,110.9,150.9,190.9};
+std::vector<float> exp_sum_wt_npd_10{51.35,111.35,171.35,231.35,291.35};
+std::vector<float> exp_sum_nwt_pd_128{209.28,1058.56,1570.56,2082.56,2594.56};
+std::vector<float> exp_sum_wt_pd_128{209.28,1651.84,2419.84,3187.84,3955.84};
+std::vector<float> exp_sum_nwt_pd_64{84.16,488.32,744.32,1000.32,1256.32};
+std::vector<float> exp_sum_wt_pd_64{84.16,764.48,1148.48,1532.48,1916.48};
+std::vector<float> exp_sum_nwt_pd_10{10.45,70.9,110.9,150.9,190.9};
+std::vector<float> exp_sum_wt_pd_10{10.45,111.35,171.35,231.35,291.35};
+std::vector<float> exp_mean_npd_128{273.28,529.28,785.28,1041.28,1297.28};
+std::vector<float> exp_max_npd_128{337.28,593.28,849.28,1105.28,1361.28};
 
-/* expected otput */
-float expected_output_sum_wt_pd[]    = {6840, 33380, 124420};
-float expected_output_mean_nwt_npd[] = {1010, 1510, 2450};
-float expected_output_max_nwt_pd[]   = {2210, 2610, 3810};
 
 /* functor for float comparison */
 class compare_float_t {
 public:
     compare_float_t(float tol = 1e-05):tolerance{tol} {}
 
-    bool operator()(float a, float b) {
+    bool operator()(const float a, const float b) {
         if(isnan(a) || isnan(b))
             return false;
         if((a -b) > tolerance)
@@ -80,76 +79,110 @@ private:
     float tolerance;
 };
 
+/* compare two vectors */
+bool compare_vectors(const std::vector<float>& a, const std::vector<float>& b) {
+
+    compare_float_t cmp_op{1e-02};
+
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (auto i = 0; i < a.size(); ++i) {
+        if (!cmp_op(a[i],b[i])) {
+            return false;
+        }
+    }
+
+    return true;
+};
+
+/* display a vector */
+std::string vec_str(std::string vd, const std::vector<float>& a) {
+
+    auto sz = a.size();
+
+    std::string out = vd + "{";
+    for (auto i = 0; i < sz -1; ++i)
+        out = out + std::to_string(a[i]) + ";";
+
+    out = out + std::to_string(a[sz -1]) + "}";
+
+    return out;
+};
+
 /* create embedding table */
-memory create_embedding_table(engine eng, emb_params &params) {
+memory create_embedding_table(engine eng, uint32_t rows, uint32_t width) {
 
-    int32_t  &num_embedding = params.num_embedding;
-    int32_t  &dim_embedding = params.dim_embedding;
+    const float incr = 0.01;
 
-    auto table = memory({{num_embedding, dim_embedding},
+    auto table = memory({{rows, width},
         memory::data_type::f32,
         memory::format_tag::ab}, eng);
 
     float *hndl = (float *)table.get_data_handle();
 
-    for(auto i = 0; i < num_embedding*dim_embedding; ++i) {
-        hndl[i] = float(i+1);
+    for(auto i = 0; i < rows ; ++i) {
+        for(auto j = 0; j < width; ++j) {
+            hndl[j + i*width] = i + 1.0 + j*incr;
+        }
     }
 
     return table;
 }
 
 /* create indices */
-memory create_indices(engine eng, emb_params &params) {
+memory create_indices(engine eng, uint32_t len) {
 
-    int32_t &num_indices = params.num_indices;
-
-    auto indices = memory({{num_indices},
+    auto indices = memory({{len},
         memory::data_type::s32,
         memory::format_tag::a}, eng);
 
     int32_t *hndl = (int32_t *)indices.get_data_handle();
 
-    /* indices should be in the range of 0 to num_embedding */
-    for(auto i = 0; i < num_indices; ++i) {
-        hndl[i] = params.indices[i];
+    /* indices should be in the range of 0 to rows */
+    for(auto i = 0; i < len; ++i) {
+        hndl[i] = i;
     }
 
     return indices;
 }
 
 /* create offsets */
-memory create_offsets(engine eng, emb_params &params) {
+memory create_offsets(engine eng, uint32_t len) {
 
-    int32_t &num_bags = params.num_bags;
+    const uint32_t incr = 2;
+    uint32_t       bags = len/incr;
 
-    auto offsets = memory({{num_bags},
+    auto offsets = memory({{bags},
         memory::data_type::s32,
         memory::format_tag::a}, eng);
 
     int32_t *hndl = (int32_t *)offsets.get_data_handle();
 
     /* first offset should always be zero */
-    for(auto i = 0; i < num_bags; ++i) {
-        hndl[i] = params.offsets[i];
+    uint32_t offset = 0;
+    for(auto i = 0; i < bags; ++i) {
+        hndl[i] = offset;
+        offset += incr;
     }
 
     return offsets;
 }
 
 /* create weights */
-memory create_weights(engine eng, emb_params &params) {
+memory create_weights(engine eng, uint32_t len) {
 
-    int32_t &num_indices = params.num_indices;
-    auto weights = memory({{num_indices},
+    const uint32_t modulo = 2;
+
+    auto weights = memory({{len},
         memory::data_type::f32,
         memory::format_tag::a}, eng);
 
     float *hndl = (float *)weights.get_data_handle();
 
-    /* weights are in the range [0.5-1.0] */
-    for(auto i = 0; i < num_indices; ++i) {
-        hndl[i]  = params.weights[i];
+    for(auto i = 0; i < len; ++i) {
+        hndl[i]  = 1.0 + float(i % modulo);
     }
 
     return weights;
@@ -157,13 +190,10 @@ memory create_weights(engine eng, emb_params &params) {
 }
 
 /* create output */
-memory create_output(engine eng, emb_params &params) {
-
-    int32_t &num_bags      = params.num_bags;
-    int32_t &dim_embedding = params.dim_embedding;
+memory create_output(engine eng, uint32_t rows, uint32_t width) {
 
     /* create destination buffer */
-    auto dst = memory({{num_bags, dim_embedding},
+    auto dst = memory({{rows, width},
         memory::data_type::f32,
         memory::format_tag::ab}, eng);
 
@@ -268,6 +298,47 @@ void exec_embedding_bag(engine eng, stream s, memory table,
     }
 }
 
+bool run_test(std::string test_id, engine eng, stream s, uint32_t width,
+              algorithm alg, bool is_wt, int32_t padidx,
+              std::vector<float>& expected) {
+
+    //parameters
+    uint32_t emb_rows  = 10;
+    uint32_t emb_nthr  = 2;
+
+    /* create embedding table */
+    memory table = create_embedding_table(eng, emb_rows, width);
+
+    /* create indices */
+    memory indices = create_indices(eng, emb_rows);
+
+    /* create offsets */
+    memory offsets = create_offsets(eng, emb_rows);
+
+    /* create weights */
+    memory weights = create_weights(eng, emb_rows);
+
+    /* create output */
+    auto   bag_count      = offsets.get_desc().dims()[0];
+    memory bags           = create_output(eng, bag_count, width);
+
+    /* execute emb */
+    exec_embedding_bag(eng, s, table, indices, offsets, weights, bags,
+                       alg, emb_nthr, is_wt, padidx);
+
+    /* compare against ground truth */
+    auto actual = sum_bags(bags);
+
+    if (!compare_vectors(expected, actual)) {
+        zendnnError(ZENDNN_TESTLOG, test_id, ":", vec_str("exp", expected),":",
+                    vec_str("act", actual));
+
+        return false;
+    }
+
+    return true;
+}
+
 int main(int argc, char **argv) {
 
     int status = API_SUCCESS;
@@ -283,85 +354,39 @@ int main(int argc, char **argv) {
     stream s(eng);
     zendnnVerbose(ZENDNN_TESTLOG, "stream created");
 
-    /* get the parameters */
-    emb_params params;
+    /* run tests */
+    if (!run_test("sm_nw_np_128", eng, s, 128, algorithm::embedding_bag_sum,
+                  false, -1, exp_sum_nwt_npd_128))
+        status = API_FAILURE;
 
-    /* create embedding table */
-    memory table = create_embedding_table(eng, params);
+    if (!run_test("sm_w_np_128", eng, s, 128, algorithm::embedding_bag_sum,
+                  true, -1, exp_sum_wt_npd_128))
+        status = API_FAILURE;
 
-    /* create indices */
-    memory indices = create_indices(eng, params);
+    if (!run_test("sm_nw_np_64", eng, s, 64, algorithm::embedding_bag_sum,
+                  false, -1, exp_sum_nwt_npd_64))
+        status = API_FAILURE;
 
-    /* create offsets */
-    memory offsets = create_offsets(eng, params);
+    if (!run_test("sm_w_np_64", eng, s, 64, algorithm::embedding_bag_sum,
+                  true, -1, exp_sum_wt_npd_64))
+        status = API_FAILURE;
 
-    /* create weights */
-    memory weights = create_weights(eng, params);
+    if (!run_test("sm_nw_np_10", eng, s, 10, algorithm::embedding_bag_sum,
+                  false, -1, exp_sum_nwt_npd_10))
+        status = API_FAILURE;
 
-    /* create output */
-    memory bags    = create_output(eng, params);
+    if (!run_test("sm_w_np_10", eng, s, 10, algorithm::embedding_bag_sum,
+                  true, -1, exp_sum_wt_npd_10))
+        status = API_FAILURE;
 
-    zendnnVerbose(ZENDNN_TESTLOG, "all memory buffers created");
+    if (!run_test("mn_np_128", eng, s, 128, algorithm::embedding_bag_mean,
+                  false, -1, exp_mean_npd_128))
+        status = API_FAILURE;
 
-    compare_float_t cmp;
+    if (!run_test("mx_w_np_128", eng, s, 128, algorithm::embedding_bag_max,
+                  false, -1, exp_max_npd_128))
+        status = API_FAILURE;
 
-    /* test embedding bag */
-    {
-        zendnnVerbose(ZENDNN_TESTLOG,
-                      "testing sum with weights and pading index");
-        exec_embedding_bag(eng, s, table, indices,
-                           offsets, weights, bags,
-                           algorithm::embedding_bag_sum, params.num_threads,
-                           true, params.padding_idx);
-
-        auto sum = sum_bags(bags);
-        for(int i = 0; i < params.num_bags; ++i) {
-            if(!cmp(sum[i],expected_output_sum_wt_pd[i])) {
-                zendnnError(ZENDNN_TESTLOG, "Expected:",
-                            expected_output_sum_wt_pd[i],
-                            " Actual:", sum[i]);
-                status = API_FAILURE;
-            }
-        }
-    }
-
-    {
-        zendnnVerbose(ZENDNN_TESTLOG,
-                      "testing mean with no weights, no pading index");
-        exec_embedding_bag(eng, s, table, indices,
-                           offsets, weights, bags,
-                           algorithm::embedding_bag_mean, params.num_threads,
-                           false, -1);
-
-        auto sum = sum_bags(bags);
-        for(int i = 0; i < params.num_bags; ++i) {
-            if(!cmp(sum[i],expected_output_mean_nwt_npd[i])) {
-                zendnnError(ZENDNN_TESTLOG, "Expected:",
-                            expected_output_mean_nwt_npd[i],
-                            " Actual:", sum[i]);
-                status = API_FAILURE;
-            }
-        }
-    }
-
-    {
-        zendnnVerbose(ZENDNN_TESTLOG,
-                      "testing max with no weights but padding index");
-        exec_embedding_bag(eng, s, table, indices,
-                           offsets, weights, bags,
-                           algorithm::embedding_bag_max, params.num_threads,
-                           false, params.padding_idx);
-
-        auto sum = sum_bags(bags);
-        for(int i = 0; i < params.num_bags; ++i) {
-            if(!cmp(sum[i],expected_output_max_nwt_pd[i])) {
-                zendnnError(ZENDNN_TESTLOG, "Expected:",
-                            expected_output_max_nwt_pd[i],
-                            " Actual:", sum[i]);
-                status = API_FAILURE;
-            }
-        }
-    }
 
     if (status == API_SUCCESS)
       zendnnInfo(ZENDNN_TESTLOG,

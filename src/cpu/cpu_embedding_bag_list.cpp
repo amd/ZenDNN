@@ -20,8 +20,8 @@ using namespace zendnn::impl::data_type;
 
 // clang-format off
 const pd_create_f impl_list[] = {
-    CPU_INSTANCE(avx2_embedding_bag_v2_t<f32>)
     CPU_INSTANCE(avx2_embedding_bag_t<f32>)
+    CPU_INSTANCE(avx2_embedding_bag_v2_t<f32>)
     CPU_INSTANCE(ref_embedding_bag_t<f32>)
     /* eol */
     nullptr,

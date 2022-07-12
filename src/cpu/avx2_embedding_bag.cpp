@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 *
 *******************************************************************************/
 
@@ -8,11 +8,13 @@
 #include "common/zendnn_traits.hpp"
 #include "common/math_utils.hpp"
 #include "common/type_helpers.hpp"
-
 #include "cpu/cpu_primitive.hpp"
 #include "cpu/simple_q10n.hpp"
-
+#include "cpu/zen_avx_utils.hpp"
+#include "zendnn_logging.hpp"
 #include "cpu/avx2_embedding_bag.hpp"
+
+#include <vector>
 
 namespace zendnn {
 namespace impl {
@@ -24,20 +26,29 @@ template<data_type_t data_type>
 status_t
 avx2_embedding_bag_t<data_type>::execute(const exec_ctx_t &ctx) const {
 
+#if ZENDNN_CPU_THREADING_RUNTIME != ZENDNN_RUNTIME_OMP
+    assert(!"threading env need to be omp for embedding_bag");
+#endif
+
+    status_t status;
+
     // initialize
     emb_params_t  params;
-    pre_process(ctx, params);
+
+    status = pre_process(ctx, params);
+    if (status != status::success)
+        return status;
 
     auto  algo                = pd()->desc()->alg_kind;
-    bool &is_weights          = params.is_weights;
+    bool  is_weights          = pd()->desc()->is_weights;
 
     switch(algo) {
     case alg_kind::embedding_bag_sum:
-      return is_weights ? avx2_sum_wt(params) : avx2_sum(params);
+        return is_weights ? avx2_sum_wt(params) : avx2_sum(params);
     case alg_kind::embedding_bag_mean:
-      return is_weights ? avx2_mean_wt(params) : avx2_mean(params);
+        return avx2_mean(params);
     case alg_kind::embedding_bag_max:
-      return is_weights ? avx2_max_wt(params) : avx2_max(params);
+        return avx2_max(params);
     }
 
     return status::unimplemented;
@@ -49,13 +60,13 @@ avx2_embedding_bag_t<data_type>::execute(const exec_ctx_t &ctx) const {
 template<data_type_t data_type>
 status_t
 avx2_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
-        emb_params_t &params) const {
+                                                emb_params_t &params) const {
 
     status_t status = status::success;
 
     // get algorithm params
-    params.is_weights  = pd()->desc()->is_weights;
-    params.padding_idx = pd()->desc()->padding_idx;
+    params.padidx       = pd()->desc()->padding_idx;
+    params.nthr         = pd()->desc()->num_threads;
 
     // get the tensors
     params.input =
@@ -66,7 +77,7 @@ avx2_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
         static_cast<void *>(ctx.host_ptr(ZENDNN_ARG_SRC_2));
 
     params.weights = nullptr;
-    if(params.is_weights) {
+    if(pd()->desc()->is_weights) {
         params.weights
             = static_cast<void *>(ctx.host_ptr(ZENDNN_ARG_SRC_3));
     }
@@ -80,23 +91,24 @@ avx2_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
     memory_desc_wrapper dst_mdw(pd()->dst_md(ZENDNN_ARG_DST));
 
     const auto &input_dims   = input_mdw.dims();
-    params.dim_embed         = input_dims[1];
+    params.width             = input_dims[1];
 
     params.offset_size       = offsets_mdw.nelems();
     params.indices_size      = indices_mdw.nelems();
 
-    // get scratchpad memory
-    using namespace memory_tracking::names;
-    using input_type   = typename prec_traits<data_type>::type;
+    // check if aligned access for avx instructions will be safe
+    if ((128 == params.width) || (64 == params.width)) {
+        if (ALIGNED_AVX2_UNSAFE(params.input)) {
+            zendnnError(ZENDNN_ALGOLOG, "embedding tables not aligned for avx instructions.");
+            return status::runtime_error;
+        }
+    }
 
-    auto scratchpad          = ctx.get_scratchpad_grantor();
-    params.scratchpad_indices
-      = scratchpad.template get(key_embed_bag_indices);
-    params.scratchpad_weights
-      = scratchpad.template get(key_embed_bag_weights);
-
-    // initialize output to zero
+    // get rid of excess omp threads if any
     params.dst_size     = dst_mdw.nelems();
+
+    if (params.offset_size < params.nthr)
+        params.nthr = params.offset_size;
 
     return status;
 }
@@ -108,79 +120,112 @@ template<>
 status_t
 avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
 
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
+    float        const *input    = static_cast<float *>(params.input);
+    indices_type       *indices  = static_cast<indices_type *>(params.indices);
+    offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
+    dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
+    const int32_t      &width    = params.width;
+    const int32_t      &indsz    = params.indices_size;
+    const int32_t      &offsz    = params.offset_size;
+    const int32_t      &dstsz    = params.dst_size;
+    const indices_type &padidx   = params.padidx;
+    const uint32_t     &nthr     = params.nthr;
 
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
+    // fast path for common cases of width 128 and 64
+    if (128 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next++] = indices[i]*dim_embed;
+                zenmm_ext_ps128 sum;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx)
+                        sum.fetch_add_ps(input + indices[i]*width);
                 }
+                sum.store_ps(dst + oi*width);
             }
-            last = next;
         }
         else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps128 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_add_ps(input + indices[i]*width);
+                sum.store_ps(dst + oi*width);
             }
         }
 
-        float *dst_base        = dst + (thrd * dim_embed);
-        float *in_base         = const_cast<float *>(input);
-        float *dst_ptr         = dst_base;
-        int    shift           = 0;
+        return status::success;
+    }
 
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            __m256 sum     = _mm256_setzero_ps();
+    if (64 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-            for(auto i = first; i < last; ++i) {
-                auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa   = _mm256_loadu_ps(in_ptr);
-                sum         = _mm256_add_ps(aa, sum);
-            }
-
-            _mm256_storeu_ps(dst_ptr, sum);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        for(auto i = first; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                dst_ptr[j] += in_ptr[j];
+                zenmm_ext_ps64 sum;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx)
+                        sum.fetch_add_ps(input + indices[i]*width);
+                }
+                sum.store_ps(dst + oi*width);
             }
         }
-    });
+        else {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps64 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_add_ps(input + indices[i]*width);
+                sum.store_ps(dst + oi*width);
+            }
+        }
+        return status::success;
+    }
+
+    // slow path, no avx instructions
+    if (padidx >= 0) {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto i = ofirst; i < olast; ++i) {
+                if (indices[i] != padidx) {
+                    for (auto j = 0; j < width; ++j)
+                        sum[j] += input[j + indices[i]*width];
+                }
+            }
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
+    else {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto i = ofirst; i < olast; ++i)
+                for (auto j = 0; j < width; ++j)
+                    sum[j] += input[j + indices[i]*width];
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
 
     return status::success;
 }
@@ -188,478 +233,413 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
 /*
  * sum with weights
  */
+
 template<>
 status_t
 avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
 
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    const input_type   *weights = static_cast<input_type *>(params.weights);
+    float        const *input    = static_cast<float *>(params.input);
+    float        const *wts      = static_cast<float *>(params.weights);
+    indices_type       *indices  = static_cast<indices_type *>(params.indices);
+    offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
+    dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
+    const int32_t      &width    = params.width;
+    const int32_t      &indsz    = params.indices_size;
+    const int32_t      &offsz    = params.offset_size;
+    const int32_t      &dstsz    = params.dst_size;
+    const indices_type &padidx   = params.padidx;
+    const uint32_t     &nthr     = params.nthr;
 
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
+    // fast path for common cases of width 128 and 64
+    if (128 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
-
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-    input_type* scratchpad_weights
-      = static_cast<input_type *>(params.scratchpad_weights);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next]   = indices[i]*dim_embed;
-                    scratchpad_weights[next++] = weights[i];
+                zenmm_ext_ps128 sum;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx)
+                        sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
                 }
+                sum.store_ps(dst + oi*width);
             }
-            last = next;
         }
         else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps128 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                sum.store_ps(dst + oi*width);
             }
         }
 
-        auto wts = (padding_idx >= 0) ? scratchpad_weights : weights;
+        return status::success;
+    }
 
-        float *dst_base        = dst + (thrd * dim_embed);
-        float *in_base         = const_cast<float *>(input);
-        float *dst_ptr         = dst_base;
-        int    shift           = 0;
+    if (64 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            __m256 sum     = _mm256_setzero_ps();
-
-            for(auto i = first; i < last; ++i) {
-                auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa = _mm256_loadu_ps(in_ptr);
-                __m256 bb = _mm256_set1_ps(wts[i]);
-                sum       = _mm256_fmadd_ps(aa, bb, sum);
-            }
-
-            _mm256_storeu_ps(dst_ptr, sum);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        for(auto i = first; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                dst_ptr[j] += wts[i]*in_ptr[j];
+                zenmm_ext_ps64 sum;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx)
+                        sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                }
+                sum.store_ps(dst + oi*width);
             }
         }
-    });
+        else {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps64 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                sum.store_ps(dst + oi*width);
+            }
+        }
+        return status::success;
+    }
+
+    // slow path, no avx instructions
+    if (padidx >= 0) {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto i = ofirst; i < olast; ++i) {
+                if (indices[i] != padidx) {
+                    for (auto j = 0; j < width; ++j)
+                        sum[j] += wts[i]*input[j + indices[i]*width];
+                }
+            }
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
+    else {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto i = ofirst; i < olast; ++i)
+                for (auto j = 0; j < width; ++j)
+                    sum[j] += wts[i]*input[j + indices[i]*width];
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
 
     return status::success;
 }
 
 /*
- * mean without weights or padding index
+ * mean without weights
  */
 template<>
 status_t
 avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
 
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
+    float        const *input    = static_cast<float *>(params.input);
+    indices_type       *indices  = static_cast<indices_type *>(params.indices);
+    offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
+    dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
+    const int32_t      &width    = params.width;
+    const int32_t      &indsz    = params.indices_size;
+    const int32_t      &offsz    = params.offset_size;
+    const int32_t      &dstsz    = params.dst_size;
+    const indices_type &padidx   = params.padidx;
+    const uint32_t     &nthr     = params.nthr;
 
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
+    // fast path for common cases of width 128 and 64
+    if (128 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next++] = indices[i]*dim_embed;
+                zenmm_ext_ps128 sum;
+                int32_t         count = 0;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx) {
+                        count++;
+                        sum.fetch_add_ps(input + indices[i]*width);
+                    }
                 }
+                sum.scale_store_ps(dst + oi*width, (1.0/float(count)));
             }
-            last = next;
         }
         else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps128 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_add_ps(input + indices[i]*width);
+
+                sum.scale_store_ps(dst + oi*width, (1.0/float(olast - ofirst)));
             }
         }
 
-        float   *dst_base        = dst + (thrd * dim_embed);
-        float   *in_base         = const_cast<float *>(input);
-        float   *dst_ptr         = dst_base;
-        int      shift           = 0;
-        float    dn              = 1.0/(float)(last - first);
+        return status::success;
+    }
 
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            __m256 sum     = _mm256_setzero_ps();
+    if (64 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-            for(auto i = first; i < last; ++i) {
-	        auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa   = _mm256_loadu_ps(in_ptr);
-                sum         = _mm256_add_ps(aa, sum);
-            }
-
-            __m256 ddn    = _mm256_set1_ps(dn);
-            sum           = _mm256_mul_ps(sum, ddn);
-            _mm256_storeu_ps(dst_ptr, sum);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        for(auto i = first; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                dst_ptr[j] += in_ptr[j];
+                zenmm_ext_ps64  sum;
+                int32_t         count = 0;
+                for (auto i = ofirst; i < olast; ++i) {
+                    if (indices[i] != padidx) {
+                        count++;
+                        sum.fetch_add_ps(input + indices[i]*width);
+                    }
+                }
+                sum.scale_store_ps(dst + oi*width, (1.0/float(count)));
             }
         }
-        for(auto j = 0; j < dim_embed_rem; ++j) {
-            dst_ptr[j] *= dn;
+        else {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps64 sum;
+                for (auto i = ofirst; i < olast; ++i)
+                    sum.fetch_add_ps(input + indices[i]*width);
+
+                sum.scale_store_ps(dst + oi*width, (1.0/float(olast - ofirst)));
+            }
         }
-    });
+
+        return status::success;
+    }
+
+    // slow path, no avx instructions
+    if (padidx >= 0) {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            int32_t               count = 0;
+            for (auto i = ofirst; i < olast; ++i) {
+                if (indices[i] != padidx) {
+                    count++;
+                    for (auto j = 0; j < width; ++j)
+                        sum[j] += input[j + indices[i]*width];
+                }
+            }
+
+            float dn = 1.0/float(count);
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = dn*sum[j];
+        }
+    }
+    else {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto i = ofirst; i < olast; ++i)
+                for (auto j = 0; j < width; ++j)
+                    sum[j] += input[j + indices[i]*width];
+
+            float dn = 1.0/float(olast - ofirst);
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = dn*sum[j];
+        }
+    }
 
     return status::success;
 }
 
 /*
- * mean with weights but without padding index
- */
-template<>
-status_t
-avx2_embedding_bag_t<f32>::avx2_mean_wt(const emb_params_t &params) const {
-
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    const input_type   *weights = static_cast<input_type *>(params.weights);
-
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
-
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
-
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
-
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-    input_type* scratchpad_weights
-      = static_cast<input_type *>(params.scratchpad_weights);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        float dn = 0;
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next]   = indices[i]*dim_embed;
-                    scratchpad_weights[next++] = weights[i];
-                    dn += weights[i];
-                }
-            }
-            last = next;
-        }
-        else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
-                dn += weights[i];
-            }
-        }
-        dn = 1/dn;
-
-        auto wts = (padding_idx >= 0) ? scratchpad_weights : weights;
-
-        float *dst_base        = dst + (thrd * dim_embed);
-        float *in_base         = const_cast<float *>(input);
-        float *dst_ptr         = dst_base;
-        int    shift           = 0;
-
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            __m256 sum     = _mm256_setzero_ps();
-
-            for(auto i = first; i < last; ++i) {
-                auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa = _mm256_loadu_ps(in_ptr);
-                __m256 bb = _mm256_set1_ps(wts[i]);
-                sum       = _mm256_fmadd_ps(aa, bb, sum);
-            }
-
-            __m256 ddn    = _mm256_set1_ps(dn);
-            sum           = _mm256_mul_ps(sum, ddn);
-            _mm256_storeu_ps(dst_ptr, sum);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        for(auto i = first; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                dst_ptr[j] += wts[i]*in_ptr[j];
-            }
-        }
-        for(auto j = 0; j < dim_embed_rem; ++j) {
-            dst_ptr[j] *= dn;
-        }
-    });
-
-    return status::success;
-}
-
-/*
- * max without weights or padding index
+ * max without weights
  */
 template<>
 status_t
 avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
+    float        const *input    = static_cast<float *>(params.input);
+    indices_type       *indices  = static_cast<indices_type *>(params.indices);
+    offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
+    dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
+    const int32_t      &width    = params.width;
+    const int32_t      &indsz    = params.indices_size;
+    const int32_t      &offsz    = params.offset_size;
+    const int32_t      &dstsz    = params.dst_size;
+    const indices_type &padidx   = params.padidx;
+    const uint32_t     &nthr     = params.nthr;
 
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
+    // fast path for common cases of width 128 and 64
+    if (128 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next++]   = indices[i]*dim_embed;
+                zenmm_ext_ps128 sum;
+                int32_t         nfirst = ofirst;
+                while (nfirst < olast) {
+                    if (nfirst != padidx) {
+                        sum.load_ps(input + indices[nfirst]*width);
+                        break;
+                    }
+                    nfirst++;
                 }
+
+                for (auto i = nfirst +1; i < olast; ++i) {
+                    if (indices[i] != padidx) {
+                        sum.fetch_max_ps(input + indices[i]*width);
+                    }
+                }
+                sum.store_ps(dst + oi*width);
             }
-            last = next;
         }
         else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps128 sum;
+                sum.load_ps(input + indices[ofirst]*width);
+                for (auto i = ofirst+1; i < olast; ++i)
+                    sum.fetch_max_ps(input + indices[i]*width);
+
+                sum.store_ps(dst + oi*width);
             }
         }
 
-        float *dst_base        = dst + (thrd * dim_embed);
-        float *in_base         = const_cast<float *>(input);
-        float *dst_ptr         = dst_base;
-        int    shift           = 0;
+        return status::success;
+    }
 
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            auto in_ptr    = in_base + scratchpad_indices[first];
-            __m256 mx      = _mm256_loadu_ps(in_ptr);
+    if (64 == width) {
+        if (padidx >= 0) {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
 
-            for(auto i = first + 1; i < last; ++i) {
-                auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa   = _mm256_loadu_ps(in_ptr);
-                mx          = _mm256_max_ps(mx, aa);
-            }
+                zenmm_ext_ps64 sum;
+                int32_t        nfirst = ofirst;
+                while (nfirst < olast) {
+                    if (nfirst != padidx) {
+                        sum.load_ps(input + indices[nfirst]*width);
+                        break;
+                    }
+                    nfirst++;
+                }
 
-            _mm256_storeu_ps(dst_ptr, mx);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        auto in_ptr  = in_base + scratchpad_indices[first];
-        for(auto j = 0; j < dim_embed_rem; ++j) {
-            dst_ptr[j] = in_ptr[j];
-        }
-
-        for(auto i = first + 1; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                if(in_ptr[j] > dst_ptr[j])
-                    dst_ptr[j] = in_ptr[j];
+                for (auto i = nfirst +1; i < olast; ++i) {
+                    if (indices[i] != padidx) {
+                        sum.fetch_max_ps(input + indices[i]*width);
+                    }
+                }
+                sum.store_ps(dst + oi*width);
             }
         }
-    });
+        else {
+            #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+            for (auto oi = 0; oi < offsz; ++oi) {
+                auto ofirst = offsets[oi];
+                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+                zenmm_ext_ps64 sum;
+                sum.load_ps(input + indices[ofirst]*width);
+                for (auto i = ofirst+1; i < olast; ++i)
+                    sum.fetch_max_ps(input + indices[i]*width);
+
+                sum.store_ps(dst + oi*width);
+            }
+        }
+
+        return status::success;
+    }
+
+    // slow path, no avx instructions
+    if (padidx >= 0) {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            int32_t               nfirst = ofirst;
+            while (nfirst < olast) {
+                if (nfirst != padidx) {
+                    for (auto j = 0; j < width; ++j)
+                        sum[j]  = input[j + indices[nfirst]*width];
+                    break;
+                }
+                nfirst++;
+            }
+
+            for (auto i = nfirst+1; i < olast; ++i) {
+                if (indices[i] != padidx) {
+                    for (auto j = 0; j < width; ++j)
+                        if (sum[j]  < input[j + indices[i]*width])
+                            sum[j] = input[j + indices[i]*width];
+                }
+            }
+
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
+    else {
+        #pragma omp parallel for num_threads(nthr) //proc_bind(master)
+        for (auto oi = 0; oi < offsz; ++oi) {
+            auto ofirst = offsets[oi];
+            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+
+            std::vector<dst_type> sum(width,0.0);
+            for (auto j = 0; j < width; ++j)
+                sum[j]  = input[j + indices[ofirst]*width];
+
+            for (auto i = ofirst+1; i < olast; ++i)
+                for (auto j = 0; j < width; ++j)
+                    if (sum[j]  < input[j + indices[i]*width])
+                        sum[j] = input[j + indices[i]*width];
+
+            for (auto j = 0; j < width; ++j)
+                dst[j + oi*width] = sum[j];
+        }
+    }
 
     return status::success;
 }
 
-/*
- * max with weights
- */
-template<>
-status_t
-avx2_embedding_bag_t<f32>::avx2_max_wt(const emb_params_t &params) const {
-
-    const input_type   *input   = static_cast<input_type *>(params.input);
-    const indices_type *indices = static_cast<indices_type *>(params.indices);
-    const offsets_type *offsets = static_cast<offsets_type *>(params.offsets);
-    const input_type   *weights = static_cast<input_type *>(params.weights);
-
-    dst_type     *dst           = static_cast<dst_type *>(params.dst);
-
-    const int32_t &dim_embed        = params.dim_embed;
-    const int32_t &indices_size     = params.indices_size;
-    const int32_t &offset_size      = params.offset_size;
-    const int32_t &dst_size         = params.dst_size;
-    const indices_type &padding_idx = params.padding_idx;
-
-    const int32_t dim_embed_div = params.dim_embed / AVX2_PS_COUNT;
-    const int32_t dim_embed_rem = params.dim_embed % AVX2_PS_COUNT;
-
-    // scratchpad buffers
-    indices_type* scratchpad_indices
-      = static_cast<indices_type *>(params.scratchpad_indices);
-    input_type* scratchpad_weights
-      = static_cast<input_type *>(params.scratchpad_weights);
-
-    // zero fill output tensor
-    std::fill(dst, (dst+ dst_size), 0);
-
-    parallel_nd(offset_size,
-    [=](dim_t thrd) {
-        // compute start and end indices of the bag
-        auto first = offsets[thrd];
-        auto last  = (thrd < (offset_size-1)) ?
-                     offsets[thrd +1] : indices_size;
-
-        // preprocess indices and weights
-        if (padding_idx >= 0) {
-            auto next = first;
-            for (auto i = first; i < last; ++i) {
-                if (indices[i] != padding_idx) {
-                    scratchpad_indices[next]   = indices[i]*dim_embed;
-                    scratchpad_weights[next++] = weights[i];
-                }
-            }
-            last = next;
-        }
-        else {
-            for (auto i = first; i < last; ++i) {
-                scratchpad_indices[i] = indices[i]*dim_embed;
-            }
-        }
-
-        auto wts = (padding_idx >= 0) ? scratchpad_weights : weights;
-
-        float *dst_base        = dst + (thrd * dim_embed);
-        float *in_base         = const_cast<float *>(input);
-        float *dst_ptr         = dst_base;
-        int    shift           = 0;
-
-        for(auto j = 0; j < dim_embed_div; ++j) {
-            auto in_ptr    = in_base + scratchpad_indices[first];
-            __m256 mx      = _mm256_loadu_ps(in_ptr);
-            __m256 bb      = _mm256_set1_ps(wts[first]);
-            mx             = _mm256_mul_ps(mx,bb);
-
-            for(auto i = first +1; i < last; ++i) {
-                auto in_ptr = in_base + scratchpad_indices[i];
-                __m256 aa = _mm256_loadu_ps(in_ptr);
-                bb        = _mm256_set1_ps(wts[i]);
-                __m256 cc = _mm256_mul_ps(aa,bb);
-                mx        = _mm256_max_ps(mx, cc);
-            }
-
-            _mm256_storeu_ps(dst_ptr, mx);
-
-            shift   += AVX2_PS_COUNT;
-            in_base = const_cast<float *>(input)  + shift;
-            dst_ptr = dst_base + shift;
-        }
-
-        // remaining vector
-        auto in_ptr  = in_base + scratchpad_indices[first];
-        for(auto j = 0; j < dim_embed_rem; ++j) {
-            dst_ptr[j] = wts[first]*in_ptr[j];
-        }
-
-        for(auto i = first +1; i < last; ++i) {
-            auto in_ptr  = in_base + scratchpad_indices[i];
-            for(auto j = 0; j < dim_embed_rem; ++j) {
-                if(wts[i]*in_ptr[j] > dst_ptr[j])
-                    dst_ptr[j] = wts[i]*in_ptr[j];
-            }
-        }
-    });
-
-    return status::success;
-}
 
 template struct avx2_embedding_bag_t<f32>;
 

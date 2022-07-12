@@ -132,6 +132,11 @@ void key_t::init_mds(const primitive_desc_t *pd) {
         case primitive_kind::zero_pad: {
             break;
         }
+        case primitive_kind::embedding_bag: {
+          /* add new primitive */
+            break;
+        }
+
         default: assert(!"unknown primitive_kind");
     }
 }
@@ -180,6 +185,7 @@ bool key_t::operator==(const key_t &rhs) const {
             CASE(softmax)
             CASE(sum)
             CASE(zero_pad)
+            CASE(embedding_bag)
             default: assert(!"unknown primitive kind");
         }
 #undef CASE
@@ -730,7 +736,7 @@ size_t get_desc_hash(const zero_pad_desc_t &desc) {
     return seed;
 }
 
-/* add for new primitive */
+/* add new primitive */
 size_t get_desc_hash(const embedding_bag_desc_t &desc) {
     size_t seed = 0;
     // Kinds

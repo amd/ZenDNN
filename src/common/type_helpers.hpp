@@ -582,6 +582,22 @@ inline bool operator==(const sum_desc_t &lhs, const sum_desc_t &rhs) {
     }
     return ret;
 }
+/* add for new primitive */
+inline bool operator==(const embedding_bag_desc_t &lhs, const embedding_bag_desc_t &rhs){
+    bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
+            && COMPARE_DESC_MEMBERS(prop_kind)
+            && COMPARE_DESC_MEMBERS(alg_kind)
+            && COMPARE_DESC_MEMBERS(input_desc)
+            && COMPARE_DESC_MEMBERS(indices_desc)
+            && COMPARE_DESC_MEMBERS(offsets_desc)
+            && COMPARE_DESC_MEMBERS(weights_desc)
+            && COMPARE_DESC_MEMBERS(dst_desc)
+            && COMPARE_DESC_MEMBERS(padding_idx)
+            && COMPARE_DESC_MEMBERS(is_weights)
+            && COMPARE_DESC_MEMBERS(num_threads);
+
+      return ret;
+}
 
 inline bool operator==(const zero_pad_desc_t &lhs, const zero_pad_desc_t &rhs) {
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind);
