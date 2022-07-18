@@ -91,6 +91,7 @@ inline size_t data_type_size(data_type_t data_type) {
         case bf16: return sizeof(prec_traits<bf16>::type);
         case f32: return sizeof(prec_traits<f32>::type);
         case s32: return sizeof(prec_traits<s32>::type);
+        case s16: return sizeof(prec_traits<s16>::type);
         case s8: return sizeof(prec_traits<s8>::type);
         case u8: return sizeof(prec_traits<u8>::type);
         case data_type::undef:
@@ -109,6 +110,7 @@ inline T max_value(data_type_t data_type) {
         CASE(f16);
         CASE(bf16);
         CASE(s32);
+        CASE(s16);
         CASE(s8);
         CASE(u8);
         case data_type::undef:
@@ -141,12 +143,34 @@ inline float max_value(data_type_t data_type) {
         // likely to drop (but it was not proved). The only drawback of current
         // approach is saturating on some integer values before it should happen
         // in the reality.
+        CASE(s16);
         case s32: return 2147483520.f;
         case data_type::undef:
         default: assert(!"unknown data_type");
     }
     return 0.f; /* not supposed to be reachable */
 #undef CASE
+}
+
+inline float get_float_value(data_type_t dt, const void *ptr, dim_t idx) {
+#define CASE(dt) \
+    case dt: \
+        return static_cast<float>(((typename prec_traits<dt>::type *)ptr)[idx]);
+
+    using namespace data_type;
+    switch (dt) {
+        CASE(bf16);
+        CASE(f16);
+        CASE(f32);
+        CASE(s32);
+        CASE(s16);
+        CASE(s8);
+        CASE(u8);
+        default: assert(!"bad data_type");
+    }
+
+#undef CASE
+    return NAN;
 }
 
 inline format_kind_t format_tag_to_kind(format_tag_t tag) {
@@ -242,6 +266,7 @@ inline data_type_t default_accum_data_type(
     if (one_of(bf16, src_dt, dst_dt)) return f32;
     if (one_of(f32, src_dt, dst_dt)) return f32;
     if (one_of(s32, src_dt, dst_dt)) return s32;
+    if (one_of(s16, src_dt, dst_dt)) return s16;
 
     if (one_of(s8, src_dt, dst_dt) || one_of(u8, src_dt, dst_dt)) return s32;
 
@@ -859,7 +884,7 @@ inline bool memory_desc_sanity_check(int ndims, const dims_t dims,
     if (ndims == 0) return true;
 
     bool ok = dims != nullptr && 0 < ndims && ndims <= ZENDNN_MAX_NDIMS
-            && utils::one_of(data_type, f16, bf16, f32, s32, s8, u8);
+            && utils::one_of(data_type, f16, bf16, f32, s32, s16, s8, u8);
     if (!ok) return false;
 
     bool has_runtime_dims = false;

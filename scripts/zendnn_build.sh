@@ -33,6 +33,11 @@ else
     return 1;
 fi
 
+make_lpgemm_args=""
+if [[ "$2" == "lpgemm" ]]; then
+	make_lpgemm_args="LPGEMM=1"
+fi
+
 #check again if ZENDNN_BLIS_PATH is defined, otherwise return
 if [ -z "$ZENDNN_BLIS_PATH" ];
 then
@@ -53,8 +58,8 @@ fi
 #echo "make clean"
 #make clean
 
-echo "make -j $make_args"
-make -j $make_args
+echo "make -j $make_args $make_lpgemm_args"
+make -j $make_args $make_lpgemm_args
 
-echo "make test $make_args"
-make test $make_args
+echo "make test $make_args $make_lpgemm_args"
+make test $make_args $make_lpgemm_args

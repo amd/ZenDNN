@@ -71,6 +71,12 @@ namespace alg_kind {
 const alg_kind_t undef = zendnn_alg_kind_undef;
 const alg_kind_t convolution_auto = zendnn_convolution_auto;
 const alg_kind_t convolution_gemm = zendnn_convolution_gemm;
+const alg_kind_t convolution_gemm_bf16bf16f32of32 = zendnn_convolution_gemm_bf16bf16f32of32;
+const alg_kind_t convolution_gemm_bf16bf16f32obf16 = zendnn_convolution_gemm_bf16bf16f32obf16;
+const alg_kind_t convolution_gemm_u8s8s16os16 = zendnn_convolution_gemm_u8s8s16os16;
+const alg_kind_t convolution_gemm_u8s8s16os8 = zendnn_convolution_gemm_u8s8s16os8;
+const alg_kind_t convolution_gemm_u8s8s32os32 = zendnn_convolution_gemm_u8s8s32os32;
+const alg_kind_t convolution_gemm_u8s8s32os8 = zendnn_convolution_gemm_u8s8s32os8;
 const alg_kind_t convolution_ref = zendnn_convolution_ref;
 const alg_kind_t convolution_direct = zendnn_convolution_direct;
 const alg_kind_t convolution_winograd = zendnn_convolution_winograd;
@@ -164,6 +170,7 @@ const data_type_t f16 = zendnn_f16;
 const data_type_t bf16 = zendnn_bf16;
 const data_type_t f32 = zendnn_f32;
 const data_type_t s32 = zendnn_s32;
+const data_type_t s16 = zendnn_s16;
 const data_type_t s8 = zendnn_s8;
 const data_type_t u8 = zendnn_u8;
 } // namespace data_type

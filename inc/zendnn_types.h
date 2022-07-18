@@ -79,6 +79,7 @@ typedef enum {
     zendnn_s8 = 5,
     /// 8-bit unsigned integer.
     zendnn_u8 = 6,
+    zendnn_s16 = 7,
 } zendnn_data_type_t;
 
 /// Memory format kind
@@ -1434,6 +1435,12 @@ typedef enum {
     zendnn_convolution_ref = 0x5,
     /// Composable Kernel convolution (implicit GEMM algorithm)
     zendnn_convolution_ck = 0x6,
+    zendnn_convolution_gemm_u8s8s32os8 = 0x7,
+    zendnn_convolution_gemm_u8s8s16os16 = 0x8,
+    zendnn_convolution_gemm_u8s8s16os8 = 0x9,
+    zendnn_convolution_gemm_u8s8s32os32 = 0x10,
+    zendnn_convolution_gemm_bf16bf16f32obf16 = 0x11,
+    zendnn_convolution_gemm_bf16bf16f32of32 = 0x12,
     /// Direct deconvolution
     zendnn_deconvolution_direct = 0xa,
     /// Winograd deconvolution

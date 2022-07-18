@@ -24,6 +24,7 @@
 
 #include <future>
 #include <memory>
+// thread header file added to avoid compilation issue with GCC v12.1.0
 #include <thread>
 #include <unordered_map>
 

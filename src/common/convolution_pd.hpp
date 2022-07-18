@@ -263,6 +263,12 @@ protected:
                              alg_kind::convolution_direct,
                              alg_kind::convolution_winograd,
                              alg_kind::convolution_gemm,
+                             alg_kind::convolution_gemm_u8s8s16os16,
+                             alg_kind::convolution_gemm_u8s8s16os8,
+                             alg_kind::convolution_gemm_u8s8s32os32,
+                             alg_kind::convolution_gemm_u8s8s32os8,
+                             alg_kind::convolution_gemm_bf16bf16f32of32,
+                             alg_kind::convolution_gemm_bf16bf16f32obf16,
                              alg_kind::convolution_ref));
         if (desc_.alg_kind == alg_kind::convolution_auto)
             desc_.alg_kind = alg_kind;

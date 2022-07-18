@@ -39,7 +39,6 @@
         } \
     } while (0)
 
-
 inline zendnn::engine::kind parse_engine_kind(
     int argc, char **argv, int extra_args = 0) {
     // Returns default engine kind, i.e. CPU, if none given

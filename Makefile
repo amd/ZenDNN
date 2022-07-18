@@ -28,6 +28,9 @@ ARCHIVE ?= 0
 # Set ZENDNN_STANDALONE_BUILD to 1 to build ZenDNN stanalone library
 # BLIS include path and lib path is not same when BLIS is build from source vs
 # BLIS official release is used
+# Set LPGEMM to 1 to enable LPGEMM based Conv
+# make -j LPGEMM=1
+LPGEMM ?= 0
 
 #Set BLIS PATH
 ifeq "$(ZENDNN_STANDALONE_BUILD)" "1"
@@ -39,6 +42,10 @@ else
 endif
 
 DEPEND_ON_CK ?= 0
+
+ifeq "$(LPGEMM)" "1"
+       LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM_CONV=1
+endif
 
 ifeq ($(DEPEND_ON_CK), 1)
 # Set Composable Kernel paths
@@ -115,7 +122,11 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -fPIC -fopenmp
-	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	ifeq ($(LPGEMM), 1)
+	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE)
+	else
+	     COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	endif
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
 	else
@@ -127,7 +138,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE)
 endif #AOCC
 endif #RELEASE = 1
 

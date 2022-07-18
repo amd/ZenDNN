@@ -231,6 +231,134 @@ void im2rowNHWC(const float *input_data, const int depth, const int height,
         h_pad += stride_h;
     }
 }
+
+// Used in zenConvolution2Dbase_LPGEMM1x1() (u8, s8, s32)
+// TODO: Verify correctness of this function; currently, not in use.
+void im2rowNHWCsplit_lpgemm(const uint8_t *input_data, const int depth, const int height,
+                     const int width, const int filter_h, const int filter_w,
+                     const int pad_t, const int pad_l, const int pad_b, const int pad_r,
+                     const int stride_h, const int stride_w, uint8_t *col_data,
+                     const int heightColOffset,
+                     const int heightStart, const int no_of_threads) {
+
+    int width_col = (width + pad_l + pad_r - filter_w) / stride_w + 1;
+    int out_width = ((width + pad_l + pad_r - filter_w) / stride_w + 1)*filter_h*
+                    depth * filter_w;
+    uint8_t *col_data_old = col_data;
+
+    int h = 0;
+    int h_pad = -pad_t;
+    int w_pad = -pad_l;
+    int h_offset = -pad_t;
+    if (heightStart > 0) {
+        h_offset = heightStart*stride_h-pad_t;
+    }
+    else {
+        h_offset = -pad_t;
+    }
+    //To enable unrolling and better vectorization, (depth == 3) path unrolled the loop
+    //along channel, this address first layer of convolution where no. of channels
+    //in Image is 3.
+    //For (depth%8 == 0), common case for other conv layers, vectorization is enabled by
+    //to tell compiler to generate AVX256 SIMD instruction using (simd_blocks*8) loop.
+    //Observed perf improvement with googlenet and alexnet.
+    if (depth == 3) {
+        #pragma omp parallel for num_threads(no_of_threads) private(h_pad, w_pad, col_data)
+        for (int i = 0; i < heightColOffset; ++i) {
+            w_pad = -pad_l;
+            h_pad = h_offset + (i * stride_h);
+            col_data = col_data_old + (i*out_width);
+            for (int w = 0; w < width_col; ++w) {
+                for (int ih = h_pad; ih < h_pad + filter_h; ++ih) {
+                    for (int iw = w_pad; iw < w_pad + filter_w; ++iw) {
+                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                            int offset = (ih * width + iw) * depth;
+                            //#pragma omp simd
+                            //for (int k=0; k<depth; k++) {
+                            col_data[0] = input_data[offset + 0];
+                            col_data[1] = input_data[offset + 1];
+                            col_data[2] = input_data[offset + 2];
+                            //}
+                        }
+                        else {
+                            // This should be simply padded with zero.
+                            //#pragma omp simd
+                            //for (int k=0; k<depth; k++) {
+                            col_data[0] = 0;
+                            col_data[1] = 0;
+                            col_data[2] = 0;
+                            //}
+                        }
+                        col_data += depth;
+                    }
+                }
+                w_pad += stride_w;
+            }
+        }
+    }
+    else if ((depth%8) == 0) {
+        int simd_blocks = depth/8;
+        #pragma omp parallel for num_threads(no_of_threads) private(h_pad, w_pad, col_data)
+        for (int i = 0; i < heightColOffset; ++i) {
+            w_pad = -pad_l;
+            h_pad = h_offset + (i * stride_h);
+            col_data = col_data_old + (i*out_width);
+            for (int w = 0; w < width_col; ++w) {
+                for (int ih = h_pad; ih < h_pad + filter_h; ++ih) {
+                    for (int iw = w_pad; iw < w_pad + filter_w; ++iw) {
+                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                            int offset = (ih * width + iw) * depth;
+                            #pragma omp simd
+                            for (int k=0; k<simd_blocks*8; k++) {
+                                col_data[k] = input_data[offset + k];
+                            }
+                        }
+                        else {
+                            // This should be simply padded with zero.
+                            #pragma omp simd
+                            for (int k=0; k<simd_blocks*8; k++) {
+                                col_data[k] = 0;
+                            }
+                        }
+                        col_data += depth;
+                    }
+                }
+                w_pad += stride_w;
+            }
+        }
+    }
+    else {
+        #pragma omp parallel for num_threads(no_of_threads) private(h_pad, w_pad, col_data)
+        for (int i = 0; i < heightColOffset; ++i) {
+            w_pad = -pad_l;
+            h_pad = h_offset + (i * stride_h);
+            col_data = col_data_old + (i*out_width);
+            for (int w = 0; w < width_col; ++w) {
+                for (int ih = h_pad; ih < h_pad + filter_h; ++ih) {
+                    for (int iw = w_pad; iw < w_pad + filter_w; ++iw) {
+                        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                            int offset = (ih * width + iw) * depth;
+                            #pragma omp simd
+                            for (int k=0; k<depth; k++) {
+                                col_data[k] = input_data[offset + k];
+                            }
+                        }
+                        else {
+                            // This should be simply padded with zero.
+                            #pragma omp simd
+                            for (int k=0; k<depth; k++) {
+                                col_data[k] = 0;
+                            }
+                        }
+                        col_data += depth;
+                    }
+                }
+                w_pad += stride_w;
+            }
+        }
+    }
+}
+
 void im2rowNHWCsplit(const float *input_data, const int depth, const int height,
                      const int width, const int filter_h, const int filter_w,
                      const int pad_t, const int pad_l, const int pad_b, const int pad_r,

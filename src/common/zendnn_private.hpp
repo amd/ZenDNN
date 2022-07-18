@@ -28,6 +28,30 @@
 #define ZENDNN_PRIVATE_HPP
 
 //structure to make key
+struct Key_conv {
+    unsigned int m;
+    unsigned int k;
+    unsigned int n;
+    unsigned int lda;
+    unsigned int ldb;
+    unsigned int ldc;
+    unsigned int thread_count;
+    const void *weights;
+
+    bool operator==(const Key_conv &other) const {
+        return (thread_count == other.thread_count
+                && m == other.m
+                && k == other.k
+                && n == other.n
+                && lda == other.lda
+                && ldb == other.ldb
+                && ldc == other.ldc
+                && weights == other.weights
+               );
+    }
+};
+
+//structure to make key
 struct Key_matmul {
     bool transpose_input;
     bool transpose_weights;
@@ -107,6 +131,24 @@ inline int getCpuID_brandString(int *a) {
     __asm__ __volatile__("mov %%ecx, %0\n\t":"=r"(a[10]));
     __asm__ __volatile__("mov %%edx, %0\n\t":"=r"(a[11]));
     return 0;
+}
+
+namespace std {
+template <>
+struct hash<Key_conv> {
+    std::size_t operator()(const Key_conv &k) const {
+        std::size_t seed = 0;
+        seed = zendnn::impl::hash_combine(seed, (k.m));
+        seed = zendnn::impl::hash_combine(seed, (k.k));
+        seed = zendnn::impl::hash_combine(seed, (k.n));
+        seed = zendnn::impl::hash_combine(seed, (k.lda));
+        seed = zendnn::impl::hash_combine(seed, (k.ldb));
+        seed = zendnn::impl::hash_combine(seed, (k.ldc));
+        seed = zendnn::impl::hash_combine(seed, (k.thread_count));
+        seed = zendnn::impl::hash_combine(seed, (k.weights));
+        return seed;
+    }
+};
 }
 
 extern "C"
@@ -194,8 +236,11 @@ extern "C"
                     const int pad_t, const int pad_l, const int pad_b, const int pad_r,
                     const int stride_h, const int stride_w, float *col_data);
 
-
-
+    void im2rowNHWCsplit_lpgemm(const uint8_t *input_data, const int depth, const int height,
+                         const int width, const int filter_h, const int filter_w,
+                         const int pad_t, const int pad_l, const int pad_b, const int pad_r,
+                         const int stride_h, const int stride_w, uint8_t *col_data, const int heightOffset,
+                         const int heightStart, const int no_of_threads);
 
     void im2rowNHWCsplit(const float *input_data, const int depth, const int height,
                          const int width, const int filter_h, const int filter_w,
@@ -616,6 +661,186 @@ extern "C"
         const float beta,
         float *output,
         const int ldc
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int32_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int scale_size
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_u8s8s16(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int scale_size
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(
+    zendnnEnv zenEnvObj,
+    const int16_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    float *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+    );
+
+    void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16(
+    zendnnEnv zenEnvObj,
+    const int16_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int scale_size
     );
 
     void zenConvolution2D_direct(

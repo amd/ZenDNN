@@ -544,6 +544,12 @@ enum class algorithm {
     convolution_ck = zendnn_convolution_ck,
     /// GEMM convolution
     convolution_gemm = zendnn_convolution_gemm,
+    convolution_gemm_bf16bf16f32of32 = zendnn_convolution_gemm_bf16bf16f32of32,
+    convolution_gemm_bf16bf16f32obf16 = zendnn_convolution_gemm_bf16bf16f32obf16,
+    convolution_gemm_u8s8s16os16 = zendnn_convolution_gemm_u8s8s16os16,
+    convolution_gemm_u8s8s16os8 = zendnn_convolution_gemm_u8s8s16os8,
+    convolution_gemm_u8s8s32os32 = zendnn_convolution_gemm_u8s8s32os32,
+    convolution_gemm_u8s8s32os8 = zendnn_convolution_gemm_u8s8s32os8,
     /// Direct convolution
     convolution_direct = zendnn_convolution_direct,
     /// Winograd convolution
@@ -1256,6 +1262,7 @@ struct memory : public handle<zendnn_memory_t> {
         f32 = zendnn_f32,
         /// 32-bit signed integer.
         s32 = zendnn_s32,
+        s16 = zendnn_s16,
         /// 8-bit signed integer.
         s8 = zendnn_s8,
         /// 8-bit unsigned integer.

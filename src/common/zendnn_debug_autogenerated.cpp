@@ -47,6 +47,7 @@ const char *zendnn_dt2str(zendnn_data_type_t v) {
     if (v == zendnn_bf16) return "bf16";
     if (v == zendnn_f32) return "f32";
     if (v == zendnn_s32) return "s32";
+    if (v == zendnn_s16) return "s16";
     if (v == zendnn_s8) return "s8";
     if (v == zendnn_u8) return "u8";
     assert(!"unknown dt");
@@ -1107,6 +1108,12 @@ const char *zendnn_prim_kind2str(zendnn_primitive_kind_t v) {
 const char *zendnn_alg_kind2str(zendnn_alg_kind_t v) {
     if (v == zendnn_alg_kind_undef) return "undef";
     if (v == zendnn_convolution_gemm) return "convolution_gemm";
+    if (v == zendnn_convolution_gemm_bf16bf16f32of32) return "convolution_gemm_bf16bf16f32of32";
+    if (v == zendnn_convolution_gemm_bf16bf16f32obf16) return "convolution_gemm_bf16bf16f32obf16";
+    if (v == zendnn_convolution_gemm_u8s8s16os16) return "convolution_gemm_u8s8s16os16";
+    if (v == zendnn_convolution_gemm_u8s8s16os8) return "convolution_gemm_u8s8s16os8";
+    if (v == zendnn_convolution_gemm_u8s8s32os32) return "convolution_gemm_u8s8s32os32";
+    if (v == zendnn_convolution_gemm_u8s8s32os8) return "convolution_gemm_u8s8s32os8";
     if (v == zendnn_convolution_ref) return "convolution_ref";
     if (v == zendnn_convolution_ck) return "convolution_ck";
     if (v == zendnn_convolution_direct) return "convolution_direct";

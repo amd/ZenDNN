@@ -74,6 +74,7 @@ using namespace zendnn::impl::cpu::x64;
 using namespace zendnn::impl::cpu::aarch64;
 #endif
 #include "cpu/x64/zendnn_convolution.hpp"
+#include "cpu/x64/zendnn_lpgemm_convolution.hpp"
 #include "common/zendnn_private.hpp"
 
 
@@ -134,6 +135,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE_AVX512(jit_avx512_core_bf16_convolution_fwd_t)
             CPU_INSTANCE_AVX512(gemm_bf16_convolution_fwd_t<f32>)
             CPU_INSTANCE(ref_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
         }},
         {{forward, bf16, bf16, bf16}, {
@@ -151,6 +153,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE_AVX512(gemm_bf16_convolution_fwd_t<bf16>)
             CPU_INSTANCE(ref_convolution_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
         }},
         // BWD_D fp
@@ -394,7 +397,13 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE_AARCH64(jit_sve_512_x8s8s32x_convolution_fwd_t<u8, s32>)
             CPU_INSTANCE(gemm_x8s8s32x_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_int8_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
+        }},
+        {{forward, u8, s8,s16}, {
+            // Quantization Support
+            // unsigned int8 input, signed int8  filters, signed int16 output (int16 bias accumulation)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
         }},
         {{forward, u8, s8, s8}, {
             /*
@@ -418,6 +427,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE(gemm_x8s8s32x_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_int8_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
         }},
         {{forward, u8, s8, u8}, {

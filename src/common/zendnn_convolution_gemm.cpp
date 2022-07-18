@@ -22,7 +22,8 @@
 #include "zendnn_convolution_winograd.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
-#include "zendnn_helper.hpp"
+#include "zendnn_private.hpp"
+#include <unordered_map>
 
 using namespace zendnn;
 
@@ -41,7 +42,844 @@ using namespace zendnn;
 #define DIRECT_CONV_GEMV        0
 #define WINOGRAD_CONV           1
 
+//Simplified Map having Key as struct and value as Blocked Weight matrix address.
+std::unordered_map<Key_conv, const int8_t * > conv_weight_caching_map;
 
+// zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32
+// Modification of zenConvolution2Dbase() to support LPGEMM (u8, s8, s32)
+// Input is in u8, Filter is in s8
+// Accumulation is in s32 and Output is in s32
+//This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+//images/featureMap followed by gemm call to blis which computes the feature map for all the images
+//and then add bias value on it.
+//I/p and o/p format will be NHWC and filter format is HWCN
+//Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+//internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int32_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_u8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+
+    aocl_post_op *post_ops = NULL;
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 0;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(int32_t);
+            post_ops->bias.bias = (int32_t *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_u8s8s32os32(storage, transa, transb, images * out_height*out_width,
+                          no_of_filter,
+                          channels*kernel_h*kernel_w, alpha, in_layer,
+                          lda, mem_format_a, /*filter*/b_reorder, ldb, mem_format_b, beta, out_layer,
+                          ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    if (postop_count > 0) {
+        free(post_ops->seq_vector);
+        free(post_ops);
+    }
+#endif
+}
+
+// zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8
+// Modification of zenConvolution2Dbase() to support LPGEMM (u8, s8, s32, s8)
+// Input is in u8, Filter is in s8
+// Accumulation is in s32 and Output is in s8
+// This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+// images/featureMap followed by gemm call to blis which computes the feature map for all the images
+// and then add bias value on it.
+// I/p and o/p format will be NHWC and filter format is HWCN
+// Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+// internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int out_scale_size
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    Key_conv key_obj;
+    //key_obj.transpose_input = transpose_input;
+    //key_obj.transpose_weights = transpose_filter;
+    key_obj.m = images * out_height * out_width;
+    key_obj.k = no_of_filter;
+    key_obj.n = channels * kernel_h * kernel_w;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+    key_obj.weights = filter;
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    // finds object in map
+    auto found_obj = conv_weight_caching_map.find(key_obj);
+    if (found_obj == conv_weight_caching_map.end()) {
+
+        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
+                                    reorder_param0, reorder_param1, reorder_param2);
+        int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_u8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+        //Create new entry
+        conv_weight_caching_map[key_obj] = b_reorder;
+    }
+    /*
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_u8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+    */
+
+    aocl_post_op *post_ops = NULL;
+    // By default, scale postop is always enabled.
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 1;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(int32_t);
+            post_ops->bias.bias = (int32_t *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+
+        // Add scale postop
+        post_ops->seq_vector[post_op_i++] = SCALE;
+        post_ops->sum.is_power_of_2 = FALSE;
+        post_ops->sum.buff = NULL;
+        post_ops->sum.zero_point = (int *)(zero_point_dst); //NULL;
+
+        int scale_size = no_of_filter * sizeof(float);
+        post_ops->sum.scale_factor = malloc(scale_size);
+        float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
+        if(out_scale_size > 1) {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[i];
+                }
+        }
+        else {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[0];
+                }
+        }
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_u8s8s32os8(storage, transa, transb, images * out_height*out_width,
+                         no_of_filter,
+                         channels*kernel_h*kernel_w, alpha, in_layer,
+                         lda, mem_format_a, /*filter*/ /*b_reorder*/ conv_weight_caching_map[key_obj], ldb, mem_format_b, beta, out_layer,
+                         ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    //free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    // Scale postop is always enabled so deleted directly.
+    free(post_ops->sum.scale_factor);
+    free(post_ops->seq_vector);
+    free(post_ops);
+#endif
+}
+
+// zenConvolution2Dbase_LPGEMM1x1_u8s8s16
+// Modification of zenConvolution2Dbase() to support LPGEMM (u8, s8, s16, s16)
+// Input is in u8, Filter is in s8
+// Accumulation is in s16 and Output is in s16
+//This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+//images/featureMap followed by gemm call to blis which computes the feature map for all the images
+//and then add bias value on it.
+//I/p and o/p format will be NHWC and filter format is HWCN
+//Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+//internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_u8s8s16(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_u8s8s16, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s16os16(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_u8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+
+    aocl_post_op *post_ops = NULL;
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 0;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(int16_t);
+            post_ops->bias.bias = (int16_t *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_u8s8s16os16(storage, transa, transb, images * out_height*out_width,
+                          no_of_filter,
+                          channels*kernel_h*kernel_w, alpha, in_layer,
+                          lda, mem_format_a, /*filter*/b_reorder, ldb, mem_format_b, beta, out_layer,
+                          ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    if (postop_count > 0) {
+        free(post_ops->seq_vector);
+        free(post_ops);
+    }
+#endif
+}
+
+// zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8
+// Modification of zenConvolution2Dbase() to support LPGEMM (u8, s8, s16, s8)
+// Input is in u8, Filter is in s8
+// Accumulation is in s16 and Output is in s8
+//This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+//images/featureMap followed by gemm call to blis which computes the feature map for all the images
+//and then add bias value on it.
+//I/p and o/p format will be NHWC and filter format is HWCN
+//Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+//internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int out_scale_size
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s16os16(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_u8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+
+    aocl_post_op *post_ops = NULL;
+    // By default, scale postop is always enabled.
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 1;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(int16_t);
+            post_ops->bias.bias = (int16_t *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+
+        // Add scale postop
+        post_ops->seq_vector[post_op_i++] = SCALE;
+        post_ops->sum.is_power_of_2 = FALSE;
+        post_ops->sum.buff = NULL;
+        // TODO: Zero-point not support in LPGEMM
+        // Placeholder for zero-point
+        post_ops->sum.zero_point = (int *)(zero_point_dst);
+        int scale_size = no_of_filter * sizeof(float);
+        post_ops->sum.scale_factor = malloc(scale_size);
+        float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
+        if(out_scale_size > 1) {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[i];
+                }
+        }
+        else {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[0];
+                }
+        }
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_u8s8s16os8(storage, transa, transb, images * out_height*out_width,
+                         no_of_filter,
+                         channels*kernel_h*kernel_w, alpha, in_layer,
+                         lda, mem_format_a, /*filter*/b_reorder, ldb, mem_format_b, beta, out_layer,
+                         ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    // Scale postop is always enabled so deleted directly.
+    free(post_ops->sum.scale_factor);
+    free(post_ops->seq_vector);
+    free(post_ops);
+#endif
+}
+
+// zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32
+// Modification of zenConvolution2Dbase() to support LPGEMM (bf16, bf16, f32)
+// Input is in bf16, Filter is in bf16
+// Accumulation is in f32 and Output is in f32
+//This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+//images/featureMap followed by gemm call to blis which computes the feature map for all the images
+//and then add bias value on it.
+//I/p and o/p format will be NHWC and filter format is HWCN
+//Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+//internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(
+    zendnnEnv zenEnvObj,
+    const int16_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    float *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int16_t *b_reorder = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_bf16bf16f32of32('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+
+    aocl_post_op *post_ops = NULL;
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 0;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(float);
+            post_ops->bias.bias = (float *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_bf16bf16f32of32(storage, transa, transb, images * out_height*out_width,
+                          no_of_filter,
+                          channels*kernel_h*kernel_w, alpha, in_layer,
+                          lda, mem_format_a, /*filter*/b_reorder, ldb, mem_format_b, beta, out_layer,
+                          ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    if (postop_count > 0) {
+        free(post_ops->seq_vector);
+        free(post_ops);
+    }
+#endif
+}
+
+// zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16
+// Modification of zenConvolution2Dbase() to support LPGEMM (bf16, bf16, f32, bf16)
+// Input is in bf16, Filter is in bf16
+// Accumulation is in f32 and Output is in bf16
+// This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+// images/featureMap followed by gemm call to blis which computes the feature map for all the images
+// and then add bias value on it.
+// I/p and o/p format will be NHWC and filter format is HWCN
+// Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+// internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16(
+    zendnnEnv zenEnvObj,
+    const int16_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int out_scale_size
+) {
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+                                      reorder_param0, reorder_param1, reorder_param2);
+    int16_t *b_reorder = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+    aocl_reorder_bf16bf16f32of32('B', filter, b_reorder, channels*kernel_h*kernel_w,
+                             no_of_filter, ldb);
+
+    aocl_post_op *post_ops = NULL;
+    // By default, scale postop is always enabled.
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 1;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(float);
+            post_ops->bias.bias = (float *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise.is_power_of_2 = FALSE;
+            post_ops->eltwise.scale_factor = NULL;
+            post_ops->eltwise.algo.alpha = NULL;
+            post_ops->eltwise.algo.beta = NULL;
+            post_ops->eltwise.algo.algo_type = RELU;
+        }
+
+        // Add scale postop
+        post_ops->seq_vector[post_op_i++] = SCALE;
+        post_ops->sum.is_power_of_2 = FALSE;
+        post_ops->sum.buff = NULL;
+        // TODO: Zero-point not support in LPGEMM
+        // Placeholder for zero-point
+        post_ops->sum.zero_point = (int *)(zero_point_dst);
+        int scale_size = no_of_filter * sizeof(float);
+        post_ops->sum.scale_factor = malloc(scale_size);
+        float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
+        if(out_scale_size > 1) {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[i];
+                }
+        }
+        else {
+                for(int i=0; i<no_of_filter; ++i) {
+                        temp_dscale_ptr[i] = (float)scale[0];
+             }
+        }
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_bf16bf16f32obf16(storage, transa, transb, images * out_height*out_width,
+                         no_of_filter,
+                         channels*kernel_h*kernel_w, alpha, in_layer,
+                         lda, mem_format_a, /*filter*/b_reorder, ldb, mem_format_b, beta, out_layer,
+                         ldc, post_ops);
+
+    // Free memory for reordered filter and postops.
+    free(b_reorder);
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    // Scale postop is always enabled so deleted directly.
+    free(post_ops->sum.scale_factor);
+    free(post_ops->seq_vector);
+    free(post_ops);
+#endif
+}
 
 //This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
 //images/featureMap followed by gemm call to blis which computes the feature map for all the images
@@ -3010,7 +3848,6 @@ void zenConvolution2DsmallGemmMergeLatency(
     }
 }
 
-
 //An umbrella C++ interface for zendnn convolution
 void zenConvolution2Dgemm(
     const float *in_layer,
@@ -3240,6 +4077,279 @@ void zenConvolution2Dgemm(
                " Time=", elapsed, "ms");
 }
 
+void zenConvolution2D_u8s8s16os16(
+    const uint8_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales
+) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+
+    zenConvolution2Dbase_LPGEMM1x1_u8s8s16(zenEnvObj, in_layer, batchsize, channels,
+                                           height, width, filter,
+                                           no_of_filter,
+                                           kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+                                           bias /*NULL*/,
+                                           out_layer, out_height, out_width, reluFused /*0*/ /*relu*/, NULL /*scale*/,
+                                           NULL/*elementwise*/,
+                                           concat, filter_offset, total_filters);
+}
+
+void zenConvolution2D_u8s8s16os8(
+    const uint8_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales,
+    const int* zero_point_dst,
+    const int scale_size
+) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+    zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(zenEnvObj, in_layer, batchsize,
+            channels, height, width, filter,
+            no_of_filter,
+            kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+            bias /*NULL*/,
+            out_layer, out_height, out_width, reluFused /*0*/ /*relu*/,
+            output_scales /*scale*/,
+            NULL/*elementwise*/,
+            concat, filter_offset, total_filters, zero_point_dst, scale_size);
+}
+
+void zenConvolution2D_bf16bf16f32of32(
+    const int16_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    float *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales
+) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+
+    zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(zenEnvObj, in_layer, batchsize, channels,
+                                           height, width, filter,
+                                           no_of_filter,
+                                           kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+                                           bias /*NULL*/,
+                                           out_layer, out_height, out_width, reluFused /*0*/ /*relu*/, NULL /*scale*/,
+                                           NULL/*elementwise*/,
+                                           concat, filter_offset, total_filters);
+}
+
+void zenConvolution2D_bf16bf16f32obf16(
+    const int16_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int16_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    float *bias,
+    int16_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales,
+    const int* zero_point_dst,
+    const int scale_size
+) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+    zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16(zenEnvObj, in_layer, batchsize,
+            channels, height, width, filter,
+            no_of_filter,
+            kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+            bias /*NULL*/,
+            out_layer, out_height, out_width, reluFused /*0*/ /*relu*/,
+            output_scales /*scale*/,
+            NULL/*elementwise*/,
+            concat, filter_offset, total_filters, zero_point_dst, scale_size);
+}
+
+void zenConvolution2D_u8s8s32os32(
+    const uint8_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int32_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales
+) {
+
+    //TODO: perform other checks...eg. for all input dimansions
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+
+    zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32(zenEnvObj, in_layer, batchsize,
+            channels, height, width, filter,
+            no_of_filter,
+            kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+            bias /*NULL*/,
+            out_layer, out_height, out_width, reluFused /*relu*/, output_scales /*scale*/,
+            NULL/*elementwise*/,
+            concat, filter_offset, total_filters);
+}
+
+void zenConvolution2D_u8s8s32os8(
+    const uint8_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int32_t *bias,
+    int8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales,
+    const int* zero_point_dst,
+    const int scale_size
+) {
+
+    //TODO: perform other checks...eg. for all input dimansions
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+    zendnnEnv zenEnvObj = readEnv();
+
+    zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8(zenEnvObj, in_layer, batchsize,
+            channels, height, width, filter,
+            no_of_filter,
+            kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+            bias /*NULL*/,
+            out_layer, out_height, out_width, reluFused /*relu*/, output_scales /*scale*/,
+            NULL/*elementwise*/,
+            concat, filter_offset, total_filters, zero_point_dst, scale_size);
+}
+
 void zenConvolution2D(
     const float *in_layer,
     const int batchsize,
@@ -3278,7 +4388,6 @@ void zenConvolution2D(
                          out_layer, out_height, out_width, 0/*relu*/, false/*sum_fused*/, NULL /*scale*/,
                          NULL/*elementwise*/,
                          concat, filter_offset, total_filters);
-
 
 }
 
