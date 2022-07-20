@@ -181,7 +181,7 @@ example:
 export ZENDNN_AOCC_COMP_PATH=/home/<user-id>/my_work/aocc-compiler-3.0.0
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-aocc-3.0-6/amd-blis
 make clean
-source scripts/zendnn_aocc_build.sh
+source scripts/zendnn_build.sh aocc
 ```
 When new terminal is opened, user need to set up environment variables:
 ```bash
@@ -194,7 +194,7 @@ example:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis
 make clean
-source scripts/zendnn_gcc_build.sh
+source scripts/zendnn_build.sh gcc
 ```
 When new terminal is opened, user need to set up environment variables:
 ```bash
