@@ -179,6 +179,9 @@ void zenMatMul(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
+    const int* input_offsets,
+    const int* weights_offsets,
+    const int* dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -202,9 +205,9 @@ void zenMatMul(
     for (int i=0; i<batch_size; ++i)
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
-                               input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, NULL, false, 0, beta,
-                               output + (i*no_of_images*no_of_filters), ldc);
+                               input + input_offsets[i], lda,
+                               filter + weights_offsets[i], ldb, NULL, false, 0, beta,
+                               output + dst_offsets[i], ldc);
 }
 
 void zenMatMulWithBias(
@@ -212,6 +215,9 @@ void zenMatMulWithBias(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
+    const int* input_offsets,
+    const int* weights_offsets,
+    const int* dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -236,9 +242,9 @@ void zenMatMulWithBias(
     for (int i=0; i<batch_size; ++i)
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
-                               input+(i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, 0,
-                               beta, output + (i*no_of_images*no_of_filters), ldc);
+                               input + input_offsets[i], lda,
+                               filter + weights_offsets[i], ldb, bias, false, 0,
+                               beta, output + dst_offsets[i], ldc);
 }
 
 void zenMatMulWithBiasReLU(
@@ -246,6 +252,9 @@ void zenMatMulWithBiasReLU(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
+    const int* input_offsets,
+    const int* weights_offsets,
+    const int* dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -270,9 +279,9 @@ void zenMatMulWithBiasReLU(
     for (int i=0; i<batch_size; ++i)
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
-                               input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, true, 0,
-                               beta, output + (i*no_of_images*no_of_filters), ldc);
+                               input + input_offsets[i], lda,
+                               filter + weights_offsets[i], ldb, bias, true, 0,
+                               beta, output + dst_offsets[i], ldc);
 }
 
 void zenMatMulWithBiasGeLU(
@@ -280,6 +289,9 @@ void zenMatMulWithBiasGeLU(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
+    const int* input_offsets,
+    const int* weights_offsets,
+    const int* dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -305,9 +317,9 @@ void zenMatMulWithBiasGeLU(
     for (int i=0; i<batch_size; ++i)
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
-                               input + (i*no_of_images*no_of_channels), lda,
-                               filter + (i*no_of_channels*no_of_filters), ldb, bias, false, geluType,
-                               beta, output + (i*no_of_images*no_of_filters), ldc);
+                               input + input_offsets[i], lda,
+                               filter + weights_offsets[i], ldb, bias, false, geluType,
+                               beta, output + dst_offsets[i], ldc);
 }
 
 

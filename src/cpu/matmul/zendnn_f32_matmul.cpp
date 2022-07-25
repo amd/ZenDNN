@@ -24,6 +24,7 @@
 #include <assert.h>
 #include <float.h>
 #include <math.h>
+#include <vector>
 
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
@@ -79,6 +80,23 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
 
     return check_and_configure_attributes();
 }
+
+// temporary solution to deal with format `any`
+bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
+    for (auto md : {&src_md_, &weights_md_, &bias_md_, &dst_md_}) {
+        memory_desc_wrapper mdw(md);
+        if (mdw.format_any()) {
+            if (mdw.has_runtime_dims_or_strides()) return false;
+            status_t status = memory_desc_init_by_strides(*md, nullptr);
+            if (status != status::success) return false;
+        }
+    }
+    memory_desc_wrapper mdw(dst_md_);
+    if (!mdw.matches_tag(zendnn::impl::format_tag::abc))
+        return false;
+    return true;
+}
+
 
 status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     zendnnInfo(ZENDNN_CORELOG,
@@ -147,7 +165,68 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     return status::success;
 }
 
+static void fill_offset(std::vector<int>& offsets,
+                        unsigned int offset_index,
+                        unsigned int curr_offset,
+                        long int const dims1[],
+                        long int const dims2[],
+                        unsigned int dims_len,
+                        unsigned int dims_index,
+                        unsigned int mat_size) {
+
+    if (dims_index == dims_len - 1) {
+        offsets[offset_index] = curr_offset + mat_size;
+        offset_index++;
+        if (dims1[dims_index] == dims2[dims_index]) {
+            for (int i = 1; i < dims1[dims_index]; i++) {
+                 offsets[offset_index] = offsets[offset_index - 1] + mat_size;
+                 offset_index++;
+            }
+	} else {
+	    if (dims1[dims_index] == 1) {
+                for (int i = 1; i < dims2[dims_index]; i++) {
+                     offsets[offset_index] = offsets[offset_index - 1];
+                     offset_index++;
+	         }
+            }
+	 }
+         return;
+    }
+    unsigned int count = 1;
+    for (int j = dims_index + 1; j < dims_len; j++) {
+         count = count * dims2[j];
+    }
+    if (dims1[dims_index] == dims2[dims_index]) {
+        int current_offset = curr_offset;
+        for (int i = dims_index; i < dims1[dims_index]; i++) {
+             fill_offset(offsets, offset_index, current_offset, dims1, dims2, dims_len, dims_index + 1, mat_size);
+             offset_index += count;
+	     current_offset = offsets[offset_index - 1];
+	}
+    }
+    else {
+        if (dims1[dims_index] == 1) {
+            for (int i = 0; i < dims2[dims_index]; i++) {
+                 fill_offset(offsets, offset_index, curr_offset, dims1, dims2, dims_len, dims_index + 1, mat_size);
+                 offset_index += count;
+            }
+        }
+    }
+    return;
+}
+
+static void calculate_offsets(std::vector<int>& offsets,
+	                      long int const dims1[],
+                              long int const dims2[],
+                              unsigned int dims_len,
+                              unsigned long mat_dim1,
+                              unsigned long mat_dim2) {
+  fill_offset(offsets, 0, -1*mat_dim1*mat_dim2, dims1, dims2, dims_len, 0, mat_dim1*mat_dim2);
+  return;
+}
+
 status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
+
     auto src = CTX_IN_MEM(const src_data_t *, ZENDNN_ARG_SRC);
     auto weights = CTX_IN_MEM(const weights_data_t *, ZENDNN_ARG_WEIGHTS);
     auto bias = CTX_IN_MEM(const char *, ZENDNN_ARG_BIAS);
@@ -159,16 +238,19 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto weights_d = ctx.memory_mdw(ZENDNN_ARG_WEIGHTS, pd()->weights_md());
     const auto dst_d = ctx.memory_mdw(ZENDNN_ARG_DST, pd()->dst_md());
 
+    matmul_helper_t helper(src_d, weights_d, dst_d);
+    const int ndims = pd()->ndims();
+    const int batch_ndims = ndims - 2;
+    const dim_t M = helper.M();
+    const dim_t N = helper.N();
+    const dim_t K = helper.K();
+    const dim_t batch = helper.batch();
+
+    const bool batched = (batch_ndims > 0) ? true : false;
+
     const gemm_based::params_t &params = pd()->params();
 
     const auto &dst_bd = dst_d.blocking_desc();
-
-    const bool batched = pd()->batched();
-
-    const dim_t M = dst_d.dims()[dst_d.ndims() - 2];
-    const dim_t N = dst_d.dims()[dst_d.ndims() - 1];
-    const dim_t K = src_d.dims()[src_d.ndims() - 1];
-
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
     const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
                                                 2];
@@ -193,7 +275,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     //TODO(aakar): Modify f32_matmul API to include Layout
     const bool Layout = true; // CblasRowMajor
 
-    const dim_t batch = batched ? src_d.dims()[dst_d.ndims() - 3] : 1;
+    //const dim_t batch = batched ? dst_d.dims()[dst_d.ndims() - 3] : 1;
+    const dim_t input_batch = batched ? src_d.dims()[dst_d.ndims() - 3] : 1;
+    const dim_t weights_batch = batched ? weights_d.dims()[dst_d.ndims() - 3] : 1;
     const auto src_batch_stride = src_d.blocking_desc().strides[0];
     const auto weights_batch_stride = weights_d.blocking_desc().strides[0];
     const auto dst_batch_stride = dst_d.blocking_desc().strides[0];
@@ -222,23 +306,38 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
+    std::vector<int> dst_off;
+    std::vector<int> ip_off;
+    std::vector<int> wei_off;
+
+    dst_off.resize(batch);
+    ip_off.resize(batch);
+    wei_off.resize(batch);
+
+    calculate_offsets(dst_off, dst_d.dims(), dst_d.dims(), dst_d.ndims()-2, M, N);
+    calculate_offsets(ip_off,src_d.dims(),dst_d.dims(), dst_d.ndims()-2, M, K);
+    calculate_offsets(wei_off,weights_d.dims(),dst_d.dims(), dst_d.ndims()-2, K, N);
+
+
+    int* input_offsets = ip_off.data();
+    int* dst_offsets = dst_off.data();
+    int* weight_offsets = wei_off.data();
+
     if ((float *)bias == NULL) {
         //MatMul without Bias
-        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, M, K,
-                  N, alpha, (float *)src, lda, (float *)weights, ldb, beta,
-                  (float *)dst, ldc);
+        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets, weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda, (float *)weights, ldb, beta, (float *)dst, ldc);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
         zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                          batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                          batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
                           (float *)bias, beta, (float *)dst, ldc);
     }
     else {
         if (has_eltwise_relu) {
             //MatMul with BiasRelu
             zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc);
         }
         else if (has_eltwise_gelu) {
@@ -247,7 +346,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc, 1);
 
         }
@@ -257,7 +356,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc, 2);
         }
         else {

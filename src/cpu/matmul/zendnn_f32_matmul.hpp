@@ -46,9 +46,8 @@ struct zendnn_f32_matmul_t : public primitive_t {
 
         status_t init(engine_t *engine);
         const gemm_based::params_t &params() const { return params_; }
-
         int nthr_; // To not exceed the limit in execute used for set up.
-
+        bool set_default_formats();
     private:
         status_t check_and_configure_attributes();
         gemm_based::params_t params_;
