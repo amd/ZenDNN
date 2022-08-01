@@ -184,8 +184,8 @@ export ZENDNN_ENABLE_MEMPOOL=1
 echo "ZENDNN_ENABLE_MEMPOOL=$ZENDNN_ENABLE_MEMPOOL"
 
 #Set the max no. of tensors that can be used inside TF memory pool, Default is
-#set to 16
-export ZENDNN_TENSOR_POOL_LIMIT=16
+#set to 32
+export ZENDNN_TENSOR_POOL_LIMIT=32
 echo "ZENDNN_TENSOR_POOL_LIMIT=$ZENDNN_TENSOR_POOL_LIMIT"
 
 #Enable fixed max size allocation for Persistent tensor with TF memory pool
