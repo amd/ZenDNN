@@ -12,69 +12,16 @@
 #include "zendnn_helper.hpp"
 
 using namespace zendnn;
-
 // initialize memory pool static array for use by the kernels
 // declared in zendnn_utils.hpp
 ZenLibMemoryPool *ZenLibMemoryPool::zenLibMemPoolArr[ZEN_LIB_MEM_POOL_LIMIT] = {NULL};
 int ZenLibMemoryPool::zenLibMemPoolCount = 0;
 
 
-//Read env variables for zendnn
+//ZenDNN Env Instance
 zendnnEnv readEnv() {
-    zendnnEnv envObj;
-    envObj.omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
-    if (getenv("ZEN_NUM_THREADS")) {
-        envObj.zen_num_threads = atoi(getenv("ZEN_NUM_THREADS"));
-        //Overriding OMP_NUM_THREADS if ZEN_NUM_THREADS is exported
-        envObj.omp_num_threads = envObj.zen_num_threads;
-    }
-
-    //ZENDNN_BLOCKED_FORMAT is to enable/disable BLOCKED Format.
-    envObj.zenBlockedFormat = zendnn_getenv_int("ZENDNN_BLOCKED_FORMAT", 0);
-
-    //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
-    //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
-    //Possible values for ZENDNN_ENABLE_MEMPOOL
-    // 0 (GAM-TPA disable)
-    // 1 (Node level Memory Reuse)
-    // 2 (Graph level Memory Reuse)
-    envObj.zenEnableMemPool = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
-    if(envObj.zenEnableMemPool < 0 || envObj.zenEnableMemPool > 2)
-        envObj.zenEnableMemPool = 1;
-
-    //TODO: Unified FWK and LIB mempool for next release
-    envObj.zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
-
-    //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
-    envObj.zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
-
-    //ZENDNN_BLOCKED_NHWC is added to support NHWC data format for CONV DIRECT ALGO
-    envObj.zenBlockedNHWC = zendnn_getenv_int("ZENDNN_NHWC_BLOCKED",0);
-
-    //ZENDNN Library gives preference to NHWC-BLOCKED Format over BLOCKED Format.
-    if (envObj.zenBlockedNHWC) {
-        envObj.zenBlockedFormat=0;
-    }
-
-    //ZENDNN_GEMM_ALGO is to enable specific GEMM ALGO.
-    //Currently ZenDNN support three ALGO path for GEMM execution
-    // If value is set to 0, library decide the optimal path
-    // based on the matrix sizes and other parameter settings. However, 
-    // this can be overridden with specific path.
-    // 1. DIRECT BLIS: MatMul is redirected to BLIS GEMM directly (zenGEMMalgo=1)
-    // 2. ZenDNN+BLIS (zenGEMMalgo=2)
-    //      Case 1:
-    //              ZenDNN take care of problem division and thread parallelism
-    //              BLIS is used for single thread GEMM execution
-    //      Case 2:
-    //              MatMul is redirected to BLIS directly
-    // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=3) (current default)
-    envObj.zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", 3);
-    if (envObj.zenGEMMalgo<=0 || envObj.zenGEMMalgo>3) {
-        envObj.zenGEMMalgo = 3;
-    }
-
-    return envObj;
+    const zendnnEnv &obj = zendnnEnv::ZenDNNEnv();
+    return (obj);
 }
 
 void compute_padding(const int image_h, const int image_w,
