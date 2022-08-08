@@ -303,6 +303,10 @@ echo "ZENDNN_CONV_ADD_FUSION_ENABLE: $ZENDNN_CONV_ADD_FUSION_ENABLE"
 export ZENDNN_RESNET_STRIDES_OPT1_ENABLE=1
 echo "ZENDNN_RESNET_STRIDES_OPT1_ENABLE: $ZENDNN_RESNET_STRIDES_OPT1_ENABLE"
 
+export ORT_ZENDNN_ENABLE_INPLACE_CONCAT=1
+echo "ORT_ZENDNN_ENABLE_INPLACE_CONCAT: $ORT_ZENDNN_ENABLE_INPLACE_CONCAT"
+
+
 #-------------------------------------------------------------------------------
 # HW, HW architecture, Cache, OS, Kernel details
 #-----------------------------------------------------------------------------
