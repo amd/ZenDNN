@@ -230,13 +230,29 @@ else
     echo "ZENDNN_BLIS_PATH: $ZENDNN_BLIS_PATH"
 fi
 
+#Use local copy of ZenDNN library source code when building
+#ONNXRT
+if [ -z "$ZENDNN_ONNXRT_USE_LOCAL_ZENDNN" ];
+then
+    export ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=0
+fi
+echo "ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=$ZENDNN_ONNXRT_USE_LOCAL_ZENDNN"
+
+#Use local copy of BLIS library source code when building
+#ONNXRT
+if [ -z "$ZENDNN_ONNXRT_USE_LOCAL_BLIS" ];
+then
+    export ZENDNN_ONNXRT_USE_LOCAL_BLIS=0
+fi
+echo "ZENDNN_ONNXRT_USE_LOCAL_BLIS=$ZENDNN_ONNXRT_USE_LOCAL_BLIS"
+
 export BENCHMARKS_GIT_ROOT=$ZENDNN_PARENT_FOLDER/benchmarks
 echo "BENCHMARKS_GIT_ROOT: $BENCHMARKS_GIT_ROOT"
 
 export ONNXRUNTIME_GIT_ROOT=$ZENDNN_PARENT_FOLDER/onnxruntime
 echo "ONNXRUNTIME_GIT_ROOT: $ONNXRUNTIME_GIT_ROOT"
 
-export ZENDNN_ONNXRT_VERSION="1.8.0"
+export ZENDNN_ONNXRT_VERSION="1.10.0"
 echo "ZENDNN_ONNXRT_VERSION: $ZENDNN_ONNXRT_VERSION"
 
 export ZENDNN_ONNX_VERSION="1.9.0"
@@ -249,11 +265,6 @@ echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
 # Enable primitive create and primitive execute logs. By default it is disabled
 export ZENDNN_PRIMITIVE_LOG_ENABLE=0
 echo "ZENDNN_PRIMITIVE_LOG_ENABLE: $ZENDNN_PRIMITIVE_LOG_ENABLE"
-
-# Export PATH and LD_LIBRARY_PATH for AOCC Compiler
-#FIXME: Use this for AOCC compiler path since 'source <compdir>/setenv_AOCC.sh' has issues
-export PATH=$ZENDNN_AOCC_COMP_PATH/bin:$PATH
-export LD_LIBRARY_PATH=$ZENDNN_AOCC_COMP_PATH/lib:$ZENDNN_AOCC_COMP_PATH/lib32:$LD_LIBRARY_PATH
 
 # Enable LIBM, By default, its disabled
 export ZENDNN_ENABLE_LIBM=0
@@ -273,18 +284,14 @@ fi
 
 # Export PATH and LD_LIBRARY_PATH for ZenDNN
 export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
-export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
 if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
 then
     export LD_LIBRARY_PATH=$ZENDNN_LIBM_PATH/lib/:$LD_LIBRARY_PATH
 fi
-export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
+
+export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
 
 echo "LD_LIBRARY_PATH: "$LD_LIBRARY_PATH
-
-#FIXME: create softlink for libomp.so.5, find a better solution
-cd $ZENDNN_AOCC_COMP_PATH/lib
-ln -sf libomp.so libomp.so.5
 
 # Flags for optimized execution of ONNXRT model
 export ZENDNN_BLOCKED_FORMAT=1
