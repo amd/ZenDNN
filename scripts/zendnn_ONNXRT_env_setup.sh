@@ -214,32 +214,18 @@ else
     echo "ZENDNN_PARENT_FOLDER: $ZENDNN_PARENT_FOLDER"
 fi
 
-if [ -z "$ZENDNN_AOCC_COMP_PATH" ];
-then
-    echo "Error: Environment variable ZENDNN_AOCC_COMP_PATH needs to be set"
-    return
-else
-    echo "ZENDNN_AOCC_COMP_PATH: $ZENDNN_AOCC_COMP_PATH"
-fi
-
-if [ -z "$ZENDNN_BLIS_PATH" ];
-then
-    echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"
-    return
-else
-    echo "ZENDNN_BLIS_PATH: $ZENDNN_BLIS_PATH"
-fi
-
-#Use local copy of ZenDNN library source code when building
-#ONNXRT
+#Use local copy of ZenDNN library source code when building ONNXRT
+#Default is build from local source for development and verification.
+#For release, export ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=0
 if [ -z "$ZENDNN_ONNXRT_USE_LOCAL_ZENDNN" ];
 then
-    export ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=0
+    export ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=1
 fi
 echo "ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=$ZENDNN_ONNXRT_USE_LOCAL_ZENDNN"
 
-#Use local copy of BLIS library source code when building
-#ONNXRT
+#Use local copy of BLIS library source code when building ONNXRT
+#Default is download and build from external git for development and verification
+#For verification with early drop pf BLIS, export ZENDNN_ONNXRT_USE_LOCAL_BLIS=1
 if [ -z "$ZENDNN_ONNXRT_USE_LOCAL_BLIS" ];
 then
     export ZENDNN_ONNXRT_USE_LOCAL_BLIS=0
