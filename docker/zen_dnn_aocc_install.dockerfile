@@ -27,8 +27,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get -y install numactl libnuma-dev hwloc
 RUN DEBIAN_FRONTEND=noninteractive apt-get -y install hwloc-nox ccache libopenblas-dev
 
 # set environment variable
-ENV ZENDNN_AOCC_COMP_PATH=/opt/mivisionx-deps/aocc-compiler-3.2.0
-ENV ZENDNN_BLIS_PATH=/opt/mivisionx-deps/aocl-linux-aocc-3.0-6/amd-blis
+ENV ZENDNN_AOCC_COMP_PATH=$ZEN_DNN_DEPS_ROOT/aocc-compiler-3.2.0
+ENV ZENDNN_BLIS_PATH=$ZEN_DNN_DEPS_ROOT/aocl-linux-aocc-3.0-6/amd-blis
 ENV ZENDNN_LIBM_PATH=/usr/lib/x86_64-linux-gnu
 
 # Working Directory
@@ -40,7 +40,7 @@ RUN echo "export OMP_NUM_THREADS=$(grep -c ^processor /proc/cpuinfo)" >> ~/.prof
 RUN echo "export GOMP_CPU_AFFINITY=\"0-$(grep ^cpu\\scores /proc/cpuinfo | uniq |  awk '{print $4}')\"" >> ~/.profile
 
 # set environment variable
-ENV ZENDNN_GIT_ROOT=/workspace/ZenDNN
+ENV ZENDNN_GIT_ROOT=$ZEN_DNN_WORKING_ROOT/ZenDNN
 
 # install Zen DNN
 RUN DEBIAN_FRONTEND=noninteractive git clone https://github.com/amd/ZenDNN.git && cd ZenDNN && make clean && \
