@@ -43,16 +43,16 @@ endif
 
 ifeq ($(RELEASE), 0)
 ifeq ($(AOCC), 0)
-	CXXFLAGS := -std=c++14 -O1 -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
+	CXXFLAGS := -std=c++14 -O0 -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
 	CXXFLAGSTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSGTEST := -std=c++14 -O1 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSBENCHTEST := -std=c++14 -O1 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSONEDNN := -std=c++14 -O1 -g -fPIC -fopenmp
+	CXXFLAGSGTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
+	CXXFLAGSBENCHTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
+	CXXFLAGSONEDNN := -std=c++14 -O0 -g -fPIC -fopenmp
 	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
-		COMMONFLAGS += -march=znver2 -flto
+		COMMONFLAGS += -march=znver2
 	else
-		COMMONFLAGS += -march=znver1 -flto
+		COMMONFLAGS += -march=znver1
 	endif
 else
 	CXXFLAGS := -std=c++14 -O0 -march=$(ZNVER) -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
