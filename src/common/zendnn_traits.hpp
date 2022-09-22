@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -120,6 +120,7 @@ PKIND_TRAITS_INST(deconvolution);
 PKIND_TRAITS_INST(shuffle);
 PKIND_TRAITS_INST(eltwise);
 PKIND_TRAITS_INST(softmax);
+PKIND_TRAITS_INST(softmax_v2);
 PKIND_TRAITS_INST(pooling);
 PKIND_TRAITS_INST(pooling_v2);
 PKIND_TRAITS_INST(prelu);

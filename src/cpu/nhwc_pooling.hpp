@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -64,13 +64,13 @@ struct nhwc_pooling_fwd_t : public primitive_t {
                             pooling_avg_exclude_padding)
                     && utils::everyone_is(
                             d_type, src_md()->data_type, dst_md()->data_type)
-                    && platform::has_data_type_support(d_type)
-                    && set_default_params() == status::success
+                    && platform::has_data_type_support(d_type) && !is_dilated()
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops, d_type)
+                    && set_default_params() == status::success
                     && memory_desc_matches_tag(*src_md(), desired_fmt_tag)
                     && memory_desc_matches_tag(*dst_md(), desired_fmt_tag)
-                    && !is_dilated();
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             const bool is_training = desc_.prop_kind == forward_training;
@@ -78,16 +78,19 @@ struct nhwc_pooling_fwd_t : public primitive_t {
                 init_default_ws();
             }
 
+            nthr_ = zendnn_get_max_threads();
             init_scratchpad();
 
             return status::success;
         }
 
+        int nthr_; // To not exceed the limit in execute used for set up.
+
     private:
         void init_scratchpad() {
             using namespace memory_tracking::names;
             if (src_md()->data_type == data_type::bf16) {
-                const size_t bf16cvt_sz_ = C() * zendnn_get_max_threads();
+                const size_t bf16cvt_sz_ = IC() * nthr_;
                 auto scratchpad = scratchpad_registry().registrar();
                 scratchpad.template book<float>(
                         key_pool_src_bf16cvt, bf16cvt_sz_);
@@ -153,16 +156,19 @@ struct nhwc_pooling_bwd_t : public primitive_t {
                 if (!compare_ws(hint_fwd_pd_)) return status::unimplemented;
             }
 
+            nthr_ = zendnn_get_max_threads();
             init_scratchpad();
 
             return status::success;
         }
 
+        int nthr_; // To not exceed the limit in execute used for set up.
+
     private:
         void init_scratchpad() {
             using namespace memory_tracking::names;
             if (diff_src_md()->data_type == data_type::bf16) {
-                size_t bf16cvt_sz_ = C() * zendnn_get_max_threads();
+                size_t bf16cvt_sz_ = IC() * nthr_;
                 auto scratchpad = scratchpad_registry().registrar();
                 scratchpad.template book<float>(
                         key_pool_src_bf16cvt, bf16cvt_sz_);

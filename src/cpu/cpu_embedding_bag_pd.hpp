@@ -27,6 +27,7 @@ struct cpu_embedding_bag_pd_t : public embedding_bag_pd_t {
     using embedding_bag_pd_t::embedding_bag_pd_t;
 };
 
+
 } // namespace cpu
 } // namespace impl
 } // namespace zendnn

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -34,14 +34,6 @@ struct lrn_fwd_pd_t;
 
 struct lrn_pd_t : public primitive_desc_t {
     static constexpr auto base_pkind = primitive_kind::lrn;
-
-    lrn_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
-            const lrn_fwd_pd_t *hint_fwd_pd)
-        : primitive_desc_t(attr, base_pkind)
-        , desc_(*adesc)
-        , hint_fwd_pd_(hint_fwd_pd)
-        , data_md_(desc_.data_desc)
-        , ws_md_() {}
 
     const lrn_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
@@ -85,6 +77,14 @@ protected:
     memory_desc_t data_md_;
     memory_desc_t ws_md_;
 
+    lrn_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
+            const lrn_fwd_pd_t *hint_fwd_pd)
+        : primitive_desc_t(attr, base_pkind)
+        , desc_(*adesc)
+        , hint_fwd_pd_(hint_fwd_pd)
+        , data_md_(desc_.data_desc)
+        , ws_md_() {}
+
 private:
     const memory_desc_t &data_desc() const { return desc_.data_desc; }
 };
@@ -92,10 +92,6 @@ private:
 struct lrn_fwd_pd_t : public lrn_pd_t {
     typedef lrn_fwd_pd_t base_class;
     typedef lrn_fwd_pd_t hint_class;
-
-    lrn_fwd_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
-            const lrn_fwd_pd_t *hint_fwd_pd)
-        : lrn_pd_t(adesc, attr, hint_fwd_pd) {}
 
     arg_usage_t arg_usage(int arg) const override {
         if (arg == ZENDNN_ARG_SRC) return arg_usage_t::input;
@@ -131,16 +127,16 @@ struct lrn_fwd_pd_t : public lrn_pd_t {
     int n_outputs() const override {
         return 1 + (!types::is_zero_md(workspace_md()));
     }
+
+protected:
+    lrn_fwd_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
+            const lrn_fwd_pd_t *hint_fwd_pd)
+        : lrn_pd_t(adesc, attr, hint_fwd_pd) {}
 };
 
 struct lrn_bwd_pd_t : public lrn_pd_t {
     typedef lrn_bwd_pd_t base_class;
     typedef lrn_fwd_pd_t hint_class;
-
-    lrn_bwd_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
-            const lrn_fwd_pd_t *hint_fwd_pd)
-        : lrn_pd_t(adesc, attr, hint_fwd_pd)
-        , diff_data_md_(desc_.diff_data_desc) {}
 
     arg_usage_t arg_usage(int arg) const override {
         if (utils::one_of(arg, ZENDNN_ARG_SRC, ZENDNN_ARG_DIFF_DST))
@@ -184,6 +180,11 @@ struct lrn_bwd_pd_t : public lrn_pd_t {
 
 protected:
     memory_desc_t diff_data_md_;
+
+    lrn_bwd_pd_t(const lrn_desc_t *adesc, const primitive_attr_t *attr,
+            const lrn_fwd_pd_t *hint_fwd_pd)
+        : lrn_pd_t(adesc, attr, hint_fwd_pd)
+        , diff_data_md_(desc_.diff_data_desc) {}
 
     bool set_default_formats_common() {
         if (diff_data_md_.format_kind != format_kind::any) return true;

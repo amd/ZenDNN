@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -47,6 +47,11 @@ protected:
         if (dst_layer_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(dst_layer_md_, tnc));
 
+        if (is_augru()) {
+            if (augru_attention_md().format_kind == format_kind::any)
+                CHECK(memory_desc_init_by_tag(augru_attention_md(), tnc));
+        }
+
         // Optional parameters
         if (with_src_iter() && src_iter_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(src_iter_md_, ldnc));
@@ -65,13 +70,13 @@ protected:
         return status::success;
     }
 
-    status_t check_layout_consistency() {
+    status_t check_layout_consistency(bool is_brgemm) {
         using namespace format_tag;
         using namespace data_type;
         using namespace types;
 
-        auto is_blocked = [&](const memory_desc_t &md, int ndims,
-                                  bool require_last_dim_contiguous) {
+        const auto is_blocked = [&](const memory_desc_t &md, int ndims,
+                                        bool require_last_dim_contiguous) {
             return md.format_kind == format_kind::blocked && md.ndims == ndims
                     && IMPLICATION(require_last_dim_contiguous,
                             md.format_desc.blocking.strides[md.ndims - 1] == 1);
@@ -130,8 +135,8 @@ protected:
                         with_bias(), memory_desc_matches_tag(bias_md_, ldgo));
 
         /* Int8 is supported only for packed weights, if not BRGEMM version */
-        data_type_t weights_iter_dt = weights_iter_md_.data_type;
-        data_type_t weights_layer_dt = weights_layer_md_.data_type;
+        const data_type_t weights_iter_dt = weights_iter_md_.data_type;
+        const data_type_t weights_layer_dt = weights_layer_md_.data_type;
         if (!rnn_utils::is_ldigo_blocked(&weights_iter_md_))
             ok = ok
                     && IMPLICATION(weights_iter_dt == s8,
@@ -156,6 +161,13 @@ protected:
             CHECK(memory_desc_init_by_tag(src_layer_md_, tnc));
         if (dst_layer_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(dst_layer_md_, tnc));
+
+        if (is_augru()) {
+            if (augru_attention_md().format_kind == format_kind::any)
+                CHECK(memory_desc_init_by_tag(augru_attention_md(), tnc));
+            if (diff_augru_attention_md().format_kind == format_kind::any)
+                CHECK(memory_desc_init_by_tag(diff_augru_attention_md(), tnc));
+        }
 
         if (diff_src_layer_md_.format_kind == format_kind::any)
             CHECK(memory_desc_init_by_tag(diff_src_layer_md_, tnc));
@@ -212,12 +224,12 @@ protected:
         return status::success;
     }
 
-    status_t check_layout_consistency() {
+    status_t check_layout_consistency(bool is_brgemm) {
         using namespace format_tag;
         using namespace types;
 
-        auto is_blocked = [&](const memory_desc_t &md, int ndims,
-                                  bool require_last_dim_contiguous) {
+        const auto is_blocked = [&](const memory_desc_t &md, int ndims,
+                                        bool require_last_dim_contiguous) {
             return md.format_kind == format_kind::blocked && md.ndims == ndims
                     && IMPLICATION(require_last_dim_contiguous,
                             md.format_desc.blocking.strides[md.ndims - 1] == 1);
@@ -236,20 +248,24 @@ protected:
                 && IMPLICATION(!is_zero_md(&dst_iter_c_md_),
                         is_blocked(dst_iter_c_md_, 4, true));
 
-        if (weights_layer_md_.format_kind == format_kind::rnn_packed)
-            ok = ok
-                    && (weights_layer_md_.format_desc.rnn_packed_desc.format
-                            == zendnn_ldgoi_p);
-        else
-            ok = ok && rnn_utils::is_ldgoi(&weights_layer_md_);
+        const auto check_weights_consistency =
+                [&](const memory_desc_t &weights_md) {
+                    if (weights_md.format_kind == format_kind::rnn_packed)
+                        return ok
+                                && weights_md.format_desc.rnn_packed_desc.format
+                                == zendnn_ldgoi_p;
+                    else if (is_brgemm)
+                        return ok && rnn_utils::is_ldgoi_blocked(&weights_md);
+                    else
+                        return ok && rnn_utils::is_ldgoi(&weights_md);
+                };
 
-        if (weights_iter_md_.format_kind == format_kind::rnn_packed)
-            ok = ok
-                    && (weights_iter_md_.format_desc.rnn_packed_desc.format
-                            == zendnn_ldgoi_p);
-        else
-            ok = ok && rnn_utils::is_ldgoi(&weights_iter_md_);
+        ok = check_weights_consistency(weights_layer_md_);
+        ok = check_weights_consistency(weights_iter_md_);
 
+        ok = ok
+                && IMPLICATION(is_augru(),
+                        memory_desc_matches_tag(augru_attention_md(), tnc));
         ok = ok
                 && IMPLICATION(is_lstm_peephole(),
                         memory_desc_matches_tag(weights_peephole_md_, ldgo));
@@ -272,10 +288,15 @@ protected:
                 && IMPLICATION(!is_zero_md(&diff_dst_iter_c_md_),
                         is_blocked(diff_dst_iter_c_md_, 4, true));
 
+        ok = ok
+                && IMPLICATION(is_augru(),
+                        memory_desc_matches_tag(
+                                diff_augru_attention_md(), tnc));
         ok = ok && rnn_utils::is_ldigo(&diff_weights_layer_md_)
                 && rnn_utils::is_ldigo(&diff_weights_iter_md_);
         ok = ok
-                && IMPLICATION(!is_zero_md(&diff_weights_peephole_md_),
+                && IMPLICATION(is_lstm_peephole()
+                                && !is_zero_md(&diff_weights_peephole_md_),
                         memory_desc_matches_tag(
                                 diff_weights_peephole_md_, ldgo));
         ok = ok

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 * Copyright 2018 YANDEX LLC
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +26,7 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/x64/injectors/injector_utils.hpp"
 #include "cpu/x64/injectors/jit_uni_binary_injector.hpp"
 #include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
@@ -61,7 +62,7 @@ jit_avx2_conv_fwd_kernel_f32::jit_avx2_conv_fwd_kernel_f32(
 
         rhs_arg_static_params_t rhs_arg_static_params {helper_vmm_idx, r13, r14,
                 preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md), tail_size,
                 use_exact_tail_scalar_bcast};
         static_params_t static_params {this->param1, rhs_arg_static_params};
@@ -214,33 +215,22 @@ void jit_avx2_conv_fwd_kernel_f32::apply_postops(
         if (jcp.with_binary) {
             binary_injector::rhs_arg_dynamic_params_t rhs_arg_params,
                     rhs_arg_params_tail;
-            const auto temp_offset_reg = r12;
             iterate(oc_blocks, ur_w, oc_tail,
                     [&](const bool mask_flag, const int i, const int j) {
-                        const int aux_output_offset
-                                = get_output_offset(i, j) / sizeof(float);
+                        const size_t aux_output_offset
+                                = get_output_offset(i, j);
                         const auto vmm_idx = get_ymm_idx(ur_w, i, j);
                         vmm_idxs.emplace(vmm_idx);
 
-                        rhs_arg_params_tail.vmm_idx_to_oc_elem_off_addr.emplace(
-                                vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-                        rhs_arg_params_tail.vmm_idx_to_oc_elem_off_val.emplace(
-                                vmm_idx, i * jcp.oc_block);
+                        rhs_arg_params_tail.vmm_idx_to_out_reg.emplace(
+                                vmm_idx, reg_output);
                         rhs_arg_params_tail.vmm_idx_to_out_elem_off_val.emplace(
                                 vmm_idx, aux_output_offset);
-                        rhs_arg_params_tail.vmm_idx_to_out_off_oprnd.emplace(
-                                vmm_idx, temp_offset_reg);
                         if (mask_flag)
                             rhs_arg_params_tail.vmm_tail_idx_.emplace(vmm_idx);
                     });
             rhs_arg_params = rhs_arg_params_tail;
             rhs_arg_params.vmm_tail_idx_.clear();
-
-            const injector_utils::register_preserve_guard_t register_guard(
-                    this, {temp_offset_reg});
-            mov(temp_offset_reg, reg_output);
-            sub(temp_offset_reg, ptr[param1 + GET_OFF(dst_orig)]);
-            shr(temp_offset_reg, std::log2(sizeof(float)));
 
             Label postops_done;
             if (oc_tail) {
@@ -397,7 +387,8 @@ void jit_avx2_conv_fwd_kernel_f32::width_blk_step(
     Label kh_loop;
     L(kh_loop);
     {
-        if (jcp.kw >= 5 && pad_l == 0 && pad_r == 0) {
+        if ((jcp.ic % jcp.ic_block == 0) && jcp.kw >= 5 && pad_l == 0
+                && pad_r == 0) {
             oh_step_nopad(ur_w, pad_l, pad_r, oc_blocks);
             add(aux_reg_input,
                     get_input_offset(0, filter_h_to_input(1))
@@ -435,13 +426,21 @@ void jit_avx2_conv_fwd_kernel_f32::width_blk_step(
     apply_postops(oc_blocks, ur_w, oc_tail);
 
     auto store_output = [=](bool is_tail, int tail) {
+        const auto is_padding = jcp.oc_without_padding != jcp.oc;
+        if (is_padding) uni_vxorps(ytmp, ytmp, ytmp);
         for (int ii = 0; ii < oc_blocks; ii++)
             for (int jj = 0; jj < ur_w; jj++) {
                 Ymm reg_out = get_ymm(ur_w, ii, jj);
-                if (is_tail && ii == oc_blocks - 1)
+                if (is_tail && ii == oc_blocks - 1) {
+                    if (is_padding && jcp.with_binary) {
+                        vmovups(make_safe_addr(reg_output,
+                                        get_output_offset(ii, jj),
+                                        reg_long_offt),
+                                ytmp);
+                    }
                     store_bytes(reg_out, reg_output, get_output_offset(ii, jj),
                             tail * sizeof(float));
-                else
+                } else
                     vmovups(make_safe_addr(reg_output,
                                     get_output_offset(ii, jj), reg_long_offt),
                             reg_out);
@@ -585,6 +584,7 @@ status_t jit_avx2_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
         const memory_desc_wrapper &weights_d, const memory_desc_wrapper &dst_d,
         const primitive_attr_t &attr) {
     if (!mayiuse(avx)) return status::unimplemented;
+    jcp.isa = mayiuse(avx2) ? avx2 : avx;
 
     jcp.nthr = zendnn_get_max_threads();
 
@@ -701,8 +701,10 @@ status_t jit_avx2_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({avx2, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero});
     if (!post_ops_ok_) return status::unimplemented;
 
     bool args_ok = true

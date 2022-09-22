@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -169,6 +169,8 @@ enum {
     key_brgemm_primitive_buffer_a,
     key_brgemm_primitive_buffer_b,
     key_brgemm_primitive_buffer_comp,
+    key_brgemm_primitive_zp_comp_a,
+    key_brgemm_primitive_zp_comp_b,
     key_concat_iptrs,
     key_concat_istrides,
     key_concat_nelems,
@@ -256,7 +258,11 @@ enum {
     key_reorder_rnn_weights_transposition,
     key_rnn_space,
     key_rnn_cell,
+    key_rnn_diff_states,
     key_rnn_gates,
+    key_rnn_gates_blocked,
+    key_rnn_src_layer_trans,
+    key_rnn_src_iter_trans,
     key_rnn_ht,
     key_rnn_diff_ht,
     key_rnn_ptrs_bia,
@@ -264,6 +270,7 @@ enum {
     key_rnn_ptrs_wei_iter,
     key_rnn_ptrs_wei_projection,
     key_softmax_reduction,
+    key_softmax_interim_store,
     key_sum_reduction,
     key_sum_srcs_cvt,
     key_wino_U,
@@ -349,6 +356,7 @@ struct registry_t {
         assert(alignment > 0 && (alignment & (alignment - 1)) == 0);
         size_t capacity
                 = size + get_alignment(alignment) + buffer_protect_size();
+        assert(capacity < (SIZE_MAX + INT_MIN));
         offset_map_[key] = entry_t {size_, size, capacity, alignment};
 
         size_ += capacity;
@@ -428,6 +436,7 @@ struct registrar_t {
 
     void book(const key_t &key, size_t nelems, size_t data_size,
             size_t data_align = 0, size_t perf_align = default_alignment) {
+        assert(nelems < (SIZE_MAX + INT_MIN));
         if (data_align == 0) data_align = data_size;
         registry_.book(make_key(prefix_, key), nelems * data_size, data_align,
                 perf_align);

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-int jit_avx2_kernel_sgemm_kern::next_acc(int idx, int um, int un) {
+int jit_avx2_kernel_sgemm_kern::next_acc(int idx, int um, int un) const {
     while (!(((idx / unroll_n_) < std::max(1, um / nelt_per_vecreg_))
             || ((idx % unroll_n_) < un)))
         idx++;
@@ -211,9 +211,10 @@ void jit_avx2_kernel_sgemm_kern::generate() {
     int LDC_off = is_windows ? 64 : 16;
     int sepload = 0;
 
-    Xbyak::Label unroll_x_label[MAX_UNROLL_M],
-            unroll_y_label[(MAX_UNROLL_N_BIN + 1) * MAX_UNROLL_M];
-    Xbyak::Label end_n_loop_label[MAX_UNROLL_M], end_m_loop_label;
+    std::vector<Xbyak::Label> unroll_x_label(MAX_UNROLL_M),
+            unroll_y_label((MAX_UNROLL_N_BIN + 1) * MAX_UNROLL_M);
+    std::vector<Xbyak::Label> end_n_loop_label(MAX_UNROLL_M);
+    Xbyak::Label end_m_loop_label;
 
     preamble();
 

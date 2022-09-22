@@ -1,11 +1,12 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 * Copyright 2021 FUJITSU LIMITED
+* Copyright 2021-2022 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,6 +30,9 @@
 using namespace zendnn::impl::cpu::x64;
 #elif ZENDNN_AARCH64
 #include "cpu/aarch64/jit_uni_softmax.hpp"
+#if ZENDNN_AARCH64_USE_ACL
+#include "cpu/aarch64/acl_softmax.hpp"
+#endif
 using namespace zendnn::impl::cpu::aarch64;
 #endif
 
@@ -36,36 +40,54 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace zendnn::impl::data_type;
+using namespace zendnn::impl::prop_kind;
 
-// clang-format off
-const pd_create_f impl_list[] = {
-        CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_softmax_bwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<sse41>)
-        CPU_INSTANCE_AARCH64(jit_uni_softmax_fwd_t<sve_512>)
-        CPU_INSTANCE_AARCH64(jit_uni_softmax_bwd_t<sve_512>)
-        CPU_INSTANCE(ref_softmax_fwd_t<f32>)
-        CPU_INSTANCE(ref_softmax_bwd_t<f32>)
-        CPU_INSTANCE(ref_softmax_fwd_t<bf16>)
-        CPU_INSTANCE(ref_softmax_bwd_t<bf16>)
-        /* eol */
-        nullptr,
-};
-// clang-format on
-} // namespace
-
-const pd_create_f *get_softmax_impl_list(const softmax_desc_t *desc) {
-    UNUSED(desc);
-    return impl_list;
+const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
+    // clang-format off
+    static std::map<pk_impl_key_t, std::vector<impl_list_item_t>> the_map =  REG_SOFTMAX_P({
+        {{forward}, {
+            CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_softmax_fwd_t<sse41>)
+            CPU_INSTANCE_AARCH64(jit_uni_softmax_fwd_t<sve_512>)
+            CPU_INSTANCE_AARCH64(jit_uni_softmax_bwd_t<sve_512>)
+            CPU_INSTANCE_AARCH64_ACL(acl_softmax_fwd_t)
+            CPU_INSTANCE(ref_softmax_fwd_t)
+            nullptr,
+        }},
+        {{backward}, REG_BWD_PK({
+            CPU_INSTANCE_X64(jit_uni_softmax_bwd_t<avx512_core>)
+            CPU_INSTANCE(ref_softmax_bwd_t)
+            nullptr,
+        })},
+    });
+    // clang-format on
+    return the_map;
 }
 
-const pd_create_f *get_logsoftmax_impl_list(const logsoftmax_desc_t *desc) {
-    return get_softmax_impl_list(desc);
+} // namespace
+
+const impl_list_item_t *get_softmax_v2_impl_list(
+        const softmax_v2_desc_t *desc) {
+    static const impl_list_item_t empty_list[] = {nullptr};
+
+    const bool is_fwd = utils::one_of(
+            desc->prop_kind, forward_training, forward_inference);
+    prop_kind_t prop_kind = is_fwd ? forward : backward;
+
+    pk_impl_key_t key {prop_kind};
+
+    const auto impl_list_it = impl_list_map().find(key);
+    return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()
+                                                  : empty_list;
+}
+
+const impl_list_item_t *get_logsoftmax_impl_list(
+        const logsoftmax_desc_t *desc) {
+    return get_softmax_v2_impl_list(
+            reinterpret_cast<const softmax_v2_desc_t *>(desc));
 }
 
 } // namespace cpu

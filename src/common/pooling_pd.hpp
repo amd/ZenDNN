@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,13 +37,6 @@ struct pooling_fwd_pd_t;
 struct pooling_pd_t : public primitive_desc_t {
     static constexpr auto base_pkind = primitive_kind::pooling_v2;
 
-    pooling_pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
-            const pooling_fwd_pd_t *hint_fwd_pd)
-        : primitive_desc_t(attr, base_pkind)
-        , desc_(cast_pool_v1_to_v2(*adesc))
-        , hint_fwd_pd_(hint_fwd_pd)
-        , ws_md_() {}
-
     const pooling_v2_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
         return reinterpret_cast<const op_desc_t *>(this->desc());
@@ -72,7 +65,8 @@ struct pooling_pd_t : public primitive_desc_t {
     /* common pooling aux functions */
 
     dim_t MB() const { return src_desc().dims[0]; }
-    dim_t C() const { return src_desc().dims[1]; }
+    dim_t IC() const { return src_desc().dims[1]; }
+    dim_t OC() const { return IC(); }
 
     dim_t ID() const { return ndims() >= 5 ? src_desc().dims[ndims() - 3] : 1; }
     dim_t IH() const { return ndims() >= 4 ? src_desc().dims[ndims() - 2] : 1; }
@@ -90,17 +84,17 @@ struct pooling_pd_t : public primitive_desc_t {
     dim_t KSH() const { return ndims() >= 4 ? desc_.strides[ndims() - 4] : 1; }
     dim_t KSW() const { return desc_.strides[ndims() - 3]; }
 
-    dim_t DD() const {
+    dim_t KDD() const {
         return is_pooling_v2()
                 ? (ndims() >= 5 ? desc_.dilation[ndims() - 5] : 0)
                 : 0;
     }
-    dim_t DH() const {
+    dim_t KDH() const {
         return is_pooling_v2()
                 ? (ndims() >= 4 ? desc_.dilation[ndims() - 4] : 0)
                 : 0;
     }
-    dim_t DW() const {
+    dim_t KDW() const {
         return is_pooling_v2() ? desc_.dilation[ndims() - 3] : 0;
     }
 
@@ -121,12 +115,11 @@ struct pooling_pd_t : public primitive_desc_t {
 
     int ndims() const { return src_desc().ndims; }
     int spatial_ndims() const { return ndims() - 2; }
-    bool is_3d() const { return ndims() == 5; }
 
     bool is_pooling_v2() const {
         return desc_.primitive_kind == primitive_kind::pooling_v2;
     }
-    bool is_dilated() const { return DD() != 0 || DH() != 0 || DW() != 0; }
+    bool is_dilated() const { return KDD() != 0 || KDH() != 0 || KDW() != 0; }
 
     bool has_zero_dim_memory() const {
         return memory_desc_wrapper(src_desc()).has_zero_dim();
@@ -150,6 +143,13 @@ protected:
     const pooling_fwd_pd_t *hint_fwd_pd_;
 
     memory_desc_t ws_md_;
+
+    pooling_pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
+            const pooling_fwd_pd_t *hint_fwd_pd)
+        : primitive_desc_t(attr, base_pkind)
+        , desc_(cast_pool_v1_to_v2(*adesc))
+        , hint_fwd_pd_(hint_fwd_pd)
+        , ws_md_() {}
 
     void init_default_ws(data_type_t dt = data_type::undef) {
         ws_md_ = is_fwd() ? *dst_md() : *diff_dst_md();
@@ -209,12 +209,6 @@ struct pooling_fwd_pd_t : public pooling_pd_t {
     typedef pooling_fwd_pd_t base_class;
     typedef pooling_fwd_pd_t hint_class;
 
-    pooling_fwd_pd_t(const pooling_v2_desc_t *adesc,
-            const primitive_attr_t *attr, const pooling_fwd_pd_t *hint_fwd_pd)
-        : pooling_pd_t(adesc, attr, hint_fwd_pd)
-        , src_md_(desc_.src_desc)
-        , dst_md_(desc_.dst_desc) {}
-
     arg_usage_t arg_usage(int arg) const override {
         if (arg == ZENDNN_ARG_SRC) return arg_usage_t::input;
 
@@ -250,9 +244,20 @@ struct pooling_fwd_pd_t : public pooling_pd_t {
         return 1 + (!types::is_zero_md(workspace_md()));
     }
 
+    std::vector<memory_desc_t> hint_mds(bool is_hint) const override {
+        if (!is_hint) return {};
+        return {*dst_md(0)};
+    }
+
 protected:
     memory_desc_t src_md_;
     memory_desc_t dst_md_;
+
+    pooling_fwd_pd_t(const pooling_v2_desc_t *adesc,
+            const primitive_attr_t *attr, const pooling_fwd_pd_t *hint_fwd_pd)
+        : pooling_pd_t(adesc, attr, hint_fwd_pd)
+        , src_md_(desc_.src_desc)
+        , dst_md_(desc_.dst_desc) {}
 
     virtual status_t set_default_params() {
         if (dst_md()->format_kind != format_kind::any) return status::success;
@@ -268,12 +273,6 @@ protected:
 struct pooling_bwd_pd_t : public pooling_pd_t {
     typedef pooling_bwd_pd_t base_class;
     typedef pooling_fwd_pd_t hint_class;
-
-    pooling_bwd_pd_t(const pooling_v2_desc_t *adesc,
-            const primitive_attr_t *attr, const pooling_fwd_pd_t *hint_fwd_pd)
-        : pooling_pd_t(adesc, attr, hint_fwd_pd)
-        , diff_src_md_(desc_.diff_src_desc)
-        , diff_dst_md_(desc_.diff_dst_desc) {}
 
     arg_usage_t arg_usage(int arg) const override {
         if (arg == ZENDNN_ARG_DIFF_DST) return arg_usage_t::input;
@@ -310,16 +309,32 @@ struct pooling_bwd_pd_t : public pooling_pd_t {
     }
     int n_outputs() const override { return 1; }
 
+    std::vector<memory_desc_t> hint_mds(bool is_hint) const override {
+        assert(!is_hint);
+        MAYBE_UNUSED(is_hint);
+        return hint_mds_;
+    }
+
 protected:
     memory_desc_t diff_src_md_;
     memory_desc_t diff_dst_md_;
+
+    pooling_bwd_pd_t(const pooling_v2_desc_t *adesc,
+            const primitive_attr_t *attr, const pooling_fwd_pd_t *hint_fwd_pd)
+        : pooling_pd_t(adesc, attr, hint_fwd_pd)
+        , diff_src_md_(desc_.diff_src_desc)
+        , diff_dst_md_(desc_.diff_dst_desc) {
+        if (hint_fwd_pd_)
+            hint_mds_ = hint_fwd_pd_->hint_mds(true /* is_hint */);
+    }
 
     virtual status_t set_default_params() {
         if (diff_dst_md()->format_kind == format_kind::any) {
             status_t status = status::success;
             if (hint_fwd_pd_)
                 status = memory_desc_init_by_md_and_dt(diff_dst_md_,
-                        *hint_fwd_pd_->dst_md(0), diff_dst_md_.data_type);
+                        hint_mds(false /* is_hint */)[0],
+                        diff_dst_md_.data_type);
             else
                 status = memory_desc_init_by_strides(diff_dst_md_, nullptr);
             if (status != status::success) return status;
@@ -334,6 +349,9 @@ protected:
         return memory_desc_init_by_blocking_desc(
                 diff_src_md_, diff_dst_md_.format_desc.blocking);
     }
+
+private:
+    std::vector<memory_desc_t> hint_mds_;
 };
 
 } // namespace impl

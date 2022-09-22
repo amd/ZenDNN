@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@
 #define COMMON_ZENDNN_THREAD_HPP
 
 #include <algorithm>
+#include <functional>
+#include <mutex>
 
 #include "utils.hpp"
 #include "z_magic.hpp"
@@ -105,14 +107,17 @@ inline int zendnn_get_max_threads() {
     // 4 or 8) depending on the configuration of the cpuid mask. It is expected
     // that the number of threads in user's threadpool will not exceed this
     // value.
-    if (def_max_threads == 0)
+    static std::once_flag initialization_flag_;
+    std::call_once(initialization_flag_, [&] {
         def_max_threads
                 = (int)zendnn::impl::cpu::platform::get_max_threads_to_use();
-    assert(def_max_threads > 0);
-    // Use the default value if the threadpool-provided is outside the range
-    // [1, def_max_threads]
-    return tp ? std::min(std::max(1, tp->get_num_threads()), def_max_threads)
-              : def_max_threads;
+        assert(def_max_threads > 0);
+    });
+
+    // Make user responsible for number of threads provided at execution time.
+    // This relates to the fact that the library may identify `def_max_threads`
+    // incorrectly for a platform.
+    return tp ? std::max(1, tp->get_num_threads()) : def_max_threads;
 }
 inline int zendnn_in_parallel() {
     using namespace zendnn::impl::threadpool_utils;
@@ -234,10 +239,107 @@ void balance2D(U nthr, U ithr, T ny, T &ny_start, T &ny_end, T nx, T &nx_start,
     balance211(ny, grp_nthr, grp_ithr, ny_start, ny_end);
 }
 
+/* Functions:
+ *  - parallel(nthr, f)                  - executes f in parallel using at
+ *                                         most nthr threads. If nthr equals
+ *                                         0 zendnn_get_current_num_threads() threads
+ *                                         is used
+ *  - for_nd(ithr, nthr, dims..., f)     - multidimensional for loop for
+ *                                         already created threads
+ *  - for_nd_ext(ithr, nthr, dims..., f) - multidimensional for loop for
+ *                                         already created threads that passes
+ *                                         ithr and nthr
+ *  - parallel_nd(dims..., f)            - creates a parallel section and then
+ *                                         calls for_nd
+ *  - parallel_nd_ext(dims..., f)        - creates a parallel section and then
+ *                                         calls for_nd_ext
+ *  - parallel_nd_in_omp(dims..., f)     - queries current nthr and ithr and
+ *                                         then calls for_nd (mostly for
+ *                                         convenience)
+ */
+
+/* general parallelization */
+void ZENDNN_API parallel(int nthr, const std::function<void(int, int)> &f);
+
+/* for_nd section */
+void for_nd(const int ithr, const int nthr, dim_t D0,
+        const std::function<void(dim_t)> &f);
+void for_nd(const int ithr, const int nthr, dim_t D0, dim_t D1,
+        const std::function<void(dim_t, dim_t)> &f);
+void for_nd(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        const std::function<void(dim_t, dim_t, dim_t)> &f);
+void for_nd(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3, const std::function<void(dim_t, dim_t, dim_t, dim_t)> &f);
+void for_nd(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3, dim_t D4,
+        const std::function<void(dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+void for_nd(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3, dim_t D4, dim_t D5,
+        const std::function<void(dim_t, dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+/* for_nd_ext section */
+void for_nd_ext(const int ithr, const int nthr, dim_t D0,
+        const std::function<void(int, int, dim_t)> &f);
+void for_nd_ext(const int ithr, const int nthr, dim_t D0, dim_t D1,
+        const std::function<void(int, int, dim_t, dim_t)> &f);
+void for_nd_ext(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        const std::function<void(int, int, dim_t, dim_t, dim_t)> &f);
+void for_nd_ext(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3,
+        const std::function<void(int, int, dim_t, dim_t, dim_t, dim_t)> &f);
+void for_nd_ext(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3, dim_t D4,
+        const std::function<void(int, int, dim_t, dim_t, dim_t, dim_t, dim_t)>
+                &f);
+void for_nd_ext(const int ithr, const int nthr, dim_t D0, dim_t D1, dim_t D2,
+        dim_t D3, dim_t D4, dim_t D5,
+        const std::function<void(
+                int, int, dim_t, dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+/* parallel_nd_ext section */
+void parallel_nd_ext(
+        int nthr, dim_t D0, const std::function<void(int, int, dim_t)> &f);
+void parallel_nd_ext(int nthr, dim_t D0, dim_t D1,
+        const std::function<void(int, int, dim_t, dim_t)> &f);
+void parallel_nd_ext(int nthr, dim_t D0, dim_t D1, dim_t D2,
+        const std::function<void(int, int, dim_t, dim_t, dim_t)> &f);
+void parallel_nd_ext(int nthr, dim_t D0, dim_t D1, dim_t D2, dim_t D3,
+        const std::function<void(int, int, dim_t, dim_t, dim_t, dim_t)> &f);
+void parallel_nd_ext(int nthr, dim_t D0, dim_t D1, dim_t D2, dim_t D3, dim_t D4,
+        const std::function<void(int, int, dim_t, dim_t, dim_t, dim_t, dim_t)>
+                &f);
+void parallel_nd_ext(int nthr, dim_t D0, dim_t D1, dim_t D2, dim_t D3, dim_t D4,
+        dim_t D5,
+        const std::function<void(
+                int, int, dim_t, dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+/* parallel_nd section */
+void ZENDNN_API parallel_nd(dim_t D0, const std::function<void(dim_t)> &f);
+void ZENDNN_API parallel_nd(
+        dim_t D0, dim_t D1, const std::function<void(dim_t, dim_t)> &f);
+void ZENDNN_API parallel_nd(dim_t D0, dim_t D1, dim_t D2,
+        const std::function<void(dim_t, dim_t, dim_t)> &f);
+void ZENDNN_API parallel_nd(dim_t D0, dim_t D1, dim_t D2, dim_t D3,
+        const std::function<void(dim_t, dim_t, dim_t, dim_t)> &f);
+void ZENDNN_API parallel_nd(dim_t D0, dim_t D1, dim_t D2, dim_t D3, dim_t D4,
+        const std::function<void(dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+void ZENDNN_API parallel_nd(dim_t D0, dim_t D1, dim_t D2, dim_t D3, dim_t D4,
+        dim_t D5,
+        const std::function<void(dim_t, dim_t, dim_t, dim_t, dim_t, dim_t)> &f);
+/* parallel_nd_in_omp section */
+
+template <typename... Args>
+void parallel_nd_in_omp(Args &&... args) {
+#if ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_SEQ
+    for_nd(0, 1, utils::forward<Args>(args)...);
+#elif ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_OMP
+    for_nd(omp_get_thread_num(), omp_get_num_threads(),
+            utils::forward<Args>(args)...);
+#elif (ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_TBB \
+        || ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_THREADPOOL)
+    assert(!"parallel_nd_in_omp() is not supported by this ZENDNN_CPU_RUNTIME");
+#endif
+}
+
 } // namespace impl
 } // namespace zendnn
-
-#include "zendnn_thread_parallel_nd.hpp"
 
 #endif
 

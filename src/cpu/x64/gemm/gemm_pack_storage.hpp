@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -49,6 +49,10 @@ struct gemm_pack_storage_t {
 
     size_t size() const { return header->size; }
     void *get() const { return static_cast<void *>(base); }
+    void set(void *data) {
+        base = static_cast<char *>(data);
+        header = static_cast<header_t *>(data);
+    }
 
     bool single_nocopy() const {
         return (threading().copy == copy_type::no_copy);
@@ -63,7 +67,8 @@ struct gemm_pack_storage_t {
     }
 
     template <typename data_type>
-    gemm_pack_storage_t(data_type *data_) : base(nullptr) {
+    gemm_pack_storage_t(data_type *data_, bool header_set_ = true)
+        : base(nullptr), header_set(header_set_) {
         reset((void *)data_);
     }
 
@@ -71,7 +76,8 @@ struct gemm_pack_storage_t {
         : base(nullptr)
         , header(nullptr)
         , matrix_header(nullptr)
-        , sums_header(nullptr) {}
+        , sums_header(nullptr)
+        , header_set(true) {}
 
     std::tuple<int, int> thread_slice_info(int ithr) const {
         assert(ithr < nthr());
@@ -183,6 +189,8 @@ struct gemm_pack_storage_t {
         total_header_size = sz_h + sz_mh * 2;
 
         header->size = 0;
+
+        header_set = true;
 
         reset(get());
 
@@ -348,14 +356,17 @@ protected:
     bool col_major() const { return (which() == matrix_id::a); }
 
     void reset(void *data) {
-        base = static_cast<char *>(data);
-        header = static_cast<header_t *>(data);
+        set(data);
+
+        if (!header_set) return;
 
         matrix_header = reinterpret_cast<matrix_header_t *>(
                 base + header->off_matrix);
         sums_header
                 = reinterpret_cast<matrix_header_t *>(base + header->off_sums);
     }
+
+    bool header_set = true;
 };
 
 struct gemm_pack_storage_shell_t : public gemm_pack_storage_t {
@@ -364,7 +375,7 @@ struct gemm_pack_storage_shell_t : public gemm_pack_storage_t {
             bool has_col_sums = false) {
         void *ptr = malloc(shell_size(max_nthr), 64);
         if (ptr) {
-            reset(ptr);
+            set(ptr);
             setup(max_nthr, has_row_sums, has_col_sums);
         }
     }

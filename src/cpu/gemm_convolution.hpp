@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -45,22 +45,20 @@ struct gemm_convolution_fwd_t : public primitive_t {
                 GEMM_IMPL_STR, gemm_convolution_fwd_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            using namespace data_type;
+
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(data_type::f32, data_type::f32,
-                            data_type::f32, data_type::f32, data_type::f32)
+                    && expect_data_types(f32, f32, f32, f32, f32)
                     && !has_zero_dim_memory()
                     && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::post_ops,
-                            data_type::f32)
-                    && post_ops_ok()
-                    && bias_md_.ndims != 0;
-
+                            primitive_attr_t::skip_mask_t::post_ops, f32)
+                    && post_ops_ok();
             if (!ok) return status::unimplemented;
 
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
-                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, *attr(),
+                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, attr_,
                     zendnn_get_max_threads());
         }
 
@@ -140,7 +138,7 @@ struct gemm_convolution_bwd_data_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
                     *desc(), diff_src_md_, weights_md_, diff_dst_md_, bias_md_,
-                    *attr(), zendnn_get_max_threads());
+                    attr_, zendnn_get_max_threads());
         }
 
         conv_gemm_conf_t jcp_;
@@ -188,7 +186,7 @@ struct gemm_convolution_bwd_weights_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
                     *desc(), src_md_, diff_weights_md_, diff_dst_md_,
-                    diff_bias_md_, *attr(), zendnn_get_max_threads());
+                    diff_bias_md_, attr_, zendnn_get_max_threads());
         }
 
         conv_gemm_conf_t jcp_;

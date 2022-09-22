@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,7 +24,9 @@
 #include "engine.hpp"
 #include "utils.hpp"
 
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
 #include "cpu/cpu_engine.hpp"
+#endif
 
 #include "scratchpad.hpp"
 
@@ -33,8 +35,9 @@ namespace impl {
 
 namespace {
 
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
 engine_t *get_cpu_engine() {
-    static std::unique_ptr<engine_t> cpu_engine;
+    static std::unique_ptr<engine_t, engine_deleter_t> cpu_engine;
     static std::once_flag initialized;
     std::call_once(initialized, [&]() {
         engine_t *cpu_engine_ptr;
@@ -46,6 +49,7 @@ engine_t *get_cpu_engine() {
     });
     return cpu_engine.get();
 }
+#endif
 
 memory_storage_t *create_scratchpad_memory_storage(
         engine_t *engine, size_t size) {
@@ -59,11 +63,15 @@ memory_storage_t *create_scratchpad_memory_storage(
     // scratchpad has to be destroyed from inside a kernel. This doesn't
     // play well with SYCL runtime, so switching to native CPU engine for such
     // cases.
-    engine_t *mem_engine
-            = (engine->kind() == engine_kind::cpu
-                      && !is_native_runtime(engine->runtime_kind()))
+    engine_t *mem_engine = nullptr;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    mem_engine = (engine->kind() == engine_kind::cpu
+                         && !is_native_runtime(engine->runtime_kind()))
             ? get_cpu_engine()
             : engine;
+#else
+    mem_engine = engine;
+#endif
 
     memory_storage_t *mem_storage = nullptr;
     auto status = mem_engine->create_memory_storage(&mem_storage, size);
@@ -156,7 +164,7 @@ thread_local unsigned int global_scratchpad_t::reference_count_ = 0;
 */
 scratchpad_t *create_scratchpad(
         engine_t *engine, size_t size, bool use_global_scratchpad) {
-#if ZENDNN_ENABLE_CONCURRENT_EXEC
+#ifndef ZENDNN_ENABLE_CONCURRENT_EXEC
     /*
      * TODO: global scratchpad should be able to handle memory
      * from different engines.

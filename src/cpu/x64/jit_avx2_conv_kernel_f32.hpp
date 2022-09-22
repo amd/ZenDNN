@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -79,6 +79,9 @@ private:
     reg64_t reg_long_offt = r15;
     Xbyak::Reg32 reg_ci_flag = r13d;
     Xbyak::Reg32 reg_oc_flag = r14d;
+
+    /* binary post-ops operand */
+    reg64_t temp_offset_reg = r12;
 
     Xbyak::Ymm ytmp = Xbyak::Ymm(14);
 

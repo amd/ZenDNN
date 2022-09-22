@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -112,7 +112,7 @@ void jit_sse41_gemv_t_f32_kern::innerloop(int unroll_m, int unroll_n) {
 void jit_sse41_gemv_t_f32_kern::outerloop(
         int unroll_x, int unroll_y, Label *&cur_outerloop_label) {
     if ((unroll_x > M_UNROLL_) || (unroll_y > N_UNROLL_) || (unroll_y < 0)
-            || (unroll_y < 0))
+            || unroll_x < 0)
         return;
 
     Label label_m_loop, label_n_loop, label_m_remainder_loops[4];

@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <cblas.h>
 #include <iostream>
 #include <algorithm>
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 
 #define AT(arr, nchannels, nwidth, h, w, ci) (arr[ h * nwidth * nchannels + w * nchannels + ci])
 #define AT_HWCN(arr, nwidth, nchannels, nfilters, h, w, c, k) (arr[ h * nwidth * nchannels * nfilters + w * nchannels * nfilters + c * nfilters + k ])

@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -42,48 +42,49 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <data_type_t src_type, data_type_t dst_type>
-struct _gemm_x8s8s32x_convolution_fwd_t : public primitive_t {
+struct gemm_x8s8s32x_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const typename pd_t::base_class *hint_fwd_pd)
             : cpu_convolution_fwd_pd_t(adesc, attr, hint_fwd_pd), jcp_() {}
 
-        DECLARE_COMMON_PD_T(IGEMM_S8U8S32_ISA_STR,
-                _gemm_x8s8s32x_convolution_fwd_t, USE_GLOBAL_SCRATCHPAD);
+        DECLARE_COMMON_PD_T(src_md()->data_type == data_type::u8
+                        ? IGEMM_S8U8S32_IMPL_STR
+                        : IGEMM_S8S8S32_IMPL_STR,
+                gemm_x8s8s32x_convolution_fwd_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
             using namespace data_type;
+            using skip_mask_t = primitive_attr_t::skip_mask_t;
+            const auto dst_type = dst_md(0)->data_type;
 
-            const bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(
-                            src_type, s8, data_type::undef, dst_type, s32)
+                    && utils::one_of(src_md()->data_type, s8, u8)
+                    && weights_md()->data_type == s8
+                    && utils::one_of(
+                            dst_md()->data_type, f32, bf16, s32, s8, u8)
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type, f32, s32,
-                                    s8, u8))
+                            utils::one_of(weights_md(1)->data_type, f32, bf16,
+                                    s32, s8, u8))
                     && !has_zero_dim_memory()
-                    && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::oscale
-                                    | primitive_attr_t::skip_mask_t::
-                                            zero_points_runtime
-                                    | primitive_attr_t::skip_mask_t::post_ops,
+                    && attr()->has_default_values(skip_mask_t::oscale
+                                    | skip_mask_t::zero_points_runtime
+                                    | skip_mask_t::post_ops
+                                    | skip_mask_t::sum_dt,
                             dst_type)
+                    && attr()->post_ops_.check_sum_consistent_dt(dst_type)
                     && output_scales_mask_ok() && zero_points_valid(attr());
-
             if (!ok) return status::unimplemented;
 
             auto scratchpad = scratchpad_registry().registrar();
-            const auto status_ = jit_gemm_convolution_utils::init_conf(jcp_,
-                    scratchpad, *desc(), src_md_, weights_md_, dst_md_,
-                    bias_md_, *attr(), zendnn_get_max_threads());
-
-            if (status_ == status::success) {
-                if (!gemm_x8s8s32x_convolution_utils::post_ops_ok(
-                            attr()->post_ops_, &dst_md_))
-                    return status::unimplemented;
-            }
-            return status_;
+            CHECK(jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
+                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, attr_,
+                    zendnn_get_max_threads()));
+            if (!gemm_x8s8s32x_convolution_utils::post_ops_ok(
+                        attr()->post_ops_, &dst_md_))
+                return status::unimplemented;
+            return status::success;
         }
 
         conv_gemm_conf_t jcp_;
@@ -95,12 +96,7 @@ struct _gemm_x8s8s32x_convolution_fwd_t : public primitive_t {
         }
     };
 
-    _gemm_x8s8s32x_convolution_fwd_t(const pd_t *apd) : primitive_t(apd) {}
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    typedef typename prec_traits<data_type::s32>::type acc_data_t;
+    gemm_x8s8s32x_convolution_fwd_t(const pd_t *apd) : primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         CHECK(safe_ptr_assign(pp_ker_, pp_ker_t::create(pd(), pd()->jcp_)));
@@ -115,39 +111,39 @@ private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     status_t execute_forward(const exec_ctx_t &ctx) const;
     status_t execute_forward_thr(const int ithr, const int nthr,
-            const src_data_t *src_base, const wei_data_t *wei_base,
-            const char *bia_base, dst_data_t *dst_base,
-            const zero_point_call_params_t &zp,
+            const char *src_base, const int8_t *wei_base, const char *bia_base,
+            void *dst_base, const zero_point_call_params_t &zp,
             const memory_tracking::grantor_t &scratchpad,
             const void *post_ops_binary_rhs_arg_vec,
             const exec_ctx_t &ctx) const;
-
-    int nthr_ = 0;
 
     using pp_ker_t = gemm_x8s8s32x_convolution_utils::pp_ker_t;
     std::unique_ptr<pp_ker_t> pp_ker_;
 };
 
-template <data_type_t dst_type>
-struct _gemm_u8s8s32x_convolution_bwd_data_t : public primitive_t {
+struct gemm_x8s8s32x_convolution_bwd_data_t : public primitive_t {
     struct pd_t : public cpu_convolution_bwd_data_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const convolution_fwd_pd_t *hint_fwd_pd)
             : cpu_convolution_bwd_data_pd_t(adesc, attr, hint_fwd_pd), jcp_() {}
 
-        DECLARE_COMMON_PD_T(IGEMM_S8U8S32_ISA_STR,
-                _gemm_u8s8s32x_convolution_bwd_data_t, USE_GLOBAL_SCRATCHPAD);
+        DECLARE_COMMON_PD_T(diff_dst_md()->data_type == data_type::u8
+                        ? IGEMM_S8U8S32_IMPL_STR
+                        : IGEMM_S8S8S32_IMPL_STR,
+                gemm_x8s8s32x_convolution_bwd_data_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
             using namespace data_type;
 
-            bool ok = true && desc()->prop_kind == prop_kind::backward_data
+            bool ok = desc()->prop_kind == prop_kind::backward_data
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(
-                            dst_type, s8, data_type::undef, u8, s32)
+                    && utils::one_of(diff_dst_md()->data_type, s8, u8)
+                    && weights_md()->data_type == s8
+                    && utils::one_of(
+                            diff_src_md()->data_type, f32, bf16, s32, s8, u8)
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type, f32, s32,
-                                    s8, u8))
+                            utils::one_of(weights_md(1)->data_type, f32, bf16,
+                                    s32, s8, u8))
                     && !has_zero_dim_memory()
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::oscale)
@@ -157,7 +153,7 @@ struct _gemm_u8s8s32x_convolution_bwd_data_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
                     *desc(), diff_src_md_, weights_md_, diff_dst_md_, bias_md_,
-                    *attr(), zendnn_get_max_threads());
+                    attr_, zendnn_get_max_threads());
         }
 
         bool support_bias() const override { return true; }
@@ -171,12 +167,7 @@ struct _gemm_u8s8s32x_convolution_bwd_data_t : public primitive_t {
         }
     };
 
-    _gemm_u8s8s32x_convolution_bwd_data_t(const pd_t *apd) : primitive_t(apd) {}
-
-    typedef typename prec_traits<data_type::u8>::type diff_dst_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type diff_src_data_t;
-    typedef typename prec_traits<data_type::s32>::type acc_data_t;
+    gemm_x8s8s32x_convolution_bwd_data_t(const pd_t *apd) : primitive_t(apd) {}
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_backward_data(ctx);
@@ -185,8 +176,8 @@ struct _gemm_u8s8s32x_convolution_bwd_data_t : public primitive_t {
 private:
     status_t execute_backward_data(const exec_ctx_t &ctx) const;
     status_t execute_backward_data_thr(const int ithr, const int nthr,
-            const diff_dst_data_t *diff_dst_base, const wei_data_t *wei_base,
-            const char *bia_base, diff_src_data_t *diff_src_base,
+            const char *diff_dst_base, const int8_t *wei_base,
+            const char *bia_base, char *diff_src_base,
             const memory_tracking::grantor_t &scratchpad) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };

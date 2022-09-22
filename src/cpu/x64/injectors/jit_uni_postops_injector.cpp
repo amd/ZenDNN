@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
+#include <cassert>
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 
 namespace zendnn {
@@ -61,17 +62,28 @@ jit_uni_postops_injector_t<isa, Vmm>::jit_uni_postops_injector_t(
 
     const auto &esp = eltwise_static_params;
     bool is_binary = false;
+    bool is_eltwise = false;
 
     for (const auto &post_op : post_ops.entry_) {
         if (post_op.is_eltwise()) {
+            is_eltwise = true;
             alg_to_eltwise_injector_.emplace(post_op.eltwise.alg,
-                    jit_uni_eltwise_injector_f32<isa>(host_, post_op.eltwise,
-                            esp.save_state, esp.p_table, esp.k_mask, esp.is_fwd,
-                            esp.use_dst));
+                    jit_uni_eltwise_injector_f32<isa, Vmm>(host_,
+                            post_op.eltwise, esp.save_state, esp.p_table,
+                            esp.k_mask, esp.is_fwd, esp.use_dst,
+                            esp.preserve_vmm, esp.preserve_p_table));
         } else if (post_op.is_binary()) {
             is_binary = true;
         }
     }
+
+    if (is_superset(isa, avx512_core) && is_eltwise && is_binary
+            && binary_static_params.rhs_arg_static_params.tail_size)
+        assert(eltwise_static_params.k_mask
+                != binary_static_params.rhs_arg_static_params.tail_opmask &&
+                "Binary tail opmask should be different than eltwise injector \
+                opmask. Otherwise eltwise injector will overwrite binary tail \
+                opmask.");
 
     if (is_binary)
         binary_injector_ = utils::make_unique<
@@ -171,26 +183,9 @@ void jit_uni_postops_injector_t<isa, Vmm>::set_lambda_injector(
 
 post_ops_ok_args_t::post_ops_ok_args_t(const cpu_isa_t isa,
         const std::vector<post_op_type> &accepted_post_op_types,
-        const post_ops_t &post_ops)
-    : isa(isa)
-    , accepted_post_op_types(accepted_post_op_types)
-    , post_ops(post_ops) {}
-
-post_ops_ok_args_t::post_ops_ok_args_t(const cpu_isa_t isa,
-        const std::vector<post_op_type> &accepted_post_op_types,
-        const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
-        const bool sum_at_pos_0_only, const bool sum_requires_scale_one)
-    : isa(isa)
-    , accepted_post_op_types(accepted_post_op_types)
-    , post_ops(post_ops)
-    , dst_d(dst_d)
-    , sum_at_pos_0_only(sum_at_pos_0_only)
-    , sum_requires_scale_one(sum_requires_scale_one) {};
-
-post_ops_ok_args_t::post_ops_ok_args_t(const cpu_isa_t isa,
-        const std::vector<post_op_type> &accepted_post_op_types,
         const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
         const bool sum_at_pos_0_only, const bool sum_requires_scale_one,
+        const bool sum_requires_zp_zero,
         const bcast_set_t &enabled_bcast_strategy)
     : isa(isa)
     , accepted_post_op_types(accepted_post_op_types)
@@ -198,15 +193,8 @@ post_ops_ok_args_t::post_ops_ok_args_t(const cpu_isa_t isa,
     , dst_d(dst_d)
     , sum_at_pos_0_only(sum_at_pos_0_only)
     , sum_requires_scale_one(sum_requires_scale_one)
+    , sum_requires_zp_zero(sum_requires_zp_zero)
     , enabled_bcast_strategy(enabled_bcast_strategy) {};
-
-post_ops_ok_args_t::post_ops_ok_args_t(const cpu_isa_t isa,
-        const std::vector<post_op_type> &accepted_post_op_types,
-        const post_ops_t &post_ops, const memory_desc_wrapper *dst_d)
-    : isa(isa)
-    , accepted_post_op_types(accepted_post_op_types)
-    , post_ops(post_ops)
-    , dst_d(dst_d) {}
 
 bool post_ops_ok(const post_ops_ok_args_t &post_ops_ok_args) {
     const cpu_isa_t isa = post_ops_ok_args.isa;
@@ -216,6 +204,7 @@ bool post_ops_ok(const post_ops_ok_args_t &post_ops_ok_args) {
     const memory_desc_wrapper *dst_d = post_ops_ok_args.dst_d;
     const bool sum_at_pos_0_only = post_ops_ok_args.sum_at_pos_0_only;
     const bool sum_requires_scale_one = post_ops_ok_args.sum_requires_scale_one;
+    const bool sum_requires_zp_zero = post_ops_ok_args.sum_requires_zp_zero;
     const auto &enabled_bcast_strategy
             = post_ops_ok_args.enabled_bcast_strategy;
 
@@ -224,8 +213,10 @@ bool post_ops_ok(const post_ops_ok_args_t &post_ops_ok_args) {
             const auto &entry = post_ops.entry_[idx];
             switch (post_op) {
                 case sum:
-                    if (entry.is_sum(false)) {
+                    if (entry.is_sum(false, false)) {
                         if (sum_requires_scale_one && entry.sum.scale != 1)
+                            return false;
+                        if (sum_requires_zp_zero && entry.sum.zero_point != 0)
                             return false;
                         return IMPLICATION(sum_at_pos_0_only, idx == 0);
                     }
@@ -259,7 +250,8 @@ bool post_ops_ok(const post_ops_ok_args_t &post_ops_ok_args) {
 
 template class jit_uni_postops_injector_t<avx512_core_bf16>;
 template class jit_uni_postops_injector_t<avx512_core>;
-template class jit_uni_postops_injector_t<avx512_common>;
+template class jit_uni_postops_injector_t<avx512_core, Xbyak::Ymm>;
+template class jit_uni_postops_injector_t<avx512_core, Xbyak::Xmm>;
 template class jit_uni_postops_injector_t<avx2>;
 template class jit_uni_postops_injector_t<avx2, Xbyak::Xmm>;
 template class jit_uni_postops_injector_t<avx>;

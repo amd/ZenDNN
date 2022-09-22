@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -45,32 +45,55 @@ void lstm_fwd_postgemm_template(T1 func1, T2 func2, T3 to_src_dt, T4 to_float,
         const rnn_utils::rnn_conf_t &rnn,
         rnn_utils::cell_position_t cell_position, src_data_t *ws_gates_,
         scratch_data_t *scratch_gates_, src_data_t *dst_layer_,
-        src_data_t *dst_iter_, float *dst_iter_c_, const src_data_t *src_iter_,
-        const float *src_iter_c_, const float *weights_peephole_, float *bias_,
-        int block_step) {
-    ws_gates_aoc<src_data_t> ws_gates(rnn, ws_gates_);
-    scratch_gates_aoc<scratch_data_t> scratch_gates(rnn, scratch_gates_);
-    weights_peephole_aoc_t<const float> weights_peephole(
+        src_data_t *dst_iter_, void *dst_iter_c_, const src_data_t *src_iter_,
+        const void *src_iter_c_, const float *weights_peephole_,
+        const void *bias_, int block_step) {
+    const ws_gates_aoc<src_data_t> ws_gates(rnn, ws_gates_);
+    const scratch_gates_aoc<scratch_data_t> scratch_gates(rnn, scratch_gates_);
+    const weights_peephole_aoc_t<const float> weights_peephole(
             rnn, weights_peephole_);
-    bias_aoc_t bias(rnn, bias_);
-
+    const auto bias_aoc = rnn_utils::make_raw_aoc(
+            bias_, types::data_type_size(rnn.bias_dt), rnn.n_bias, rnn.dhc);
+    const auto bias = [&](int gate_id, int dhc_id) {
+        return rnn_utils::to_float(bias_aoc(gate_id, dhc_id), rnn.bias_dt);
+    };
     // If lstmp, instead of dst_layer, we use scratch_ht if inference or ws_ht if training
-    auto dst_layer_ld = rnn.is_lstm_projection
+    const auto dst_layer_ld = rnn.is_lstm_projection
             ? rnn.scratch_ht_ld
             : rnn.dst_layer_ld(cell_position);
-    auto dst_iter_ld = rnn.dst_iter_ld(cell_position);
-    auto dst_iter_c_ld = rnn.dst_iter_c_ld(cell_position);
-    auto src_iter_c_ld = rnn.src_iter_c_ld(cell_position);
+    const auto dst_iter_ld = rnn.dst_iter_ld(cell_position);
+    const int dst_iter_c_ld = rnn.dst_iter_c_ld(cell_position);
+    const int src_iter_c_ld = rnn.src_iter_c_ld(cell_position);
 
-    ws_states_layer_aoc<src_data_t> dst_layer(rnn, dst_layer_, dst_layer_ld);
+    const ws_states_layer_aoc<src_data_t> dst_layer(
+            rnn, dst_layer_, dst_layer_ld);
     // TODO: we use scratch and not dst_iter for lstmp
-    ws_states_iter_aoc<src_data_t> dst_iter(rnn, dst_iter_, dst_iter_ld);
-    ws_states_iter_c_aoc<float> dst_iter_c(rnn, dst_iter_c_, dst_iter_c_ld);
-    ws_states_iter_c_aoc<const float> src_iter_c(
-            rnn, src_iter_c_, src_iter_c_ld);
+    const ws_states_iter_aoc<src_data_t> dst_iter(rnn, dst_iter_, dst_iter_ld);
 
-    auto postgemm_call = [&](int i) {
-        int n_elem = block_step / (int)sizeof(scratch_data_t);
+    const auto dst_iter_c = rnn_utils::make_raw_aoc(dst_iter_c_,
+            types::data_type_size(rnn.dst_iter_c_dt), rnn.ws_states_iter_c_nld,
+            dst_iter_c_ld);
+    const auto src_iter_c_aoc = rnn_utils::make_raw_aoc(src_iter_c_,
+            types::data_type_size(rnn.src_iter_c_dt), rnn.ws_states_iter_c_nld,
+            src_iter_c_ld);
+
+    const auto src_iter_c = [&](int mb_id, int dhc_id) {
+        return rnn_utils::to_float(
+                src_iter_c_aoc(mb_id, dhc_id), rnn.src_iter_c_dt);
+    };
+    const auto dst_iter_c_assign = [&](int mb_id, int dhc_id, float c_state) {
+        const auto dst_iter_c_ptr
+                = const_cast<void *>(dst_iter_c(mb_id, dhc_id));
+
+        if (rnn.dst_iter_c_dt == data_type::f32)
+            *static_cast<float *>(dst_iter_c_ptr) = c_state;
+        else if (rnn.dst_iter_c_dt == data_type::bf16)
+            *static_cast<bfloat16_t *>(dst_iter_c_ptr)
+                    = cpu::saturate_and_round<bfloat16_t>(c_state);
+    };
+
+    const auto postgemm_call = [&](int i) {
+        const int n_elem = block_step / (int)sizeof(scratch_data_t);
         ZENDNN_PRAGMA_OMP_SIMD()
         for (int j = 0; j < n_elem; j++) {
             float gate_i_arg
@@ -83,26 +106,26 @@ void lstm_fwd_postgemm_template(T1 func1, T2 func2, T3 to_src_dt, T4 to_float,
             if (rnn.is_lstm_peephole)
                 gate_f_arg += weights_peephole(1, j) * src_iter_c(i, j);
 
-            float gate_c_arg
+            const float gate_c_arg
                     = to_float(scratch_gates(i, 2, j), 2, j) + bias(2, j);
 
             // default func1 is sigmoid, func2 is tanh
 
-            float gate_i = func1(scales + 0, gate_i_arg);
-            float gate_f = func1(scales + 1, gate_f_arg);
-            float gate_c = func2(scales + 2, gate_c_arg);
+            const float gate_i = func1(scales + 0, gate_i_arg);
+            const float gate_f = func1(scales + 1, gate_f_arg);
+            const float gate_c = func2(scales + 2, gate_c_arg);
 
-            float c_state = gate_f * src_iter_c(i, j) + gate_i * gate_c;
-            dst_iter_c(i, j) = c_state;
+            const float c_state = gate_f * src_iter_c(i, j) + gate_i * gate_c;
+            dst_iter_c_assign(i, j, c_state);
 
             float gate_o_arg
                     = to_float(scratch_gates(i, 3, j), 3, j) + bias(3, j);
             if (rnn.is_lstm_peephole)
                 gate_o_arg += weights_peephole(2, j) * c_state;
 
-            float gate_o = func1(scales + 3, gate_o_arg);
+            const float gate_o = func1(scales + 3, gate_o_arg);
 
-            src_data_t ht = to_src_dt(gate_o * func2(cscale, c_state));
+            const src_data_t ht = to_src_dt(gate_o * func2(cscale, c_state));
             if (dst_layer_ != nullptr) dst_layer(i, j) = ht;
             if (dst_iter_ != nullptr) dst_iter(i, j) = ht;
 
@@ -121,7 +144,7 @@ void lstm_fwd_postgemm_template(T1 func1, T2 func2, T3 to_src_dt, T4 to_float,
         for (int i = 0; i < rnn.m_block; i++)
             postgemm_call(i);
     } else {
-        parallel_nd(rnn.mb, [&](int i) { postgemm_call(i); });
+        parallel_nd(rnn.mb, [&](dim_t i) { postgemm_call(i); });
     }
 }
 
@@ -130,14 +153,15 @@ rnn_postgemm_sig(rnn_postgemm_fwd_f32_t::lstm_postgemm) {
     const float *scales = pd_->attr()->rnn_tparams_.scales_;
     const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
 
-    auto q_id = [&](float f) { return f; };
-    auto deq_id = [&](float f, int i, int j) { return f; };
+    const auto q_id = [&](float f) { return f; };
+    const auto deq_id = [&](float f, int i, int j) { return f; };
 
-    auto linear_f = [](const float *scale, float a) { return *scale * a; };
-    auto logistic_f = [](const float *scale, float a) {
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto logistic_f = [](const float *scale, float a) {
         return logistic_fwd<float>(a);
     };
-    auto tanh_f
+    const auto tanh_f
             = [](const float *scale, float a) { return tanh_fwd<float>(a); };
 
     if (!pd_->attr()->rnn_tparams_.test_mode_)
@@ -156,14 +180,15 @@ template <>
 rnn_postgemm_sig(rnn_postgemm_fwd_bf16_t::lstm_postgemm) {
     const float *scales = pd_->attr()->rnn_tparams_.scales_;
     const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
-    auto round_f32_bf16 = [&](float f) { return bfloat16_t(f); };
-    auto deq_id = [&](float f, int i, int j) { return f; };
+    const auto round_f32_bf16 = [&](float f) { return bfloat16_t(f); };
+    const auto deq_id = [&](float f, int i, int j) { return f; };
 
-    auto linear_f = [](const float *scale, float a) { return *scale * a; };
-    auto logistic_f = [](const float *scale, float a) {
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto logistic_f = [](const float *scale, float a) {
         return logistic_fwd<float>(a);
     };
-    auto tanh_f
+    const auto tanh_f
             = [](const float *scale, float a) { return tanh_fwd<float>(a); };
 
     if (!pd_->attr()->rnn_tparams_.test_mode_)
@@ -183,32 +208,28 @@ rnn_postgemm_sig(rnn_postgemm_fwd_u8_t::lstm_postgemm) {
     const float *scales = pd_->attr()->rnn_tparams_.scales_;
     const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
 
-    float *weights_scales = (rnn.is_brgemm && !rnn.unfused_post_gemm)
-            ? weights_scales_
-            : pd_->attr()->rnn_weights_qparams_.scales_;
-    float data_shift = pd_->attr()->rnn_data_qparams_.shift_;
-    float data_scale = pd_->attr()->rnn_data_qparams_.scale_;
+    const float data_shift = pd_->attr()->rnn_data_qparams_.shift_;
+    const float data_scale = pd_->attr()->rnn_data_qparams_.scale_;
 
-    auto quantize_f32_u8 = [&](float f) {
+    const auto quantize_f32_u8 = [&](float f) {
         float qf = f * data_scale + data_shift;
-        qf = nstl::min(qf, 255.0f);
-        qf = nstl::max(qf, 0.0f);
-        return (dst_layer_t)mxcsr_cvt(qf);
+        return qz_a1b0<float, dst_layer_t>()(qf);
     };
 
-    auto dequantize_s32_f32 = [&](gemm_acc_t s, int gate, int j) {
-        float wscale = pd_->attr()->rnn_weights_qparams_.mask_ == 0
-                ? weights_scales[0]
-                : weights_scales[gate * rnn.dhc + j];
+    const auto dequantize_s32_f32 = [&](gemm_acc_t s, int gate, int j) {
+        const float wscale = pd_->attr()->rnn_weights_qparams_.mask_ == 0
+                ? weights_scales_[0]
+                : weights_scales_[gate * rnn.dhc + j];
 
         return saturate<float>(s) * (1.f / (wscale * data_scale));
     };
 
-    auto linear_f = [](const float *scale, float a) { return *scale * a; };
-    auto logistic_f = [](const float *scale, float a) {
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto logistic_f = [](const float *scale, float a) {
         return logistic_fwd<float>(a);
     };
-    auto tanh_f
+    const auto tanh_f
             = [](const float *scale, float a) { return tanh_fwd<float>(a); };
 
     if (!pd_->attr()->rnn_tparams_.test_mode_)
@@ -223,39 +244,93 @@ rnn_postgemm_sig(rnn_postgemm_fwd_u8_t::lstm_postgemm) {
                 src_iter_, src_iter_c_, weights_peephole_, bias_, block_step);
 }
 
+template <>
+rnn_postgemm_sig(rnn_postgemm_fwd_s8_t::lstm_postgemm) {
+    const float *scales = pd_->attr()->rnn_tparams_.scales_;
+    const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
+
+    const float data_shift = pd_->attr()->rnn_data_qparams_.shift_;
+    const float data_scale = pd_->attr()->rnn_data_qparams_.scale_;
+
+    const auto quantize_f32_s8 = [&](float f) {
+        float qf = f * data_scale + data_shift;
+        return qz_a1b0<float, dst_layer_t>()(qf);
+    };
+
+    const auto dequantize_s32_f32 = [&](gemm_acc_t s, int gate, int j) {
+        float wscale = pd_->attr()->rnn_weights_qparams_.mask_ == 0
+                ? weights_scales_[0]
+                : weights_scales_[gate * rnn.dhc + j];
+
+        return saturate<float>(s) * (1.f / (wscale * data_scale));
+    };
+
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto logistic_f = [](const float *scale, float a) {
+        return logistic_fwd<float>(a);
+    };
+    const auto tanh_f
+            = [](const float *scale, float a) { return tanh_fwd<float>(a); };
+
+    if (!pd_->attr()->rnn_tparams_.test_mode_)
+        lstm_fwd_postgemm_template(logistic_f, tanh_f, quantize_f32_s8,
+                dequantize_s32_f32, scales, cscale, rnn, cell_position,
+                ws_gates_, scratch_gates_, dst_layer_, dst_iter_, dst_iter_c_,
+                src_iter_, src_iter_c_, weights_peephole_, bias_, block_step);
+    else
+        lstm_fwd_postgemm_template(linear_f, linear_f, quantize_f32_s8,
+                dequantize_s32_f32, scales, cscale, rnn, cell_position,
+                ws_gates_, scratch_gates_, dst_layer_, dst_iter_, dst_iter_c_,
+                src_iter_, src_iter_c_, weights_peephole_, bias_, block_step);
+}
+
 template <typename T1, typename T2, typename src_data_t, typename acc_data_t,
         typename scratch_data_t>
 void lstm_bwd_postgemm_template(T1 func1, T2 to_src_dt, const float *cscale,
         const rnn_utils::rnn_conf_t &rnn, const cell_position_t cell_position,
         src_data_t *ws_gates_, scratch_data_t *scratch_gates_,
-        float *dst_iter_c_, const float *src_iter_c_,
+        void *dst_iter_c_, const void *src_iter_c_,
         acc_data_t *diff_src_iter_c_, acc_data_t *diff_dst_layer_,
         acc_data_t *diff_dst_iter_, acc_data_t *diff_dst_iter_c_,
-        const float *weights_peephole_, float *bias_) {
-    ws_gates_aoc<src_data_t> ws_gates(rnn, ws_gates_);
-    ws_gates_aoc<scratch_data_t> scratch_gates(rnn, scratch_gates_);
-    weights_peephole_aoc_t<const float> weights_peephole(
+        const float *weights_peephole_, const void *bias_) {
+    const ws_gates_aoc<src_data_t> ws_gates(rnn, ws_gates_);
+    const ws_gates_aoc<scratch_data_t> scratch_gates(rnn, scratch_gates_);
+    const weights_peephole_aoc_t<const float> weights_peephole(
             rnn, weights_peephole_);
-    bias_aoc_t bias(rnn, bias_);
-    auto dst_iter_c_ld = rnn.dst_iter_c_ld(cell_position);
-    auto src_iter_c_ld = rnn.src_iter_c_ld(cell_position);
-    ws_states_iter_aoc<float> dst_iter_c(rnn, dst_iter_c_, dst_iter_c_ld);
-    ws_states_iter_c_aoc<const float> src_iter_c(
-            rnn, src_iter_c_, src_iter_c_ld);
-    ws_diff_states_iter_c_aoc<acc_data_t> diff_src_iter_c(
+    const int dst_iter_c_ld = rnn.dst_iter_c_ld(cell_position);
+    const int src_iter_c_ld = rnn.src_iter_c_ld(cell_position);
+    const auto src_iter_c_aoc = rnn_utils::make_raw_aoc(src_iter_c_,
+            types::data_type_size(rnn.src_iter_c_dt), rnn.ws_states_iter_c_nld,
+            src_iter_c_ld);
+    const auto src_iter_c = [&](int mb_id, int dhc_id) {
+        return rnn_utils::to_float(
+                src_iter_c_aoc(mb_id, dhc_id), rnn.src_iter_c_dt);
+    };
+    const auto dst_iter_c_aoc = rnn_utils::make_raw_aoc(dst_iter_c_,
+            types::data_type_size(rnn.dst_iter_c_dt), rnn.ws_states_iter_c_nld,
+            dst_iter_c_ld);
+    const auto dst_iter_c = [&](int mb_id, int dhc_id) {
+        return rnn_utils::to_float(
+                dst_iter_c_aoc(mb_id, dhc_id), rnn.dst_iter_c_dt);
+    };
+
+    const ws_diff_states_iter_c_aoc<acc_data_t> diff_src_iter_c(
             rnn, diff_src_iter_c_);
-    ws_diff_states_layer_aoc<acc_data_t> diff_dst_layer(rnn, diff_dst_layer_);
-    ws_diff_states_iter_aoc<acc_data_t> diff_dst_iter(rnn, diff_dst_iter_);
-    ws_diff_states_iter_c_aoc<acc_data_t> diff_dst_iter_c(
+    const ws_diff_states_layer_aoc<acc_data_t> diff_dst_layer(
+            rnn, diff_dst_layer_);
+    const ws_diff_states_iter_aoc<acc_data_t> diff_dst_iter(
+            rnn, diff_dst_iter_);
+    const ws_diff_states_iter_c_aoc<acc_data_t> diff_dst_iter_c(
             rnn, diff_dst_iter_c_);
 
-    parallel_nd(rnn.mb, [&](int i) {
+    parallel_nd(rnn.mb, [&](dim_t i) {
         ZENDNN_PRAGMA_OMP_SIMD()
         for (int j = 0; j < rnn.dhc; j++) {
-            float Ct = dst_iter_c(i, j);
+            const float Ct = dst_iter_c(i, j);
             /// @todo save it in the workspace in fwd pass or recompute it to
             /// save bw
-            float tanhCt = func1(cscale, Ct);
+            const float tanhCt = func1(cscale, Ct);
             // we have 2 incoming diffs on Ht if no projection,
             // otherwise we have only 1 as the summation happened
             // before the bwd projection
@@ -264,13 +339,15 @@ void lstm_bwd_postgemm_template(T1 func1, T2 to_src_dt, const float *cscale,
             float dCt = diff_dst_iter_c(i, j)
                     + one_m_square(tanhCt) * ws_gates(i, 3, j) * dHt;
 
-            float dG3 = tanhCt * dHt * x_m_square(ws_gates(i, 3, j));
+            const float dG3 = tanhCt * dHt * x_m_square(ws_gates(i, 3, j));
 
             if (rnn.is_lstm_peephole) dCt += dG3 * weights_peephole(2, j);
 
-            float dG1 = src_iter_c(i, j) * dCt * x_m_square(ws_gates(i, 1, j));
-            float dG0 = ws_gates(i, 2, j) * dCt * x_m_square(ws_gates(i, 0, j));
-            float dG2
+            const float dG1
+                    = src_iter_c(i, j) * dCt * x_m_square(ws_gates(i, 1, j));
+            const float dG0
+                    = ws_gates(i, 2, j) * dCt * x_m_square(ws_gates(i, 0, j));
+            const float dG2
                     = ws_gates(i, 0, j) * dCt * one_m_square(ws_gates(i, 2, j));
 
             diff_src_iter_c(i, j) = dCt * ws_gates(i, 1, j);
@@ -291,10 +368,11 @@ void lstm_bwd_postgemm_template(T1 func1, T2 to_src_dt, const float *cscale,
 template <>
 rnn_postgemm_sig(rnn_postgemm_bwd_f32_t::lstm_postgemm) {
     const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
-    auto linear_f = [](const float *scale, float a) { return *scale * a; };
-    auto tanh_f
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto tanh_f
             = [](const float *scale, float a) { return tanh_fwd<float>(a); };
-    auto to_src_dt = [](float a) { return a; };
+    const auto to_src_dt = [](float a) { return a; };
 
     if (!pd_->attr()->rnn_tparams_.test_mode_)
         lstm_bwd_postgemm_template(tanh_f, to_src_dt, cscale, rnn,
@@ -311,10 +389,11 @@ rnn_postgemm_sig(rnn_postgemm_bwd_f32_t::lstm_postgemm) {
 template <>
 rnn_postgemm_sig(rnn_postgemm_bwd_bf16_t::lstm_postgemm) {
     const float *cscale = &(pd_->attr()->rnn_tparams_.cscale_);
-    auto linear_f = [](const float *scale, float a) { return *scale * a; };
-    auto tanh_f
+    const auto linear_f
+            = [](const float *scale, float a) { return *scale * a; };
+    const auto tanh_f
             = [](const float *scale, float a) { return tanh_fwd<float>(a); };
-    auto to_src_dt = [](float a) { return bfloat16_t(a); };
+    const auto to_src_dt = [](float a) { return bfloat16_t(a); };
 
     if (!pd_->attr()->rnn_tparams_.test_mode_)
         lstm_bwd_postgemm_template(tanh_f, to_src_dt, cscale, rnn,

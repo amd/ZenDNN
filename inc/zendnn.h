@@ -4,7 +4,7 @@
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -231,6 +231,18 @@ int ZENDNN_API zendnn_primitive_desc_query_s32(
 zendnn_status_t ZENDNN_API zendnn_primitive_create(zendnn_primitive_t *primitive,
         const_zendnn_primitive_desc_t primitive_desc);
 
+/// Creates a primitive from a cache blob.
+///
+/// @param primitive Output primitive.
+/// @param primitive_desc Primitive descriptor used to create the primitive.
+/// @param size Size of the cache blob in bytes.
+/// @param cache_blob Cache blob of size @p size.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_create_from_cache_blob(
+        zendnn_primitive_t *primitive, const_zendnn_primitive_desc_t primitive_desc,
+        size_t size, const uint8_t *cache_blob);
+
 /// Executes a primitive.
 ///
 /// @param primitive Primitive to execute.
@@ -266,6 +278,21 @@ zendnn_status_t ZENDNN_API zendnn_primitive_execute(const_zendnn_primitive_t pri
 zendnn_status_t ZENDNN_API zendnn_primitive_get_primitive_desc(
         const_zendnn_primitive_t primitive,
         const_zendnn_primitive_desc_t *primitive_desc);
+
+/// Retrieves a cache blob associated with the given primitive.
+///
+/// @param primitive Primitive to query for the cache blob.
+/// @param size Size of the cache blob in bytes.
+/// @param cache_blob Cache blob of size @p size. If the @p cache_blob is
+///     nullptr then the size of the cache blob is returned in @p size.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+///
+/// @note The cache blob can be empty. It's the user's responsibility to check
+///     whether it's empty prior to passing it to
+///     #zendnn_primitive_create_from_cache_blob().
+zendnn_status_t ZENDNN_API zendnn_primitive_get_cache_blob(
+        const_zendnn_primitive_t primitive, size_t *size, uint8_t *cache_blob);
 
 /// Destroys a primitive.
 ///
@@ -304,6 +331,28 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_clone(
 /// @returns #zendnn_success on success and a status describing the error
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_primitive_attr_destroy(zendnn_primitive_attr_t attr);
+
+/// Returns the floating-point math mode primitive attribute.
+///
+/// @param attr Primitive attributes.
+/// @param mode Output FP math mode.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_get_fpmath_mode(
+        const_zendnn_primitive_attr_t attr, zendnn_fpmath_mode_t *mode);
+
+/// Sets the floating-point math mode primitive attributes.
+///
+/// @param attr Primitive attributes.
+/// @param mode FP math mode. The possible values are:
+///     #zendnn_fpmath_mode_strict (default),
+///     #zendnn_fpmath_mode_bf16,
+///     #zendnn_fpmath_mode_f16,
+///     #zendnn_fpmath_mode_any.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_fpmath_mode(
+        zendnn_primitive_attr_t attr, zendnn_fpmath_mode_t mode);
 
 /// Returns the primitive attributes scratchpad mode.
 ///
@@ -585,8 +634,8 @@ zendnn_primitive_kind_t ZENDNN_API zendnn_post_ops_get_kind(
 /// integer-based computations when the result and previous activations have
 /// different logical scaling factors.
 ///
-/// In the simplest case when the accumulation is the only post-op, the
-/// computations would be:
+/// In the simplest case where the accumulation is the only post-op, the
+/// computations will be:
 ///
 ///     dst[:] <- scale * dst[:] + op(...) // instead of dst[:] <- op(...)
 ///
@@ -612,15 +661,15 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_append_sum(
 /// integer-based computations when the result and previous activations have
 /// different logical scaling factors.
 ///
-/// In the simplest case when the accumulation is the only post-op, the
-/// computations would be:
+/// In the simplest case where the accumulation is the only post-op, the
+/// computations will be:
 ///
 ///     dst[:] <- scale * dst[:] + op(...) // instead of dst[:] <- op(...)
 ///
 /// If @p data_type is specified, original dst tensor will be reinterpreted
 /// as a tensor with provided data type. Since it is reinterpretation,
-/// data_type and dst data type should have same size.
-/// As a result, computations would be:
+/// data_type and dst data type should have the same size.
+/// As a result, computations will be:
 ///
 ///     dst[:] <- scale * as_data_type(dst[:]) + op(...)
 ///                                        // instead of dst[:] <- op(...)
@@ -635,6 +684,42 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_append_sum(
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_post_ops_append_sum_v2(
         zendnn_post_ops_t post_ops, float scale, zendnn_data_type_t data_type);
+
+/// Appends an accumulation v3 (sum) to post-ops. Prior to accumulating the
+/// result, a zero point is subtracted from the previous value and is
+/// multiplied by the scale.
+///
+/// The kind of this post-op is #zendnn_sum.
+///
+/// This feature may improve performance for cases like dequantize the
+/// asymmetrically quantized sum's src1 tensor to f32 domain before performing
+/// the sum operation by subtracting the @p zero_point before the scaling.
+///
+/// In the simplest case where accumulation is the only post-op, the
+/// computations will be:
+///
+///     dst[:] <- scale * (dst[:] - zero_point) + op(...)
+///                                             // instead of dst[:] <- op(...)
+///
+/// If @p data_type is specified, original dst tensor will be reinterpreted
+/// as a tensor with provided data type. Since it is reinterpretation,
+/// data_type and dst data type should have the same size.
+/// As a result, computations will be:
+///
+///     dst[:] <- scale * (as_data_type(dst[:]) - zero_point) + op(...)
+///                                        // instead of dst[:] <- op(...)
+/// @note
+///     This post-op executes in-place and does not change the
+///     destination layout.
+///
+/// @param post_ops Post-ops.
+/// @param scale Accumulation scaling factor.
+/// @param zero_point Single scalar int32_t value of zero point.
+/// @param data_type Accumulation data_type.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_post_ops_append_sum_v3(zendnn_post_ops_t post_ops,
+        float scale, int32_t zero_point, zendnn_data_type_t data_type);
 
 /// Returns the parameters of an accumulation (sum) post-op.
 ///
@@ -660,6 +745,20 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_sum(
 zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_sum_v2(
         const_zendnn_post_ops_t post_ops, int index, float *scale,
         zendnn_data_type_t *data_type);
+
+/// Returns the parameters of an accumulation (sum) post-op with
+/// zero point and data type parameter.
+///
+/// @param post_ops Post-ops.
+/// @param index Index of the sum post-op.
+/// @param scale Output accumulation scaling factor.
+/// @param zero_point Zero point.
+/// @param data_type Data type for accumulation.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_sum_v3(
+        const_zendnn_post_ops_t post_ops, int index, float *scale,
+        int32_t *zero_point, zendnn_data_type_t *data_type);
 
 /// Appends an elementwise post-op.
 ///
@@ -697,6 +796,70 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_append_eltwise(zendnn_post_ops_t post
 zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_eltwise(
         const_zendnn_post_ops_t post_ops, int index, float *scale,
         zendnn_alg_kind_t *alg_kind, float *alpha, float *beta);
+
+/// Appends a depthwise post-op convolution.
+///
+/// This post-op can only be fused with a 2D 1x1 convolution (convolution with
+/// weights spatial dimensions equal to 1 i.e., kh=kw=1).
+///
+/// The kind of this post-op is #zendnn_convolution.
+///
+/// The number of outputs for primitive with fusion is one. The output spatial
+/// size can be derived as below:
+///
+/// output_height = ceil(output_height_1x1_convolution, stride)
+/// output_width = ceil(output_width_1x1_convolution, stride)
+///
+/// See @ref dev_guide_attributes_post_ops_depthwise and
+/// @ref dev_guide_attributes_post_ops_depthwise_fusion for more info.
+///
+/// @param post_ops Post-ops.
+/// @param weights_data_type Weights data type of depthwise post-op
+/// @param bias_data_type Bias data type of depthwise post-op
+/// @param dst_data_type Output data type of depthwise post-op
+/// @param kernel_size Size of kernel of depthwise post-op
+/// @param stride_size Size of stride of depthwise post-op
+/// @param padding_l_size Size of left and top paddings of depthwise post-op
+/// @param count Output length of the array of scaling factors @p scales.
+/// @param mask Output scaling factors correspondence mask that defines the
+///     correspondence between the output tensor dimensions and the @p
+///     scales array. The set i-th bit indicates that a dedicated output scaling
+///     factor is used for each index along that dimension. The mask value of 0
+///     implies a common scaling factor for the whole output tensor.
+/// @param scales Output pointer to a constant array of float scaling factors.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise
+zendnn_status_t ZENDNN_API zendnn_post_ops_append_dw(zendnn_post_ops_t post_ops,
+        zendnn_data_type_t weights_data_type, zendnn_data_type_t bias_data_type,
+        zendnn_data_type_t dst_data_type, zendnn_dim_t kernel_size,
+        zendnn_dim_t stride_size, zendnn_dim_t padding_l_size, zendnn_dim_t count,
+        int mask, const float *scales);
+
+/// Returns the parameters of an depthwise post-op.
+///
+/// @param post_ops Post-ops.
+/// @param index Index of the elementwise post-op.
+/// @param weights_data_type Weights data type of depthwise post-op
+/// @param bias_data_type Bias data type of depthwise post-op
+/// @param dst_data_type Output data type of depthwise post-op
+/// @param kernel_size Size of kernel of depthwise post-op
+/// @param stride_size Size of stride of depthwise post-op
+/// @param padding_l_size Size of left and top paddings of depthwise post-op
+/// @param count Output length of the array of scaling factors @p scales.
+/// @param mask Output scaling factors correspondence mask that defines the
+///     correspondence between the output tensor dimensions and the @p
+///     scales array. The set i-th bit indicates that a dedicated output scaling
+///     factor is used for each index along that dimension. The mask value of 0
+///     implies a common scaling factor for the whole output tensor.
+/// @param scales Output pointer to a constant array of float scaling factors.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise
+zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_dw(
+        const_zendnn_post_ops_t post_ops, int index,
+        zendnn_data_type_t *weights_data_type, zendnn_data_type_t *bias_data_type,
+        zendnn_data_type_t *dst_data_type, zendnn_dim_t *kernel_size,
+        zendnn_dim_t *stride_size, zendnn_dim_t *padding_l_size, zendnn_dim_t *count,
+        int *mask, const float **scales);
 
 /// Appends a depthwise post-op convolution with stride 1.
 ///
@@ -848,6 +1011,51 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_append_binary(zendnn_post_ops_t post_
 zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_binary(
         const_zendnn_post_ops_t post_ops, int index, zendnn_alg_kind_t *alg_kind,
         const zendnn_memory_desc_t **src1_desc);
+
+/// Appends a prelu forward post-op.
+///
+/// The kind of this post-op is #zendnn::primitive::kind::prelu.
+///
+/// The post-op can be defined as:
+///
+///      dst[:] <- prelu(dst[:], weights[:])
+///      prelu:
+///      dst[:] <- dst[:] if dst[:] > 0
+///      dst[:] <- dst[:] * weights[:] if dst[:] <= 0
+///
+///
+/// @note
+///     The order of dimensions does not depend on how elements are laid
+///     out in memory. For example:
+///     - for a 2D CNN activations tensor the order is always (n, c)
+///     - for a 4D CNN activations tensor the order is always (n, c, h, w)
+///     - for a 5D CNN weights tensor the order is always
+///        (g, oc, ic, kh, kw)
+///
+///    Prelu weights tensor is passed in runtime execution phase. Prelu
+///    weights tensor data type is implicitly assumed as f32 using plain
+///    layout (a, ab, acb, acdb, acdeb)
+///
+/// @param post_ops Post-ops.
+/// @param mask Defines the correspondence between the output tensor
+///     dimensions and the prelu weights tensor. The set i-th bit indicates
+///     that a dedicated weights value is used for each index along that
+///     dimension. Set the mask to 0 to use a common weights value
+///     for the whole output tensor.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_post_ops_append_prelu(
+        zendnn_post_ops_t post_ops, int mask);
+
+/// Returns the parameters of a prelu post-op.
+///
+/// @param post_ops Post-ops.
+/// @param index Index of the prelu post-op.
+/// @param mask Mask of the prelu post-op.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_prelu(
+        const_zendnn_post_ops_t post_ops, int index, int *mask);
 
 /// @} zendnn_api_attributes
 
@@ -1843,6 +2051,45 @@ zendnn_status_t ZENDNN_API zendnn_softmax_backward_desc_init(
         const zendnn_memory_desc_t *data_desc, int softmax_axis);
 
 /// @} zendnn_api_softmax
+
+/// @addtogroup zendnn_api_softmax_v2
+/// @{
+
+/// Initializes a descriptor for softmax v2 forward propagation primitive.
+///
+/// @param softmax_desc Output descriptor for a softmax primitive.
+/// @param prop_kind Propagation kind. Possible values are
+///     #zendnn_forward_training and #zendnn_forward_inference.
+/// @param alg_kind Softmax algorithm kind: either #zendnn_softmax_accurate, or
+///     #zendnn_softmax_log.
+/// @param src_desc Source memory descriptor.
+/// @param dst_desc Destination memory descriptor.
+/// @param softmax_axis Axis over which softmax is computed.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_softmax_v2_forward_desc_init(
+        zendnn_softmax_v2_desc_t *softmax_desc, zendnn_prop_kind_t prop_kind,
+        zendnn_alg_kind_t alg_kind, const zendnn_memory_desc_t *src_desc,
+        const zendnn_memory_desc_t *dst_desc, int softmax_axis);
+
+/// Initializes a descriptor for softmax v2 backward propagation primitive.
+///
+/// @param softmax_desc Output descriptor for a softmax primitive.
+/// @param alg_kind Softmax algorithm kind: either #zendnn_softmax_accurate, or
+///     #zendnn_softmax_log.
+/// @param diff_src_desc Diff source memory descriptor.
+/// @param diff_dst_desc Diff destination memory descriptor.
+/// @param dst_desc Destination memory descriptor.
+/// @param softmax_axis Axis over which softmax is computed.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_softmax_v2_backward_desc_init(
+        zendnn_softmax_v2_desc_t *softmax_desc, zendnn_alg_kind_t alg_kind,
+        const zendnn_memory_desc_t *diff_src_desc,
+        const zendnn_memory_desc_t *diff_dst_desc,
+        const zendnn_memory_desc_t *dst_desc, int softmax_axis);
+
+/// @} zendnn_api_softmax_v2
 
 /// @addtogroup zendnn_api_logsoftmax
 /// @{
@@ -3207,6 +3454,228 @@ zendnn_status_t ZENDNN_API zendnn_lbr_gru_backward_desc_init(
         const zendnn_memory_desc_t *diff_dst_layer_desc,
         const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags);
 
+/// Initializes a descriptor for AUGRU forward propagation primitive.
+///
+/// The following arguments may either be @c NULL or point to a zero memory
+/// descriptor:
+/// - @p src_iter_desc,
+/// - @p bias_desc,
+/// - @p dst_iter_desc.
+///
+/// This would then indicate that the AUGRU forward propagation primitive should
+/// not use them and should default to zero values instead.
+///
+/// @note
+///     All memory descriptors can be initialized with
+///     #zendnn_format_tag_any or with format_kind set to #zendnn_format_kind_any.
+///
+/// @param rnn_desc Output descriptor for AUGRU primitive.
+/// @param prop_kind Propagation kind. Possible values are
+///     #zendnn_forward_training and #zendnn_forward_inference.
+/// @param direction RNN direction. See @ref zendnn_rnn_direction_t for more
+///     info.
+/// @param src_layer_desc Memory descriptor for the input vector.
+/// @param src_iter_desc Memory descriptor for the input recurrent hidden
+///     state vector.
+/// @param attention_desc Memory descriptor for the attention vector.
+/// @param weights_layer_desc Memory descriptor for the weights applied to the
+///     layer input.
+/// @param weights_iter_desc Memory descriptor for the weights applied to the
+///     recurrent input.
+/// @param bias_desc Bias memory descriptor.
+/// @param dst_layer_desc Memory descriptor for the output vector.
+/// @param dst_iter_desc Memory descriptor for the output recurrent hidden
+///     state vector.
+/// @param flags Unused.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_augru_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc, unsigned flags);
+
+/// Initializes a descriptor for AUGRU backward propagation primitive.
+///
+/// The following arguments may either be @c NULL or point to a zero memory
+/// descriptor:
+/// - @p src_iter_desc together with @p diff_src_iter_desc,
+/// - @p bias_desc together with @p diff_bias_desc,
+/// - @p dst_iter_desc together with @p diff_dst_iter_desc.
+///
+/// This would then indicate that the AUGRU backward propagation primitive
+/// should not use them and should default to zero values instead.
+///
+/// @note
+///     All memory descriptors can be initialized with
+///     #zendnn_format_tag_any or with format_kind set to #zendnn_format_kind_any.
+///
+/// @param rnn_desc Output descriptor for AUGRU primitive.
+/// @param prop_kind Propagation kind. Must be #zendnn_backward.
+/// @param direction RNN direction. See @ref zendnn_rnn_direction_t for more
+///     info.
+/// @param src_layer_desc Memory descriptor for the input vector.
+/// @param src_iter_desc Memory descriptor for the input recurrent hidden
+///     state vector.
+/// @param attention_desc Memory descriptor for the attention vector.
+/// @param weights_layer_desc Memory descriptor for the weights applied to the
+///     layer input.
+/// @param weights_iter_desc Memory descriptor for the weights applied to the
+///     recurrent input.
+/// @param bias_desc Bias memory descriptor.
+/// @param dst_layer_desc Memory descriptor for the output vector.
+/// @param dst_iter_desc Memory descriptor for the output recurrent hidden
+///     state vector.
+/// @param diff_src_layer_desc Memory descriptor for the diff of input vector.
+/// @param diff_src_iter_desc Memory descriptor for the diff of input recurrent
+///     hidden state vector.
+/// @param diff_attention_desc Memory descriptor for the diff of attention vector.
+/// @param diff_weights_layer_desc Memory descriptor for the diff of weights
+///     applied to the layer input.
+/// @param diff_weights_iter_desc Memory descriptor for the diff of weights
+///     applied to the recurrent input.
+/// @param diff_bias_desc Diff bias memory descriptor.
+/// @param diff_dst_layer_desc Memory descriptor for the diff of output
+///     vector.
+/// @param diff_dst_iter_desc Memory descriptor for the diff of output
+///     recurrent hidden state vector.
+/// @param flags Unused.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_augru_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc,
+        const zendnn_memory_desc_t *diff_src_layer_desc,
+        const zendnn_memory_desc_t *diff_src_iter_desc,
+        const zendnn_memory_desc_t *diff_attention_desc,
+        const zendnn_memory_desc_t *diff_weights_layer_desc,
+        const zendnn_memory_desc_t *diff_weights_iter_desc,
+        const zendnn_memory_desc_t *diff_bias_desc,
+        const zendnn_memory_desc_t *diff_dst_layer_desc,
+        const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags);
+
+/// Initializes a descriptor for LBR AUGRU forward propagation primitive.
+///
+/// The following arguments may either be @c NULL or point to a zero memory
+/// descriptor:
+/// - @p src_iter_desc,
+/// - @p bias_desc,
+/// - @p dst_iter_desc.
+///
+/// This would then indicate that the LBR AUGRU forward propagation primitive
+/// should not use them and should default to zero values instead.
+///
+/// @param rnn_desc Output descriptor for LBR AUGRU primitive.
+/// @param prop_kind Propagation kind. Possible values are
+///     #zendnn_forward_training and #zendnn_forward_inference.
+/// @param direction RNN direction. See @ref zendnn_rnn_direction_t for more
+///     info.
+/// @param src_layer_desc Memory descriptor for the input vector.
+/// @param src_iter_desc Memory descriptor for the input recurrent hidden
+///     state vector.
+/// @param attention_desc Memory descriptor for the attention vector.
+/// @param weights_layer_desc Memory descriptor for the weights applied to the
+///     layer input.
+/// @param weights_iter_desc Memory descriptor for the weights applied to the
+///     recurrent input.
+/// @param bias_desc Bias memory descriptor.
+/// @param dst_layer_desc Memory descriptor for the output vector.
+/// @param dst_iter_desc Memory descriptor for the output recurrent hidden
+///     state vector.
+/// @param flags Unused.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_lbr_augru_forward_desc_init(
+        zendnn_rnn_desc_t *rnn_desc, zendnn_prop_kind_t prop_kind,
+        zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc, unsigned flags);
+
+/// Initializes a descriptor for LBR AUGRU backward propagation primitive.
+///
+/// The following arguments may either be @c NULL or point to a zero memory
+/// descriptor:
+/// - @p src_iter_desc together with @p diff_src_iter_desc,
+/// - @p bias_desc together with @p diff_bias_desc,
+/// - @p dst_iter_desc together with @p diff_dst_iter_desc.
+///
+/// This would then indicate that the LBR AUGRU backward propagation primitive
+/// should not use them and should default to zero values instead.
+///
+/// @note
+///     All memory descriptors can be initialized with
+///     #zendnn_format_tag_any or with format_kind set to #zendnn_format_kind_any.
+///
+/// @param rnn_desc Output descriptor for LBR AUGRU primitive.
+/// @param prop_kind Propagation kind. Must be #zendnn_backward.
+/// @param direction RNN direction. See @ref zendnn_rnn_direction_t for more
+///     info.
+/// @param src_layer_desc Memory descriptor for the input vector.
+/// @param src_iter_desc Memory descriptor for the input recurrent hidden
+///     state vector.
+/// @param attention_desc Memory descriptor for the attention vector.
+/// @param weights_layer_desc Memory descriptor for the weights applied to the
+///     layer input.
+/// @param weights_iter_desc Memory descriptor for the weights applied to the
+///     recurrent input.
+/// @param bias_desc Bias memory descriptor.
+/// @param dst_layer_desc Memory descriptor for the output vector.
+/// @param dst_iter_desc Memory descriptor for the output recurrent hidden
+///     state vector.
+/// @param diff_src_layer_desc Memory descriptor for the diff of input vector.
+/// @param diff_src_iter_desc Memory descriptor for the diff of input recurrent
+///     hidden state vector.
+/// @param diff_attention_desc Memory descriptor for the diff of attention vector.
+/// @param diff_weights_layer_desc Memory descriptor for the diff of weights
+///     applied to the layer input.
+/// @param diff_weights_iter_desc Memory descriptor for the diff of weights
+///     applied to the recurrent input.
+/// @param diff_bias_desc Diff bias memory descriptor.
+/// @param diff_dst_layer_desc Memory descriptor for the diff of output
+///     vector.
+/// @param diff_dst_iter_desc Memory descriptor for the diff of output
+///     recurrent hidden state vector.
+/// @param flags Unused.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_lbr_augru_backward_desc_init(
+        zendnn_rnn_desc_t *rnn_desc, zendnn_prop_kind_t prop_kind,
+        zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc,
+        const zendnn_memory_desc_t *diff_src_layer_desc,
+        const zendnn_memory_desc_t *diff_src_iter_desc,
+        const zendnn_memory_desc_t *diff_attention_desc,
+        const zendnn_memory_desc_t *diff_weights_layer_desc,
+        const zendnn_memory_desc_t *diff_weights_iter_desc,
+        const zendnn_memory_desc_t *diff_bias_desc,
+        const zendnn_memory_desc_t *diff_dst_layer_desc,
+        const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags);
+
 /// @} zendnn_api_rnn
 
 /// @addtogroup zendnn_api_matmul
@@ -3300,7 +3769,6 @@ zendnn_status_t ZENDNN_API zendnn_resampling_backward_desc_init(
 zendnn_status_t ZENDNN_API zendnn_reduction_desc_init(zendnn_reduction_desc_t *desc,
         zendnn_alg_kind_t alg_kind, const zendnn_memory_desc_t *src_desc,
         const zendnn_memory_desc_t *dst_desc, float p, float eps);
-
 
 /// @} zendnn_api_reduction
 
@@ -3455,6 +3923,31 @@ zendnn_status_t ZENDNN_API zendnn_set_primitive_cache_capacity(int capacity);
 
 /// @} zendnn_api_primitive_cache
 
+/// @addtogroup zendnn_api_mathmode Floating-point Math Mode
+/// @{
+
+/// Returns the floating-point math mode that will be used by default
+/// for all subsequently created primitives.
+///
+/// @param mode Output FP math mode.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_get_default_fpmath_mode(zendnn_fpmath_mode_t *mode);
+
+/// Sets the floating-point math mode that will be used by default
+/// for all subsequently created primitives.
+///
+/// @param mode FP math mode. The possible values are:
+///     #zendnn_fpmath_mode_strict,
+///     #zendnn_fpmath_mode_bf16,
+///     #zendnn_fpmath_mode_f16,
+///     #zendnn_fpmath_mode_any.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_set_default_fpmath_mode(zendnn_fpmath_mode_t mode);
+
+/// @} zendnn_api_mathmode
+
 /// @addtogroup zendnn_api_service
 /// @{
 
@@ -3547,8 +4040,9 @@ zendnn_status_t ZENDNN_API zendnn_set_jit_profiling_jitdumpdir(const char *dir);
 /// #zendnn_cpu_isa_t and #zendnn::cpu_isa for the list of the values accepted by
 /// the C and C++ API functions respectively.
 ///
-/// This function has effect only before the first JIT kernel is generated and
-/// will return an error afterwards.
+/// This function has effect only once, and returns an error on subsequent
+/// calls. It should also be invoked before any other ZENDNN API call, otherwise
+/// it may return an error.
 ///
 /// This function overrides the ZENDNN_MAX_CPU_ISA environment variable. The
 /// environment variable can be set to the desired maximal ISA name in upper
@@ -3558,7 +4052,6 @@ zendnn_status_t ZENDNN_API zendnn_set_jit_profiling_jitdumpdir(const char *dir);
 /// @note
 ///     The ISAs are only partially ordered:
 ///         - SSE41 < AVX < AVX2,
-///         - AVX2 < AVX512_MIC < AVX512_MIC_4OPS,
 ///         - AVX2 < AVX512_CORE < AVX512_CORE_VNNI < AVX512_CORE_BF16
 ///           < AVX512_CORE_AMX,
 ///         - AVX2 < AVX2_VNNI.
@@ -3590,8 +4083,9 @@ zendnn_cpu_isa_t ZENDNN_API zendnn_get_effective_cpu_isa(void);
 /// #zendnn::cpu_isa_hints for the list of the values accepted by the C and C++
 /// API functions respectively.
 ///
-/// This function has effect only before the first JIT kernel is generated and
-/// will return an error afterwards.
+/// This function has effect only once, and returns an error on subsequent
+/// calls. It should also be invoked before any other ZENDNN API call, otherwise
+/// it may return an error.
 ///
 /// This function overrides the ZENDNN_CPU_ISA_HINTS environment variable.
 /// @sa @ref dev_guide_cpu_isa_hints for more details

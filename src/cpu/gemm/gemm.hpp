@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,22 +57,22 @@ zendnn_status_t gemm_bf16bf16f32(const char *transa, const char *transb,
         const dim_t *ldb, const float *beta, float *C, const dim_t *ldc);
 
 #if defined(USE_CBLAS)
-#define GEMM_IMPL_STR "gemm:blas"
+#define GEMM_IMPL_STR "x64:gemm:blas"
 #elif ZENDNN_X64
-#define GEMM_IMPL_STR "gemm:jit"
+#define GEMM_IMPL_STR "x64:gemm:jit"
 #else
 #define GEMM_IMPL_STR "gemm:ref"
 #endif
 
 #if USE_MKL_IGEMM
-#define IGEMM_S8U8S32_IMPL_STR "igemm_s8u8s32:blas"
-#define IGEMM_S8S8S32_IMPL_STR "igemm_s8s8s32:blas"
+#define IGEMM_S8U8S32_IMPL_STR "x64:gemm_s8u8s32:blas"
+#define IGEMM_S8S8S32_IMPL_STR "x64:gemm_s8s8s32:blas"
 #elif ZENDNN_X64
-#define IGEMM_S8U8S32_IMPL_STR "igemm_s8u8s32:jit"
-#define IGEMM_S8S8S32_IMPL_STR "igemm_s8s8s32:jit"
+#define IGEMM_S8U8S32_IMPL_STR "x64:gemm_s8u8s32:jit"
+#define IGEMM_S8S8S32_IMPL_STR "x64:gemm_s8s8s32:jit"
 #else
-#define IGEMM_S8U8S32_IMPL_STR "igemm_s8u8s32:ref"
-#define IGEMM_S8S8S32_IMPL_STR "igemm_s8s8s32:ref"
+#define IGEMM_S8U8S32_IMPL_STR "gemm_s8u8s32:ref"
+#define IGEMM_S8S8S32_IMPL_STR "gemm_s8s8s32:ref"
 #endif
 
 #if !defined(USE_MKL_IGEMM) && defined(ZENDNN_X64)

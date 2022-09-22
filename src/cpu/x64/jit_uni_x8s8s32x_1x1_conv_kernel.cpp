@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::_jit_uni_x8s8s32x_1x1_conv_kernel(
         static constexpr bool preserve_vmm = true;
         rhs_arg_static_params_t rhs_arg_static_params {15, r13, r14,
                 preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md)};
         static_params_t static_params {this->param1, rhs_arg_static_params};
 
@@ -147,22 +147,29 @@ void iterate(const int ur, const int load_loop_blk, const F &f) {
 template <cpu_isa_t isa, typename Vmm>
 void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::apply_sum(const int ur,
         const int load_loop_blk, const bool mask_flag_in,
-        const float *p_sum_scale) {
+        const float *p_sum_scale, const int32_t *p_sum_zp) {
 
     if (jcp.with_sum) {
-        assert(p_sum_scale != nullptr && "p_sum_scale = nullptr");
+        assert(!utils::any_null(p_sum_scale, p_sum_zp)
+                && "p_sum_scale or p_sum_zp = nullptr");
         const float sum_scale = *p_sum_scale;
+        const int32_t sum_zp = *p_sum_zp;
         const auto sum_injector_lam = [this, mask_flag_in, load_loop_blk,
-                                              sum_scale](const int i_ur,
+                                              sum_scale, sum_zp](const int i_ur,
                                               const int i_load) {
             const bool mask_flag = mask_flag_in && i_load == load_loop_blk - 1;
             const auto ymm_prev_dst = vmm_zero;
 
             const auto r = vreg_accum(load_loop_blk, i_load, i_ur);
-            cvt2ps(jcp.dst_dt, ymm_prev_dst, aux_reg_output_data,
+            cvt2ps(jcp.sum_dt, ymm_prev_dst, aux_reg_output_data,
                     output_ptr(i_load, i_ur),
                     mask_flag ? get_tail_size() : simd_w);
 
+            if (sum_zp != 0) {
+                uni_vbroadcastss(vmm_tmp, ptr[reg_ptr_sum_zp]);
+                uni_vcvtdq2ps(vmm_tmp, vmm_tmp);
+                uni_vsubps(vmm_prev_dst, vmm_prev_dst, vmm_tmp);
+            }
             if (sum_scale == 1.f)
                 uni_vaddps(r, r, ymm_prev_dst);
             else {
@@ -172,6 +179,8 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::apply_sum(const int ur,
         };
         const auto sum_injector
                 = [=]() { iterate(ur, load_loop_blk, sum_injector_lam); };
+        if (sum_zp != 0)
+            mov(reg_ptr_sum_zp, reinterpret_cast<size_t>(p_sum_zp));
         postops_injector_->set_lambda_injector(
                 primitive_kind::sum, sum_injector);
     }
@@ -180,39 +189,32 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::apply_sum(const int ur,
 template <cpu_isa_t isa, typename Vmm>
 void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::apply_postops(const int ur,
         const int load_loop_blk, const bool mask_flag_in,
-        const float *p_sum_scale) {
+        const float *p_sum_scale, const int32_t *p_sum_zp) {
 
     if (jcp.with_eltwise || jcp.with_binary || jcp.with_sum) {
-        apply_sum(ur, load_loop_blk, mask_flag_in, p_sum_scale);
+        if (jcp.with_sum && *p_sum_zp != 0)
+            mov(ptr[rsp + reg_bcast_loop_iter_off], reg_ptr_sum_zp);
+        apply_sum(ur, load_loop_blk, mask_flag_in, p_sum_scale, p_sum_zp);
 
         binary_injector::rhs_arg_dynamic_params_t rhs_arg_params;
         vmm_index_set_t vmm_idxs;
         if (jcp.with_binary) {
-            const auto oc_off_oprnd = r12;
             iterate(ur, load_loop_blk, [&](const int i_ur, const int i_load) {
                 const int ur_stride = jcp.with_dw_conv
                         ? jcp.nb_load_blocking * jcp.oc_block * i_ur
                         : jcp.oc_without_padding * jcp.ngroups * i_ur;
-                const int aux_output_offset = jcp.typesize_out
+                const size_t aux_output_offset = jcp.typesize_out
                         * (ur_stride + i_load * jcp.load_block);
                 const auto vmm_idx
                         = vreg_accum_idx(load_loop_blk, i_load, i_ur);
                 vmm_idxs.emplace(vmm_idx);
-                rhs_arg_params.vmm_idx_to_oc_elem_off_addr.emplace(
-                        vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-                rhs_arg_params.vmm_idx_to_oc_elem_off_val.emplace(
-                        vmm_idx, i_load * jcp.load_block);
-                rhs_arg_params.vmm_idx_to_oc_off_oprnd.emplace(
-                        vmm_idx, oc_off_oprnd);
+
+                rhs_arg_params.vmm_idx_to_out_reg.emplace(
+                        vmm_idx, aux_reg_output_data);
                 rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
                         vmm_idx, aux_output_offset);
             });
 
-            const injector_utils::register_preserve_guard_t register_guard(
-                    this, {oc_off_oprnd});
-            mov(oc_off_oprnd,
-                    ptr[rsp + reg_binary_post_op_acc_off
-                            + register_guard.stack_space_occupied()]);
             postops_injector_->compute_vector_range(vmm_idxs, rhs_arg_params);
         } else {
             iterate(ur, load_loop_blk, [&](const int i_ur, const int i_load) {
@@ -220,6 +222,8 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::apply_postops(const int ur,
             });
             postops_injector_->compute_vector_range(vmm_idxs, rhs_arg_params);
         }
+        if (jcp.with_sum && *p_sum_zp != 0)
+            mov(reg_ptr_sum_zp, ptr[rsp + reg_bcast_loop_iter_off]);
     }
 }
 
@@ -292,13 +296,15 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::reduce_loop(
         const int sum_idx = p.find(primitive_kind::sum);
         const float *p_sum_scale
                 = (sum_idx != -1) ? &p.entry_[sum_idx].sum.scale : nullptr;
+        const int32_t *p_sum_zp
+                = (sum_idx != -1) ? &p.entry_[sum_idx].sum.zero_point : nullptr;
         mov(ptr[rsp + reg_bcast_data_off], reg_bcast_data);
         mov(reg_ptr_scales, ptr[rsp + reg_ptr_sum_scale_off]);
         if (p_sum_scale && *p_sum_scale != 1.f) {
             mov(ptr[rsp + reg_load_data_off], reg_load_data);
-            mov(reg_ptr_sum_scale, (size_t)p_sum_scale);
+            mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
         }
-        if (jcp.signed_input && jcp.ver != ver_vnni) {
+        if (jcp.signed_input && (!jcp.has_vnni)) {
             mov(reg_store_bcast, float2int(jcp.wei_adj_scale));
             uni_vmovq(xmm_bias_alpha(), reg_store_bcast);
             uni_vbroadcastss(vmm_bias_alpha(), xmm_bias_alpha());
@@ -320,7 +326,7 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::reduce_loop(
                     mov(reg_bias_data, ptr[rsp + reg_bias_data_off]);
                 cvt2ps(jcp.bia_dt, vmm_bias, reg_bias_data,
                         jcp.typesize_bia * jcp.oc_block * i_load, load_size);
-                if (jcp.signed_input && jcp.ver != ver_vnni)
+                if (jcp.signed_input && (!jcp.has_vnni))
                     uni_vmulps(vmm_bias, vmm_bias, vmm_bias_alpha());
             }
             if (jcp.signed_input) {
@@ -357,7 +363,7 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::reduce_loop(
             }
         }
 
-        apply_postops(ur, load_loop_blk, mask_flag_in, p_sum_scale);
+        apply_postops(ur, load_loop_blk, mask_flag_in, p_sum_scale, p_sum_zp);
 
         if (jcp.dst_zero_point) {
             mov(reg_dst_zero_point, ptr[rsp + reg_dst_zero_point_off]);
@@ -403,7 +409,7 @@ void _jit_uni_x8s8s32x_1x1_conv_kernel<isa, Vmm>::reduce_loop(
     };
 
     auto compute = [&](Vmm vreg_acc, Vmm vreg_wei, Vmm vreg_src) {
-        if (jcp.ver == ver_vnni) {
+        if (jcp.has_vnni) {
             vpdpbusd(vreg_acc, vreg_src, vreg_wei, VexEncoding);
         } else {
             uni_vpmaddubsw(vmm_tmp, vreg_src, vreg_wei);
@@ -626,7 +632,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
         jit_1x1_conv_conf_t &jcp, const convolution_desc_t &cd,
         const memory_desc_wrapper &src_d, const memory_desc_wrapper &weights_d,
         const memory_desc_wrapper &dst_d, const memory_desc_wrapper &bias_d,
-        const primitive_attr_t &attr, int nthreads, bool reduce_src) {
+        primitive_attr_t &attr, int nthreads, bool reduce_src) {
     if (!mayiuse(isa)) return status::unimplemented;
 
     const bool with_groups = weights_d.ndims() == src_d.ndims() + 1;
@@ -663,8 +669,8 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
 
     jcp.signed_input = (src_d.data_type() == data_type::s8);
 
-    jcp.os = jcp.od * jcp.oh * jcp.ow;
-    jcp.is = jcp.id * jcp.ih * jcp.iw;
+    jcp.os = static_cast<dim_t>(jcp.od) * jcp.oh * jcp.ow;
+    jcp.is = static_cast<dim_t>(jcp.id) * jcp.ih * jcp.iw;
 
     const auto &post_ops = attr.post_ops_;
     const int dw_conv_ind = post_ops.find(primitive_kind::convolution);
@@ -701,7 +707,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
             && jcp.dst_tag == dat_tag;
     if (!args_ok) return status::unimplemented;
 
-    jcp.ver = mayiuse(avx2_vnni) ? ver_vnni : ver_unused;
+    jcp.has_vnni = mayiuse(avx2_vnni);
 
     jcp.oc = rnd_up(jcp.oc, simd_w);
     jcp.ic = rnd_up(jcp.ic, simd_w);
@@ -720,8 +726,8 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
         }
 
     using namespace injector;
-    const bool post_ops_ok_
-            = post_ops_ok({isa, {eltwise, binary, sum}, jcp.post_ops, &dst_d});
+    const bool post_ops_ok_ = post_ops_ok({isa, {eltwise, binary, sum},
+            jcp.post_ops, &dst_d, false, false, false});
     if (!post_ops_ok_) return status::unimplemented;
 
     args_ok = true && jcp.oc % simd_w == 0 && jcp.ic % simd_w == 0
@@ -733,6 +739,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
 
     jcp.bia_dt = jcp.with_bias ? cd.bias_desc.data_type : data_type::undef;
     jcp.dst_dt = cd.dst_desc.data_type;
+    jcp.sum_dt = post_ops.get_sum_dt(jcp.dst_dt);
 
     jcp.ic_block = jcp.oc_block = simd_w;
 
@@ -768,7 +775,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
             && (jcp.oh <= size_threshold && jcp.ow <= size_threshold)) {
         if (jcp.os <= SMALL_SPATIAL && jcp.oc * jcp.ic < L2_size)
             max_regs = min_regs = 3;
-        jcp.ur = nstl::min(max_regs, jcp.os);
+        jcp.ur = nstl::min<dim_t>(max_regs, jcp.os);
     } else {
         const int spatial = jcp.od * jcp.oh;
         jcp.ur = 1;
@@ -780,7 +787,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
             }
         }
         if (jcp.ur == 1) {
-            jcp.ur = nstl::min(max_regs, jcp.os);
+            jcp.ur = nstl::min<dim_t>(max_regs, jcp.os);
             int os_tail = jcp.os % max_regs;
             for (int i = max_regs; i >= min_regs; i--) {
                 int i_tail = jcp.os % i;
@@ -853,7 +860,7 @@ status_t jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
     bcast_blocking = div_up(jcp.mb * jcp.ngroups * nb_bcast,
                              div_up(jcp.nthr, jcp.load_grp_count))
             * jcp.bcast_block;
-    bcast_blocking = nstl::min(jcp.bcast_dim, bcast_blocking);
+    bcast_blocking = nstl::min<dim_t>(jcp.bcast_dim, bcast_blocking);
     bcast_blocking = rnd_up(bcast_blocking, jcp.bcast_block);
 
     int space_for_bcast = (L2_capacity - /* kernel_size - */
@@ -922,7 +929,7 @@ void jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_scratchpad(
         const jit_1x1_conv_conf_t &jcp, const primitive_attr_t &attr) {
     using namespace zendnn::impl::memory_tracking::names;
 
-    if (jcp.signed_input && jcp.ver != ver_vnni) {
+    if (jcp.signed_input && (!jcp.has_vnni)) {
         dim_t count = nstl::max<dim_t>(attr.output_scales_.count_, 8);
         scratchpad.book<float>(key_conv_adjusted_scales, count);
     }

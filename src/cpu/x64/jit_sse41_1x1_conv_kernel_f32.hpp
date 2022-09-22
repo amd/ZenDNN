@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -91,7 +91,7 @@ private:
     void generate() override;
 
     void apply_postops(const int load_loop_blk, const int ur);
-    size_t get_fwd_output_ptr_l_off(int i, int j, int n);
+    size_t get_fwd_output_ptr_l_off(int i, int j, int n) const;
 };
 
 } // namespace x64

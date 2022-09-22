@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #ifndef COMMON_BFLOAT16_HPP
 #define COMMON_BFLOAT16_HPP
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,11 @@
 
 namespace zendnn {
 namespace impl {
+
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+struct bfloat16_t;
+bool try_cvt_float_to_bfloat16(bfloat16_t *out, const float *inp);
+#endif
 
 struct bfloat16_t {
     uint16_t raw_bits_;

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,6 +57,7 @@ private:
     const Xbyak::Reg64 reg_output_data = r9;
     const Xbyak::Reg64 reg_load_data = r10;
     const Xbyak::Reg64 reg_ptr_sum_scale = r10;
+    const Xbyak::Reg64 reg_ptr_sum_zp = rdx;
     const Xbyak::Reg64 reg_reduce_loop_work = r11;
     const Xbyak::Reg64 reg_bias_data = r12;
     const Xbyak::Reg64 reg_comp_data = r12;
@@ -101,12 +102,13 @@ private:
     constexpr static int reg_bcast_data_off = 2 * reg64_size;
     constexpr static int reg_load_data_off = 3 * reg64_size;
     constexpr static int reg_ptr_sum_scale_off = 4 * reg64_size;
-    constexpr static int reg_comp_data_off = 5 * reg64_size;
-    constexpr static int reg_zp_compensation_off = 6 * reg64_size;
-    constexpr static int reg_src_zero_point_off = 7 * reg64_size;
-    constexpr static int reg_dst_zero_point_off = 8 * reg64_size;
-    constexpr static int reg_binary_post_op_acc_off = 9 * reg64_size;
-    constexpr static int stack_space_needed = 10 * reg64_size;
+    constexpr static int reg_bcast_loop_iter_off = 5 * reg64_size;
+    constexpr static int reg_comp_data_off = 6 * reg64_size;
+    constexpr static int reg_zp_compensation_off = 7 * reg64_size;
+    constexpr static int reg_src_zero_point_off = 8 * reg64_size;
+    constexpr static int reg_dst_zero_point_off = 9 * reg64_size;
+    constexpr static int reg_binary_post_op_acc_off = 10 * reg64_size;
+    constexpr static int stack_space_needed = 11 * reg64_size;
 
     int vreg_accum_idx(
             const int load_loop_blk, const int i_load, const int i_ur);
@@ -114,9 +116,11 @@ private:
     int output_ptr(const int i_load, const int i_ur);
     void bcast_loop(int load_loop_blk);
     void apply_sum(const int ur, const int load_loop_blk,
-            const bool mask_flag_in, const float *p_sum_scale);
+            const bool mask_flag_in, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void apply_postops(const int ur, const int load_loop_blk,
-            const bool mask_flag_in, const float *p_sum_scale);
+            const bool mask_flag_in, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void reduce_loop(int load_loop_blk, int ur, int substep, bool wraparound);
 
     void generate() override;
@@ -154,7 +158,7 @@ struct jit_uni_x8s8s32x_1x1_conv_kernel {
             const convolution_desc_t &cd, const memory_desc_wrapper &src_d,
             const memory_desc_wrapper &weights_d,
             const memory_desc_wrapper &dst_d, const memory_desc_wrapper &bias_d,
-            const primitive_attr_t &attr, int nthreads, bool reduce_src);
+            primitive_attr_t &attr, int nthreads, bool reduce_src);
 
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_1x1_conv_conf_t &jcp, const primitive_attr_t &attr);

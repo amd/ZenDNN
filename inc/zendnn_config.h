@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -62,61 +62,29 @@
 
 // clang-format off
 
-// ZenDNN CPU threading runtime
+// ZENDNN CPU threading runtime
 #define ZENDNN_CPU_THREADING_RUNTIME ZENDNN_RUNTIME_OMP
 
-// ZenDNN CPU engine runtime
+// ZENDNN CPU engine runtime
 #define ZENDNN_CPU_RUNTIME ZENDNN_RUNTIME_OMP
 
-// ZenDNN GPU engine runtime
+// ZENDNN GPU engine runtime
 #define ZENDNN_GPU_RUNTIME ZENDNN_RUNTIME_NONE
 
 // clang-format on
 
-/// Build Options
-/// Enable Primitive Cache. To mitigate primitive creation overhead, ZenDNN
-/// provides the primitive cache which automatically caches created primitives
-/// to avoid repeating JIT compilation for the primitives with identical
-/// operation descriptors, attributes.
-/// To diable this feature, change the below define to 0
-/// Corresponding run time environment variable is
-/// ZENDNN_PRIMITIVE_CACHE_CAPACITY whose default value is 1024
-#define ZENDNN_ENABLE_PRIMITIVE_CACHE   1
-
-/// When the feature is enabled at build-time, the ZENDNN_MAX_CPU_ISA
-/// environment variable can be used to limit processor features ZenDNN is
-/// able to detect to certain Instruction Set Architecture (ISA) and older
-/// instruction sets.
-/// This feature is disabled at build time. To enable this feature change the
-/// below define to 1 and use corresponding environment variable mentioned here.
-/// Corresponding run time environment variable is
-/// ZENDNN_MAX_CPU_ISA whose default value is ALL.
-/// Possible values for ZENDNN_MAX_CPU_ISA: SSE41, AVX, AVX2, AVX512, ALL
-#define ZENDNN_ENABLE_MAX_CPU_ISA       0
-
-/// For performance reasons, extra hints may be provided to ZenDNN which enable
-/// the just-in-time (JIT) code generation to prefer or avoid certain CPU ISA
-/// features.
-/// This feature is disabled at build time. To enable this feature change the
-/// below define to 1 and use corresponding environment variable mentioned here.
-/// Corresponding run time environment variable is
-/// ZENDNN_CPU_ISA_HINTS whose default value is NO_HINTS.
-/// Possible values for ZENDNN_CPU_ISA_HINTS: NO_HINTS, PREFER_YMM
-#define ZENDNN_ENABLE_CPU_ISA_HINTS        0
-
-/// Disables sharing a common scratchpad between primitives in
-/// zendnn::scratchpad_mode::library mode
-#define ZENDNN_ENABLE_CONCURRENT_EXEC   0
-
 #if defined(ZENDNN_CPU_RUNTIME) && defined(ZENDNN_GPU_RUNTIME)
-#if (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_NONE) \
-        || (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_OCL)
+#if (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_OCL)
 #error "Unexpected ZENDNN_CPU_RUNTIME"
 #endif
 #if (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_NONE) \
         && (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_OCL) \
         && (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_SYCL)
 #error "Unexpected ZENDNN_GPU_RUNTIME"
+#endif
+#if (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_NONE \
+        && ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_NONE)
+#error "At least one runtime must be specified"
 #endif
 #else
 #error "BOTH ZENDNN_CPU_RUNTIME and ZENDNN_GPU_RUNTIME must be defined"
@@ -131,13 +99,69 @@
 #endif
 #endif
 
+// When defined, primitive cache stores runtime objects.
+#undef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+
 // When defined, DPCPP is supported.
-/* #undef ZENDNN_WITH_SYCL */
+#undef ZENDNN_WITH_SYCL
 
 // When defined, Level Zero is supported.
-/* #undef ZENDNN_WITH_LEVEL_ZERO */
+#undef ZENDNN_WITH_LEVEL_ZERO
 
 // When defined, SYCL CUDA backend is used.
-/* #undef ZENDNN_SYCL_CUDA */
+#undef ZENDNN_SYCL_CUDA
+
+// When defined, stack checker is enabled.
+#undef ZENDNN_ENABLE_STACK_CHECKER
+
+// When defined, experimental features are enabled.
+#undef ZENDNN_EXPERIMENTAL
+
+// List of configurating build controls
+// Workload controls
+#define BUILD_TRAINING 0
+#define BUILD_INFERENCE 1
+// Primitive controls
+#define BUILD_PRIMITIVE_ALL 1
+#define BUILD_BATCH_NORMALIZATION 0
+#define BUILD_BINARY 0
+#define BUILD_CONCAT 0
+#define BUILD_CONVOLUTION 0
+#define BUILD_DECONVOLUTION 0
+#define BUILD_ELTWISE 0
+#define BUILD_INNER_PRODUCT 0
+#define BUILD_LAYER_NORMALIZATION 0
+#define BUILD_LRN 0
+#define BUILD_MATMUL 0
+#define BUILD_POOLING 0
+#define BUILD_PRELU 0
+#define BUILD_REDUCTION 0
+#define BUILD_REORDER 0
+#define BUILD_RESAMPLING 0
+#define BUILD_RNN 0
+#define BUILD_SHUFFLE 0
+#define BUILD_SOFTMAX 0
+#define BUILD_SUM 0
+// Primitives CPU ISA controls
+#define BUILD_PRIMITIVE_CPU_ISA_ALL 1
+#define BUILD_SSE41 0
+#define BUILD_AVX2 0
+#define BUILD_AVX512 0
+#define BUILD_AMX 0
+// Primitives GPU ISA controls
+#define BUILD_PRIMITIVE_GPU_ISA_ALL 0
+#define BUILD_GEN9 0
+#define BUILD_GEN11 0
+#define BUILD_XELP 0
+#define BUILD_XEHP 0
+#define BUILD_XEHPG 0
+#define BUILD_XEHPC 0
+//ZenDNN core specific control
+//Few needs to move to frameworks specific build files
+#define ZENDNN_ENABLE_PRIMITIVE_CACHE 1
+//#define ZENDNN_DISABLE_PRIMITIVE_CACHE  1
+#define ZENDNN_ENABLE_MAX_CPU_ISA       0
+#define ZENDNN_ENABLE_CPU_ISA_HINTS     0
+#define ZENDNN_ENABLE_CONCURRENT_EXEC   0
 
 #endif

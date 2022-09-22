@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -51,8 +51,9 @@ struct rnn_data_qparams_t : public c_compatible {
     }
 
     bool operator==(const rnn_data_qparams_t &rhs) const {
-        bool ret = scale_ == rhs.scale_ && shift_ == rhs.shift_;
-        return ret;
+        using namespace utils;
+        return equal_with_nan(scale_, rhs.scale_)
+                && equal_with_nan(shift_, rhs.shift_);
     }
 
     float scale_;
@@ -72,15 +73,16 @@ struct rnn_tparams_t : public c_compatible {
     }
 
     bool operator==(const rnn_tparams_t &rhs) const {
+        using namespace utils;
+
         bool ret = test_mode_ == rhs.test_mode_ && ngates_ == rhs.ngates_
-                && cscale_ == rhs.cscale_;
+                && equal_with_nan(cscale_, rhs.cscale_);
 
         if (!ret) return ret;
 
         if (scales_) {
-            for (dim_t g = 0; g < ngates_; g++) {
-                if (scales_[g] != rhs.scales_[g]) { return false; }
-            }
+            if (std::memcmp(scales_, rhs.scales_, sizeof(float) * ngates_))
+                return false;
         }
         return true;
     }
@@ -138,7 +140,8 @@ struct scales_t : public c_compatible {
                 && !utils::any_null(scales_, rhs.scales_)
                 && defined() == rhs.defined()
                 && IMPLICATION(defined(),
-                        utils::array_cmp(scales_, rhs.scales_, count_));
+                        !std::memcmp(
+                                scales_, rhs.scales_, sizeof(float) * count_));
         return ret;
     }
 
@@ -202,6 +205,13 @@ struct arg_scales_t : public c_compatible {
         return true;
     }
 
+    bool defined() const {
+        for (const auto &s : scales_) {
+            if (!s.second.defined()) return false;
+        }
+        return true;
+    }
+
     status_t get(int arg, dim_t *count, int *mask, const float **scales) const;
     status_t set(int arg, dim_t count, int mask, const float *scales);
     status_t set(int arg, float single_scale) {
@@ -230,6 +240,15 @@ struct arg_scales_t : public c_compatible {
                     it->second.scales_));
         }
         return status::success;
+    }
+
+    int get_index_val(int arg) const {
+        switch (arg) {
+            case ZENDNN_ARG_SRC_0: return 0;
+            case ZENDNN_ARG_SRC_1: return 1;
+            default: assert(!"unsupported arg");
+        }
+        return -1;
     }
 
     std::map<int, scales_t> scales_;
@@ -341,7 +360,9 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
         };
 
         struct depthwise_conv_t {
-            int stride;
+            zendnn::impl::dim_t kernel;
+            zendnn::impl::dim_t stride;
+            zendnn::impl::dim_t padding;
             zendnn::impl::data_type_t wei_dt;
             zendnn::impl::data_type_t bias_dt;
             zendnn::impl::data_type_t dst_dt;
@@ -352,7 +373,17 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
 
         struct binary_t {
             zendnn::impl::alg_kind_t alg;
+            // This is an unmodifiable user copy of attributes which is used in
+            // caching mechanism. Not to be used internally.
+            zendnn::impl::memory_desc_t user_src1_desc;
+            // This is a modifiable copy of memory desc. It changes format kind
+            // and tag of md in case user passed format_kind::any. To be used
+            // everywhere internally.
             zendnn::impl::memory_desc_t src1_desc;
+        };
+
+        struct prelu_t {
+            int mask;
         };
 
         zendnn::impl::primitive_kind_t kind
@@ -360,11 +391,13 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
         union {
             struct {
                 float scale;
+                int32_t zero_point;
                 zendnn::impl::data_type_t dt;
             } sum;
             eltwise_t eltwise;
             depthwise_conv_t depthwise_conv;
             binary_t binary;
+            prelu_t prelu;
         };
 
         bool is_eltwise(bool require_scale_one = false) const {
@@ -381,10 +414,12 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
                     && IMPLICATION(require_nslope_zero, eltwise.alpha == 0.f);
         }
 
-        bool is_sum(bool require_scale_one = true) const {
+        bool is_sum(bool require_scale_one = true,
+                bool require_zp_zero = true) const {
             using namespace zendnn::impl;
             return kind == primitive_kind::sum
-                    && IMPLICATION(require_scale_one, sum.scale == 1.f);
+                    && IMPLICATION(require_scale_one, sum.scale == 1.f)
+                    && IMPLICATION(require_zp_zero, sum.zero_point == 0);
         }
 
         bool is_convolution() const {
@@ -396,25 +431,36 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
             return kind == zendnn::impl::primitive_kind::binary;
         }
 
+        bool is_prelu() const {
+            return kind == zendnn::impl::primitive_kind::prelu;
+        }
+
         zendnn::impl::status_t set_depthwise_scales(const float *scales);
 
         bool operator==(const entry_t &rhs) const {
             using namespace zendnn::impl;
+            using namespace zendnn::impl::utils;
             if (kind != rhs.kind) { return false; }
             bool ret = true;
             switch (kind) {
                 case primitive_kind::eltwise:
                     ret = eltwise.alg == rhs.eltwise.alg
-                            && eltwise.scale == rhs.eltwise.scale
-                            && eltwise.alpha == rhs.eltwise.alpha
-                            && eltwise.beta == rhs.eltwise.beta;
+                            && equal_with_nan(eltwise.scale, rhs.eltwise.scale)
+                            && equal_with_nan(eltwise.alpha, rhs.eltwise.alpha)
+                            && equal_with_nan(eltwise.beta, rhs.eltwise.beta);
                     break;
                 case primitive_kind::sum:
-                    ret = sum.scale == rhs.sum.scale && sum.dt == rhs.sum.dt;
+                    ret = equal_with_nan(sum.scale, rhs.sum.scale)
+                            && sum.zero_point == rhs.sum.zero_point
+                            && sum.dt == rhs.sum.dt;
                     break;
                 case primitive_kind::convolution:
                     // Depthwise Only
-                    ret = depthwise_conv.stride == rhs.depthwise_conv.stride
+                    ret = depthwise_conv.kernel == rhs.depthwise_conv.kernel
+                            && depthwise_conv.stride
+                                    == rhs.depthwise_conv.stride
+                            && depthwise_conv.padding
+                                    == rhs.depthwise_conv.padding
                             && depthwise_conv.wei_dt
                                     == rhs.depthwise_conv.wei_dt
                             && depthwise_conv.bias_dt
@@ -424,16 +470,22 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
                             && depthwise_conv.count == rhs.depthwise_conv.count
                             && depthwise_conv.mask == rhs.depthwise_conv.mask;
                     if (!ret) break;
-                    for (int i = 0; i < depthwise_conv.count; ++i) {
-                        ret = ret
-                                && depthwise_conv.scales[i]
-                                        == rhs.depthwise_conv.scales[i];
-                        if (!ret) break;
-                    }
+
+                    // only call memcmp with valid pointers
+                    if (depthwise_conv.count == 0) break;
+                    ret = !utils::any_null(depthwise_conv.scales,
+                                  rhs.depthwise_conv.scales)
+                            && !std::memcmp(depthwise_conv.scales,
+                                    rhs.depthwise_conv.scales,
+                                    sizeof(float) * depthwise_conv.count);
                     break;
                 case primitive_kind::binary:
                     ret = binary.alg == rhs.binary.alg
-                            && binary.src1_desc == rhs.binary.src1_desc;
+                            && binary.user_src1_desc
+                                    == rhs.binary.user_src1_desc;
+                    break;
+                case primitive_kind::prelu:
+                    ret = prelu.mask == rhs.prelu.mask;
                     break;
                 default: assert(!"unsupported post_op");
             }
@@ -448,7 +500,8 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
 
     private:
         void clear() {
-            if (is_convolution() && depthwise_conv.scales)
+            if (is_convolution() && depthwise_conv.count
+                    && depthwise_conv.scales)
                 zendnn::impl::free(depthwise_conv.scales);
             depthwise_conv.scales = nullptr;
             return;
@@ -469,18 +522,18 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
 
     zendnn_post_ops() : entry_() {}
 
-    zendnn::impl::status_t append_sum(
-            float scale, zendnn::impl::data_type_t dt = zendnn_data_type_undef);
+    zendnn::impl::status_t append_sum(float scale, int32_t zero_point = 0,
+            zendnn::impl::data_type_t dt = zendnn_data_type_undef);
     zendnn::impl::status_t append_eltwise(
             float scale, zendnn::impl::alg_kind_t alg, float alpha, float beta);
-    zendnn::impl::status_t append_dw_k3s1p1(zendnn::impl::data_type_t wei_dt,
+    zendnn::impl::status_t append_dw(zendnn::impl::data_type_t wei_dt,
             zendnn::impl::data_type_t bias_dt, zendnn::impl::data_type_t dst_dt,
-            zendnn::impl::dim_t count, int mask, const float *scales);
-    zendnn::impl::status_t append_dw_k3s2p1(zendnn::impl::data_type_t wei_dt,
-            zendnn::impl::data_type_t bias_dt, zendnn::impl::data_type_t dst_dt,
-            zendnn::impl::dim_t count, int mask, const float *scales);
+            zendnn::impl::dim_t kernel_size, zendnn::impl::dim_t stride_size,
+            zendnn::impl::dim_t padding_l_size, zendnn::impl::dim_t count, int mask,
+            const float *scales);
     zendnn::impl::status_t append_binary(zendnn::impl::alg_kind_t alg,
-            const zendnn::impl::memory_desc_t *src1_desc);
+            const zendnn::impl::memory_desc_t *user_src1_desc);
+    zendnn::impl::status_t append_prelu(int mask);
 
     int find(zendnn::impl::primitive_kind_t kind, int start = 0,
             int stop = -1) const {
@@ -491,9 +544,24 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
         return -1;
     }
 
+    zendnn::impl::data_type_t get_sum_dt(
+            const zendnn::impl::data_type_t dst_dt) const {
+        const int sum_ind = find(zendnn::impl::primitive_kind::sum);
+        if (sum_ind == -1) return dst_dt;
+        const auto sum_dt = entry_[sum_ind].sum.dt;
+        if (sum_dt != zendnn::impl::data_type::undef) return sum_dt;
+        return dst_dt;
+    }
+
     bool defined() const;
     int len() const { return (int)entry_.size(); }
     bool has_default_values() const { return len() == 0; }
+
+    zendnn::impl::status_t set_default_formats(
+            const zendnn::impl::memory_desc_t *dst_md);
+
+    bool check_sum_consistent_dt(const zendnn::impl::data_type_t dst_dt,
+            const bool diverse_sum_dt_allowed = false) const;
 
     bool sum_with_default_dt(
             zendnn::impl::data_type_t dst_dt = zendnn_data_type_undef) const {
@@ -530,7 +598,6 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
 
     std::vector<entry_t> entry_;
 
-private:
     // Since binary post op accepts no more than 32 memory arguments by
     // design, we limit the amount of post-ops to 32.
     static constexpr int post_ops_limit = 32;
@@ -538,7 +605,8 @@ private:
 
 struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn_primitive_attr()
-        : scratchpad_mode_(zendnn::impl::scratchpad_mode::library) {}
+        : scratchpad_mode_(zendnn::impl::scratchpad_mode::library)
+        , fpmath_mode_(zendnn::impl::get_fpmath_mode()) {}
 
     zendnn_primitive_attr *clone() const {
         return new zendnn_primitive_attr(*this);
@@ -556,6 +624,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
         CHECK(scales_.copy_from(other.scales_));
         zero_points_ = other.zero_points_;
         scratchpad_mode_ = other.scratchpad_mode_;
+        fpmath_mode_ = other.fpmath_mode_;
         CHECK(post_ops_.copy_from(other.post_ops_));
         rnn_data_qparams_ = other.rnn_data_qparams_;
         CHECK(rnn_weights_qparams_.copy_from(other.rnn_weights_qparams_));
@@ -573,14 +642,15 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
         oscale = 1u << 0,
         oscale_runtime = (unsigned)oscale | (1u << 1),
         scales = 1u << 2,
-        zero_points = 1u << 3,
-        zero_points_runtime = (unsigned)zero_points | (1u << 4),
-        post_ops = 1u << 5,
-        rnn_data_qparams = 1u << 6,
-        rnn_weights_qparams = 1u << 7,
-        rnn_tparams = 1u << 8,
-        sum_dt = 1 << 9,
-        rnn_weights_projection_qparams = 1u << 10
+        scales_runtime = (unsigned)scales | (1u << 3),
+        zero_points = 1u << 4,
+        zero_points_runtime = (unsigned)zero_points | (1u << 5),
+        post_ops = 1u << 6,
+        rnn_data_qparams = 1u << 7,
+        rnn_weights_qparams = 1u << 8,
+        rnn_tparams = 1u << 9,
+        sum_dt = 1u << 10,
+        rnn_weights_projection_qparams = 1u << 11
     };
 
     /** Returns true if the attributes have default values.
@@ -594,6 +664,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
 
     bool operator==(const zendnn_primitive_attr &rhs) const {
         bool ret = scratchpad_mode_ == rhs.scratchpad_mode_
+                && fpmath_mode_ == rhs.fpmath_mode_
                 && output_scales_ == rhs.output_scales_
                 && scales_ == rhs.scales_ && zero_points_ == rhs.zero_points_
                 && post_ops_ == rhs.post_ops_
@@ -605,15 +676,39 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
         return ret;
     }
 
+    zendnn::impl::status_t set_fpmath_mode(zendnn::impl::fpmath_mode_t fpmath_mode);
     zendnn::impl::status_t set_scratchpad_mode(
             zendnn::impl::scratchpad_mode_t scratchpad_mode);
     zendnn::impl::status_t set_post_ops(const zendnn::impl::post_ops_t &post_ops);
+    zendnn::impl::status_t set_default_formats(
+            const zendnn::impl::memory_desc_t *dst_md);
+
+    /* Auxiliary functions */
+    bool mayidownconvert(zendnn::impl::data_type_t dt_from,
+            zendnn::impl::data_type_t dt_to) const {
+        using namespace zendnn::impl;
+
+        bool is_compat = is_fpsubtype(dt_to, dt_from);
+        auto can_downconvert = [&]() {
+            switch (fpmath_mode_) {
+                case fpmath_mode::strict: return dt_from == dt_to;
+                case fpmath_mode::any: return true;
+                case fpmath_mode::bf16:
+                    return is_fpsubtype(data_type::bf16, dt_to);
+                case fpmath_mode::f16:
+                    return is_fpsubtype(data_type::f16, dt_to);
+                default: return false;
+            }
+        };
+        return is_compat && can_downconvert();
+    }
 
     // NOTE: make sure that the types below have overloaded comparison operator
     zendnn::impl::scales_t output_scales_;
     zendnn::impl::arg_scales_t scales_;
     zendnn::impl::zero_points_t zero_points_;
     zendnn::impl::scratchpad_mode_t scratchpad_mode_;
+    zendnn::impl::fpmath_mode_t fpmath_mode_;
     zendnn::impl::post_ops_t post_ops_;
     zendnn::impl::rnn_data_qparams_t rnn_data_qparams_;
     zendnn::impl::scales_t rnn_weights_qparams_;

@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -23,12 +23,12 @@
 #define CPU_X64_PRELU_JIT_PRELU_BACKWARD_KERNEL_HPP
 
 #include <map>
-#include <memory>
 #include <utility>
+
 #include "cpu/cpu_prelu_pd.hpp"
 #include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/prelu/jit_prelu_base_kernel.hpp"
-#include "cpu/x64/prelu/jit_prelu_utils.hpp"
+#include "cpu/x64/utils/jit_io_helper.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -66,15 +66,16 @@ protected:
     const data_type_t diff_src_dt_;
     const data_type_t diff_dst_dt_;
     const data_type_t diff_wei_dt_;
-
-private:
-    bool any_tensor_bf16() const override;
-
-    void load_kernel_call_params() override;
+    const size_t diff_src_block_tail_;
+    const size_t diff_wei_block_tail_;
 
     const Xbyak::Reg64 &reg_src_ = r12;
     const Xbyak::Reg64 &reg_src_diff_ = r13;
     const Xbyak::Reg64 &reg_dst_diff_ = r14;
+
+private:
+    bool any_tensor_bf16() const override;
+    void load_kernel_call_params() override;
 };
 
 template <typename Vmm>
@@ -92,7 +93,7 @@ private:
     void accumulate_weights_diff(const Vmm &partial_sum_vmm, const Vmm &tmp_vmm,
             const Xbyak::Address &dst_addr, bool tail);
     void finalize() override;
-    std::map<data_type_t, std::pair<Vmm, Vmm>>
+    std::map<data_type_t, io::io_saturation_conf_t>
     create_saturation_vmm_map() const;
 
     const bool saturation_needed_diff_src_;
@@ -110,7 +111,7 @@ private:
     const Xbyak::Opmask &tail_opmask_ = k1;
     const Xbyak::Reg64 &reg_tmp_ = r15;
 
-    prelu::jit_prelu_io_multi_dt_helper_t<Vmm> io_;
+    io::jit_io_multi_dt_helper_t<Vmm> io_;
 };
 
 } // namespace x64

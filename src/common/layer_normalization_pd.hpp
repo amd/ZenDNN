@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,16 +36,6 @@ struct layer_normalization_fwd_pd_t;
 struct layer_normalization_pd_t : public primitive_desc_t {
     static constexpr auto base_pkind = primitive_kind::layer_normalization;
 
-    layer_normalization_pd_t(const layer_normalization_desc_t *adesc,
-            const primitive_attr_t *attr,
-            const layer_normalization_fwd_pd_t *hint_fwd_pd)
-        : primitive_desc_t(attr, base_pkind)
-        , desc_(*adesc)
-        , hint_fwd_pd_(hint_fwd_pd)
-        , data_md_(desc_.data_desc)
-        , stat_md_(desc_.stat_desc)
-        , scaleshift_md_(desc_.data_scaleshift_desc) {}
-
     const layer_normalization_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
         return reinterpret_cast<const op_desc_t *>(this->desc());
@@ -75,6 +65,8 @@ struct layer_normalization_pd_t : public primitive_desc_t {
     bool stats_are_tmp() const { return !(stats_are_src() || is_training()); }
 
     bool use_scaleshift() const { return desc_.flags & zendnn_use_scaleshift; }
+    bool use_scale() const { return desc_.flags & zendnn_use_scale; }
+    bool use_shift() const { return desc_.flags & zendnn_use_shift; }
     bool use_global_stats() const {
         return desc_.flags & zendnn_use_global_stats;
     }
@@ -101,6 +93,16 @@ protected:
     memory_desc_t data_md_;
     memory_desc_t stat_md_;
     memory_desc_t scaleshift_md_;
+
+    layer_normalization_pd_t(const layer_normalization_desc_t *adesc,
+            const primitive_attr_t *attr,
+            const layer_normalization_fwd_pd_t *hint_fwd_pd)
+        : primitive_desc_t(attr, base_pkind)
+        , desc_(*adesc)
+        , hint_fwd_pd_(hint_fwd_pd)
+        , data_md_(desc_.data_desc)
+        , stat_md_(desc_.stat_desc)
+        , scaleshift_md_(desc_.data_scaleshift_desc) {}
 
     bool set_default_stat_md_format(const memory_desc_t &data_md) {
         if (stat_md_.format_kind != format_kind::any) return true;
@@ -133,11 +135,6 @@ struct layer_normalization_fwd_pd_t : public layer_normalization_pd_t {
     typedef layer_normalization_fwd_pd_t base_class;
     typedef layer_normalization_fwd_pd_t hint_class;
 
-    layer_normalization_fwd_pd_t(const layer_normalization_desc_t *adesc,
-            const primitive_attr_t *attr,
-            const layer_normalization_fwd_pd_t *hint_fwd_pd)
-        : layer_normalization_pd_t(adesc, attr, hint_fwd_pd) {}
-
     arg_usage_t arg_usage(int arg) const override {
         if (arg == ZENDNN_ARG_SRC) return arg_usage_t::input;
         if (arg == ZENDNN_ARG_DST) return arg_usage_t::output;
@@ -151,6 +148,9 @@ struct layer_normalization_fwd_pd_t : public layer_normalization_pd_t {
         if (arg == ZENDNN_ARG_SCALE_SHIFT && use_scaleshift())
             return arg_usage_t::input;
 
+        if (arg == ZENDNN_ARG_SCALE && use_scale()) return arg_usage_t::input;
+        if (arg == ZENDNN_ARG_SHIFT && use_shift()) return arg_usage_t::input;
+
         return primitive_desc_t::arg_usage(arg);
     }
 
@@ -161,7 +161,9 @@ struct layer_normalization_fwd_pd_t : public layer_normalization_pd_t {
             case ZENDNN_ARG_MEAN: return stats_are_src() ? src_md(1) : dst_md(1);
             case ZENDNN_ARG_VARIANCE:
                 return stats_are_src() ? src_md(2) : dst_md(2);
-            case ZENDNN_ARG_SCALE_SHIFT: return weights_md(0);
+            case ZENDNN_ARG_SCALE_SHIFT:
+            case ZENDNN_ARG_SCALE:
+            case ZENDNN_ARG_SHIFT: return weights_md(0);
             default: return layer_normalization_pd_t::arg_md(arg);
         }
     }
@@ -184,33 +186,32 @@ struct layer_normalization_fwd_pd_t : public layer_normalization_pd_t {
     }
 
     int n_inputs() const override {
-        return 1 + 2 * stats_are_src() + use_scaleshift();
+        return 1 + 2 * stats_are_src() + use_scaleshift() + use_scale()
+                + use_shift();
     }
     int n_outputs() const override {
         return 1 + 2 * (!stats_are_src()) * is_training();
     }
 
 protected:
+    layer_normalization_fwd_pd_t(const layer_normalization_desc_t *adesc,
+            const primitive_attr_t *attr,
+            const layer_normalization_fwd_pd_t *hint_fwd_pd)
+        : layer_normalization_pd_t(adesc, attr, hint_fwd_pd) {}
+
     bool set_default_formats_common() {
         return set_default_stat_md_format(data_md_);
     }
 
     bool check_scale_shift_data_type() const {
-        return IMPLICATION(
-                use_scaleshift(), weights_md()->data_type == data_type::f32);
+        return IMPLICATION(use_scaleshift() || use_scale() || use_shift(),
+                weights_md()->data_type == data_type::f32);
     }
 };
 
 struct layer_normalization_bwd_pd_t : public layer_normalization_pd_t {
     typedef layer_normalization_bwd_pd_t base_class;
     typedef layer_normalization_fwd_pd_t hint_class;
-
-    layer_normalization_bwd_pd_t(const layer_normalization_desc_t *adesc,
-            const primitive_attr_t *attr,
-            const layer_normalization_fwd_pd_t *hint_fwd_pd)
-        : layer_normalization_pd_t(adesc, attr, hint_fwd_pd)
-        , diff_data_md_(desc_.diff_data_desc)
-        , diff_scaleshift_md_(desc_.diff_data_scaleshift_desc) {}
 
     arg_usage_t arg_usage(int arg) const override {
         if (utils::one_of(arg, ZENDNN_ARG_SRC, ZENDNN_ARG_MEAN, ZENDNN_ARG_VARIANCE,
@@ -219,10 +220,16 @@ struct layer_normalization_bwd_pd_t : public layer_normalization_pd_t {
 
         if (arg == ZENDNN_ARG_SCALE_SHIFT && use_scaleshift())
             return arg_usage_t::input;
+        if (arg == ZENDNN_ARG_SCALE && use_scale()) return arg_usage_t::input;
+        if (arg == ZENDNN_ARG_SHIFT && use_shift()) return arg_usage_t::input;
 
         if (arg == ZENDNN_ARG_DIFF_SRC) return arg_usage_t::output;
 
         if (arg == ZENDNN_ARG_DIFF_SCALE_SHIFT && use_scaleshift())
+            return arg_usage_t::output;
+        if (arg == ZENDNN_ARG_DIFF_SCALE && use_scale())
+            return arg_usage_t::output;
+        if (arg == ZENDNN_ARG_DIFF_SHIFT && use_shift())
             return arg_usage_t::output;
 
         return primitive_desc_t::arg_usage(arg);
@@ -233,10 +240,14 @@ struct layer_normalization_bwd_pd_t : public layer_normalization_pd_t {
             case ZENDNN_ARG_SRC: return src_md(0);
             case ZENDNN_ARG_MEAN: return src_md(1);
             case ZENDNN_ARG_VARIANCE: return src_md(2);
-            case ZENDNN_ARG_SCALE_SHIFT: return weights_md(0);
+            case ZENDNN_ARG_SCALE_SHIFT:
+            case ZENDNN_ARG_SCALE:
+            case ZENDNN_ARG_SHIFT: return weights_md(0);
             case ZENDNN_ARG_DIFF_SRC: return diff_src_md(0);
             case ZENDNN_ARG_DIFF_DST: return diff_dst_md(0);
-            case ZENDNN_ARG_DIFF_SCALE_SHIFT: return diff_weights_md(0);
+            case ZENDNN_ARG_DIFF_SCALE_SHIFT:
+            case ZENDNN_ARG_DIFF_SCALE:
+            case ZENDNN_ARG_DIFF_SHIFT: return diff_weights_md(0);
             default: return layer_normalization_pd_t::arg_md(arg);
         }
     }
@@ -261,14 +272,25 @@ struct layer_normalization_bwd_pd_t : public layer_normalization_pd_t {
         return index == 0 ? &diff_scaleshift_md_ : &glob_zero_md;
     }
 
-    int n_inputs() const override { return 4 + use_scaleshift(); }
+    int n_inputs() const override {
+        return 4 + use_scaleshift() + use_scale() + use_shift();
+    }
     int n_outputs() const override {
-        return 1 + (desc_.prop_kind == prop_kind::backward);
+        return 1
+                + (desc_.prop_kind == prop_kind::backward)
+                * (use_scale() + use_shift() + use_scaleshift());
     }
 
 protected:
     memory_desc_t diff_data_md_;
     memory_desc_t diff_scaleshift_md_;
+
+    layer_normalization_bwd_pd_t(const layer_normalization_desc_t *adesc,
+            const primitive_attr_t *attr,
+            const layer_normalization_fwd_pd_t *hint_fwd_pd)
+        : layer_normalization_pd_t(adesc, attr, hint_fwd_pd)
+        , diff_data_md_(desc_.diff_data_desc)
+        , diff_scaleshift_md_(desc_.diff_data_scaleshift_desc) {}
 
     bool set_default_formats_common() {
         return IMPLICATION(diff_data_md_.format_kind == format_kind::any,
@@ -279,7 +301,7 @@ protected:
     }
 
     bool check_scale_shift_data_type() const {
-        return IMPLICATION(use_scaleshift(),
+        return IMPLICATION(use_scaleshift() || use_scale() || use_shift(),
                 utils::everyone_is(data_type::f32, weights_md()->data_type,
                         diff_weights_md()->data_type));
     }

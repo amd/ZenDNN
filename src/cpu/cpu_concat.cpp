@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 
 #include "cpu/cpu_engine.hpp"
 
+#include "common/impl_list_item.hpp"
 #include "cpu/ref_concat.hpp"
 #include "cpu/simple_concat.hpp"
 
@@ -28,25 +29,27 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using cpd_create_f = zendnn::impl::engine_t::concat_primitive_desc_create_f;
-
 namespace {
+using namespace zendnn::impl::data_type;
+#define INSTANCE(...) \
+    impl_list_item_t(impl_list_item_t::concat_type_deduction_helper_t< \
+            __VA_ARGS__::pd_t>()),
 // clang-format off
-#define INSTANCE(...) __VA_ARGS__::pd_t::create,
-const cpd_create_f cpu_concat_impl_list[] = {
-        INSTANCE(simple_concat_t<data_type::f32>)
-        INSTANCE(simple_concat_t<data_type::u8>)
-        INSTANCE(simple_concat_t<data_type::s8>)
-        INSTANCE(simple_concat_t<data_type::s32>)
-        INSTANCE(simple_concat_t<data_type::bf16>)
+constexpr impl_list_item_t cpu_concat_impl_list[] = REG_CONCAT_P({
+        INSTANCE(simple_concat_t<f32>)
+        INSTANCE(simple_concat_t<u8>)
+        INSTANCE(simple_concat_t<s8>)
+        INSTANCE(simple_concat_t<s32>)
+        INSTANCE(simple_concat_t<bf16>)
         INSTANCE(ref_concat_t)
         nullptr,
-};
-#undef INSTANCE
+});
 // clang-format on
+#undef INSTANCE
 } // namespace
 
-const cpd_create_f *cpu_engine_impl_list_t::get_concat_implementation_list() {
+const impl_list_item_t *
+cpu_engine_impl_list_t::get_concat_implementation_list() {
     return cpu_concat_impl_list;
 }
 

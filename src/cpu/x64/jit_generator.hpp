@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -100,6 +100,8 @@ static inline void tc_configure_tile(
 //
 // (Roma)
 
+} // namespace
+
 #ifdef XBYAK64
 constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
         Xbyak::Operand::RBX,
@@ -114,19 +116,32 @@ constexpr Xbyak::Operand::Code abi_save_gpr_regs[] = {
 #endif
 };
 
+constexpr Xbyak::Operand::Code abi_param_regs[] = {
 #ifdef _WIN32
-static const Xbyak::Reg64 abi_param1(Xbyak::Operand::RCX),
-        abi_param2(Xbyak::Operand::RDX), abi_param3(Xbyak::Operand::R8),
-        abi_param4(Xbyak::Operand::R9), abi_not_param1(Xbyak::Operand::RDI);
+        Xbyak::Operand::RCX, Xbyak::Operand::RDX, Xbyak::Operand::R8,
+        Xbyak::Operand::R9
 #else
-static const Xbyak::Reg64 abi_param1(Xbyak::Operand::RDI),
-        abi_param2(Xbyak::Operand::RSI), abi_param3(Xbyak::Operand::RDX),
-        abi_param4(Xbyak::Operand::RCX), abi_param5(Xbyak::Operand::R8),
-        abi_param6(Xbyak::Operand::R9), abi_not_param1(Xbyak::Operand::RCX);
+        Xbyak::Operand::RDI, Xbyak::Operand::RSI, Xbyak::Operand::RDX,
+        Xbyak::Operand::RCX, Xbyak::Operand::R8, Xbyak::Operand::R9
 #endif
+};
+
+constexpr Xbyak::Operand::Code abi_not_param_reg =
+#ifdef _WIN32
+        Xbyak::Operand::RDI;
+#else
+        Xbyak::Operand::RCX;
 #endif
 
-} // namespace
+#define abi_param1 Xbyak::Reg64(abi_param_regs[0])
+#define abi_param2 Xbyak::Reg64(abi_param_regs[1])
+#define abi_param3 Xbyak::Reg64(abi_param_regs[2])
+#define abi_param4 Xbyak::Reg64(abi_param_regs[3])
+#define abi_param5 Xbyak::Reg64(abi_param_regs[4])
+#define abi_param6 Xbyak::Reg64(abi_param_regs[5])
+#define abi_not_param1 Xbyak::Reg64(abi_not_param_reg)
+
+#endif
 
 class jit_generator : public Xbyak::CodeGenerator, public c_compatible {
 public:
@@ -180,7 +195,7 @@ public:
         }
         for (size_t i = 0; i < num_abi_save_gpr_regs; ++i)
             push(Xbyak::Reg64(abi_save_gpr_regs[i]));
-        if (is_valid_isa(avx512_common)) {
+        if (is_valid_isa(avx512_core)) {
             mov(reg_EVEX_max_8b_offt, 2 * EVEX_max_8b_offt);
         }
     }
@@ -207,20 +222,8 @@ public:
         return rsp + saved_regs_size + first_params_and_return_addr_size;
     }
 
-    void mic_prefetcht0(Xbyak::Address a) {
-        if (is_valid_isa(avx512_mic)) prefetcht0(a);
-    }
-
-    void mic_prefetcht1(Xbyak::Address a) {
-        if (is_valid_isa(avx512_mic)) prefetcht1(a);
-    }
-
-    void mic_prefetcht2(Xbyak::Address a) {
-        if (is_valid_isa(avx512_mic)) prefetcht2(a);
-    }
-
     void uni_vzeroupper() {
-        if (mayiuse(avx) && !mayiuse(avx512_mic)) vzeroupper();
+        if (mayiuse(avx)) vzeroupper();
     }
 
     void postamble() {
@@ -471,10 +474,10 @@ public:
     }
 
     void uni_vmovntps(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
-        movntps(addr, x);
-    }
-    void uni_vmovntps(const Xbyak::Address &addr, const Xbyak::Ymm &x) {
-        vmovntps(addr, x);
+        if (is_valid_isa(avx))
+            vmovntps(addr, x);
+        else
+            movntps(addr, x);
     }
 
     void uni_vbroadcastss(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
@@ -500,8 +503,18 @@ public:
     }
 
     void uni_vpbroadcastd(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        movss(x, op);
-        pshufd(x, x, 0x0);
+        if (is_valid_isa(avx2))
+            vpbroadcastd(x, op);
+        else if (is_valid_isa(avx)) {
+            if (op.isMEM())
+                vmovss(x, op.getAddress());
+            else
+                vmovss(x, x, op);
+            vpshufd(x, x, 0x0);
+        } else {
+            movss(x, op);
+            pshufd(x, x, 0x0);
+        }
     }
     void uni_vpbroadcastd(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         if (is_valid_isa(avx2)) {
@@ -529,8 +542,20 @@ public:
         }
     }
 
+    void uni_vpshufd(
+            const Xbyak::Xmm &x1, const Xbyak::Operand &op, Xbyak::uint8 imm) {
+        if (is_valid_isa(avx))
+            vpshufd(x1, op, imm);
+        else {
+            pshufd(x1, op, imm);
+        }
+    }
+
     void uni_vrcpss(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        rcpss(x, op);
+        if (is_valid_isa(avx))
+            vrcpss(x, x, op);
+        else
+            rcpss(x, op);
     }
     void uni_vrcpss(const Xbyak::Ymm &x1, const Xbyak::Xmm &x2) {
         Xbyak::Xmm x1_(x1.getIdx());
@@ -543,7 +568,10 @@ public:
     }
 
     void uni_vrcpps(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        rcpps(x, op);
+        if (is_valid_isa(avx))
+            vrcpps(x, op);
+        else
+            rcpps(x, op);
     }
     void uni_vrcpps(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         vrcpps(x, op);
@@ -554,19 +582,37 @@ public:
 
     void uni_vdivps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-        assert(x.isEqualIfNotInherited(op1));
-        divps(x, op2);
+        if (is_valid_isa(avx))
+            vdivps(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            divps(x, op2);
+        }
     }
     void uni_vdivps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
         vdivps(x, op1, op2);
     }
 
+    void uni_vdivss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+        if (is_valid_isa(avx))
+            vdivss(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            divss(x, op2);
+        }
+    }
+
     void uni_vdivps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2, const Xbyak::Xmm &buf) {
-        movups(buf, op1);
-        divps(buf, op2);
-        if (x.getIdx() != buf.getIdx()) { movups(x, buf); }
+        if (is_valid_isa(avx))
+            vdivps(x, op1, op2);
+        else {
+            movups(buf, op1);
+            divps(buf, op2);
+            if (x.getIdx() != buf.getIdx()) { movups(x, buf); }
+        }
     }
 
     void uni_vdivps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
@@ -601,10 +647,34 @@ public:
         vaddss(x, op1, op2);
     }
 
+    void uni_vphaddd(const Xbyak::Xmm &x, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx)) {
+            vphaddd(x, x2, op);
+        } else {
+            assert(x.isEqualIfNotInherited(op));
+            phaddd(x, op);
+        }
+    }
+
+    void uni_vhaddps(const Xbyak::Xmm &x, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx)) {
+            vhaddps(x, x2, op);
+        } else {
+            assert(x.isEqualIfNotInherited(op));
+            haddps(x, op);
+        }
+    }
+
     void uni_vpsignd(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
-        assert(x1.getIdx() == x2.getIdx());
-        psignd(x1, op);
+        if (is_valid_isa(avx))
+            vpsignd(x1, x2, op);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            psignd(x1, op);
+        }
     }
     void uni_vpsignd(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -613,8 +683,12 @@ public:
 
     void uni_vpsubd(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
-        assert(x1.getIdx() == x2.getIdx());
-        psubd(x1, op);
+        if (is_valid_isa(avx))
+            vpsubd(x1, x2, op);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            psubd(x1, op);
+        }
     }
     void uni_vpsubd(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -623,8 +697,12 @@ public:
 
     void uni_vpsubb(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
-        assert(x1.getIdx() == x2.getIdx());
-        psubb(x1, op);
+        if (is_valid_isa(avx))
+            vpsubb(x1, x2, op);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            psubb(x1, op);
+        }
     }
     void uni_vpsubb(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -633,8 +711,12 @@ public:
 
     void uni_vsubss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-        assert(x.isEqualIfNotInherited(op1));
-        subps(x, op2);
+        if (is_valid_isa(avx))
+            vsubss(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            subps(x, op2);
+        }
     }
     void uni_vsubss(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
@@ -643,8 +725,12 @@ public:
 
     void uni_vsubps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-        assert(x.isEqualIfNotInherited(op1));
-        subps(x, op2);
+        if (is_valid_isa(avx))
+            vsubps(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            subps(x, op2);
+        }
     }
     void uni_vsubps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
@@ -653,9 +739,13 @@ public:
 
     void uni_vsubps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2, const Xbyak::Xmm &buf) {
-        movups(buf, op1);
-        subps(buf, op2);
-        if (x.getIdx() != buf.getIdx()) { movups(x, buf); }
+        if (is_valid_isa(avx))
+            vsubps(x, op1, op2);
+        else {
+            movups(buf, op1);
+            subps(buf, op2);
+            if (x.getIdx() != buf.getIdx()) { movups(x, buf); }
+        }
     }
 
     void uni_vsubps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
@@ -713,9 +803,17 @@ public:
             const Xbyak::Operand &op) {
         // Note: x1 gets overriden by x1*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulps(x1, op);
-        addps(x1, x2);
+        if (is_valid_isa(avx2))
+            vfmadd132ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(x1.getIdx() != x2.getIdx());
+            vmulps(x1, x1, op);
+            vaddps(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulps(x1, op);
+            addps(x1, x2);
+        }
     }
     void uni_vfmadd132ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -734,9 +832,17 @@ public:
             const Xbyak::Operand &op) {
         // Note: x1 gets overriden by x1*x2
         // This is incorrect if x1 == op
-        assert(!x1.isEqualIfNotInherited(op));
-        mulps(x1, x2);
-        addps(x1, op);
+        if (is_valid_isa(avx2))
+            vfmadd213ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(!x1.isEqualIfNotInherited(op));
+            vmulps(x1, x1, x2);
+            vaddps(x1, x1, op);
+        } else {
+            assert(!x1.isEqualIfNotInherited(op));
+            mulps(x1, x2);
+            addps(x1, op);
+        }
     }
     void uni_vfmadd213ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -755,9 +861,17 @@ public:
             const Xbyak::Operand &op) {
         // Note: x1 gets overriden by x1*x2
         // This is incorrect if x1 == op
-        assert(!x1.isEqualIfNotInherited(op));
-        mulss(x1, x2);
-        addss(x1, op);
+        if (is_valid_isa(avx2))
+            vfmadd213ss(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(!x1.isEqualIfNotInherited(op));
+            vmulss(x1, x1, x2);
+            vaddss(x1, x1, op);
+        } else {
+            assert(!x1.isEqualIfNotInherited(op));
+            mulss(x1, x2);
+            addss(x1, op);
+        }
     }
     void uni_vfmadd213ss(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -776,9 +890,17 @@ public:
             const Xbyak::Operand &op) {
         // Note: x2 gets overriden by x2*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulps(x2, op);
-        addps(x1, x2);
+        if (is_valid_isa(avx2))
+            vfmadd231ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(x1.getIdx() != x2.getIdx());
+            vmulps(x2, x2, op);
+            vaddps(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulps(x2, op);
+            addps(x1, x2);
+        }
     }
     void uni_vfmadd231ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -796,9 +918,16 @@ public:
             const Xbyak::Operand &op) {
         // Note: x2 gets overriden by x2*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulss(x2, op);
-        addss(x1, x2);
+        if (is_valid_isa(avx2))
+            vfmadd231ss(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            vmulss(x2, x2, op);
+            vaddss(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulss(x2, op);
+            addss(x1, x2);
+        }
     }
     void uni_vfmadd231ss(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -817,9 +946,17 @@ public:
             const Xbyak::Operand &op) {
         // Note: x2 gets overriden by x2*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulps(x2, op);
-        subps(x1, x2);
+        if (is_valid_isa(avx2))
+            vfnmadd231ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(x1.getIdx() != x2.getIdx());
+            vmulps(x2, x2, op);
+            vsubps(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulps(x2, op);
+            subps(x1, x2);
+        }
     }
 
     void uni_vfnmadd231ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
@@ -835,13 +972,51 @@ public:
         }
     }
 
+    void uni_vfnmadd231ss(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        // Note: x2 gets overriden by x2*op
+        // This is incorrect if x1 == x2
+        if (is_valid_isa(avx2))
+            vfnmadd231ss(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(x1.getIdx() != x2.getIdx());
+            vmulss(x2, x2, op);
+            vsubss(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulss(x2, op);
+            subss(x1, x2);
+        }
+    }
+
+    void uni_vfnmadd231ss(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx2))
+            vfnmadd231ss(x1, x2, op);
+        else {
+            // Note: x2 gets overriden by x2*op
+            // This is incorrect if x1 == x2
+            assert(x1.getIdx() != x2.getIdx());
+            vmulss(x2, x2, op);
+            vsubss(x1, x1, x2);
+        }
+    }
+
     void uni_vfmsub213ps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
         // Note: x1 gets overriden by x1*x2
         // This is incorrect if x1 == op
-        assert(!x1.isEqualIfNotInherited(op));
-        mulps(x1, x2);
-        subps(x1, op);
+        if (is_valid_isa(avx2))
+            vfmsub213ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            assert(!x1.isEqualIfNotInherited(op));
+            vmulps(x1, x1, x2);
+            vsubps(x1, x1, op);
+        } else {
+            assert(!x1.isEqualIfNotInherited(op));
+            mulps(x1, x2);
+            subps(x1, op);
+        }
     }
     void uni_vfmsub213ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -857,7 +1032,10 @@ public:
     }
 
     void uni_vsqrtps(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        sqrtps(x, op);
+        if (is_valid_isa(avx))
+            vsqrtps(x, op);
+        else
+            sqrtps(x, op);
     }
     void uni_vsqrtps(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         vsqrtps(x, op);
@@ -921,12 +1099,16 @@ public:
 
     void uni_vandps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
-        assert(x1.getIdx() == x2.getIdx());
-        andps(x1, op);
+        if (is_valid_isa(avx))
+            vandps(x1, x2, op);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            andps(x1, op);
+        }
     }
     void uni_vandps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
-        if (!is_valid_isa(avx512_common) || x1.getBit() < 512)
+        if (!is_valid_isa(avx512_core) || x1.getBit() < 512)
             vandps(x1, x2, op);
         else
             vpandd(x1, x2, op);
@@ -934,12 +1116,16 @@ public:
 
     void uni_vorps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op) {
-        assert(x1.getIdx() == x2.getIdx());
-        orps(x1, op);
+        if (is_valid_isa(avx))
+            vorps(x1, x2, op);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            orps(x1, op);
+        }
     }
     void uni_vorps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
-        if (!is_valid_isa(avx512_common) || x1.getBit() < 512)
+        if (!is_valid_isa(avx512_core) || x1.getBit() < 512)
             vorps(x1, x2, op);
         else
             vpord(x1, x2, op);
@@ -956,7 +1142,7 @@ public:
     }
     void uni_vxorps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
-        if (!is_valid_isa(avx512_common) || x1.getBit() < 512)
+        if (!is_valid_isa(avx512_core) || x1.getBit() < 512)
             vxorps(x1, x2, op);
         else
             vpxord(x1, x2, op);
@@ -964,8 +1150,12 @@ public:
 
     void uni_vpslld(
             const Xbyak::Xmm &x, const Xbyak::Operand &op, const int imm) {
-        assert(x.isEqualIfNotInherited(op));
-        pslld(x, imm);
+        if (is_valid_isa(avx))
+            vpslld(x, op, imm);
+        else {
+            assert(x.isEqualIfNotInherited(op));
+            pslld(x, imm);
+        }
     }
     void uni_vpslld(
             const Xbyak::Ymm &x, const Xbyak::Operand &op, const int imm) {
@@ -974,8 +1164,12 @@ public:
 
     void uni_vpsrld(
             const Xbyak::Xmm &x, const Xbyak::Operand &op, const int imm) {
-        if (!x.isEqualIfNotInherited(op)) uni_vmovups(x, op);
-        psrld(x, imm);
+        if (is_valid_isa(avx))
+            vpsrld(x, op, imm);
+        else {
+            if (!x.isEqualIfNotInherited(op)) uni_vmovups(x, op);
+            psrld(x, imm);
+        }
     }
     void uni_vpsrld(
             const Xbyak::Ymm &x, const Xbyak::Operand &op, const int imm) {
@@ -996,9 +1190,18 @@ public:
         vmaxps(x, op1, op2);
     }
 
+    void uni_vmaxss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+        if (is_valid_isa(avx))
+            vmaxss(x, op1, op2);
+        else {
+            if (!x.isEqualIfNotInherited(op1)) movss(x, op1);
+            maxss(x, op2);
+        }
+    }
+
     void uni_vminps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-
         if (is_valid_isa(avx))
             vminps(x, op1, op2);
         else {
@@ -1010,6 +1213,16 @@ public:
     void uni_vminps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
         vminps(x, op1, op2);
+    }
+
+    void uni_vminss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+        if (is_valid_isa(avx))
+            vminss(x, op1, op2);
+        else {
+            if (!x.isEqualIfNotInherited(op1)) movss(x, op1);
+            minss(x, op2);
+        }
     }
 
     void uni_vpmovsxbd(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
@@ -1036,8 +1249,12 @@ public:
 
     void uni_vcmpps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, int cmp_predicate) {
-        if (x1.getIdx() != x2.getIdx()) uni_vmovups(x1, x2);
-        cmpps(x1, op, cmp_predicate);
+        if (is_valid_isa(avx))
+            vcmpps(x1, x2, op, cmp_predicate);
+        else {
+            if (x1.getIdx() != x2.getIdx()) uni_vmovups(x1, x2);
+            cmpps(x1, op, cmp_predicate);
+        }
     }
     void uni_vcmpps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op, int cmp_predicate) {
@@ -1045,7 +1262,10 @@ public:
     }
 
     void uni_vtestps(const Xbyak::Xmm &x1, const Xbyak::Operand &op) {
-        ptest(x1, op);
+        if (is_valid_isa(avx))
+            vtestps(x1, op);
+        else
+            ptest(x1, op);
     }
 
     void uni_vtestps(const Xbyak::Ymm &x1, const Xbyak::Operand &op) {
@@ -1055,18 +1275,37 @@ public:
 
     void uni_vblendvps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, const Xbyak::Xmm &msk) {
-        assert(x1.getIdx() == x2.getIdx());
-        assert(msk.getIdx() == 0);
-        blendvps(x1, op);
+        if (is_valid_isa(avx))
+            vblendvps(x1, x2, op, msk);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            assert(msk.getIdx() == 0);
+            blendvps(x1, op);
+        }
     }
     void uni_vblendvps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op, const Xbyak::Ymm &msk) {
         vblendvps(x1, x2, op, msk);
     }
 
+    void uni_vblendps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op, const int imm) {
+        assert(!x1.isZMM() && !x2.isZMM());
+
+        if (is_valid_isa(avx))
+            vblendps(x1, x2, op, imm);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            blendps(x1, op, imm);
+        }
+    }
+
     void uni_vroundps(
             const Xbyak::Xmm &x, const Xbyak::Operand &op, const int imm) {
-        roundps(x, op, imm);
+        if (is_valid_isa(avx))
+            vroundps(x, op, imm);
+        else
+            roundps(x, op, imm);
     }
     void uni_vroundps(
             const Xbyak::Ymm &x, const Xbyak::Operand &op, const int imm) {
@@ -1078,7 +1317,10 @@ public:
     }
 
     void uni_vcvtps2dq(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        cvtps2dq(x, op);
+        if (is_valid_isa(avx))
+            vcvtps2dq(x, op);
+        else
+            cvtps2dq(x, op);
     }
     void uni_vcvtps2dq(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         vcvtps2dq(x, op);
@@ -1100,6 +1342,32 @@ public:
     }
     void uni_vmovmskps(const Xbyak::Reg &x1, const Xbyak::Ymm &x2) {
         vmovmskps(x1, x2);
+    }
+
+    void uni_vmovd(const Xbyak::Reg32 &r, const Xbyak::Xmm &x) {
+        if (is_valid_isa(avx))
+            vmovd(r, x);
+        else
+            movd(r, x);
+    }
+    void uni_vmovd(const Xbyak::Xmm &x, const Xbyak::Reg32 &r) {
+        if (is_valid_isa(avx))
+            vmovd(x, r);
+        else
+            movd(x, r);
+    }
+    void uni_vmovd(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
+        if (is_valid_isa(avx))
+            vmovd(addr, x);
+        else
+            movd(addr, x);
+    }
+
+    void uni_vmovd(const Xbyak::Xmm &x, const Xbyak::Address &addr) {
+        if (is_valid_isa(avx))
+            vmovd(x, addr);
+        else
+            movd(x, addr);
     }
 
     void uni_vmovq(const Xbyak::Xmm &x, const Xbyak::Reg64 &r) {
@@ -1159,11 +1427,12 @@ public:
 
     void uni_vpinsrb(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, const int imm) {
-        assert(x1.getIdx() == x2.getIdx());
         if (is_valid_isa(avx))
             vpinsrb(x1, x2, op, imm);
-        else
+        else {
+            assert(x1.getIdx() == x2.getIdx());
             pinsrb(x1, op, imm);
+        }
     }
 
     void uni_vpinsrb(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
@@ -1173,11 +1442,12 @@ public:
 
     void uni_vpinsrd(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, const int imm) {
-        assert(x1.getIdx() == x2.getIdx());
         if (is_valid_isa(avx))
             vpinsrd(x1, x2, op, imm);
-        else
+        else {
+            assert(x1.getIdx() == x2.getIdx());
             pinsrd(x1, op, imm);
+        }
     }
     void uni_vpinsrd(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op, const int imm) {
@@ -1186,11 +1456,12 @@ public:
 
     void uni_vpinsrq(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, const int imm) {
-        assert(x1.getIdx() == x2.getIdx());
         if (is_valid_isa(avx))
             vpinsrq(x1, x2, op, imm);
-        else
+        else {
+            assert(x1.getIdx() == x2.getIdx());
             pinsrq(x1, op, imm);
+        }
     }
     void uni_vpinsrq(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op, const int imm) {
@@ -1199,11 +1470,12 @@ public:
 
     void uni_vpinsrw(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
             const Xbyak::Operand &op, const int imm) {
-        assert(x1.getIdx() == x2.getIdx());
         if (is_valid_isa(avx))
             vpinsrw(x1, x2, op, imm);
-        else
+        else {
+            assert(x1.getIdx() == x2.getIdx());
             pinsrw(x1, op, imm);
+        }
     }
     void uni_vpinsrw(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op, const int imm) {
@@ -1274,6 +1546,31 @@ public:
         vpmaxsd(x1, x2, op);
     }
 
+    void uni_vpmaxsb(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vpmaxsb(x1, x2, op);
+        else {
+            if (x1.getIdx() != x2.getIdx()) movdqa(x1, x2);
+            pmaxsb(x1, op);
+        }
+    }
+
+    void uni_vpmaxsb(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+            const Xbyak::Operand &op) {
+        vpmaxsb(x1, x2, op);
+    }
+
+    void uni_vpminub(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vpminub(x1, x2, op);
+        else {
+            if (x1.getIdx() != x2.getIdx()) movdqa(x1, x2);
+            pminub(x1, op);
+        }
+    }
+
     void mul_by_const(
             const Xbyak::Reg &out, const Xbyak::Reg64 &tmp, int value) {
         // Generates a shift + add sequence for multiplicating contents of the
@@ -1281,7 +1578,6 @@ public:
         //
         // Pros compared to mul/imul:
         // - does not require using known registers
-        // - not microcoded on Intel(R) Xeon Phi(TM) processors
         // Still, there are probably a lot of cases when mul/imul is faster on
         // Intel(R) Core(TM) processors. Not intended for critical path.
 
@@ -1314,30 +1610,41 @@ public:
      */
     template <typename Vmm>
     void init_saturate_f32(Vmm vmm_lbound, Vmm vmm_ubound, Xbyak::Reg64 reg_tmp,
-            data_type_t idt, data_type_t odt) {
+            data_type_t idt, data_type_t odt, bool force_lbound = false) {
         using namespace data_type;
         if (!((idt == f32) && utils::one_of(odt, u8, s8, s32))) return;
 
-        assert(IMPLICATION(
-                idt == u8, vmm_lbound.getIdx() != vmm_ubound.getIdx()));
+        assert(IMPLICATION(idt == u8 || force_lbound,
+                vmm_lbound.getIdx() != vmm_ubound.getIdx()));
+
+        auto init_vmm = [&](Vmm vmm, float value) {
+            Xbyak::Xmm xmm_tmp(vmm.getIdx());
+            mov(reg_tmp, float2int(value));
+            uni_vmovq(xmm_tmp, reg_tmp);
+            if (vmm.isYMM() || vmm.isZMM())
+                uni_vbroadcastss(vmm, xmm_tmp);
+            else
+                uni_vshufps(vmm, xmm_tmp, xmm_tmp, 0);
+        };
+
         // No need to saturate on lower bound for signed integer types, as
         // the conversion to int would return INT_MIN, and then proper
-        // saturation will happen in store_data
-        if (odt == u8) uni_vpxor(vmm_lbound, vmm_lbound, vmm_lbound);
+        // saturation will happen in store_data. The param force_lbound, will
+        // force saturate values unconditionally to lbound.
+        if (odt == u8)
+            uni_vpxor(vmm_lbound, vmm_lbound, vmm_lbound);
+        else if (force_lbound) {
+            const float saturation_lbound = odt == s8 ? INT8_MIN : INT32_MIN;
+            init_vmm(vmm_lbound, saturation_lbound);
+        }
 
-        Xbyak::Xmm tmp(vmm_ubound.getIdx());
-        float saturation_ubound = types::max_value<float>(odt);
-        mov(reg_tmp, float2int(saturation_ubound));
-        uni_vmovq(tmp, reg_tmp);
-        if (vmm_ubound.isYMM() || vmm_ubound.isZMM())
-            uni_vbroadcastss(vmm_ubound, tmp);
-        else
-            uni_vshufps(vmm_ubound, tmp, tmp, 0);
+        const float saturation_ubound = types::max_value<float>(odt);
+        init_vmm(vmm_ubound, saturation_ubound);
     }
 
     template <typename Vmm>
     void saturate_f32(const Vmm &vmm, const Vmm &vmm_lbound,
-            const Vmm &vmm_ubound, data_type_t odt) {
+            const Vmm &vmm_ubound, data_type_t odt, bool force_lbound = false) {
         // This function is used to saturate to odt in f32 before converting
         // to s32 in order to avoid bad saturation due to cvtps2dq
         // behavior (it returns INT_MIN if the f32 is out of the
@@ -1347,8 +1654,9 @@ public:
 
         // no need to apply lower saturation bound when odt is
         // signed, as cvtps2dq will return MIN_INT if the value
-        // does not fit
-        if (odt == u8) {
+        // does not fit. The param force_lbound, will force saturate values
+        // unconditionally to lbound.
+        if (odt == u8 || force_lbound) {
             if (is_valid_isa(avx))
                 vmaxps(vmm, vmm, vmm_lbound);
             else
@@ -1796,6 +2104,46 @@ public:
                 break;
             default: assert(!"unsupported source data type");
         }
+    }
+
+    /* A utility function to process f32 tail (load, store or other) depending
+     * on tail size, stored in Reg64. Tail size must be value from 0 to 3/7
+     * (Xmm/Ymm). Tail process functions require integer as argument to specify
+     * behavior for each tail size.
+     *
+     * Only supported for Xmm and Ymm.
+     */
+    template <typename Vmm>
+    void runtime_tail_process(const Xbyak::Reg64 &reg_tail,
+            const Xbyak::Reg64 &reg_tmp,
+            const std::function<void(int)> &tail_process) {
+        constexpr int simd_w_ymm = 8;
+        constexpr int f32_bits = sizeof(float) * 8;
+        const auto simd_w = Vmm().getBit() / f32_bits;
+        assert(simd_w != Xbyak::Zmm().getBit() / f32_bits);
+
+        Xbyak::Label label_tbl, label_tbl_end;
+        Xbyak::Label l_case[simd_w_ymm];
+
+        mov(reg_tmp, label_tbl);
+        const Xbyak::Address label_address
+                = ptr[reg_tmp + reg_tail * sizeof(void *)];
+        jmp(label_address);
+
+        // create jump table
+        L(label_tbl);
+        for (size_t i = 0; i < simd_w; i++)
+            putL(l_case[i]);
+
+        // cases for each tail size - from 0 to 3/7
+        L(l_case[0]);
+        jmp(label_tbl_end, T_NEAR);
+        for (size_t i = 1; i < simd_w; i++) {
+            L(l_case[i]);
+            tail_process(i);
+            jmp(label_tbl_end, T_NEAR);
+        }
+        L(label_tbl_end);
     }
 
     ZENDNN_DISALLOW_COPY_AND_ASSIGN(jit_generator);

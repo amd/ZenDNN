@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #define CPU_X64_JIT_UNI_ELTWISE_INJECTOR_HPP
 
 #include <assert.h>
+#include <type_traits>
 
 #include "common/c_types_map.hpp"
 #include "common/primitive_attr.hpp"
@@ -43,56 +44,45 @@ struct static_params_t {
     static_params_t(bool save_state = true,
             Xbyak::Reg64 p_table = Xbyak::util::rax,
             Xbyak::Opmask k_mask = Xbyak::Opmask(1), bool is_fwd = true,
-            bool use_dst = false)
+            bool use_dst = false, bool preserve_vmm = true,
+            bool preserve_p_table = true)
         : save_state(save_state)
         , p_table(p_table)
         , k_mask(k_mask)
         , is_fwd(is_fwd)
-        , use_dst(use_dst) {}
+        , use_dst(use_dst)
+        , preserve_vmm(preserve_vmm)
+        , preserve_p_table(preserve_p_table) {}
 
     bool save_state;
     Xbyak::Reg64 p_table;
     Xbyak::Opmask k_mask;
     bool is_fwd;
     bool use_dst;
+    bool preserve_vmm;
+    bool preserve_p_table;
 };
 
 /*
- * Checks if isa is supported by binary injector.
+ * Checks if isa is supported by eltwise injector.
  */
-constexpr bool is_isa_supported(cpu_isa_t isa) {
-    return utils::one_of(isa, sse41, avx, avx2, avx512_common, avx512_core);
-}
+bool is_isa_supported(cpu_isa_t isa);
 
 /*
  * Checks if eltwise algorithm is supported by eltwise injector.
  */
-constexpr bool is_alg_supported(alg_kind_t alg) {
-    using namespace alg_kind;
-    return utils::one_of(alg, eltwise_relu, eltwise_tanh, eltwise_elu,
-            eltwise_square, eltwise_abs, eltwise_sqrt, eltwise_linear,
-            eltwise_bounded_relu, eltwise_soft_relu, eltwise_logistic,
-            eltwise_logsigmoid, eltwise_mish, eltwise_exp, eltwise_gelu_tanh,
-            eltwise_hardswish, eltwise_swish, eltwise_log, eltwise_clip,
-            eltwise_clip_v2, eltwise_pow, eltwise_gelu_erf, eltwise_round,
-            eltwise_relu_use_dst_for_bwd, eltwise_tanh_use_dst_for_bwd,
-            eltwise_elu_use_dst_for_bwd, eltwise_sqrt_use_dst_for_bwd,
-            eltwise_logistic_use_dst_for_bwd, eltwise_exp_use_dst_for_bwd,
-            eltwise_clip_v2_use_dst_for_bwd);
-}
+bool is_alg_supported(alg_kind_t alg);
 
 /*
  * Checks if eltwise injection for given args is supported.
  */
-constexpr bool is_supported(cpu_isa_t isa, alg_kind_t alg) {
-    return is_isa_supported(isa) && is_alg_supported(alg);
-}
+bool is_supported(cpu_isa_t isa, alg_kind_t alg);
 
 } // namespace eltwise_injector
 
-template <cpu_isa_t isa>
+template <cpu_isa_t isa, typename Wmm = typename cpu_isa_traits<isa>::Vmm>
 struct jit_uni_eltwise_injector_f32 {
-    using Vmm = typename cpu_isa_traits<isa>::Vmm;
+    using Vmm = Wmm;
 
     // Arguments description:
     // host - jit generator which is filled with instructions
@@ -110,7 +100,8 @@ struct jit_uni_eltwise_injector_f32 {
             float alpha, float beta, float scale, bool save_state = true,
             Xbyak::Reg64 p_table = Xbyak::util::rax,
             Xbyak::Opmask k_mask = Xbyak::Opmask(1), bool is_fwd = true,
-            bool use_dst = false)
+            bool use_dst = false, bool preserve_vmm = true,
+            bool preserve_p_table = true)
         : alg_(alg)
         , alpha_(alpha)
         , beta_(beta)
@@ -120,7 +111,9 @@ struct jit_uni_eltwise_injector_f32 {
         , p_table(p_table)
         , k_mask(k_mask)
         , is_fwd_(is_fwd)
-        , use_dst_(use_dst) {
+        , use_dst_(use_dst)
+        , preserve_vmm_(preserve_vmm)
+        , preserve_p_table_(preserve_p_table) {
         assert(eltwise_injector::is_supported(isa, alg_));
 
         register_table_entries();
@@ -130,10 +123,11 @@ struct jit_uni_eltwise_injector_f32 {
             const post_ops_t::entry_t::eltwise_t &eltwise,
             bool save_state = true, Xbyak::Reg64 p_table = Xbyak::util::rax,
             Xbyak::Opmask k_mask = Xbyak::Opmask(1), bool is_fwd = true,
-            bool use_dst = false)
+            bool use_dst = false, bool preserve_vmm = true,
+            bool preserve_p_table = true)
         : jit_uni_eltwise_injector_f32(host, eltwise.alg, eltwise.alpha,
                 eltwise.beta, eltwise.scale, save_state, p_table, k_mask,
-                is_fwd, use_dst) {}
+                is_fwd, use_dst, preserve_vmm, preserve_p_table) {}
 
     void compute_vector_range(size_t start_idx, size_t end_idx);
     void compute_vector_range(const injector_utils::vmm_index_set_t &vmm_idxs);
@@ -154,12 +148,15 @@ private:
     const Xbyak::Opmask k_mask;
     const bool is_fwd_;
     const bool use_dst_;
+    const bool preserve_vmm_;
+    const bool preserve_p_table_;
 
     Xbyak::Label l_table;
 
     // if only the injector was inherited from jit_generator...
     enum {
         _cmp_eq_oq = jit_generator::_cmp_eq_oq,
+        _cmp_neq_uq = jit_generator::_cmp_neq_uq,
         _cmp_lt_os = jit_generator::_cmp_lt_os,
         _cmp_le_os = jit_generator::_cmp_le_os,
         _cmp_ge_os = jit_generator::_cmp_nlt_us,
@@ -168,14 +165,13 @@ private:
         _op_mxcsr = jit_generator::_op_mxcsr
     };
 
-    static constexpr bool has_avx512() {
-        return utils::one_of(isa, avx512_common, avx512_core);
-    }
+    static constexpr bool is_avx512
+            = utils::one_of(isa, avx512_core, avx512_core_bf16);
 
-    static constexpr size_t vlen = cpu_isa_traits<isa>::vlen;
+    static constexpr size_t vlen = injector_utils::vmm_size_t<Vmm>::bytes;
     static constexpr size_t preserved_vecs_max = 6;
     static constexpr size_t preserved_gprs_max = 5;
-    static constexpr size_t vecs_count = has_avx512() ? 32 : 16;
+    static constexpr size_t vecs_count = is_avx512 ? 32 : 16;
     static constexpr int n_mantissa_bits = 23;
     static constexpr int k_mask_size = 8;
 
@@ -293,6 +289,7 @@ private:
         gelu_erf_one_over_sqrt_two, // 1.f / sqrtf(2.f)
         gelu_erf_one_over_sqrt_pi, // 1.f / sqrtf(pi) = 0.564190f
         gelu_erf_pol, // see correspondent table for float values
+        log_inf, // inf
         log_minus_inf, // -inf
         log_qnan, // qnan
         log_mantissa_mask, // gets mantissa bits

@@ -1,4 +1,4 @@
-﻿/*******************************************************************************
+/*******************************************************************************
 * Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -28,6 +28,7 @@
 #include "zendnn.h"
 
 #include "c_types_map.hpp"
+#include "cache_blob.hpp"
 #include "memory_storage.hpp"
 #include "memory_tracking.hpp"
 #include "primitive_desc.hpp"
@@ -49,14 +50,18 @@ struct primitive_t : public c_compatible {
     primitive_t(const primitive_desc_t *pd) : pd_(pd->clone()) {
         cum_exec_time_ = 0.0;
     }
-
     virtual ~primitive_t() = default;
 
     virtual status_t init(engine_t *engine) { return status::success; }
 
-    status_t init(engine_t *engine, bool use_global_scratchpad) {
+    status_t init(engine_t *engine, bool use_global_scratchpad,
+            const cache_blob_t &cache_blob) {
+        cache_blob_ = cache_blob;
         CHECK(init(engine));
+        CHECK(init_cached_resource(engine));
         use_global_scratchpad_ = use_global_scratchpad;
+        // The `cache_blob_` is no longer needed after primitive creation.
+        cache_blob_ = cache_blob_t();
         return status::success;
     }
 
@@ -64,12 +69,41 @@ struct primitive_t : public c_compatible {
     primitive_kind_t kind() const { return pd_->kind(); }
     virtual status_t execute(const exec_ctx_t &ctx) const = 0;
 
+    virtual status_t get_cache_blob(
+            engine_t *engine, cache_blob_t &cache_blob) const {
+        assert(!"unexpected");
+        return status::runtime_error;
+    }
+
+    virtual status_t get_cache_blob_size(size_t *size) const {
+        assert(!"unexpected");
+        return status::runtime_error;
+    }
+
     virtual status_t create_resource(
             engine_t *engine, resource_mapper_t &mapper) const {
         return status::success;
     }
 
+    // Although this function is marked as `const` it changes primitive_t state.
+    // The only place where this function should be used is in:
+    // `init(engine_t *engine, bool use_global_scratchpad)` during primitive_t
+    // creation in `create_primitive_common`.
+    // The rationale behind marking it as `const` is to simplify enabling the
+    // primitive cache mode for storing compiled GPU kernels instead of
+    // binaries - ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE=ON and to preserve the
+    // current primitive cache implementation.
+    //
+    // The main idea is to create a resource inside the primitive_t only once
+    // and cache it as part of primitive_t.
+    // TODO: The ultimate goal is to switch completely to caching compiled
+    // GPU kernels therefore the code will be thrown out once it's done.
+    virtual status_t init_cached_resource(engine_t *engine) const {
+        return status::success;
+    }
+
     bool use_global_scratchpad() const { return use_global_scratchpad_; }
+    cache_blob_t cache_blob() const { return cache_blob_; }
 
     double add_cum_exec_time(double elapsed_time) const {
         cum_exec_time_ += elapsed_time;
@@ -81,10 +115,11 @@ protected:
     template <typename impl_type, typename pd_t>
     static status_t create_primitive_common(
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive,
-            const pd_t *pd, engine_t *engine, bool use_global_scratchpad) {
+            const pd_t *pd, engine_t *engine, bool use_global_scratchpad,
+            const cache_blob_t &cache_blob) {
 
         auto &global_primitive_cache = primitive_cache();
-        primitive_hashing::key_t key(pd, engine, zendnn_get_max_threads());
+        primitive_hashing::key_t key(pd, engine);
 
         std::promise<primitive_cache_t::cache_value_t> p_promise;
         // Try to get the shared future from the cache, if it's missing then
@@ -109,7 +144,7 @@ protected:
             // we have to create it and notify the waiting threads
             // once the creation is done.
             p = std::make_shared<impl_type>(pd);
-            status = p->init(engine, use_global_scratchpad);
+            status = p->init(engine, use_global_scratchpad, cache_blob);
             if (status != status::success) {
                 // Communicate an error.
                 p_promise.set_value({nullptr, status});
@@ -141,9 +176,9 @@ protected:
 
     std::shared_ptr<primitive_desc_t> pd_;
     bool use_global_scratchpad_;
+    cache_blob_t cache_blob_;
 
     mutable double cum_exec_time_;
-
 
 private:
     primitive_t() = delete;
@@ -274,6 +309,9 @@ struct zendnn_primitive : public zendnn::impl::c_compatible {
     zendnn::impl::status_t init();
     zendnn::impl::engine_t *engine() const;
     const primitive_desc_iface_t *pd() const;
+    zendnn::impl::status_t get_cache_blob_size(size_t *size) const;
+    zendnn::impl::status_t get_cache_blob(
+            zendnn::impl::cache_blob_t cache_blob) const;
     zendnn::impl::status_t execute(zendnn::impl::exec_ctx_t &ctx) const;
 
     void retain() { counter_++; }

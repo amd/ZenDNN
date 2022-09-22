@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -47,11 +47,7 @@ struct simple_layer_normalization_fwd_t : public primitive_t {
                 const layer_normalization_fwd_pd_t *hint_fwd_pd)
             : cpu_layer_normalization_fwd_pd_t(adesc, attr, hint_fwd_pd) {}
 
-        pd_t(const pd_t &other) : cpu_layer_normalization_fwd_pd_t(other) {
-            copy_from(other);
-            reordered_stat_md_ = other.reordered_stat_md_;
-        }
-
+        pd_t(const pd_t &other) = default;
         ~pd_t() = default;
 
         DECLARE_COMMON_PD_T("simple_layer_normalization:any",
@@ -61,7 +57,7 @@ struct simple_layer_normalization_fwd_t : public primitive_t {
 
         bool use_tmp_stats() const { return reorder_pd_ || stats_are_tmp(); }
 
-        std::unique_ptr<primitive_desc_t> reorder_pd_;
+        std::shared_ptr<primitive_desc_t> reorder_pd_;
         memory_desc_t reordered_stat_md_;
 
     private:
@@ -77,12 +73,6 @@ struct simple_layer_normalization_fwd_t : public primitive_t {
             if (reordered_stat_md_ != *stat_md() && !stats_are_tmp()) {
                 scratchpad.book(key_nested, reorder_pd_->scratchpad_registry());
             }
-        }
-
-        void copy_from(const pd_t &other) {
-            reordered_stat_md_ = other.reordered_stat_md_;
-            reorder_pd_.reset(
-                    other.reorder_pd_ ? other.reorder_pd_->clone() : nullptr);
         }
     };
 
@@ -132,7 +122,8 @@ struct simple_layer_normalization_fwd_t : public primitive_t {
             reorder_stat(ctx, engine, ctx.args().at(ZENDNN_ARG_VARIANCE),
                     {&variance, false});
         }
-        execute_forward(ctx);
+        status_t status = execute_forward(ctx);
+        if (status != status::success) return status;
         // reorder output stats
         if (!pd()->stats_are_src() && reorder_) {
             reorder_stat(
@@ -146,7 +137,7 @@ struct simple_layer_normalization_fwd_t : public primitive_t {
 
 private:
     using data_t = typename prec_traits<data_type>::type;
-    void execute_forward(const exec_ctx_t &ctx) const;
+    status_t execute_forward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     std::unique_ptr<lnorm_utils::stat_and_data_kernel_t<data_type>>
@@ -162,10 +153,7 @@ struct simple_layer_normalization_bwd_t : public primitive_t {
                 const layer_normalization_fwd_pd_t *hint_fwd_pd)
             : cpu_layer_normalization_bwd_pd_t(adesc, attr, hint_fwd_pd) {}
 
-        pd_t(const pd_t &other) : cpu_layer_normalization_bwd_pd_t(other) {
-            copy_from(other);
-        }
-
+        pd_t(const pd_t &other) = default;
         ~pd_t() = default;
 
         DECLARE_COMMON_PD_T("simple_layer_normalization:any",
@@ -175,8 +163,9 @@ struct simple_layer_normalization_bwd_t : public primitive_t {
 
         bool use_tmp_stats() const { return reorder_pd_.get(); }
 
-        std::unique_ptr<primitive_desc_t> reorder_pd_;
+        std::shared_ptr<primitive_desc_t> reorder_pd_;
         memory_desc_t reordered_stat_md_;
+        int nthr_; // To not exceed the limit in execute used for set up.
 
     private:
         void init_scratchpad() {
@@ -188,8 +177,8 @@ struct simple_layer_normalization_bwd_t : public primitive_t {
                 scratchpad.template book<float>(
                         key_lnorm_tmp_var, across_axis());
             }
-            scratchpad.template book<float>(key_lnorm_reduction,
-                    2 * norm_axis() * zendnn_get_max_threads());
+            scratchpad.template book<float>(
+                    key_lnorm_reduction, 2 * norm_axis() * nthr_);
             scratchpad.template book<float>(
                     key_lnorm_tmp_diff_ss, 2 * norm_axis());
             if (reordered_stat_md_ != *stat_md() && !stats_are_tmp()) {
@@ -197,12 +186,6 @@ struct simple_layer_normalization_bwd_t : public primitive_t {
             }
             scratchpad.template book<float>(
                     key_lnorm_inv_sqrtvar, across_axis());
-        }
-
-        void copy_from(const pd_t &other) {
-            reordered_stat_md_ = other.reordered_stat_md_;
-            reorder_pd_.reset(
-                    other.reorder_pd_ ? other.reorder_pd_->clone() : nullptr);
         }
     };
 
@@ -256,13 +239,12 @@ struct simple_layer_normalization_bwd_t : public primitive_t {
                     {&variance, false});
         }
 
-        execute_backward(ctx);
-        return status::success;
+        return execute_backward(ctx);
     }
 
 private:
     using data_t = typename prec_traits<data_type>::type;
-    void execute_backward(const exec_ctx_t &ctx) const;
+    status_t execute_backward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     std::unique_ptr<lnorm_utils::diff_ss_kernel_t<data_type>> diff_ss_kernel_;

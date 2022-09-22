@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -52,7 +52,8 @@ struct ref_batch_normalization_fwd_t : public primitive_t {
             bool ok = is_fwd() && src_md()->data_type == d_type
                     && platform::has_data_type_support(d_type)
                     && check_scale_shift_data_type()
-                    && (attr()->has_default_values() || with_relu_post_op());
+                    && (attr()->has_default_values()
+                            || with_relu_post_op(is_training()));
             if (!ok) return status::unimplemented;
 
             if (src_md()->data_type == s8 && !stats_is_src())

@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -45,6 +45,7 @@ public:
         using cpu_prelu_bwd_pd_t::cpu_prelu_bwd_pd_t;
         DECLARE_COMMON_PD_T("jit_uni", jit_prelu_bwd_t);
         status_t init(engine_t *engine);
+        int nthr_; // To not exceed the limit in execute used for set up.
 
     private:
         bool dt_supported(const std::set<data_type_t> &tensor_data_types) const
@@ -61,8 +62,8 @@ public:
 
 private:
     using byte = unsigned char;
-    void fill_scratchpad_zeros(
-            float *const scratchpad, size_t thread_scratchpad_size) const;
+    void fill_scratchpad_zeros(float *const scratchpad,
+            size_t thread_scratchpad_size, int nthr) const;
     void scratchpad_to_diff_weights_reduction(float *scratchpad,
             byte *weights_diff, size_t weights_diff_dt, dim_t C,
             size_t reduction_blocks) const;

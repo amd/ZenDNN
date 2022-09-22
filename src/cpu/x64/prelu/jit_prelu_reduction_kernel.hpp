@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -27,7 +27,7 @@
 #include "cpu/cpu_prelu_pd.hpp"
 #include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/jit_generator.hpp"
-#include "cpu/x64/prelu/jit_prelu_utils.hpp"
+#include "cpu/x64/utils/jit_io_helper.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -43,10 +43,11 @@ public:
         const void *weights_diff_scratch = nullptr;
         void *weights_diff = nullptr;
         bool tail = false;
+        bool is_last_c_blk = false;
     };
 
     void generate() override;
-    size_t simd_w();
+    size_t simd_w() const;
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_prelu_reduction_kernel_t)
 
     void operator()(jit_prelu_reduction_kernel_t::call_params_t *params) {
@@ -62,11 +63,9 @@ private:
     void generate(bool tail);
 
     const Xbyak::Reg64 &reg_reduction_blocks_ = r8;
-    const Xbyak::Reg64 &reg_offset_ = r9;
     const Xbyak::Reg64 &reg_weights_diff_scratch_ = r10;
     const Xbyak::Reg8 &reg_tail_ = r12b;
 
-    const size_t simd_w_ = 0;
     const size_t scratchpad_c_block_offset_ = 0;
 
 protected:
@@ -74,10 +73,15 @@ protected:
     Xbyak::Address diff_scratch_ptr(int unrolling_group) const;
     int reserve_vmm();
 
+    const size_t simd_w_ = 0;
     const data_type_t data_type_;
     const size_t tail_size_ = 0;
+    const Xbyak::Reg64 &reg_offset_ = r9;
     const Xbyak::Reg64 &reg_weights_diff_ = r11;
+    const Xbyak::Reg8 &reg_last_c_blk_byte_ = r13b;
     size_t number_reserved_vmms_ = 0;
+    size_t tail_block_size_ = 0;
+    size_t c_blk_nelems_ = 0;
 };
 
 template <typename Vmm>
@@ -102,7 +106,7 @@ private:
     const Xbyak::Opmask &tail_opmask_ = k1;
     const Xbyak::Reg64 &reg_tmp_ = r15;
 
-    prelu::jit_prelu_io_helper_t<Vmm> io_;
+    io::jit_io_helper_t<Vmm> io_;
 };
 
 } // namespace x64

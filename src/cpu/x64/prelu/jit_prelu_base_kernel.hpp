@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -41,7 +41,7 @@ public:
 
 protected:
     int reserve_vmm();
-    int get_compute_vmm(size_t base_idx, size_t unroll_group);
+    int get_compute_vmm(size_t base_idx, size_t unroll_group) const;
 
     size_t get_number_reserved_vmms() const noexcept;
 

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@
 #include "cpu/x64/cpu_reducer.hpp"
 
 #include "cpu/x64/jit_avx512_common_conv_kernel.hpp"
-#include "cpu/x64/jit_transpose_src_utils.hpp"
+#include "cpu/x64/jit_transpose_utils.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -48,7 +48,7 @@ struct jit_avx512_common_convolution_fwd_t : public primitive_t {
                 const typename pd_t::base_class *hint_fwd_pd)
             : cpu_convolution_fwd_pd_t(adesc, attr, hint_fwd_pd), jcp_() {}
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_common, ""),
+        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_core, ""),
                 jit_avx512_common_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
@@ -61,16 +61,15 @@ struct jit_avx512_common_convolution_fwd_t : public primitive_t {
                     && !has_zero_dim_memory();
             if (!ok) return status::unimplemented;
 
-            status_t status = jit_avx512_common_conv_fwd_kernel::init_conf(jcp_,
-                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, *attr(),
-                    zendnn_get_max_threads());
-            if (status != status::success) return status;
+            CHECK(jit_avx512_common_conv_fwd_kernel::init_conf(jcp_, *desc(),
+                    src_md_, weights_md_, dst_md_, bias_md_, attr_,
+                    zendnn_get_max_threads()));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx512_common_conv_fwd_kernel::init_scratchpad(
                     scratchpad, jcp_);
 
-            return status;
+            return status::success;
         }
 
         jit_conv_conf_t jcp_;
@@ -123,7 +122,7 @@ struct jit_avx512_common_convolution_bwd_data_t : public primitive_t {
                 const convolution_fwd_pd_t *hint_fwd_pd)
             : cpu_convolution_bwd_data_pd_t(adesc, attr, hint_fwd_pd), jcp_() {}
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_common, ""),
+        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_core, ""),
                 jit_avx512_common_convolution_bwd_data_t);
 
         status_t init(engine_t *engine) {
@@ -194,7 +193,7 @@ struct jit_avx512_common_convolution_bwd_weights_t : public primitive_t {
             : cpu_convolution_bwd_weights_pd_t(adesc, attr, hint_fwd_pd)
             , jcp_() {}
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_common, ""),
+        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx512_core, ""),
                 jit_avx512_common_convolution_bwd_weights_t);
 
         status_t init(engine_t *engine) {
@@ -271,7 +270,6 @@ private:
     int nthr_, nthr_mb_, nthr_g_, nthr_oc_b_, nthr_ic_b_;
 
     std::unique_ptr<jit_avx512_common_conv_bwd_weights_kernel_f32> kernel_;
-    std::unique_ptr<jit_trans_src_t> trans_kernel_;
     std::unique_ptr<cpu_accumulator_1d_t<diff_weights_type>> acc_ker_;
     std::unique_ptr<cpu_reducer_t<diff_weights_type>> reducer_bias_;
 };

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,7 +22,9 @@
 #ifndef CPU_X64_JIT_AVX512_CORE_X8S8S32X_DECONVOLUTION_HPP
 #define CPU_X64_JIT_AVX512_CORE_X8S8S32X_DECONVOLUTION_HPP
 
+#include <functional>
 #include <vector>
+
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
 #include "common/memory.hpp"
@@ -35,6 +37,7 @@
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
+#include "cpu/x64/jit_uni_deconv_zp_pad_str_kernel.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -84,7 +87,7 @@ struct jit_avx512_core_x8s8s32x_deconv_fwd_kernel : public jit_generator {
     const primitive_attr_t &attr_;
 
 private:
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
 
     const int ic_sub_step = 4;
@@ -117,6 +120,12 @@ private:
     const Xbyak::Reg64 reg_overflow = rax;
     const Xbyak::Reg64 reg_comp_strides = reg_overflow;
     const Xbyak::Reg64 reg_ker_long_offt = r15;
+    const Xbyak::Reg64 &reg_zp_dst_ = r15;
+    const Xbyak::Reg64 &reg_zp_src_ = r15;
+    const Xbyak::Reg64 &reg_zp_compensation = r11;
+    static constexpr int reserved_stack_size_ = 16;
+    const Xbyak::Address zp_src_pad_comp_addr = ptr[rsp];
+    const Xbyak::Address reg_scratch_preserved = ptr[rsp + 8];
 
     Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
     const Vmm vmm_tmp = Vmm(28);
@@ -137,7 +146,7 @@ private:
         assert(idx < 31);
         return Vmm(idx);
     }
-    Vmm vmm_inp(int i_ic, int nb_x_blocking) {
+    Vmm vmm_inp(int i_ic, int nb_x_blocking) const {
         int idx = i_ic + nb_x_blocking * jcp.ur_w;
         assert(idx < 31);
         return Vmm(idx);
@@ -165,8 +174,18 @@ private:
             res += jcp.stride_w;
         return ur_w - res;
     }
+
+    int get_blocking_size() const noexcept;
+    int get_tail_size() const noexcept;
     void prepare_output(int ur_w);
     void store_output(int ur_w, bool last_oc_block);
+    void compute(const Vmm &vreg_acc, const Vmm &vreg_wei, const Vmm &vreg_src);
+    std::function<Vmm()> prepare_round_robin_vmm_inp_generator(int ur_w) const
+            noexcept;
+    void apply_zp_src_pad_str_comp(
+            int ur_w, int l_overflow, int r_overflow, bool h_padded);
+    void append_zp_src_pad_str_comp(int ur_w, int l_overflow, int r_overflow,
+            bool h_padded, bool last_oc_block);
     void compute_ker(int ur_w, int l_overflow, int r_overflow,
             ker_block_t last_ic_block_flag, bool h_padded = false);
     void kh_loop(int ur_w, int pad_l, int pad_r, ker_block_t last_ker_block);
@@ -180,7 +199,6 @@ private:
 };
 
 struct _jit_avx512_core_x8s8s32x_deconv_fwd_kernel {
-
     _jit_avx512_core_x8s8s32x_deconv_fwd_kernel(const jit_conv_conf_t &ajcp,
             const primitive_attr_t &attr, const memory_desc_t &dst_md)
         : kernel_(nullptr) {
@@ -209,14 +227,14 @@ struct _jit_avx512_core_x8s8s32x_deconv_fwd_kernel {
 
     void operator()(const jit_deconv_call_s *p) const { (*kernel_)(p); }
 
-    static bool post_ops_ok(jit_conv_conf_t &jcp, const primitive_attr_t &attr,
+    static bool post_ops_ok(jit_conv_conf_t &jcp, primitive_attr_t &attr,
             const memory_desc_wrapper &dst_d);
 
     static status_t init_conf(jit_conv_conf_t &jcp,
             const deconvolution_desc_t &cd, memory_desc_t &src_md,
             memory_desc_t &weights_md, memory_desc_t &dst_md,
             const bool with_bias, memory_desc_t &bias_md,
-            const primitive_attr_t &attr, int nthreads);
+            primitive_attr_t &attr, int nthreads);
 
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
@@ -226,39 +244,35 @@ private:
     jit_generator *kernel_;
 };
 
-template <impl::data_type_t src_type, impl::data_type_t dst_type>
-struct _jit_avx512_core_x8s8s32x_deconvolution_fwd_t : public primitive_t {
+struct jit_avx512_core_x8s8s32x_deconvolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_deconvolution_fwd_pd_t {
         using cpu_deconvolution_fwd_pd_t::cpu_deconvolution_fwd_pd_t;
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit_deconvolution:",
-                                    ((jcp_.ver == ver_vnni) ? avx512_core_vnni
-                                                            : avx512_core),
-                                    ""),
-                _jit_avx512_core_x8s8s32x_deconvolution_fwd_t);
+        DECLARE_COMMON_PD_T(
+                JIT_IMPL_NAME_HELPER("jit_deconvolution:",
+                        ((jcp_.has_vnni) ? avx512_core_vnni : avx512_core), ""),
+                jit_avx512_core_x8s8s32x_deconvolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
+            using skip_mask_t = primitive_attr_t::skip_mask_t;
             const bool ok = is_fwd()
                     && (desc()->alg_kind & alg_kind::deconvolution_direct)
-                    && desc()->src_desc.data_type == src_type
-                    && desc()->dst_desc.data_type == dst_type
+                    && utils::one_of(src_md(0)->data_type, s8, u8)
+                    && weights_md(0)->data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
-                    && desc()->accum_data_type == data_type::s32
-                    && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::oscale
-                            | primitive_attr_t::skip_mask_t::post_ops);
+                            utils::one_of(
+                                    weights_md(1)->data_type, f32, s32, s8, u8))
+                    && utils::one_of(dst_md(0)->data_type, f32, s32, s8, u8)
+                    && desc()->accum_data_type == s32
+                    && attr()->has_default_values(skip_mask_t::oscale
+                            | skip_mask_t::post_ops
+                            | skip_mask_t::zero_points_runtime);
             if (!ok) return status::unimplemented;
 
-            status_t status
-                    = _jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_conf(
-                            jcp_, *desc(), src_md_, weights_md_, dst_md_,
-                            with_bias(), bias_md_, *attr(),
-                            zendnn_get_max_threads());
-
-            if (status != status::success) return status;
+            CHECK(_jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_conf(jcp_,
+                    *desc(), src_md_, weights_md_, dst_md_, with_bias(),
+                    bias_md_, attr_, zendnn_get_max_threads()));
 
             auto scratchpad = scratchpad_registry().registrar();
             _jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_scratchpad(
@@ -270,39 +284,45 @@ struct _jit_avx512_core_x8s8s32x_deconvolution_fwd_t : public primitive_t {
         jit_conv_conf_t jcp_;
     };
 
-    _jit_avx512_core_x8s8s32x_deconvolution_fwd_t(const pd_t *apd)
+    jit_avx512_core_x8s8s32x_deconvolution_fwd_t(const pd_t *apd)
         : primitive_t(apd) {}
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
 
     status_t init(engine_t *engine) override {
         CHECK(safe_ptr_assign(kernel_,
                 new _jit_avx512_core_x8s8s32x_deconv_fwd_kernel(
                         pd()->jcp_, *pd()->attr(), *pd()->dst_md(0))));
+
+        if (zp::should_calculate_deconv_zp_src_pad_str_comp(pd()->jcp_)) {
+            CHECK(safe_ptr_assign(zp_src_pad_comp_kernel_,
+                    zp::create_deconv_zp_pad_str_comp_ker<avx512_core>(
+                            pd()->jcp_)));
+            const auto zp_kernel_status
+                    = zp_src_pad_comp_kernel_->create_kernel();
+            if (zp_kernel_status != status::success) return zp_kernel_status;
+        }
+
         return kernel_->create_kernel();
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
         auto ndims = pd()->ndims();
         if (ndims == 3)
-            execute_forward_1d(ctx);
+            return execute_forward_1d(ctx);
         else if (ndims == 4)
-            execute_forward_2d(ctx);
+            return execute_forward_2d(ctx);
         else if (ndims == 5)
-            execute_forward_3d(ctx);
-        else
-            return status::unimplemented;
-        return status::success;
+            return execute_forward_3d(ctx);
+        return status::runtime_error;
     }
 
 private:
-    void execute_forward_1d(const exec_ctx_t &ctx) const;
-    void execute_forward_2d(const exec_ctx_t &ctx) const;
-    void execute_forward_3d(const exec_ctx_t &ctx) const;
+    status_t execute_forward_1d(const exec_ctx_t &ctx) const;
+    status_t execute_forward_2d(const exec_ctx_t &ctx) const;
+    status_t execute_forward_3d(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     std::unique_ptr<_jit_avx512_core_x8s8s32x_deconv_fwd_kernel> kernel_;
+    std::unique_ptr<zp::jit_uni_deconv_zp_pad_str_kernel_base_t>
+            zp_src_pad_comp_kernel_;
 };
 
 } // namespace x64

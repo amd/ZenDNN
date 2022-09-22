@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2021-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@
 #include "cpu/cpu_shuffle_pd.hpp"
 
 #include "cpu/x64/cpu_isa_traits.hpp"
-#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
 #include "cpu/x64/shuffle/jit_uni_shuffle.hpp"
@@ -56,7 +55,7 @@ struct jit_uni_shuffle_kernel_t : public jit_generator {
     /*
      * Prepare the mask to be used during tail processing.
      * vmm_tail_mask_ is filled if it is avx and
-     * if it is avx512_common at least then k_tail_mask_ is filled.
+     * if it is avx512_core at least then k_tail_mask_ is filled.
      */
     void prepare_mask();
 
@@ -75,6 +74,9 @@ struct jit_uni_shuffle_kernel_t : public jit_generator {
 
     void shuffle_blocked_format();
 
+    void append_zero_padding(
+            const Reg64 &reg_dst_addr, const bool zero_extend_write);
+
     void generate() override;
 
     const Vmm vmm_tail_mask_ = Vmm(0);
@@ -86,6 +88,7 @@ struct jit_uni_shuffle_kernel_t : public jit_generator {
     const Vmm vmm_src_ = Vmm(2);
     const Vmm vmm_tmp_ = Vmm(3);
     const Vmm vmm_indices_ = Vmm(4);
+    const Vmm vmm_zero_ = Vmm(11);
 
     const Opmask k_tail_mask_ = k1;
     const Opmask k_full_mask_ = k2;
@@ -103,15 +106,10 @@ struct jit_uni_shuffle_kernel_t : public jit_generator {
     const Reg64 &reg_tmp4_ = r11;
     const Reg64 &reg_tmp5_ = r12;
     const Reg64 &reg_tmp6_ = r13;
-
-    const Zmm bf16_emu_reserv_1 = Zmm(7);
-    const Zmm bf16_emu_reserv_2 = Zmm(8);
-    const Zmm bf16_emu_reserv_3 = Zmm(9);
-    const Reg64 &bf16_emu_scratch = r15;
-    const Zmm bf16_emu_reserv_4 = Zmm(10);
+    const Reg8 &reg_padded_block = r14b;
 
     const jit_shuffle_conf_t conf_;
-    std::unique_ptr<bf16_emulation_t> bf16_emulation_;
+    const size_t padding_size_;
 };
 
 } // namespace x64

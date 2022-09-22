@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -24,15 +24,17 @@
 #include <windows.h>
 #endif
 
-#if defined __linux__ || defined __APPLE__ || defined __FreeBSD__
+#if defined __unix__ || defined __APPLE__ || defined __FreeBSD__ \
+        || defined __Fuchsia__
 #include <unistd.h>
 #endif
 
-#ifdef __linux__
+#ifdef __unix__
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -45,7 +47,9 @@
 #include "memory_debug.hpp"
 #include "utils.hpp"
 
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
 #include "cpu/platform.hpp"
+#endif
 
 namespace zendnn {
 namespace impl {
@@ -91,6 +95,37 @@ int getenv_int(const char *name, int default_value) {
     const int len = 12;
     char value_str[len];
     if (getenv(name, value_str, len) > 0) value = atoi(value_str);
+    return value;
+}
+
+int getenv_int_user(const char *name, int default_value) {
+    int value = default_value;
+    // # of digits in the longest 32-bit signed int + sign + terminating null
+    const int len = 12;
+    char value_str[len];
+    for (const auto &prefix : {"ZENDNN_", "ZENDNN_"}) {
+        std::string name_str = std::string(prefix) + std::string(name);
+        if (getenv(name_str.c_str(), value_str, len) > 0) {
+            value = atoi(value_str);
+            break;
+        }
+    }
+    return value;
+}
+
+std::string getenv_string_user(const char *name) {
+    // Random number to fit possible string input.
+    std::string value;
+    const int len = 32;
+    char value_str[len];
+    for (const auto &prefix : {"ZENDNN_", "ZENDNN_"}) {
+        std::string name_str = std::string(prefix) + std::string(name);
+        if (getenv(name_str.c_str(), value_str, len) > 0) {
+            value = value_str;
+            break;
+        }
+    }
+    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
     return value;
 }
 
@@ -151,8 +186,8 @@ int32_t fetch_and_add(int32_t *dst, int32_t val) {
 static setting_t<bool> jit_dump {false};
 bool get_jit_dump() {
     if (!jit_dump.initialized()) {
-        jit_dump.set(!!getenv_int("MKLDNN_JIT_DUMP", 0));
-        jit_dump.set(!!getenv_int("ZENDNN_JIT_DUMP", jit_dump.get()));
+        static bool val = getenv_int_user("JIT_DUMP", jit_dump.get());
+        jit_dump.set(val);
     }
     return jit_dump.get();
 }
@@ -163,11 +198,17 @@ static setting_t<unsigned> jit_profiling_flags {ZENDNN_JIT_PROFILE_LINUX_PERFMAP
 static setting_t<unsigned> jit_profiling_flags {ZENDNN_JIT_PROFILE_VTUNE};
 #endif
 unsigned get_jit_profiling_flags() {
+    MAYBE_UNUSED(jit_profiling_flags);
+    unsigned flag = 0;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
     if (!jit_profiling_flags.initialized()) {
-        jit_profiling_flags.set(
-                getenv_int("ZENDNN_JIT_PROFILE", jit_profiling_flags.get()));
+        static unsigned val
+                = getenv_int_user("JIT_PROFILE", jit_profiling_flags.get());
+        jit_profiling_flags.set(val);
     }
-    return jit_profiling_flags.get();
+    flag = jit_profiling_flags.get();
+#endif
+    return flag;
 }
 
 static setting_t<std::string> jit_profiling_jitdumpdir;
@@ -193,14 +234,19 @@ zendnn_status_t init_jit_profiling_jitdumpdir(
 
     return status::success;
 #else
+    UNUSED(jit_profiling_jitdumpdir);
     return status::unimplemented;
 #endif
 }
 
 std::string get_jit_profiling_jitdumpdir() {
+    std::string jitdumpdir;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
     if (!jit_profiling_jitdumpdir.initialized())
         init_jit_profiling_jitdumpdir(nullptr, false);
-    return jit_profiling_jitdumpdir.get();
+    jitdumpdir = jit_profiling_jitdumpdir.get();
+#endif
+    return jitdumpdir;
 }
 
 } // namespace impl
@@ -214,6 +260,7 @@ zendnn_status_t zendnn_set_jit_dump(int enabled) {
 
 zendnn_status_t zendnn_set_jit_profiling_flags(unsigned flags) {
     using namespace zendnn::impl;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
     unsigned mask = ZENDNN_JIT_PROFILE_VTUNE;
 #ifdef __linux__
     mask |= ZENDNN_JIT_PROFILE_LINUX_PERF;
@@ -222,26 +269,49 @@ zendnn_status_t zendnn_set_jit_profiling_flags(unsigned flags) {
     if (flags & ~mask) return status::invalid_arguments;
     jit_profiling_flags.set(flags);
     return status::success;
+#else
+    return status::unimplemented;
+#endif
 }
 
 zendnn_status_t zendnn_set_jit_profiling_jitdumpdir(const char *dir) {
-    return zendnn::impl::init_jit_profiling_jitdumpdir(dir, true);
+    auto status = zendnn::impl::status::unimplemented;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    status = zendnn::impl::init_jit_profiling_jitdumpdir(dir, true);
+#endif
+    return status;
 }
 
 zendnn_status_t zendnn_set_max_cpu_isa(zendnn_cpu_isa_t isa) {
-    return zendnn::impl::cpu::platform::set_max_cpu_isa(isa);
+    auto status = zendnn::impl::status::runtime_error;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    status = zendnn::impl::cpu::platform::set_max_cpu_isa(isa);
+#endif
+    return status;
 }
 
 zendnn_cpu_isa_t zendnn_get_effective_cpu_isa() {
-    return zendnn::impl::cpu::platform::get_effective_cpu_isa();
+    auto isa = zendnn_cpu_isa_all;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    isa = zendnn::impl::cpu::platform::get_effective_cpu_isa();
+#endif
+    return isa;
 }
 
 zendnn_status_t zendnn_set_cpu_isa_hints(zendnn_cpu_isa_hints_t isa_hints) {
-    return zendnn::impl::cpu::platform::set_cpu_isa_hints(isa_hints);
+    auto status = zendnn::impl::status::runtime_error;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    status = zendnn::impl::cpu::platform::set_cpu_isa_hints(isa_hints);
+#endif
+    return status;
 }
 
 zendnn_cpu_isa_hints_t zendnn_get_cpu_isa_hints() {
-    return zendnn::impl::cpu::platform::get_cpu_isa_hints();
+    auto isa_hint = zendnn_cpu_isa_no_hints;
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
+    isa_hint = zendnn::impl::cpu::platform::get_cpu_isa_hints();
+#endif
+    return isa_hint;
 }
 
 #if ZENDNN_CPU_THREADING_RUNTIME == ZENDNN_RUNTIME_THREADPOOL

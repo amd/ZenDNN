@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 * Copyright 2018 YANDEX LLC
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -51,8 +51,8 @@ struct jit_uni_pool_kernel : public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_pool_kernel)
 
     static status_t init_conf(jit_pool_conf_t &jbp,
-            memory_tracking::registrar_t &scratchpad, const pooling_pd_t *ppd,
-            int nthreads);
+            memory_tracking::registrar_t &scratchpad, primitive_attr_t &attr,
+            const pooling_pd_t *ppd);
 
 private:
     using Xmm = Xbyak::Xmm;
@@ -65,7 +65,7 @@ private:
     using Vmm = typename cpu_isa_traits<isa>::Vmm;
 
     int vmm_idx_upper_bound() const noexcept {
-        return utils::one_of(isa, avx512_common, avx512_core) ? 31 : 15;
+        return isa == avx512_core ? 31 : 15;
     }
 
     int reg_idx(int idx) const noexcept { return vmm_idx_upper_bound() - idx; }
@@ -80,6 +80,7 @@ private:
             : (isa == avx || isa == avx2) ? yword : zword;
 
     Xmm vmm_mask = Xmm(0);
+    Xmm xmm_tmp_1 = Xmm(0);
     Ymm ymm_tmp_1 = Ymm(0);
     Vmm vmm_tmp_1 = Vmm(0);
 

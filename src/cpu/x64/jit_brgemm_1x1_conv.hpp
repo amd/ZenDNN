@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2021-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -31,9 +31,11 @@
 #include "cpu/cpu_convolution_pd.hpp"
 #include "cpu/platform.hpp"
 
+#include "cpu/x64/amx_tile_configure.hpp"
 #include "cpu/x64/brgemm/brgemm.hpp"
 #include "cpu/x64/cpu_barrier.hpp"
 #include "cpu/x64/cpu_reducer.hpp"
+#include "cpu/x64/jit_brgemm_conv_trans_kernel.hpp"
 #include "cpu/x64/jit_brgemm_conv_utils.hpp"
 #include "cpu/x64/jit_brgemm_post_ops.hpp"
 
@@ -42,15 +44,12 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <cpu_isa_t isa, impl::data_type_t src_type,
-        impl::data_type_t wei_type = src_type,
-        impl::data_type_t dst_type = src_type>
+template <cpu_isa_t isa>
 struct brgemm_1x1_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const typename pd_t::base_class *hint_fwd_pd)
             : cpu_convolution_fwd_pd_t(adesc, attr, hint_fwd_pd)
-            , attr_(attr)
             , with_sum(false)
             , sum_scale(0) {}
 
@@ -59,22 +58,27 @@ struct brgemm_1x1_convolution_fwd_t : public primitive_t {
 
         status_t init(engine_t *engine);
 
-        const primitive_attr_t *attr_;
         brgemm_t brgs_[16];
         bool with_sum;
         float sum_scale;
 
         jit_brgemm_conv_conf_t jcp_;
+
+    protected:
+        bool zero_points_ok() const {
+            // Only common zero points are supported -> mask should only be 0
+            int mask_src = 0, mask_dst = 0;
+            attr()->zero_points_.get(ZENDNN_ARG_SRC, nullptr, &mask_src, nullptr);
+            attr()->zero_points_.get(ZENDNN_ARG_DST, nullptr, &mask_dst, nullptr);
+            return attr()->zero_points_.has_default_values(ZENDNN_ARG_WEIGHTS)
+                    && mask_src == 0 && mask_dst == 0;
+        }
     };
 
     brgemm_1x1_convolution_fwd_t(const pd_t *apd)
         : primitive_t(apd), bias_d(pd()->weights_md(1)) {}
 
     ~brgemm_1x1_convolution_fwd_t() {}
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<wei_type>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
 
     status_t execute(const exec_ctx_t &ctx) const override {
         execute_forward_all(ctx);
@@ -90,21 +94,33 @@ protected:
 private:
     //  brgemm convolution execution context
     struct brgemm_exec_ctx_t {
-        brgemm_exec_ctx_t(const exec_ctx_t &ctx)
-            : src(CTX_IN_MEM(const src_data_t *, ZENDNN_ARG_SRC))
-            , weights(CTX_IN_MEM(const wei_data_t *, ZENDNN_ARG_WEIGHTS))
+        brgemm_exec_ctx_t(const exec_ctx_t &ctx, const pd_t *pd)
+            : src(CTX_IN_MEM(const char *, ZENDNN_ARG_SRC))
+            , weights(CTX_IN_MEM(const char *, ZENDNN_ARG_WEIGHTS))
             , bias(CTX_IN_MEM(const char *, ZENDNN_ARG_BIAS))
-            , dst(CTX_OUT_MEM(dst_data_t *, ZENDNN_ARG_DST)) {}
-        const src_data_t *const __restrict src;
-        const wei_data_t *const __restrict weights;
+            , dst(CTX_OUT_MEM(char *, ZENDNN_ARG_DST))
+            , post_ops_binary_rhs_arg_vec(binary_injector::prepare_binary_args(
+                      pd->attr()->post_ops_, ctx))
+            , wsp_tile(ctx.get_scratchpad_grantor().template get<char>(
+                      memory_tracking::names::key_conv_amx_tile_buffer)) {}
+        const char *const __restrict src;
+        const char *const __restrict weights;
         const char *const __restrict bias;
-        dst_data_t *const __restrict dst;
+        char *const __restrict dst;
+        const std::vector<const void *> post_ops_binary_rhs_arg_vec;
+        char *const wsp_tile;
     };
+
+    void maybe_rtus(int ithr, const char *__restrict src,
+            char *__restrict inp_buffer, uint8_t *__restrict inp_buffer_mask,
+            int g, int n, int icc, int od, int oh, int ow) const;
     void exec_ker(const brgemm_exec_ctx_t &brgemm_ctx, int ithr,
             brgemm_batch_element_t *const __restrict brg_batch,
-            char *const c_buffer, int g, int n, int ocb, int od, int oh, int ow,
-            int icc) const;
-    void execute_forward_all(const exec_ctx_t &ctx) const;
+            char *const c_buffer, const char *inp_buffer, int g, int n, int ocb,
+            int od, int oh, int ow, int icc, int *last_brg_idx,
+            int32_t src_zp_vals, int32_t *src_zp_comp, int32_t *dst_zp_vals,
+            int32_t *s8s8_compensation) const;
+    status_t execute_forward_all(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     static int get_brg_idx(bool do_initialization, int is_M_tail,
@@ -121,6 +137,14 @@ private:
 
     std::unique_ptr<brgemm_kernel_t> brg_kernels_[16];
     std::unique_ptr<jit_brgemm_kernel_post_ops> kernels_po_[4];
+    struct amx_palette_t {
+        char p[AMX_PALETTE_SIZE];
+    };
+    std::vector<amx_palette_t> brg_kernel_palette_;
+    int brg_kernel_palette_idx_[16];
+    std::unique_ptr<jit_avx512_core_brgemm_conv_trans_kernel::
+                    jit_avx512_core_brgemm_conv_rtus_kernel_t>
+            rtus_kernel_;
 
     const memory_desc_wrapper bias_d;
 
@@ -128,7 +152,6 @@ private:
     size_t bia_dsz, acc_dsz, src_dsz, wei_dsz;
     bool need_postwork;
     int ic_chunks;
-    bool is_os_blocking;
     // const variables used for address calculations
     dim_t src_w_sz, src_h_sz, src_d_sz, dst_w_sz, dst_h_sz, dst_d_sz, wei_oc_sz,
             wei_ic_sz, wei_ocb_sz;

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ namespace avx512_common_gemm_f32 {
 zendnn_status_t sgemm_nocopy_driver(const char *transa, const char *transb,
         dim_t m, dim_t n, dim_t k, const float *alpha, const float *a,
         dim_t lda, const float *b, dim_t ldb, const float *beta, float *c,
-        dim_t ldc, const float *bias, float *ws);
+        dim_t ldc, const float *bias);
 }
 
 } // namespace x64

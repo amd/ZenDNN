@@ -1,4 +1,9 @@
 /*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,6 +33,7 @@
 #include "cpu/primitive_attr_postops.hpp"
 
 #include "cpu/cpu_embedding_bag_pd.hpp"
+#include "common/zendnn_thread.hpp"
 
 namespace zendnn {
 namespace impl {

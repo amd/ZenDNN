@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,10 +20,6 @@
 *******************************************************************************/
 
 #include "zendnn.h"
-#if ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_THREADPOOL
-#include "zendnn_threadpool.hpp"
-#include "zendnn_threadpool_iface.hpp"
-#endif
 
 #include "common/bfloat16.hpp"
 #include "common/c_types_map.hpp"
@@ -196,7 +192,7 @@ zendnn_status_t gemm_s8x8s32(const char *transa, const char *transb,
     if (status == zendnn_success) return status;
 
 #if ZENDNN_X64
-    if (mayiuse(sse41) && !mayiuse(avx512_mic))
+    if (mayiuse(sse41))
         return gemm_driver(transa, transb, offsetc, M, N, K, alpha, A, LDA, ao,
                 B, LDB, bo, beta, C, LDC, co, false);
 #endif
@@ -261,98 +257,3 @@ zendnn_status_t gemm_bf16bf16f32(const char *transa, const char *transb,
 } // namespace cpu
 } // namespace impl
 } // namespace zendnn
-
-using namespace zendnn::impl;
-using namespace zendnn::impl::cpu;
-
-zendnn_status_t zendnn_sgemm(char transa, char transb, dim_t M, dim_t N, dim_t K,
-        float alpha, const float *A, dim_t lda, const float *B, const dim_t ldb,
-        float beta, float *C, dim_t ldc) {
-    return extended_sgemm(&transb, &transa, &N, &M, &K, &alpha, B, &ldb, A,
-            &lda, &beta, C, &ldc);
-}
-
-namespace {
-const char *c2f_offsetC(const char *offC) {
-    if (offC) {
-        if (offC[0] == 'R' || offC[0] == 'r') return "C";
-        if (offC[0] == 'C' || offC[0] == 'c') return "R";
-    }
-    return offC;
-}
-} // namespace
-
-zendnn_status_t zendnn_gemm_u8s8s32(char transa, char transb, char offsetc, dim_t M,
-        dim_t N, dim_t K, float alpha, const uint8_t *A, dim_t lda, uint8_t ao,
-        const int8_t *B, dim_t ldb, int8_t bo, float beta, int32_t *C,
-        dim_t ldc, const int32_t *co) {
-    return gemm_s8x8s32(&transb, &transa, c2f_offsetC(&offsetc), &N, &M, &K,
-            &alpha, B, &ldb, &bo, A, &lda, &ao, &beta, C, &ldc, co);
-}
-
-zendnn_status_t zendnn_gemm_s8s8s32(char transa, char transb, char offsetc, dim_t M,
-        dim_t N, dim_t K, float alpha, const int8_t *A, dim_t lda, int8_t ao,
-        const int8_t *B, dim_t ldb, int8_t bo, float beta, int32_t *C,
-        dim_t ldc, const int32_t *co) {
-    return gemm_s8x8s32<int8_t>(&transb, &transa, c2f_offsetC(&offsetc), &N, &M,
-            &K, &alpha, B, &ldb, &bo, A, &lda, &ao, &beta, C, &ldc, co);
-}
-
-extern "C" zendnn_status_t ZENDNN_API zendnn_gemm_bf16bf16f32(char transa,
-        char transb, dim_t M, dim_t N, dim_t K, float alpha,
-        const bfloat16_t *A, dim_t lda, const bfloat16_t *B, dim_t ldb,
-        float beta, float *C, dim_t ldc) {
-    return gemm_bf16bf16f32(&transb, &transa, &N, &M, &K, &alpha, B, &ldb, A,
-            &lda, &beta, C, &ldc);
-}
-
-#if ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_THREADPOOL
-zendnn_status_t zendnn_threadpool_interop_sgemm(char transa, char transb, dim_t M,
-        dim_t N, dim_t K, float alpha, const float *A, dim_t lda,
-        const float *B, const dim_t ldb, float beta, float *C, dim_t ldc,
-        void *th) {
-    threadpool_utils::activate_threadpool(
-            (zendnn::threadpool_interop::threadpool_iface *)th);
-    status_t status = extended_sgemm(&transb, &transa, &N, &M, &K, &alpha, B,
-            &ldb, A, &lda, &beta, C, &ldc, nullptr, false);
-    threadpool_utils::deactivate_threadpool();
-    return status;
-}
-
-zendnn_status_t zendnn_threadpool_interop_gemm_u8s8s32(char transa, char transb,
-        char offsetc, dim_t M, dim_t N, dim_t K, float alpha, const uint8_t *A,
-        dim_t lda, uint8_t ao, const int8_t *B, dim_t ldb, int8_t bo,
-        float beta, int32_t *C, dim_t ldc, const int32_t *co, void *th) {
-    threadpool_utils::activate_threadpool(
-            (zendnn::threadpool_interop::threadpool_iface *)th);
-    status_t status = gemm_s8x8s32(&transb, &transa, c2f_offsetC(&offsetc), &N,
-            &M, &K, &alpha, B, &ldb, &bo, A, &lda, &ao, &beta, C, &ldc, co);
-    threadpool_utils::deactivate_threadpool();
-    return status;
-}
-
-zendnn_status_t zendnn_threadpool_interop_gemm_s8s8s32(char transa, char transb,
-        char offsetc, dim_t M, dim_t N, dim_t K, float alpha, const int8_t *A,
-        dim_t lda, int8_t ao, const int8_t *B, dim_t ldb, int8_t bo, float beta,
-        int32_t *C, dim_t ldc, const int32_t *co, void *th) {
-    threadpool_utils::activate_threadpool(
-            (zendnn::threadpool_interop::threadpool_iface *)th);
-    status_t status = gemm_s8x8s32<int8_t>(&transb, &transa,
-            c2f_offsetC(&offsetc), &N, &M, &K, &alpha, B, &ldb, &bo, A, &lda,
-            &ao, &beta, C, &ldc, co);
-    threadpool_utils::deactivate_threadpool();
-    return status;
-}
-
-extern "C" zendnn_status_t ZENDNN_API zendnn_threadpool_interop_gemm_bf16bf16f32(
-        char transa, char transb, dim_t M, dim_t N, dim_t K, float alpha,
-        const bfloat16_t *A, dim_t lda, const bfloat16_t *B, dim_t ldb,
-        float beta, float *C, dim_t ldc, void *th) {
-    threadpool_utils::activate_threadpool(
-            (zendnn::threadpool_interop::threadpool_iface *)th);
-    status_t status = gemm_bf16bf16f32(&transb, &transa, &N, &M, &K, &alpha, B,
-            &ldb, A, &lda, &beta, C, &ldc);
-    threadpool_utils::deactivate_threadpool();
-    return status;
-}
-#endif

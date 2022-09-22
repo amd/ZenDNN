@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -40,9 +40,6 @@ namespace impl {
 namespace cpu {
 namespace matmul {
 
-template <impl::data_type_t src_type, impl::data_type_t weights_type = src_type,
-        impl::data_type_t dst_type = src_type,
-        impl::data_type_t acc_type = dst_type>
 struct ref_matmul_t : public primitive_t {
     struct pd_t : public cpu_matmul_pd_t {
         using cpu_matmul_pd_t::cpu_matmul_pd_t;
@@ -52,44 +49,35 @@ struct ref_matmul_t : public primitive_t {
         status_t init(engine_t *engine) {
             using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
+            const auto src_type = src_md(0)->data_type;
+            const auto wei_type = weights_md(0)->data_type;
+            const auto bia_type = weights_md(1)->data_type;
+            const auto dst_type = dst_md(0)->data_type;
 
-            bool ok = src_md()->data_type == src_type
-                    && weights_md()->data_type == weights_type
-                    && desc()->accum_data_type == acc_type
-                    && dst_md()->data_type == dst_type
+            bool ok = utils::one_of(src_type, f32, bf16)
+                    && utils::one_of(wei_type, f32, bf16)
+                    && utils::one_of(dst_type, f32, bf16)
+                    && src_type == wei_type
+                    && IMPLICATION(src_type == f32, dst_type == f32)
+                    && IMPLICATION(with_bias(),
+                            utils::one_of(bia_type, f32, bf16)
+                                    && IMPLICATION(
+                                            src_type == f32, bia_type == f32))
                     && platform::has_data_type_support(src_type)
                     && attr()->has_default_values(smask_t::oscale_runtime
-                            | smask_t::zero_points_runtime | smask_t::post_ops)
-                    && attr_oscale_ok() && attr_zero_points_ok()
-                    && set_default_formats();
-
-            if (with_bias()) {
-                auto bia_dt = weights_md(1)->data_type;
-                if (acc_type == f32)
-                    ok = ok && utils::one_of(bia_dt, f32);
-                else if (acc_type == s32)
-                    ok = ok && utils::one_of(bia_dt, f32, s32, s8, u8);
-            }
+                                    | smask_t::post_ops | smask_t::sum_dt,
+                            dst_type)
+                    && attr_.post_ops_.check_sum_consistent_dt(dst_type)
+                    && attr_oscale_ok() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             return ok ? status::success : status::unimplemented;
         }
 
     private:
+        // oscale for f32/bf16 is a way to support alpha multiplication.
         bool attr_oscale_ok() const {
             const auto &oscale = attr()->output_scales_;
             return oscale.mask_ == 0 || oscale.mask_ == (1 << (batched() + 1));
-        }
-
-        bool attr_zero_points_ok() const {
-            int mask_src = 0, mask_wei = 0, mask_dst = 0;
-            attr()->zero_points_.get(ZENDNN_ARG_SRC, nullptr, &mask_src, nullptr);
-            attr()->zero_points_.get(
-                    ZENDNN_ARG_WEIGHTS, nullptr, &mask_wei, nullptr);
-            attr()->zero_points_.get(ZENDNN_ARG_DST, nullptr, &mask_dst, nullptr);
-
-            return IMPLICATION(acc_type != data_type::s32,
-                           attr()->zero_points_.has_default_values())
-                    && (mask_src == 0 || mask_src == 1 << 1) && (mask_wei == 0)
-                    && (mask_dst == 0 || mask_dst == 1 << 1);
         }
     };
 
@@ -101,11 +89,6 @@ struct ref_matmul_t : public primitive_t {
         if (!ref_post_ops) return status::out_of_memory;
         return status::success;
     }
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<weights_type>::type weights_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    typedef typename prec_traits<acc_type>::type acc_data_t;
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_ref(ctx);

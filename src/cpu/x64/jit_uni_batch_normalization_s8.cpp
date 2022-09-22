@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -37,8 +37,6 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-namespace {
-
 using namespace Xbyak;
 
 using data_t = int8_t;
@@ -47,14 +45,14 @@ struct call_params_t {
     // keep int sizes at 8 bytes -- jit code expects this
     size_t channel_offt_count, spat_offt_count;
     float eps;
-    const float *scale_shift, *mean, *var;
+    const float *scale, *shift, *mean, *var;
     const data_t *src, *dst;
 };
 
 template <cpu_isa_t isa>
 struct jit_bnorm_base_t : public jit_generator {
 
-    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_bnorm_t)
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_bnorm_s8_t)
 
     using Vmm = typename cpu_isa_traits<isa>::Vmm;
     const AddressFrame &vmmword
@@ -65,7 +63,8 @@ struct jit_bnorm_base_t : public jit_generator {
 
     Reg64 reg_param = abi_param1;
 
-    Reg64 reg_scale_shift = rbx;
+    Reg64 reg_scale = rbx;
+    Reg64 reg_shift = rdx;
     Reg64 reg_mean = rbp;
 
     Reg64 reg_channel_offt_count = r8;
@@ -77,11 +76,16 @@ struct jit_bnorm_base_t : public jit_generator {
     Reg64 reg_var = r14;
     Reg64 reg_channel_offt_1byte = r15;
     Reg64 reg_channel_offt_4byte = rax;
+    Reg64 reg_relu_alpha = abi_not_param1;
+
+    Opmask kstore_mask = Opmask(1);
 
     Vmm vzero = Vmm(isa == avx512_core ? 29 : 13);
     Xmm xone = Xmm(14);
     Vmm vone = Vmm(isa == avx512_core ? 30 : 14);
     Vmm veps = Vmm(isa == avx512_core ? 31 : 15);
+    Vmm vmm_aux = Vmm(isa == avx512_core ? 28 : 10); // shared with 'veps'
+    Vmm vmm_mask = Vmm(0); // used for AVX2 and SSE41
 
     size_t simd_w_ = cpu_isa_traits<isa>::vlen / sizeof(float);
     size_t c_in_xmm_ = (isa == sse41) ? 8 : 16;
@@ -89,13 +93,16 @@ struct jit_bnorm_base_t : public jit_generator {
     size_t num_c_blocks_;
     size_t c_tail_;
     bool with_relu_;
+    bool has_alpha_value_;
 
     void compute_predefined_variables() {
         chan_data_offt_ = pd_->C() * sizeof(float);
         num_c_blocks_ = pd_->C() / c_in_xmm_;
         c_tail_ = pd_->C() % c_in_xmm_;
-        with_relu_ = (pd_->with_relu_post_op() || pd_->fuse_norm_relu())
+        with_relu_ = (pd_->with_relu_post_op(false) || pd_->fuse_norm_relu())
                 && pd_->is_fwd();
+        has_alpha_value_ = with_relu_ && pd_->with_relu_post_op(false)
+                && pd_->alpha() != 0;
     }
 
     void load_common_params() {
@@ -113,9 +120,12 @@ struct jit_bnorm_base_t : public jit_generator {
         mov(reg_src, ptr[reg_param + PARAM_OFF(src)]);
         mov(reg_dst, ptr[reg_param + PARAM_OFF(dst)]);
         mov(reg_mean, ptr[reg_param + PARAM_OFF(mean)]);
-        mov(reg_scale_shift, ptr[reg_param + PARAM_OFF(scale_shift)]);
+        mov(reg_scale, ptr[reg_param + PARAM_OFF(scale)]);
+        mov(reg_shift, ptr[reg_param + PARAM_OFF(shift)]);
         mov(reg_var, ptr[reg_param + PARAM_OFF(var)]);
 #undef PARAM_OFF
+
+        if (has_alpha_value_) { mov(reg_relu_alpha, float2int(pd_->alpha())); }
     }
 
     Address mean_ptr(size_t offt = 0) {
@@ -127,13 +137,13 @@ struct jit_bnorm_base_t : public jit_generator {
     }
 
     Address scale_ptr(size_t offt = 0) {
-        return vmmword[reg_scale_shift + reg_channel_offt_4byte + offt
+        return vmmword[reg_scale + reg_channel_offt_4byte + offt
                 + 0 * chan_data_offt_];
     }
 
     Address shift_ptr(size_t offt = 0) {
-        return vmmword[reg_scale_shift + reg_channel_offt_4byte + offt
-                + 1 * chan_data_offt_];
+        return vmmword[reg_shift + reg_channel_offt_4byte + offt
+                + 0 * chan_data_offt_];
     }
 
     Address src_ptr(size_t offt = 0) {
@@ -147,8 +157,8 @@ struct jit_bnorm_base_t : public jit_generator {
     virtual void prepare_tail_mask() {}
     virtual void load_mean_and_var(const Vmm &vmean, const Vmm &vsqrtvar,
             size_t offt, bool need_tail) {}
-    virtual void load_scale_and_shift(const Vmm &vscale, const Vmm &vshift,
-            size_t offt, bool need_tail) {}
+    virtual void load_scale(const Vmm &vscale, size_t offt, bool need_tail) {}
+    virtual void load_shift(const Vmm &vshift, size_t offt, bool need_tail) {}
     virtual void compute_dst(bool need_tail) {}
 
     // Precomputes vscale and vshift for following
@@ -160,9 +170,19 @@ struct jit_bnorm_base_t : public jit_generator {
         uni_vaddps(vsqrtvar, vsqrtvar, veps);
         uni_vsqrtps(vsqrtvar, vsqrtvar);
 
-        if (pd_->use_scaleshift()) {
-            load_scale_and_shift(vscale, vshift, offt, need_tail);
+        if (pd_->use_scaleshift() || (pd_->use_scale() && pd_->use_shift())) {
+            load_scale(vscale, offt, need_tail);
             uni_vdivps(vscale, vscale, vsqrtvar);
+            load_shift(vshift, offt, need_tail);
+            uni_vfnmadd231ps(vshift, vmean, vscale);
+        } else if (pd_->use_scale()) {
+            load_scale(vscale, offt, need_tail);
+            uni_vdivps(vscale, vscale, vsqrtvar);
+            uni_vmulps(vmean, vmean, vscale);
+            uni_vsubps(vshift, vzero, vmean, vshift);
+        } else if (pd_->use_shift()) {
+            uni_vdivps(vscale, vone, vsqrtvar, vscale);
+            load_shift(vshift, offt, need_tail);
             uni_vfnmadd231ps(vshift, vmean, vscale);
         } else {
             uni_vdivps(vscale, vone, vsqrtvar, vscale);
@@ -196,10 +216,10 @@ struct jit_bnorm_base_t : public jit_generator {
 };
 
 template <cpu_isa_t isa>
-struct jit_bnorm_t;
+struct jit_bnorm_s8_t;
 
 template <>
-struct jit_bnorm_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
+struct jit_bnorm_s8_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
     Opmask tail_opmask = Opmask(1); // f32 mask for channel math
 
     void prepare_tail_mask() override {
@@ -223,15 +243,29 @@ struct jit_bnorm_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
         }
     }
 
-    void load_scale_and_shift(const Vmm &vscale, const Vmm &vshift, size_t offt,
-            bool need_tail) override {
+    void load_scale(const Vmm &vscale, size_t offt, bool need_tail) override {
         if (need_tail) {
             uni_vmovups_tail(vscale, tail_opmask, scale_ptr(offt));
-            uni_vmovups_tail(vshift, tail_opmask, shift_ptr(offt));
         } else {
             uni_vmovups(vscale, scale_ptr(offt));
+        }
+    }
+
+    void load_shift(const Vmm &vshift, size_t offt, bool need_tail) override {
+        if (need_tail) {
+            uni_vmovups_tail(vshift, tail_opmask, shift_ptr(offt));
+        } else {
             uni_vmovups(vshift, shift_ptr(offt));
         }
+    }
+
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        vmovq(xmm_aux, reg_relu_alpha);
+        vbroadcastss(vmm_aux, xmm_aux);
+        vcmpps(kstore_mask, vzero, vmm_dst, _cmp_lt_os);
+        vmulps(vmm_aux, vmm_dst, vmm_aux);
+        vblendmps(vmm_dst | kstore_mask, vmm_aux, vmm_dst);
     }
 
     void compute_dst(bool need_tail) override {
@@ -264,7 +298,12 @@ struct jit_bnorm_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
                 vcvtdq2ps(v, v);
 
                 uni_vfmadd213ps(v, vscale, vshift);
-                if (with_relu_) uni_vmaxps(v, v, vzero);
+                if (with_relu_) {
+                    if (has_alpha_value_)
+                        process_relu_alpha(v);
+                    else
+                        uni_vmaxps(v, v, vzero);
+                }
 
                 vcvtps2dq(v, v);
                 if (need_tail) {
@@ -288,12 +327,12 @@ struct jit_bnorm_t<avx512_core> : public jit_bnorm_base_t<avx512_core> {
         }
     }
 
-    jit_bnorm_t(const batch_normalization_pd_t *pd)
+    jit_bnorm_s8_t(const batch_normalization_pd_t *pd)
         : jit_bnorm_base_t<avx512_core>(pd) {}
 };
 
 template <>
-struct jit_bnorm_t<avx2> : public jit_bnorm_base_t<avx2> {
+struct jit_bnorm_s8_t<avx2> : public jit_bnorm_base_t<avx2> {
     Vmm tail_vmask = Vmm(11);
     Vmm body_vmask = Vmm(12);
 
@@ -326,15 +365,31 @@ struct jit_bnorm_t<avx2> : public jit_bnorm_base_t<avx2> {
         }
     }
 
-    void load_scale_and_shift(const Vmm &vscale, const Vmm &vshift, size_t offt,
-            bool need_tail) override {
+    void load_scale(const Vmm &vscale, size_t offt, bool need_tail) override {
         if (need_tail) {
             uni_vmovups_tail(vscale, tail_vmask, scale_ptr(offt));
-            uni_vmovups_tail(vshift, tail_vmask, shift_ptr(offt));
         } else {
             uni_vmovups(vscale, scale_ptr(offt));
+        }
+    }
+
+    void load_shift(const Vmm &vshift, size_t offt, bool need_tail) override {
+        if (need_tail) {
+            uni_vmovups_tail(vshift, tail_vmask, shift_ptr(offt));
+        } else {
             uni_vmovups(vshift, shift_ptr(offt));
         }
+    }
+
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        uni_vpxor(vmm_mask, vmm_mask, vmm_mask);
+        vmovq(xmm_aux, reg_relu_alpha);
+        uni_vbroadcastss(vmm_aux, xmm_aux);
+        uni_vcmpps(vmm_mask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vmm_aux, vmm_aux, vmm_dst);
+        uni_vblendvps(
+                vmm_dst, vmm_dst, vmm_aux, vmm_mask); // swaped aux and dst
     }
 
     void compute_dst(bool need_tail) override {
@@ -391,8 +446,21 @@ struct jit_bnorm_t<avx2> : public jit_bnorm_base_t<avx2> {
                 uni_vfmadd213ps(v0, vscale0, vshift0);
                 uni_vfmadd213ps(v1, vscale1, vshift1);
                 if (with_relu_) {
-                    uni_vmaxps(v0, v0, vzero);
-                    uni_vmaxps(v1, v1, vzero);
+                    if (has_alpha_value_) {
+                        Vmm vmm_dst_0 = Vmm(5);
+                        Vmm vmm_dst_1 = Vmm(9);
+                        uni_vmovups(vmm_dst_0, v0);
+                        uni_vmovups(vmm_dst_1, v1);
+
+                        process_relu_alpha(vmm_dst_0);
+                        process_relu_alpha(vmm_dst_1);
+
+                        uni_vmovups(v0, vmm_dst_0);
+                        uni_vmovups(v1, vmm_dst_1);
+                    } else {
+                        uni_vmaxps(v0, v0, vzero);
+                        uni_vmaxps(v1, v1, vzero);
+                    }
                 }
 
                 vcvtps2dq(v0, v0); // BA
@@ -426,12 +494,12 @@ struct jit_bnorm_t<avx2> : public jit_bnorm_base_t<avx2> {
         }
     }
 
-    jit_bnorm_t(const batch_normalization_pd_t *pd)
+    jit_bnorm_s8_t(const batch_normalization_pd_t *pd)
         : jit_bnorm_base_t<avx2>(pd) {}
 };
 
 template <>
-struct jit_bnorm_t<sse41> : public jit_bnorm_base_t<sse41> {
+struct jit_bnorm_s8_t<sse41> : public jit_bnorm_base_t<sse41> {
     void load_mean_and_var(const Vmm &vmean, const Vmm &vsqrtvar, size_t offt,
             bool need_tail) override {
         if (need_tail) {
@@ -445,17 +513,35 @@ struct jit_bnorm_t<sse41> : public jit_bnorm_base_t<sse41> {
         }
     }
 
-    void load_scale_and_shift(const Vmm &vscale, const Vmm &vshift, size_t offt,
-            bool need_tail) override {
+    void load_scale(const Vmm &vscale, size_t offt, bool need_tail) override {
         if (need_tail) {
             for (size_t tl = 0; tl < c_tail_ % simd_w_; tl++) {
                 pinsrd(vscale, scale_ptr(offt + tl * sizeof(float)), tl);
-                pinsrd(vshift, shift_ptr(offt + tl * sizeof(float)), tl);
             }
         } else {
             movups(vscale, scale_ptr(offt));
+        }
+    }
+
+    void load_shift(const Vmm &vshift, size_t offt, bool need_tail) override {
+        if (need_tail) {
+            for (size_t tl = 0; tl < c_tail_ % simd_w_; tl++) {
+                pinsrd(vshift, shift_ptr(offt + tl * sizeof(float)), tl);
+            }
+        } else {
             movups(vshift, shift_ptr(offt));
         }
+    }
+
+    void process_relu_alpha(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vmm_aux.getIdx());
+        uni_vpxor(vmm_mask, vmm_mask, vmm_mask);
+        vmovq(xmm_aux, reg_relu_alpha);
+        uni_vbroadcastss(vmm_aux, xmm_aux);
+        uni_vcmpps(vmm_mask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vmm_aux, vmm_aux, vmm_dst);
+        uni_vblendvps(
+                vmm_dst, vmm_dst, vmm_aux, vmm_mask); // swaped aux and dst
     }
 
     void compute_dst(bool need_tail) override {
@@ -510,8 +596,21 @@ struct jit_bnorm_t<sse41> : public jit_bnorm_base_t<sse41> {
                 uni_vfmadd213ps(v0, vscale0, vshift0);
                 uni_vfmadd213ps(v1, vscale1, vshift1);
                 if (with_relu_) {
-                    maxps(v0, vzero);
-                    maxps(v1, vzero);
+                    if (has_alpha_value_) {
+                        Vmm vmm_dst_0 = Vmm(5);
+                        Vmm vmm_dst_1 = Vmm(9);
+                        movups(vmm_dst_0, v0);
+                        movups(vmm_dst_1, v1);
+
+                        process_relu_alpha(vmm_dst_0);
+                        process_relu_alpha(vmm_dst_1);
+
+                        movups(v0, vmm_dst_0);
+                        movups(v1, vmm_dst_1);
+                    } else {
+                        maxps(v0, vzero);
+                        maxps(v1, vzero);
+                    }
                 }
 
                 cvtps2dq(v0, v0);
@@ -541,11 +640,9 @@ struct jit_bnorm_t<sse41> : public jit_bnorm_base_t<sse41> {
         }
     }
 
-    jit_bnorm_t(const batch_normalization_pd_t *pd)
+    jit_bnorm_s8_t(const batch_normalization_pd_t *pd)
         : jit_bnorm_base_t<sse41>(pd) {}
 };
-
-} // namespace
 
 namespace bnorm_s8_impl {
 
@@ -557,7 +654,8 @@ struct driver_t : public c_compatible {
     // TODO: for problems where thread pieces don't fit L2 cache, add spatial
     // re-balance using less pieces.
     void exec(int ithr, int nthr, const data_t *src, data_t *dst,
-            const float *scale_shift, const float *mean, const float *var) {
+            const float *scale, const float *shift, const float *mean,
+            const float *var) {
         dim_t N = pd_->MB();
         dim_t C = pd_->C();
         dim_t D = pd_->D();
@@ -569,7 +667,8 @@ struct driver_t : public c_compatible {
 
         p.eps = pd_->desc()->batch_norm_epsilon;
 
-        p.scale_shift = scale_shift;
+        p.scale = scale;
+        p.shift = shift;
         p.mean = mean;
         p.var = var;
 
@@ -589,7 +688,7 @@ struct driver_t : public c_compatible {
 private:
     const batch_normalization_pd_t *pd_;
 
-    jit_bnorm_t<isa> ker_;
+    jit_bnorm_s8_t<isa> ker_;
 };
 
 } // namespace bnorm_s8_impl
@@ -609,7 +708,7 @@ status_t jit_uni_batch_normalization_s8_fwd_t<isa>::pd_t::init(
             && one_of(ndims(), 4, 5) && stats_is_src()
             && src_md()->data_type == s8 && check_scale_shift_data_type()
             && memory_desc_matches_tag(*src_md(), desired_fmt_tag)
-            && (attr()->has_default_values() || this->with_relu_post_op());
+            && (attr()->has_default_values() || this->with_relu_post_op(false));
     if (!ok) return status::unimplemented;
 
     return status::success;
@@ -630,14 +729,27 @@ status_t jit_uni_batch_normalization_s8_fwd_t<isa>::init(engine_t *engine) {
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_s8_fwd_t<isa>::execute(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
+
+    const memory_desc_wrapper ss_d(pd()->weights_md());
+
+    const auto use_ss = pd()->use_scaleshift();
+    const auto use_sc = pd()->use_scale();
+    const auto use_sh = pd()->use_shift();
+
+    const size_t shift_off
+            = use_ss && !ss_d.has_zero_dim() ? ss_d.off(1, 0) : 0;
+
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto scale_shift = CTX_IN_MEM(const float *, ZENDNN_ARG_SCALE_SHIFT);
+    auto scale = CTX_IN_MEM(
+            const float *, use_sc ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
+    auto shift = use_sh ? CTX_IN_MEM(const float *, ZENDNN_ARG_SHIFT)
+                        : use_ss ? &CTX_IN_MEM(const float *,
+                                  ZENDNN_ARG_SCALE_SHIFT)[shift_off]
+                                 : nullptr;
     auto mean = const_cast<float *>(CTX_IN_MEM(const float *, ZENDNN_ARG_MEAN));
     auto var
             = const_cast<float *>(CTX_IN_MEM(const float *, ZENDNN_ARG_VARIANCE));
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
 
     // do sequential if the problem is less than one 4K memory page
     const bool force_sequential
@@ -645,7 +757,7 @@ status_t jit_uni_batch_normalization_s8_fwd_t<isa>::execute(
             <= 4096;
 
     parallel(force_sequential ? 1 : 0, [&](const int ithr, const int nthr) {
-        bnorm_driver_->exec(ithr, nthr, src, dst, scale_shift, mean, var);
+        bnorm_driver_->exec(ithr, nthr, src, dst, scale, shift, mean, var);
     });
 
     return status::success;

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,12 +37,18 @@ status_t lnorm_desc_init(layer_normalization_desc_t *lnorm_desc,
         prop_kind_t prop_kind, const memory_desc_t *data_desc,
         const memory_desc_t *stat_desc, const memory_desc_t *diff_data_desc,
         float epsilon, unsigned flags) {
-    bool args_ok = true && !any_null(lnorm_desc, data_desc)
+    bool args_ok = !any_null(lnorm_desc, data_desc)
             && one_of(prop_kind, forward_training, forward_inference,
                     backward_data, backward)
             && 2 <= data_desc->ndims && data_desc->ndims <= 5
             && IMPLICATION(prop_kind & backward, diff_data_desc != nullptr)
-            && (flags & ~(zendnn_use_global_stats | zendnn_use_scaleshift)) == 0;
+            && (flags
+                       & ~(zendnn_use_global_stats | zendnn_use_scaleshift
+                               | zendnn_use_scale | zendnn_use_shift))
+                    == 0
+            && IMPLICATION(
+                    one_of(prop_kind, forward_training, forward_inference),
+                    !memory_desc_wrapper(data_desc).format_any());
     if (!args_ok) return invalid_arguments;
 
     auto ld = layer_normalization_desc_t();
@@ -74,15 +80,28 @@ status_t lnorm_desc_init(layer_normalization_desc_t *lnorm_desc,
                 format_tag::any));
 
     int ndims = data_desc->ndims;
-    dims_t scaleshift_dims = {2, data_desc->dims[ndims - 1]};
-    zendnn_memory_desc_init_by_tag(&ld.data_scaleshift_desc, 2, scaleshift_dims,
-            data_type::f32, zendnn_nc);
+    ld.data_scaleshift_desc = zero_md();
+    if (flags & (zendnn_use_scale | zendnn_use_shift)) {
+        dims_t scaleshift_dims = {data_desc->dims[ndims - 1]};
+        zendnn_memory_desc_init_by_tag(&ld.data_scaleshift_desc, 1,
+                scaleshift_dims, data_type::f32, zendnn_x);
+    } else {
+        dims_t scaleshift_dims = {2, data_desc->dims[ndims - 1]};
+        zendnn_memory_desc_init_by_tag(&ld.data_scaleshift_desc, 2,
+                scaleshift_dims, data_type::f32, zendnn_nc);
+    }
     ld.diff_data_scaleshift_desc = zero_md();
     if (ld.prop_kind == backward) {
         ld.diff_data_scaleshift_desc = ld.data_scaleshift_desc;
     }
 
     ld.layer_norm_epsilon = epsilon;
+
+    // zendnn_use_scaleshift can't be mixed with zendnn_use_scale or zendnn_use_shift
+    if ((flags & zendnn_use_scaleshift)
+            && (flags & (zendnn_use_scale | zendnn_use_shift)))
+        return invalid_arguments;
+
     ld.flags = flags;
 
     if (ld.prop_kind == backward_data) {

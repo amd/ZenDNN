@@ -1,0 +1,166 @@
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
+* Copyright 2019-2022 Intel Corporation
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*******************************************************************************/
+
+#ifndef ZENDNN_CONFIG_H
+#define ZENDNN_CONFIG_H
+
+#include "zendnn_types.h"
+
+/// @cond DO_NOT_DOCUMENT_THIS
+
+// All symbols shall be internal unless marked as ZENDNN_API
+#if defined _WIN32 || defined __CYGWIN__
+#define ZENDNN_HELPER_DLL_IMPORT __declspec(dllimport)
+#define ZENDNN_HELPER_DLL_EXPORT __declspec(dllexport)
+#else
+#if __GNUC__ >= 4
+#define ZENDNN_HELPER_DLL_IMPORT __attribute__((visibility("default")))
+#define ZENDNN_HELPER_DLL_EXPORT __attribute__((visibility("default")))
+#else
+#define ZENDNN_HELPER_DLL_IMPORT
+#define ZENDNN_HELPER_DLL_EXPORT
+#endif
+#endif
+
+#ifdef ZENDNN_DLL
+#ifdef ZENDNN_DLL_EXPORTS
+#define ZENDNN_API ZENDNN_HELPER_DLL_EXPORT
+#else
+#define ZENDNN_API ZENDNN_HELPER_DLL_IMPORT
+#endif
+#else
+#define ZENDNN_API
+#endif
+
+#if defined(__GNUC__)
+#define ZENDNN_DEPRECATED __attribute__((deprecated))
+#elif defined(_MSC_VER)
+#define ZENDNN_DEPRECATED __declspec(deprecated)
+#else
+#define ZENDNN_DEPRECATED
+#endif
+
+/// @endcond
+
+// clang-format off
+
+// ZENDNN CPU threading runtime
+#cmakedefine ZENDNN_CPU_THREADING_RUNTIME ZENDNN_RUNTIME_${ZENDNN_CPU_THREADING_RUNTIME}
+
+// ZENDNN CPU engine runtime
+#cmakedefine ZENDNN_CPU_RUNTIME ZENDNN_RUNTIME_${ZENDNN_CPU_RUNTIME}
+
+// ZENDNN GPU engine runtime
+#cmakedefine ZENDNN_GPU_RUNTIME ZENDNN_RUNTIME_${ZENDNN_GPU_RUNTIME}
+
+// clang-format on
+
+#if defined(ZENDNN_CPU_RUNTIME) && defined(ZENDNN_GPU_RUNTIME)
+#if (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_OCL)
+#error "Unexpected ZENDNN_CPU_RUNTIME"
+#endif
+#if (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_NONE) \
+        && (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_OCL) \
+        && (ZENDNN_GPU_RUNTIME != ZENDNN_RUNTIME_SYCL)
+#error "Unexpected ZENDNN_GPU_RUNTIME"
+#endif
+#if (ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_NONE \
+        && ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_NONE)
+#error "At least one runtime must be specified"
+#endif
+#else
+#error "BOTH ZENDNN_CPU_RUNTIME and ZENDNN_GPU_RUNTIME must be defined"
+#endif
+
+// For SYCL CPU, a primitive may be created and executed in different threads
+// hence the global scratchpad does not work. This enables concurrent execution
+// when CPU runtime is SYCL to avoid the issue.
+#if ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_SYCL
+#ifndef ZENDNN_ENABLE_CONCURRENT_EXEC
+#define ZENDNN_ENABLE_CONCURRENT_EXEC
+#endif
+#endif
+
+// When defined, primitive cache stores runtime objects.
+#cmakedefine ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+
+// When defined, DPCPP is supported.
+#cmakedefine ZENDNN_WITH_SYCL
+
+// When defined, Level Zero is supported.
+#cmakedefine ZENDNN_WITH_LEVEL_ZERO
+
+// When defined, SYCL CUDA backend is used.
+#cmakedefine ZENDNN_SYCL_CUDA
+
+// When defined, stack checker is enabled.
+#cmakedefine ZENDNN_ENABLE_STACK_CHECKER
+
+// When defined, experimental features are enabled.
+#cmakedefine ZENDNN_EXPERIMENTAL
+
+// List of configurating build controls
+// Workload controls
+#cmakedefine01 BUILD_TRAINING
+#cmakedefine01 BUILD_INFERENCE
+// Primitive controls
+#cmakedefine01 BUILD_PRIMITIVE_ALL
+#cmakedefine01 BUILD_BATCH_NORMALIZATION
+#cmakedefine01 BUILD_BINARY
+#cmakedefine01 BUILD_CONCAT
+#cmakedefine01 BUILD_CONVOLUTION
+#cmakedefine01 BUILD_DECONVOLUTION
+#cmakedefine01 BUILD_ELTWISE
+#cmakedefine01 BUILD_INNER_PRODUCT
+#cmakedefine01 BUILD_LAYER_NORMALIZATION
+#cmakedefine01 BUILD_LRN
+#cmakedefine01 BUILD_MATMUL
+#cmakedefine01 BUILD_POOLING
+#cmakedefine01 BUILD_PRELU
+#cmakedefine01 BUILD_REDUCTION
+#cmakedefine01 BUILD_REORDER
+#cmakedefine01 BUILD_RESAMPLING
+#cmakedefine01 BUILD_RNN
+#cmakedefine01 BUILD_SHUFFLE
+#cmakedefine01 BUILD_SOFTMAX
+#cmakedefine01 BUILD_SUM
+// Primitives CPU ISA controls
+#cmakedefine01 BUILD_PRIMITIVE_CPU_ISA_ALL
+#cmakedefine01 BUILD_SSE41
+#cmakedefine01 BUILD_AVX2
+#cmakedefine01 BUILD_AVX512
+#cmakedefine01 BUILD_AMX
+// Primitives GPU ISA controls
+#cmakedefine01 BUILD_PRIMITIVE_GPU_ISA_ALL
+#cmakedefine01 BUILD_GEN9
+#cmakedefine01 BUILD_GEN11
+#cmakedefine01 BUILD_XELP
+#cmakedefine01 BUILD_XEHP
+#cmakedefine01 BUILD_XEHPG
+#cmakedefine01 BUILD_XEHPC
+//ZenDNN core specific control
+#cmakedefine01 ZENDNN_ENABLE
+#cmakedefine01 BIAS_ENABLED
+#cmakedefine01 BLIS_EXPERT
+#cmakedefine01 ZENDNN_DIRECT_CONV
+#cmakedefine01 ZENDNN_BLOCKED_POOLING
+#cmakedefine01 LIBM_ENABLE
+#endif

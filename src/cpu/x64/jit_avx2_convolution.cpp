@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -25,7 +25,7 @@
 #include "common/utils.hpp"
 
 #include "cpu/x64/jit_avx2_convolution.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -77,6 +77,7 @@ void jit_avx2_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                " t_pad=",jcp.t_pad, " ngroups=",jcp.ngroups,
                " ic=",jcp.ic, " oc=",jcp.oc,
                " [cpu/jit_avx2_convolution_fwd]");
+
     auto ker = [&](const int ithr, const int nthr) {
         size_t start {0}, end {0};
         balance211(work_amount, nthr, ithr, start, end);

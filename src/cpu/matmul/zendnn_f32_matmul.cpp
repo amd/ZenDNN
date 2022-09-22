@@ -34,11 +34,13 @@
 
 #include "cpu/gemm/gemm.hpp"
 
-#include "cpu/matmul/zendnn_f32_matmul.hpp"
+#include "cpu/binary_injector_utils.hpp"
+#include "cpu/matmul/gemm_f32_matmul.hpp"
 #include "cpu/matmul/matmul_utils.hpp"
+#include "cpu/matmul/zendnn_f32_matmul.hpp"
 
 #include "zendnn_logging.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -178,13 +180,13 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         = weights_strides[1] == 1 &&
           weights_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
 
-    const int M_s32 = (int)M;
-    const int N_s32 = (int)N;
-    const int K_s32 = (int)K;
+    const dim_t M_s32 = (dim_t)M;
+    const dim_t N_s32 = (dim_t)N;
+    const dim_t K_s32 = (dim_t)K;
 
-    const int lda = (int)src_strides[*transA == 'N' ? 0 : 1];
-    const int ldb = (int)weights_strides[*transB == 'N' ? 0 : 1];
-    const int ldc = (int)dst_bd.strides[dst_d.ndims() - 2];
+    const dim_t lda = (dim_t)src_strides[*transA == 'N' ? 0 : 1];
+    const dim_t ldb = (dim_t)weights_strides[*transB == 'N' ? 0 : 1];
+    const dim_t ldc = (dim_t)dst_bd.strides[dst_d.ndims() - 2];
 
     float alpha = params.get_gemm_alpha(scales);
     const float beta = params.gemm_beta_;
@@ -260,45 +262,6 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         }
         else {
             return status::unimplemented;
-        }
-    }
-#else //ZENDNN_ENABLE
-    const bool parallel_over_batch = batch > 1;
-    if (parallel_over_batch) {
-        parallel(parallel_over_batch ? 0 : 1, [&](int ithr, int nthr) {
-            size_t batch_start {}, batch_end {};
-            balance211((size_t)(batch), nthr, ithr, batch_start, batch_end);
-            for (size_t b = batch_start; b < batch_end; ++b) {
-                const src_data_t *curr_src = src + b * src_batch_stride;
-                const weights_data_t *curr_weights
-                    = weights + b * weights_batch_stride;
-                dst_data_t *curr_dst = dst + b * dst_batch_stride;
-
-                extended_sgemm(transB, transA, &N_s32, &M_s32, &K_s32, &alpha,
-                               curr_weights, &ldb, curr_src, &lda, &beta, curr_dst,
-                               &ldc, nullptr, false);
-
-                if (params.has_pp_kernel_) {
-                    const float *pp_scales
-                        = params.get_post_processing_scales(scales);
-                    (*pp_kernel_)(curr_dst, curr_dst, bias, pp_scales, 0, M * N,
-                                  (size_t)N);
-                }
-            }
-        });
-    }
-    else {
-        extended_sgemm(transB, transA, &N_s32, &M_s32, &K_s32, &alpha, weights,
-                       &ldb, src, &lda, &beta, dst, &ldc, nullptr, false);
-
-        if (params.has_pp_kernel_) {
-            const bool force_sequential = pp_kernel_->sequential_kernel();
-            const float *pp_scales = params.get_post_processing_scales(scales);
-            parallel(force_sequential ? 1 : 0, [&](int ithr, int nthr) {
-                size_t start {}, end {};
-                balance211((size_t)(M * N), nthr, ithr, start, end);
-                (*pp_kernel_)(dst, dst, bias, pp_scales, start, end, (size_t)N);
-            });
         }
     }
 #endif //ZENDNN_ENABLE

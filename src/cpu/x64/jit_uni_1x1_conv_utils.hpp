@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -74,7 +74,6 @@ inline void rtus_prepare(conv_pd_t *self, const convolution_desc_t *&conv_d,
     }
     if (!rtus_applicable) return;
 
-    //Regression fix for Gerrit 480261
     const auto dat_tag = ndims == 3
             ? memory_desc_wrapper(src_d).matches_one_of_tag(
                     format_tag::nCw8c, format_tag::nCw16c, format_tag::nwc)
@@ -201,9 +200,7 @@ struct rtus_driver_t : public jit_generator {
                 switch (isa) {
                     case sse41: res = Xmm(idx); break;
                     case avx2: res = Ymm(idx); break;
-                    case avx512_common:
-                    case avx512_core:
-                    case avx512_mic: res = Zmm(idx); break;
+                    case avx512_core: res = Zmm(idx); break;
                     default: assert(!"Not supported isa"); res = Xmm(idx);
                 }
                 return res;
@@ -224,9 +221,7 @@ struct rtus_driver_t : public jit_generator {
                             res = Ymm(idx);
                     }
                     break;
-                case avx512_common:
                 case avx512_core:
-                case avx512_mic:
                     switch (typesize) {
                         case 4: res = Zmm(idx); break;
                         case 2: res = Ymm(idx); break;
@@ -283,7 +278,7 @@ struct rtus_driver_t : public jit_generator {
             Label skip_h_step;
             add(reg_cur_iw, stride_w_);
             cmp(reg_cur_iw, iw_);
-            jl(skip_h_step);
+            jl(skip_h_step, T_NEAR);
 
             if (src_to_ws_) {
                 add(reg_cur_src, (src_step_h_ - iw_) * vlen_);
@@ -298,14 +293,14 @@ struct rtus_driver_t : public jit_generator {
 
                 add(reg_cur_src, stride_w_ * vlen_);
                 cmp(reg_cur_src, reg_cur_src_fin);
-                jl(ih_loop);
+                jl(ih_loop, T_NEAR);
             }
             xor_(reg_cur_iw, reg_cur_iw);
             L(skip_h_step);
         }
 
         sub(reg_cur_os, vlen_);
-        jnz(is_loop);
+        jnz(is_loop, T_NEAR);
 
         /* restore dst */
         sub(reg_ws, reg_os);
@@ -319,7 +314,7 @@ struct rtus_driver_t : public jit_generator {
         mov(reg_cur_src, reg_src);
         mov(reg_cur_iw, reg_iw_start);
 
-        if (isa == avx512_common) {
+        if (isa == avx512_core) {
             push(rcx); // preserve rcx, used for shift
             mov(reg_icb_remainder, reg_icb);
             and_(reg_icb_remainder,
@@ -339,7 +334,7 @@ struct rtus_driver_t : public jit_generator {
 
         auto load_reg = [=](const Xmm &vreg, const Reg64 &reg,
                                 const int64_t offset, const int load_size) {
-            if (isa == avx512_common) {
+            if (isa == avx512_core) {
                 const Address &addr = ptr[reg + offset];
                 switch (typesize_) {
                     case 4: vmovups(vreg, addr); break;
@@ -360,7 +355,7 @@ struct rtus_driver_t : public jit_generator {
 
         auto store_reg = [=](const Reg64 &reg, const Xmm &vreg,
                                  const int64_t offset, const int store_size) {
-            if (isa == avx512_common) {
+            if (isa == avx512_core) {
                 const Address &addr = ptr[reg + offset];
                 switch (typesize_) {
                     case 4: vmovups(addr, vreg); break;
@@ -387,7 +382,7 @@ struct rtus_driver_t : public jit_generator {
                 ? typesize_ == 4 ? 16 : 8
                 : typesize_ == 4 ? 32 : 16;
         const size_t load_store_size
-                = isa == avx512_common ? vlen_ : max_load_store_bytes;
+                = isa == avx512_core ? vlen_ : max_load_store_bytes;
         size_t load_store_tail_size = (typesize_ == 1 ? max_load_store_bytes
                                                       : ic_tail_ * typesize_);
 
@@ -401,7 +396,7 @@ struct rtus_driver_t : public jit_generator {
             L(ic_loop);
             {
                 cmp(reg_cur_icb, load_store_size);
-                jl(ic_loop_tail);
+                jl(ic_loop_tail, T_NEAR);
 
                 if (src_to_ws_) {
                     load_reg(reg_v, reg_cur_src, 0, load_store_size);
@@ -417,13 +412,13 @@ struct rtus_driver_t : public jit_generator {
                 add(reg_cur_src, load_store_size);
 
                 sub(reg_cur_icb, load_store_size);
-                jmp(ic_loop);
+                jmp(ic_loop, T_NEAR);
             }
 
             L(ic_loop_tail);
             {
                 cmp(reg_cur_icb, 0);
-                je(ic_loop_finish);
+                je(ic_loop_finish, T_NEAR);
 
                 if (src_to_ws_) {
                     load_reg(reg_v | tail_mask, reg_cur_src, 0,
@@ -466,7 +461,7 @@ struct rtus_driver_t : public jit_generator {
                     mov(reg_cur_icb, reg_icb);
                     L(ic_ih_loop_nhwc);
                     cmp(reg_cur_icb, load_store_size);
-                    jl(ic_tail_ih_loop_nhwc);
+                    jl(ic_tail_ih_loop_nhwc, T_NEAR);
 
                     for (int w = 0; w < stride_w_; ++w)
                         store_reg(reg_cur_src, reg_zero, w * w_step_factor,
@@ -474,11 +469,11 @@ struct rtus_driver_t : public jit_generator {
 
                     add(reg_cur_src, load_store_size);
                     sub(reg_cur_icb, load_store_size);
-                    jnz(ic_ih_loop_nhwc);
+                    jnz(ic_ih_loop_nhwc, T_NEAR);
 
                     L(ic_tail_ih_loop_nhwc);
                     cmp(reg_cur_icb, 0);
-                    jle(ic_finish_ih_loop_nhwc);
+                    jle(ic_finish_ih_loop_nhwc, T_NEAR);
 
                     for (int w = 0; w < stride_w_; ++w)
                         store_reg(reg_cur_src, reg_zero | tail_mask,
@@ -488,21 +483,20 @@ struct rtus_driver_t : public jit_generator {
 
                     add(reg_src, stride_w_ * w_step_factor);
                     cmp(reg_src, reg_cur_src_fin);
-                    jl(ih_loop_nhwc);
+                    jl(ih_loop_nhwc, T_NEAR);
                 }
                 xor_(reg_cur_iw, reg_cur_iw);
                 L(skip_h_step);
             }
 
             sub(reg_os, 1);
-            jnz(is_loop);
+            jnz(is_loop, T_NEAR);
         }
     }
 
     void generate() override {
         using namespace Xbyak;
-        assert(utils::one_of(
-                isa, sse41, avx2, avx512_common, avx512_core, avx512_mic));
+        assert(utils::one_of(isa, sse41, avx2, avx512_core));
 
         preamble();
 #define READ_PARAM(what) \

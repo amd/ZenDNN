@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 #include "cpu/cpu_resampling_pd.hpp"
 
 #include "cpu/x64/cpu_isa_traits.hpp"
+#include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
 #include "cpu/x64/jit_uni_resampling_kernel.hpp"
 
@@ -36,10 +37,6 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <cpu_isa_t isa>
-struct jit_uni_resampling_kernel;
-
-template <cpu_isa_t isa>
 struct jit_uni_resampling_fwd_t : public primitive_t {
     struct pd_t : public cpu_resampling_fwd_pd_t {
         using cpu_resampling_fwd_pd_t::cpu_resampling_fwd_pd_t;
@@ -49,9 +46,11 @@ struct jit_uni_resampling_fwd_t : public primitive_t {
 
         status_t init(engine_t *engine);
 
-        jit_resampling_conf_t get_conf() const { return conf_; };
+        const jit_resampling_conf_t &get_conf() const { return conf_; }
 
     private:
+        void fill_format_tag_info();
+
         jit_resampling_conf_t conf_;
     };
 
@@ -170,12 +169,21 @@ private:
      * ...
      */
 
-    status_t interpolate_nearest(const uint8_t *src, uint8_t *dst) const;
-    status_t interpolate_linear(const uint8_t *src, uint8_t *dst) const;
+    status_t interpolate_nearest(const uint8_t *src, uint8_t *dst,
+            const std::vector<const void *> &post_ops_args) const;
+    status_t interpolate_linear(const uint8_t *src, uint8_t *dst,
+            const std::vector<const void *> &post_ops_args) const;
+
+    status_t get_proper_kernel_for_avx512(
+            const memory_desc_t *dst_md, const jit_resampling_conf_t &conf);
+    status_t get_proper_kernel_for_avx(
+            const memory_desc_t *dst_md, const jit_resampling_conf_t &conf);
+    status_t get_proper_kernel_for_sse(
+            const memory_desc_t *dst_md, const jit_resampling_conf_t &conf);
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
-    std::unique_ptr<jit_uni_resampling_kernel<isa>> kernel_;
+    std::unique_ptr<jit_uni_resampling_kernel_base_t> kernel_;
 
     std::vector<unsigned> indices_;
     std::vector<float> weights_;

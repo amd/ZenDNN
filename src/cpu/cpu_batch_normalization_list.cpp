@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 * Copyright 2021 FUJITSU LIMITED
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,58 +43,73 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace zendnn::impl::data_type;
+using namespace zendnn::impl::prop_kind;
 
-// clang-format off
-const pd_create_f impl_list[] = {
-        /* fp */
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<sse41>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<sse41>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<avx512_common>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<sse41>)
-        CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<sse41>)
-        CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_fwd_t<sve_512>)
-        CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_bwd_t<sve_512>)
-        CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_fwd_t<asimd>)
-        CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_bwd_t<asimd>)
-        CPU_INSTANCE(ncsp_batch_normalization_fwd_t<f32>)
-        CPU_INSTANCE(ncsp_batch_normalization_bwd_t<f32>)
-        CPU_INSTANCE(ncsp_batch_normalization_fwd_t<bf16>)
-        CPU_INSTANCE(ncsp_batch_normalization_bwd_t<bf16>)
-        CPU_INSTANCE(nspc_batch_normalization_fwd_t<f32>)
-        CPU_INSTANCE(nspc_batch_normalization_bwd_t<f32>)
-        CPU_INSTANCE(nspc_batch_normalization_fwd_t<bf16>)
-        CPU_INSTANCE(nspc_batch_normalization_bwd_t<bf16>)
-        CPU_INSTANCE(ref_batch_normalization_fwd_t<f32>)
-        CPU_INSTANCE(ref_batch_normalization_bwd_t<f32>)
-        CPU_INSTANCE(ref_batch_normalization_fwd_t<bf16>)
-        CPU_INSTANCE(ref_batch_normalization_bwd_t<bf16>)
-        /* int */
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<avx512_core>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<sse41>)
-        CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_s8_fwd_t<sve_512>)
-        CPU_INSTANCE(ref_batch_normalization_fwd_t<s8>)
-        /* eol */
-        nullptr,
-};
-// clang-format on
+const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
+    // clang-format off
+    static const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_BNORM_P({
+        {{forward}, {
+            /* fp */
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_fwd_t<sse41>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_fwd_t<sse41>)
+            CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_fwd_t<sve_512>)
+            CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_fwd_t<asimd>)
+            CPU_INSTANCE(ncsp_batch_normalization_fwd_t<f32>)
+            CPU_INSTANCE(ncsp_batch_normalization_fwd_t<bf16>)
+            CPU_INSTANCE(nspc_batch_normalization_fwd_t<f32>)
+            CPU_INSTANCE(nspc_batch_normalization_fwd_t<bf16>)
+            CPU_INSTANCE(ref_batch_normalization_fwd_t<f32>)
+            CPU_INSTANCE(ref_batch_normalization_fwd_t<bf16>)
+            /* int */
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_s8_fwd_t<sse41>)
+            CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_s8_fwd_t<sve_512>)
+            CPU_INSTANCE(ref_batch_normalization_fwd_t<s8>)
+            nullptr,
+        }},
+        {{backward}, REG_BWD_PK({
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_batch_normalization_bwd_t<sse41>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_tbb_batch_normalization_bwd_t<sse41>)
+            CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_bwd_t<sve_512>)
+            CPU_INSTANCE_AARCH64(jit_uni_batch_normalization_bwd_t<asimd>)
+            CPU_INSTANCE(ncsp_batch_normalization_bwd_t<f32>)
+            CPU_INSTANCE(ncsp_batch_normalization_bwd_t<bf16>)
+            CPU_INSTANCE(nspc_batch_normalization_bwd_t<f32>)
+            CPU_INSTANCE(nspc_batch_normalization_bwd_t<bf16>)
+            CPU_INSTANCE(ref_batch_normalization_bwd_t<f32>)
+            CPU_INSTANCE(ref_batch_normalization_bwd_t<bf16>)
+            nullptr,
+        })},
+    });
+    // clang-format on
+    return the_map;
+}
 } // namespace
 
-const pd_create_f *get_batch_normalization_impl_list(
+const impl_list_item_t *get_batch_normalization_impl_list(
         const batch_normalization_desc_t *desc) {
-    UNUSED(desc);
-    return impl_list;
+    static const impl_list_item_t empty_list[] = {nullptr};
+
+    const bool is_fwd = utils::one_of(
+            desc->prop_kind, forward_training, forward_inference);
+    prop_kind_t prop_kind = is_fwd ? forward : backward;
+
+    pk_impl_key_t key {prop_kind};
+
+    const auto impl_list_it = impl_list_map().find(key);
+    return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()
+                                                  : empty_list;
 }
 
 } // namespace cpu

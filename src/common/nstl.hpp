@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -26,6 +26,7 @@
 #include <limits.h>
 #include <stdint.h>
 
+#include <cassert>
 #include <cstdlib>
 #include <map>
 #include <vector>
@@ -84,7 +85,7 @@ protected:
 namespace nstl {
 
 template <typename T>
-inline const T abs(const T &a) {
+constexpr const T abs(const T &a) {
     return a >= 0 ? a : -a;
 }
 
@@ -109,12 +110,12 @@ inline const T additive_inverse_modulo(const T &dividend, const T &divisor) {
 }
 
 template <typename T>
-inline const T &max(const T &a, const T &b) {
+constexpr const T &max(const T &a, const T &b) {
     return a > b ? a : b;
 }
 
 template <typename T>
-inline const T &min(const T &a, const T &b) {
+constexpr const T &min(const T &a, const T &b) {
     return a < b ? a : b;
 }
 

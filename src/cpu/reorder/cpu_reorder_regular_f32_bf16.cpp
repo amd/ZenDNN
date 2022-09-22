@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,30 +27,34 @@ namespace cpu {
 
 // clang-format off
 
-const impl_list_map_t regular_f32_bf16_impl_list_map {
-    // f32 -> bf16
-    {{f32, bf16, 0}, {
-        rnn_weights_reorder_t<f32, bf16>::pd_t::create,
+const impl_list_map_t &regular_f32_bf16_impl_list_map() {
+    static const impl_list_map_t the_map = REG_REORDER_P({
+        // f32 -> bf16
+        {{f32, bf16, 0}, {
+            CPU_REORDER_INSTANCE(rnn_weights_reorder_t<f32, bf16>)
 
-        ZENDNN_X64_ONLY(x64::jit_uni_reorder_create,)
+            ZENDNN_X64_ONLY(CPU_REORDER_INSTANCE(x64::jit_blk_reorder_t))
+            ZENDNN_X64_ONLY(CPU_REORDER_INSTANCE(x64::jit_uni_reorder_t))
 
-        REG_SR_BIDIR(f32, any, bf16, nChw16c),
-        REG_SR_BIDIR(f32, any, bf16, nCdhw16c),
+            ZENDNN_NON_X64_ONLY(REG_SR_BIDIR(f32, any, bf16, nChw16c))
+            ZENDNN_NON_X64_ONLY(REG_SR_BIDIR(f32, any, bf16, nCdhw16c))
 
-        REG_SR(f32, oihw, bf16, OIhw8i16o2i, fmt_order::keep),
-        REG_SR(f32, goihw, bf16, gOIhw8i16o2i, fmt_order::keep),
-        REG_SR(f32, oihw, bf16, OIhw8o16i2o, fmt_order::keep),
-        REG_SR(f32, goihw, bf16, gOIhw8o16i2o, fmt_order::keep),
-        REG_SR(f32, oihw, bf16, IOhw8o16i2o, fmt_order::keep),
-        REG_SR(f32, goihw, bf16, gIOhw8o16i2o, fmt_order::keep),
-        REG_SR(f32, oihw, bf16, OIhw16i16o, fmt_order::keep),
-        REG_SR(f32, goihw, bf16, gOIhw16i16o, fmt_order::keep),
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, oihw, bf16, OIhw8i16o2i, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, goihw, bf16, gOIhw8i16o2i, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, oihw, bf16, OIhw8o16i2o, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, goihw, bf16, gOIhw8o16i2o, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, oihw, bf16, IOhw8o16i2o, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, goihw, bf16, gIOhw8o16i2o, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, oihw, bf16, OIhw16i16o, fmt_order::keep))
+            ZENDNN_NON_X64_ONLY(REG_SR(f32, goihw, bf16, gOIhw16i16o, fmt_order::keep))
 
-        REG_SR(f32, any, bf16, any, fmt_order::any, spec::reference),
+            REG_SR(f32, any, bf16, any, fmt_order::any, spec::reference)
 
-        nullptr,
-    }},
-};
+            nullptr,
+        }},
+    });
+    return the_map;
+}
 
 // clang-format on
 

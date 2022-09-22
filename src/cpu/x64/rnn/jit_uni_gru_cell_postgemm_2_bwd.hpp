@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -48,12 +48,12 @@ struct jit_uni_gru_cell_postgemm_part2_bwd : public jit_uni_rnn_postgemm {
 protected:
     // register size in bytes
     using Vmm = typename cpu_isa_traits<isa>::Vmm;
-    size_t vlen = cpu_isa_traits<isa>::vlen;
-    size_t vlen_scratch
+    static constexpr size_t vlen = cpu_isa_traits<isa>::vlen;
+    static constexpr size_t hstate_dt_size = sizeof(float);
+    const size_t vlen_scratch
             = vlen / (sizeof(float) / types::data_type_size(scratch_data_t));
-    size_t hstate_dt_size = sizeof(float);
-    size_t gate_dt_size = types::data_type_size(scratch_data_t);
-    size_t scratch_dt_size = types::data_type_size(scratch_data_t);
+    const size_t gate_dt_size = types::data_type_size(scratch_data_t);
+    const size_t scratch_dt_size = types::data_type_size(scratch_data_t);
 
     void generate() override {
         using namespace Xbyak;
@@ -64,7 +64,7 @@ protected:
         Label rem_loop_start_label, rem_loop_inc_regs, rem_loop_end_label;
 
         // Register map
-        Reg64 loop_cnt(rbx); // loop counter
+        const Reg64 loop_cnt(rbx); // loop counter
 
         // We skip vmm0 as it can be used by the injector for masks on sse4.1
         enum {
@@ -81,39 +81,39 @@ protected:
         preamble();
 
         // extract addresses passed as parameter
-        auto addr_ws_gates_reg = abi_param1;
-        auto addr_scratch_gates_reg = abi_param2;
+        const auto addr_ws_gates_reg = abi_param1;
+        const auto addr_scratch_gates_reg = abi_param2;
         // auto addr_diff_states_t_lp1_reg = abi_param3; // not needed
         // auto addr_diff_states_tp1_l_reg = abi_param4; // not needed
 #ifdef _WIN32
-        auto addr_diff_states_t_l_reg = r10;
-        auto addr_states_tm1_l_reg = r11;
-        auto addr_scratch_cell_reg = r12;
+        const auto addr_diff_states_t_l_reg = r10;
+        const auto addr_states_tm1_l_reg = r11;
+        const auto addr_scratch_cell_reg = r12;
         // auto addr_ws_grid_reg = rsi; // not needed
-        auto addr_dhG1_reg = rsi;
-        auto base_args = get_stack_params_address();
+        const auto addr_dhG1_reg = rsi;
+        const auto base_args = get_stack_params_address();
         mov(addr_diff_states_t_l_reg, ptr[base_args]);
         mov(addr_states_tm1_l_reg, ptr[base_args + 8]);
         mov(addr_scratch_cell_reg, ptr[base_args + 16]);
         // mov(addr_ws_grid_reg, ptr[base_args + 24]);
         mov(addr_dhG1_reg, ptr[base_args + 32]);
 #else
-        auto addr_diff_states_t_l_reg = abi_param5;
-        auto addr_states_tm1_l_reg = abi_param6;
-        auto addr_scratch_cell_reg = r10;
+        const auto addr_diff_states_t_l_reg = abi_param5;
+        const auto addr_states_tm1_l_reg = abi_param6;
+        const auto addr_scratch_cell_reg = r10;
         // auto addr_ws_grid_reg = r11; // not needed
-        auto addr_dhG1_reg = r11;
-        auto base_args = get_stack_params_address();
+        const auto addr_dhG1_reg = r11;
+        const auto base_args = get_stack_params_address();
         mov(addr_scratch_cell_reg, ptr[base_args]);
         // mov(addr_ws_grid_reg, ptr[base_args + 8]);
         mov(addr_dhG1_reg, ptr[base_args + 16]);
 #endif
 
         // helper lambda to address the gates and biases
-        auto sg_addr = [&](int i) {
+        const auto sg_addr = [&](int i) {
             return ptr[addr_scratch_gates_reg + i * rnn_.dhc * scratch_dt_size];
         };
-        auto wg_addr = [&](int i) {
+        const auto wg_addr = [&](int i) {
             return ptr[addr_ws_gates_reg + i * rnn_.dhc * gate_dt_size];
         };
 
@@ -126,11 +126,11 @@ protected:
 
         L(vector_loop_start_label);
         {
-            Vmm dG1(dG1_idx), dhG1(dhG1_idx), hG1(hG1_idx), G1(G1_idx),
+            const Vmm dG1(dG1_idx), dhG1(dhG1_idx), hG1(hG1_idx), G1(G1_idx),
                     dH(dH_idx), tmp1(tmp1_idx), h(h_idx);
 
-            to_float<src_data_t>(G1, wg_addr(1), vlen);
-            to_float<src_data_t>(h, ptr[addr_states_tm1_l_reg], vlen);
+            to_float(G1, wg_addr(1), src_data_t, vlen);
+            to_float(h, ptr[addr_states_tm1_l_reg], src_data_t, vlen);
 
             // compute dG1
             uni_vmovups(dG1, G1);
@@ -149,8 +149,8 @@ protected:
             uni_vfmadd231ps(dH, dhG1, G1);
 
             // downconvert and write data
-            to_src<scratch_data_t>(sg_addr(1), dG1, vlen);
-            to_src<scratch_data_t>(ptr[addr_scratch_cell_reg], hG1, vlen);
+            to_src(sg_addr(1), dG1, scratch_data_t, vlen);
+            to_src(ptr[addr_scratch_cell_reg], hG1, scratch_data_t, vlen);
             uni_vmovups(ptr[addr_diff_states_t_l_reg], dH);
 
             // increment address pointers
@@ -175,11 +175,11 @@ protected:
         // TODO: smarter handling of tails with Zmm -> Ymm -> Xmm -> scalar
         L(rem_loop_start_label);
         {
-            Xmm dG1(dG1_idx), dhG1(dhG1_idx), hG1(hG1_idx), G1(G1_idx),
+            const Xmm dG1(dG1_idx), dhG1(dhG1_idx), hG1(hG1_idx), G1(G1_idx),
                     dH(dH_idx), tmp1(tmp1_idx), h(h_idx);
 
-            to_float<src_data_t>(G1, wg_addr(1), hstate_dt_size);
-            to_float<src_data_t>(h, ptr[addr_states_tm1_l_reg], hstate_dt_size);
+            to_float(G1, wg_addr(1), src_data_t, hstate_dt_size);
+            to_float(h, ptr[addr_states_tm1_l_reg], src_data_t, hstate_dt_size);
 
             // compute dG1
             uni_vmovss(dG1, G1);
@@ -198,9 +198,9 @@ protected:
             uni_vfmadd231ps(dH, dhG1, G1);
 
             // downconvert and write data
-            to_src<scratch_data_t>(sg_addr(1), dG1, hstate_dt_size);
-            to_src<scratch_data_t>(
-                    ptr[addr_scratch_cell_reg], hG1, hstate_dt_size);
+            to_src(sg_addr(1), dG1, scratch_data_t, hstate_dt_size);
+            to_src(ptr[addr_scratch_cell_reg], hG1, scratch_data_t,
+                    hstate_dt_size);
             uni_vmovss(ptr[addr_diff_states_t_l_reg], dH);
 
             // increment address pointers

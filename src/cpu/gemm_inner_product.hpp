@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -60,7 +60,8 @@ struct gemm_inner_product_fwd_t : public primitive_t {
                     && dense_gemm_consitency_check(
                             src_md(), weights_md(), dst_md())
                     && inner_product_utils::post_ops_ok(
-                            attr()->post_ops_, &dst_md_);
+                            attr()->post_ops_, &dst_md_)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
 
             return ok ? status::success : status::unimplemented;
         }
@@ -77,7 +78,8 @@ struct gemm_inner_product_fwd_t : public primitive_t {
                 = pd()->attr()->post_ops_.find(primitive_kind::binary) >= 0;
         postops_in_ip_ = has_bias || has_eltwise || has_binary;
 
-        CHECK(safe_ptr_assign(pp_kernel_, pp_kernel_t::create(pd(), true)));
+        CHECK(safe_ptr_assign(pp_kernel_,
+                inner_product_utils::pp_kernel_t::create(pd(), true)));
 
         auto sum_idx = pd()->attr()->post_ops_.find(primitive_kind::sum);
         beta_ = sum_idx >= 0 ? pd()->attr()->post_ops_.entry_[sum_idx].sum.scale
@@ -96,8 +98,7 @@ private:
     status_t execute_forward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
-    using pp_kernel_t = inner_product_utils::pp_kernel_t<data_type, data_type>;
-    std::unique_ptr<pp_kernel_t> pp_kernel_;
+    std::unique_ptr<inner_product_utils::pp_kernel_t> pp_kernel_;
     bool postops_in_ip_;
     float beta_;
 };

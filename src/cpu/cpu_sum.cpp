@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
+
+#include "common/impl_list_item.hpp"
 
 #include "cpu/cpu_engine.hpp"
 
@@ -33,27 +35,28 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using spd_create_f = zendnn::impl::engine_t::sum_primitive_desc_create_f;
-
 namespace {
-// clang-format off
-#define INSTANCE(...) __VA_ARGS__::pd_t::create,
+using namespace zendnn::impl::data_type;
+#define INSTANCE(...) \
+    impl_list_item_t(impl_list_item_t::sum_type_deduction_helper_t< \
+            __VA_ARGS__::pd_t>()),
 #define INSTANCE_X64(...) ZENDNN_X64_ONLY(INSTANCE(__VA_ARGS__))
-const spd_create_f cpu_sum_impl_list[] = {
-        INSTANCE_X64(jit_bf16_sum_t<data_type::bf16, data_type::bf16>)
-        INSTANCE_X64(jit_bf16_sum_t<data_type::bf16, data_type::f32>)
-        INSTANCE(simple_sum_t<data_type::bf16>)
-        INSTANCE(simple_sum_t<data_type::bf16, data_type::f32>)
-        INSTANCE(simple_sum_t<data_type::f32>)
+// clang-format off
+constexpr impl_list_item_t cpu_sum_impl_list[] = REG_SUM_P({
+        INSTANCE_X64(jit_bf16_sum_t<bf16, bf16>)
+        INSTANCE_X64(jit_bf16_sum_t<bf16, f32>)
+        INSTANCE(simple_sum_t<bf16>)
+        INSTANCE(simple_sum_t<bf16, f32>)
+        INSTANCE(simple_sum_t<f32>)
         INSTANCE(ref_sum_t)
         nullptr,
-};
+});
+// clang-format on
 #undef INSTANCE_X64
 #undef INSTANCE
-// clang-format on
 } // namespace
 
-const spd_create_f *cpu_engine_impl_list_t::get_sum_implementation_list() {
+const impl_list_item_t *cpu_engine_impl_list_t::get_sum_implementation_list() {
     return cpu_sum_impl_list;
 }
 

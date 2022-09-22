@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -29,8 +29,6 @@
 #include "nstl.hpp"
 #include "utils.hpp"
 
-#include "../cpu/platform.hpp"
-
 namespace zendnn {
 namespace impl {
 namespace math {
@@ -55,9 +53,17 @@ inline int gcd(int a, int b) {
     return b;
 }
 
+inline int lcm(int a, int b) {
+    a = impl::nstl::abs(a);
+    b = impl::nstl::abs(b);
+    assert(a > 0 && b > 0);
+
+    return a * b / gcd(a, b);
+}
+
 template <typename T>
 inline bool is_pow2(const T &v) {
-    return (v != 0) && ((v & (v - 1)) == 0);
+    return (v > 0) && ((v & (v - 1)) == 0);
 }
 
 /** returns floor(log2(v)), aka the position of the leftmost non-0 bit */
@@ -118,7 +124,7 @@ inline typename utils::enable_if<nstl::is_integral<U>::value, U>::type relu_fwd(
 template <typename T, typename A,
         typename U = typename utils::remove_reference<T>::type>
 inline typename utils::enable_if<!nstl::is_integral<U>::value, U>::type
-relu_fwd(T s, A alpha) {
+relu_fwd(T s, A alpha) ATTR_NO_MSAN {
     return s > 0 ? s : (U)(s * alpha);
 }
 
@@ -428,24 +434,6 @@ inline bool is_eltwise_ok(
                     alg == eltwise_clip_v2_use_dst_for_bwd, beta >= alpha);
 
     return eltwise_use_src || eltwise_use_dst;
-}
-
-inline float get_bias(const char *bias, size_t offset, data_type_t data_type) {
-    if (!bias) return 0.0f;
-
-#define CASE(dt) \
-    case dt: return (float)((const prec_traits<dt>::type *)bias)[offset]
-
-    switch (data_type) {
-        CASE(data_type::s8);
-        CASE(data_type::u8);
-        CASE(data_type::bf16);
-        CASE(data_type::s32);
-        CASE(data_type::f32);
-        default: assert(!"unimplemented");
-    }
-    return 0; // never happens (should probably be a NaN)
-#undef CASE
 }
 
 } // namespace math

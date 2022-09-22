@@ -1,11 +1,12 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 * Copyright 2021 FUJITSU LIMITED
+* Copyright 2021 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -31,6 +32,9 @@ using namespace zendnn::impl::cpu::x64;
 #elif ZENDNN_AARCH64
 #include "cpu/aarch64/jit_uni_eltwise.hpp"
 #include "cpu/aarch64/jit_uni_eltwise_int.hpp"
+#if ZENDNN_AARCH64_USE_ACL
+#include "cpu/aarch64/acl_eltwise.hpp"
+#endif // ZENDNN_AARCH64_USE_ACL
 using namespace zendnn::impl::cpu::aarch64;
 #endif
 
@@ -38,53 +42,70 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace zendnn::impl::data_type;
+using namespace zendnn::impl::prop_kind;
 
 // clang-format off
-const pd_create_f impl_list[] = {
-        CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx512_common, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx512_common, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx512_core, bf16>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx512_core, bf16>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx2, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx2, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<sse41, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<sse41, f32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_common, s32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_common, s8>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_common, u8>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, s32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, s8>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, u8>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, s32>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, s8>)
-        CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, u8>)
-        CPU_INSTANCE_AARCH64(jit_uni_eltwise_fwd_t<sve_512, f32>)
-        CPU_INSTANCE_AARCH64(jit_uni_eltwise_bwd_t<sve_512, f32>)
-        CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, s32>)
-        CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, s8>)
-        CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, u8>)
-        CPU_INSTANCE(ref_eltwise_fwd_t<f32>)
-        CPU_INSTANCE(ref_eltwise_bwd_t<f32>)
-        CPU_INSTANCE(ref_eltwise_fwd_t<bf16>)
-        CPU_INSTANCE(ref_eltwise_bwd_t<bf16>)
-        CPU_INSTANCE(ref_eltwise_fwd_t<s32>)
-        CPU_INSTANCE(ref_eltwise_fwd_t<s8>)
-        CPU_INSTANCE(ref_eltwise_fwd_t<u8>)
-        /* eol */
-        nullptr,
-};
+const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
+    static const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_ELTWISE_P({
+        {{forward}, {
+            CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx512_core, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx512_core, bf16>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx2, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<avx, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_fwd_t<sse41, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_core, s32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_core, s8>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx512_core, u8>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, s32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, s8>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<avx2, u8>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, s32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, s8>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_int_fwd_t<sse41, u8>)
+            CPU_INSTANCE_AARCH64(jit_uni_eltwise_fwd_t<sve_512, f32>)
+            CPU_INSTANCE_AARCH64(jit_uni_eltwise_bwd_t<sve_512, f32>)
+            CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, s32>)
+            CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, s8>)
+            CPU_INSTANCE_AARCH64(jit_uni_eltwise_int_fwd_t<sve_512, u8>)
+            CPU_INSTANCE_AARCH64_ACL(acl_eltwise_fwd_t<f32>)
+            CPU_INSTANCE_AARCH64_ACL(acl_eltwise_fwd_t<s8>)
+            CPU_INSTANCE(ref_eltwise_fwd_t<f32>)
+            CPU_INSTANCE(ref_eltwise_fwd_t<bf16>)
+            CPU_INSTANCE(ref_eltwise_fwd_t<s32>)
+            CPU_INSTANCE(ref_eltwise_fwd_t<s8>)
+            CPU_INSTANCE(ref_eltwise_fwd_t<u8>)
+            nullptr,
+        }},
+        {{backward}, REG_BWD_PK({
+            CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx512_core, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx512_core, bf16>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx2, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<avx, f32>)
+            CPU_INSTANCE_X64(jit_uni_eltwise_bwd_t<sse41, f32>)
+            CPU_INSTANCE(ref_eltwise_bwd_t<f32>)
+            CPU_INSTANCE(ref_eltwise_bwd_t<bf16>)
+            nullptr,
+        })},
+    });
+    return the_map;
+}
 // clang-format on
 } // namespace
 
-const pd_create_f *get_eltwise_impl_list(const eltwise_desc_t *desc) {
-    UNUSED(desc);
-    return impl_list;
+const impl_list_item_t *get_eltwise_impl_list(const eltwise_desc_t *desc) {
+    static const impl_list_item_t empty_list[] = {nullptr};
+
+    const bool is_fwd = utils::one_of(
+            desc->prop_kind, forward_training, forward_inference);
+    prop_kind_t prop_kind = is_fwd ? forward : backward;
+
+    pk_impl_key_t key {prop_kind};
+
+    const auto impl_list_it = impl_list_map().find(key);
+    return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()
+                                                  : empty_list;
 }
 
 } // namespace cpu

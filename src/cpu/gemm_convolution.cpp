@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -28,7 +28,7 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 #include "cpu/gemm_convolution.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
 
 namespace zendnn {
@@ -42,7 +42,7 @@ using namespace zendnn::impl::utils;
 namespace {
 struct im_pos_t {
     im_pos_t() : n {0}, g {0}, od {0}, sp {0}, ic {0}, oc {0} {}
-    int n, g, od, sp, ic, oc;
+    dim_t n, g, od, sp, ic, oc;
     bool do_im2col(const im_pos_t &prev) const {
         return true
                 && (n != prev.n || g != prev.g || od != prev.od || sp != prev.sp
@@ -90,7 +90,7 @@ status_t gemm_convolution_fwd_t::execute_forward_nspc(
         jcp.oh,
         jcp.ow
     );
-#else //DNNL implementation
+#else //ZENDNN implementation
     zendnnInfo(ZENDNN_CORELOG, "ZenDNN Ref implementaion path in gemm_convolution_fwd_t::execute_forward");
     zendnnInfo(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od,
@@ -105,7 +105,7 @@ status_t gemm_convolution_fwd_t::execute_forward_nspc(
         if (st_thr != status::success) st = st_thr;
     });
 
-#endif //DNNL implementation
+#endif //ZENDNN implementation
     return st;
 }
 
@@ -116,25 +116,23 @@ status_t gemm_convolution_fwd_t::execute_forward_thr_nspc(const exec_ctx_t &ctx,
     const conv_gemm_conf_t &jcp = pd()->jcp_;
 
     // Src Format: mb-spatial-groups-input_channels
-    const size_t src_mb_stride = static_cast<size_t>(jcp.id) * jcp.ih * jcp.iw
-            * jcp.ngroups * jcp.ic;
-    const size_t src_g_stride = jcp.ic;
+    const dim_t src_mb_stride = jcp.id * jcp.ih * jcp.iw * jcp.ngroups * jcp.ic;
+    const dim_t src_g_stride = jcp.ic;
     // Wei Format: spatial-input_channels-groups-output_channels
-    const size_t wei_g_stride = pd()->with_groups() ? jcp.oc : 0;
+    const dim_t wei_g_stride = pd()->with_groups() ? jcp.oc : 0;
 
     // Dst Format: mb-spatial-groups-output_channels
-    const size_t dst_mb_stride = static_cast<size_t>(jcp.od) * jcp.oh * jcp.ow
-            * jcp.ngroups * jcp.oc;
-    const size_t dst_g_stride = jcp.oc;
-    const size_t dst_os_stride = jcp.ngroups * jcp.oc;
+    const dim_t dst_mb_stride = jcp.od * jcp.oh * jcp.ow * jcp.ngroups * jcp.oc;
+    const dim_t dst_g_stride = jcp.oc;
+    const dim_t dst_os_stride = jcp.ngroups * jcp.oc;
 
     data_t *__restrict col = scratchpad.get<data_t>(key_conv_gemm_col)
             + (ptrdiff_t)ithr * jcp.im2col_sz;
     data_t *__restrict imtr = scratchpad.get<data_t>(key_conv_gemm_imtr)
             + (ptrdiff_t)ithr * jcp.is * jcp.ic;
 
-    int g {0}, n {0}, ohb {0}, owb {0};
-    size_t start = 0, end = 0;
+    dim_t g {0}, n {0}, ohb {0}, owb {0};
+    dim_t start = 0, end = 0;
     const bool is_problem_3d = pd()->ndims() == 5;
 
     assert(IMPLICATION(is_problem_3d,
@@ -142,11 +140,10 @@ status_t gemm_convolution_fwd_t::execute_forward_thr_nspc(const exec_ctx_t &ctx,
                     && jcp.ic_block == jcp.ic));
     assert(IMPLICATION(jcp.ow_block != jcp.ow, jcp.oh_block == 1));
 
-    const int nb_oh = div_up(jcp.oh, jcp.oh_block);
-    const int nb_ow = div_up(jcp.ow, jcp.ow_block);
+    const dim_t nb_oh = div_up(jcp.oh, jcp.oh_block);
+    const dim_t nb_ow = div_up(jcp.ow, jcp.ow_block);
     // threads share work across mini-batch, groups, and blocked width/height
-    const size_t work_amount
-            = static_cast<size_t>(jcp.mb) * jcp.ngroups * nb_oh * nb_ow;
+    const dim_t work_amount = jcp.mb * jcp.ngroups * nb_oh * nb_ow;
     balance211(work_amount, nthr, ithr, start, end);
     nd_iterator_init(start, n, jcp.mb, g, jcp.ngroups, ohb, nb_oh, owb, nb_ow);
 
@@ -157,7 +154,7 @@ status_t gemm_convolution_fwd_t::execute_forward_thr_nspc(const exec_ctx_t &ctx,
         for (ptrdiff_t i = 0; i < jcp.im2col_sz; i++)
             col[i] = 0.0f;
     }
-    for (size_t iwork = start; iwork < end; ++iwork) {
+    for (dim_t iwork = start; iwork < end; ++iwork) {
         int oh = ohb * jcp.oh_block;
         int ow = owb * jcp.ow_block;
         const data_t *__restrict src
@@ -201,8 +198,8 @@ status_t gemm_convolution_fwd_t::execute_forward_thr_nspc(const exec_ctx_t &ctx,
 
             if (jcp.with_bias || jcp.with_eltwise || jcp.with_binary) {
                 parallel(0, [&](int ithr, int nthr) {
-                    size_t start, end;
-                    balance211((size_t)N * jcp.oc, nthr, ithr, start, end);
+                    dim_t start, end;
+                    balance211(N * jcp.oc, nthr, ithr, start, end);
 
                     const size_t first_oc = start % jcp.oc;
                     const size_t last_oc = (end - 1) % jcp.oc;
@@ -215,7 +212,7 @@ status_t gemm_convolution_fwd_t::execute_forward_thr_nspc(const exec_ctx_t &ctx,
                                 = (os == last_os) ? last_oc : jcp.oc - 1;
 
                         const data_t *__restrict bia_arr
-                                = bia_base + g * jcp.oc;
+                                = bia_base ? bia_base + g * jcp.oc : nullptr;
                         data_t *__restrict dst_arr = dst + os * dst_os_stride;
 
                         if (jcp.with_bias) {
@@ -353,7 +350,7 @@ status_t gemm_convolution_fwd_t::execute_forward_ncsp(
                         const auto &eltwise
                                 = jcp.post_ops.entry_.back().eltwise;
                         if (eltwise.alg == alg_kind::eltwise_relu) {
-                            parallel_nd(step.oc, [&](const int oc) {
+                            parallel_nd(step.oc, [&](dim_t oc) {
                                 data_t b = jcp.with_bias ? bias[oc_start + oc]
                                                          : 0;
                                 data_t *d_ = _dst + oc * M;
@@ -368,25 +365,26 @@ status_t gemm_convolution_fwd_t::execute_forward_ncsp(
                         }
                     }
                     if (!fast_relu_done) {
-                        parallel_nd(step.oc, [&](const int oc) {
+                        parallel_nd(step.oc, [&](dim_t oc) {
                             data_t b = jcp.with_bias ? bias[oc_start + oc] : 0;
                             data_t *d_ = _dst + oc * M;
 
                             ref_post_ops_t::args_t args;
                             args.ctx = &ctx;
                             args.dst_md = pd()->dst_md();
-                            args.l_offset = (oc_start + oc) * jcp.os;
+                            args.l_offset = d_ - dst;
 
                             ZENDNN_PRAGMA_OMP_SIMD()
                             for (int oS = 0; oS < m; ++oS) {
                                 d_[oS] += b;
                                 post_ops_->execute(d_[oS], args);
+                                args.l_offset++;
                             }
                         });
                     }
 
                 } else if (jcp.with_bias) {
-                    parallel_nd(step.oc, [&](const int oc) {
+                    parallel_nd(step.oc, [&](dim_t oc) {
                         data_t b = bias[oc_start + oc];
                         data_t *d_ = _dst + oc * M;
                         ZENDNN_PRAGMA_OMP_SIMD()
@@ -403,13 +401,13 @@ status_t gemm_convolution_fwd_t::execute_forward_ncsp(
         end.ic = jcp.ic;
 
         if (!is_problem_3d) {
-            const int sp_work = jcp.mb * jcp.ngroups * jcp.od * jcp.os;
+            dim_t sp_work = jcp.mb * jcp.ngroups * jcp.od * jcp.os;
             balance2D(nthr, ithr, sp_work, start.sp, end.sp, jcp.oc, start.oc,
-                    end.oc, jcp.nthr_oc);
+                    end.oc, dim_t(jcp.nthr_oc));
         } else {
-            const int sp_work = jcp.mb * jcp.ngroups * jcp.od;
+            dim_t sp_work = jcp.mb * jcp.ngroups * jcp.od;
             balance2D(nthr, ithr, sp_work, start.sp, end.sp, jcp.oc, start.oc,
-                    end.oc, jcp.nthr_oc);
+                    end.oc, dim_t(jcp.nthr_oc));
             start.sp *= jcp.os;
             end.sp *= jcp.os;
         }
@@ -500,7 +498,7 @@ status_t gemm_convolution_bwd_data_t::execute_backward_data_thr_nspc(
     const size_t diff_src_os_stride = jcp.ngroups * jcp.ic;
 
     // threads share work across mini-batch and groups
-    const size_t work_amount = jcp.ngroups * jcp.mb;
+    const dim_t work_amount = jcp.ngroups * jcp.mb;
 
     data_t *__restrict col = scratchpad.get<data_t>(key_conv_gemm_col)
             + (ptrdiff_t)ithr * jcp.im2col_sz;
@@ -510,13 +508,13 @@ status_t gemm_convolution_bwd_data_t::execute_backward_data_thr_nspc(
                     + (ptrdiff_t)ithr * jcp.is * jcp.id * jcp.ic
             : nullptr;
 
-    int n {0}, g {0};
-    size_t start = 0, end = 0;
+    dim_t n {0}, g {0};
+    dim_t start = 0, end = 0;
 
     balance211(work_amount, nthr, ithr, start, end);
     nd_iterator_init(start, n, jcp.mb, g, jcp.ngroups);
 
-    for (size_t iwork = start; iwork < end; ++iwork) {
+    for (dim_t iwork = start; iwork < end; ++iwork) {
         const data_t *__restrict diff_dst = diff_dst_base
                 + n * diff_dst_mb_stride + g * diff_dst_g_stride;
         const data_t *__restrict wei = wei_base + g * wei_g_stride;
@@ -574,18 +572,18 @@ status_t gemm_convolution_bwd_data_t::execute_backward_data_ncsp(
     const dim_t K = jcp.oc;
     const dim_t N = jcp.ic * jcp.ks;
 
-    const size_t work_amount = (size_t)jcp.ngroups * jcp.mb;
+    const dim_t work_amount = (size_t)jcp.ngroups * jcp.mb;
     const bool is_problem_3d = pd()->ndims() == 5;
 
     std::atomic<status_t> st(status::success);
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
         data_t *_col = col + (ptrdiff_t)ithr * jcp.im2col_sz;
 
-        int g {0}, n {0};
-        size_t start = 0, end = 0;
+        dim_t g {0}, n {0};
+        dim_t start = 0, end = 0;
         balance211(work_amount, nthr, ithr, start, end);
         nd_iterator_init(start, g, jcp.ngroups, n, jcp.mb);
-        for (size_t iwork = start; iwork < end; ++iwork) {
+        for (dim_t iwork = start; iwork < end; ++iwork) {
 
             data_t *_diff_src = diff_src + (n * jcp.ngroups + g) * src_step;
             if (is_problem_3d && jcp.im2col_sz > 0) {
@@ -779,12 +777,12 @@ status_t gemm_convolution_bwd_weights_t::execute_backward_weights_nspc(
     }
 
     if (jcp.with_bias) {
-        parallel_nd(jcp.ngroups, jcp.oc, [&](int g, int oc) {
+        parallel_nd(jcp.ngroups, jcp.oc, [&](dim_t g, dim_t oc) {
             data_t db = 0;
             const size_t offset_base = g * jcp.oc + oc;
-            for_(int mb = 0; mb < jcp.mb; ++mb)
-            for_(int od = 0; od < jcp.od; ++od)
-            for (int oh = 0; oh < jcp.oh; ++oh) {
+            for_(dim_t mb = 0; mb < jcp.mb; ++mb)
+            for_(dim_t od = 0; od < jcp.od; ++od)
+            for (dim_t oh = 0; oh < jcp.oh; ++oh) {
                 const data_t *__restrict diff_dst_arr = diff_dst + offset_base
                         + ((static_cast<size_t>(mb) * jcp.od + od) * jcp.oh
                                   + oh)
@@ -946,17 +944,18 @@ status_t gemm_convolution_bwd_weights_t::execute_backward_weights_ncsp(
     }
 
     if (jcp.with_bias) {
-        parallel_nd(jcp.ngroups, jcp.oc, [&](int g, int oc) {
+        parallel_nd(jcp.ngroups, jcp.oc, [&](dim_t g, dim_t oc) {
             data_t db = 0;
-            size_t offset_ = (size_t)g * dst_step + (size_t)oc * K;
-            for (int mb = 0; mb < jcp.mb; ++mb) {
-                size_t offset = offset_ + (size_t)mb * jcp.ngroups * dst_step;
-                for_(int od = 0; od < jcp.od; ++od)
-                for (int oh = 0; oh < jcp.oh; ++oh)
+            dim_t offset_ = g * dst_step + oc * K;
+            for (dim_t mb = 0; mb < jcp.mb; ++mb) {
+                dim_t offset = offset_ + mb * jcp.ngroups * dst_step;
+                for_(dim_t od = 0; od < jcp.od; ++od)
+                for (dim_t oh = 0; oh < jcp.oh; ++oh) {
                     ZENDNN_PRAGMA_OMP_SIMD(reduction(+ : db))
-                for (int ow = 0; ow < jcp.ow; ++ow) {
-                    db += diff_dst[offset];
-                    offset++;
+                    for (dim_t ow = 0; ow < jcp.ow; ++ow) {
+                        db += diff_dst[offset + ow];
+                    }
+                    offset += jcp.ow;
                 }
             }
             diff_bias[g * jcp.oc + oc] = db;

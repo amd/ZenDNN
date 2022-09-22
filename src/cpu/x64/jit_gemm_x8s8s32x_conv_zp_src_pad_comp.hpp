@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -60,7 +60,7 @@ public:
         dim_t offset;
     };
 
-    zp_src_pad_com_d calculate_zp_src_pad_com_d(const dim_t d_off);
+    zp_src_pad_com_d calculate_zp_src_pad_com_d(const dim_t d_off) const;
 
 private:
     enum bound { upper, lower };

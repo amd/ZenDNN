@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -107,7 +107,7 @@ static inline void create_2d_desc(memory_desc_t *md_2d, int d0, int d1,
 }
 
 static inline status_t create_gemm_pd(
-        std::unique_ptr<primitive_desc_t> &gemm_pd_, engine_t *engine,
+        std::shared_ptr<primitive_desc_t> &gemm_pd_, engine_t *engine,
         const memory_desc_t *a_md, const memory_desc_t *b_md,
         const memory_desc_t *c_md, const memory_desc_t *bias_md,
         data_type_t acc_dt, const primitive_attr_t *attr,
@@ -121,12 +121,11 @@ static inline status_t create_gemm_pd(
     gemm_desc.acc_type = acc_dt;
 
     primitive_attr_t gemm_attr = *attr;
-    gemm_attr.set_scratchpad_mode(scratchpad_mode::user);
 
     zendnn_primitive_desc_iterator it(
             engine, (op_desc_t *)&gemm_desc, &gemm_attr, nullptr);
-    ++it;
-    gemm_pd_.reset(it.fetch_once());
+
+    gemm_pd_ = *(++it);
     if (!gemm_pd_) return status::unimplemented;
     if (skip_ref && strstr(gemm_pd_.get()->name(), "ref") != NULL)
         return status::unimplemented;

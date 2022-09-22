@@ -2,7 +2,7 @@
 * Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
-#include <zendnn_private.hpp>
+#include "common/zendnn_private.hpp"
 #include <omp.h>
 #include <sys/sysinfo.h>
 #include <cblas.h>

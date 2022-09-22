@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 *******************************************************************************/
 
 // DO NOT EDIT, AUTO-GENERATED
+// Use this script to update the file: scripts/generate_zendnn_debug.py
 
 // clang-format off
 
@@ -46,31 +47,12 @@ const char ZENDNN_API *zendnn_alg_kind2str(zendnn_alg_kind_t v);
 const char ZENDNN_API *zendnn_rnn_flags2str(zendnn_rnn_flags_t v);
 const char ZENDNN_API *zendnn_rnn_direction2str(zendnn_rnn_direction_t v);
 const char ZENDNN_API *zendnn_engine_kind2str(zendnn_engine_kind_t v);
+const char ZENDNN_API *zendnn_fpmath_mode2str(zendnn_fpmath_mode_t v);
 const char ZENDNN_API *zendnn_scratchpad_mode2str(zendnn_scratchpad_mode_t v);
 const char ZENDNN_API *zendnn_cpu_isa2str(zendnn_cpu_isa_t v);
 const char ZENDNN_API *zendnn_cpu_isa_hints2str(zendnn_cpu_isa_hints_t v);
 
 const char ZENDNN_API *zendnn_runtime2str(unsigned v);
-
-/// Forms a format string for a given memory descriptor.
-///
-/// The format is defined as: 'dt:[p|o|0]:fmt_kind:fmt:extra'.
-/// Here:
-///  - dt       -- data type
-///  - p        -- indicates there is non-trivial padding
-///  - o        -- indicates there is non-trivial padding offset
-///  - 0        -- indicates there is non-trivial offset0
-///  - fmt_kind -- format kind (blocked, wino, etc...)
-///  - fmt      -- extended format string (format_kind specific)
-///  - extra    -- shows extra fields (underspecified)
-int ZENDNN_API zendnn_md2fmt_str(char *fmt_str, size_t fmt_str_len,
-        const zendnn_memory_desc_t *md);
-
-/// Forms a dimension string for a given memory descriptor.
-///
-/// The format is defined as: 'dim0xdim1x...xdimN
-int ZENDNN_API zendnn_md2dim_str(char *dim_str, size_t dim_str_len,
-        const zendnn_memory_desc_t *md);
 
 #ifdef __cplusplus
 }

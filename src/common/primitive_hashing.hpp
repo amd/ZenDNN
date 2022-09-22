@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -30,6 +30,10 @@
 #include "primitive_attr.hpp"
 #include "type_helpers.hpp"
 
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+#include "engine_id.hpp"
+#endif
+
 namespace zendnn {
 namespace impl {
 
@@ -37,7 +41,11 @@ struct primitive_desc_t;
 namespace primitive_hashing {
 
 struct key_t {
-    key_t(const primitive_desc_t *pd, const engine_t *engine, int impl_nthr);
+    key_t(const engine_t *engine, const op_desc_t *op_desc,
+            const primitive_attr_t *attr, int pd_iterator_offset,
+            const std::vector<memory_desc_t> &hint_mds);
+
+    key_t(const primitive_desc_t *pd, const engine_t *engine);
 
     bool operator==(const key_t &other) const;
     const std::thread::id &thread_id() const { return thread_id_; }
@@ -47,20 +55,24 @@ struct key_t {
     // and adding a key (extract is available in C++17 only).
     mutable const op_desc_t *op_desc_;
     mutable const primitive_attr_t *attr_;
-    std::type_index impl_id_;
+    int pd_iterator_offset_;
     int impl_nthr_;
-    std::vector<memory_desc_t> mds;
+    std::vector<memory_desc_t> hint_mds_;
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    engine_id_t engine_id_;
+#else
     engine_kind_t engine_kind_;
     runtime_kind_t runtime_kind_;
     device_id_t device_id_;
+#endif
 
 private:
-    void init_mds(const primitive_desc_t *pd);
-
     template <typename desc_t>
     static const desc_t &cast_to_desc(const void *p) {
         return *(reinterpret_cast<const desc_t *>(p));
     }
+
+    static primitive_kind_t get_pkind(primitive_kind_t pkind);
 
     // Thread ID is not used as part of the key, it's only used to get
     // information about what thread inserted the key and the corresponding
@@ -80,6 +92,7 @@ size_t get_desc_hash(const inner_product_desc_t &desc);
 size_t get_desc_hash(const layer_normalization_desc_t &desc);
 size_t get_desc_hash(const lrn_desc_t &desc);
 size_t get_desc_hash(const matmul_desc_t &desc);
+size_t get_desc_hash(const pooling_desc_t &desc);
 size_t get_desc_hash(const pooling_v2_desc_t &desc);
 size_t get_desc_hash(const prelu_desc_t &desc);
 size_t get_desc_hash(const reduction_desc_t &desc);
@@ -88,6 +101,7 @@ size_t get_desc_hash(const resampling_desc_t &desc);
 size_t get_desc_hash(const rnn_desc_t &desc);
 size_t get_desc_hash(const shuffle_desc_t &desc);
 size_t get_desc_hash(const softmax_desc_t &desc);
+size_t get_desc_hash(const softmax_v2_desc_t &desc);
 size_t get_desc_hash(const sum_desc_t &desc);
 size_t get_desc_hash(const zero_pad_desc_t &desc);
 /* add for new primitive */
@@ -136,8 +150,12 @@ struct hash<zendnn::impl::primitive_hashing::key_t> {
         seed = hash_combine(seed,
                 hash_combine(0, static_cast<size_t>(key.primitive_kind_)));
         seed = hash_combine(seed, get_attr_hash(*key.attr_));
-        seed = hash_combine(seed, hash_combine(0, key.impl_id_));
+        seed = hash_combine(seed, hash_combine(0, key.pd_iterator_offset_));
         seed = hash_combine(seed, hash_combine(0, key.impl_nthr_));
+
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+        seed = hash_combine(seed, key.engine_id_.hash());
+#else
         seed = hash_combine(
                 seed, hash_combine(0, static_cast<size_t>(key.engine_kind_)));
         seed = hash_combine(
@@ -145,6 +163,7 @@ struct hash<zendnn::impl::primitive_hashing::key_t> {
         seed = hash_combine(seed, hash_combine(0, std::get<0>(key.device_id_)));
         seed = hash_combine(seed, hash_combine(0, std::get<1>(key.device_id_)));
         seed = hash_combine(seed, hash_combine(0, std::get<2>(key.device_id_)));
+#endif
         // Combine hash for op_desc with the computed hash
 #define CASE(pkind) \
     case primitive_kind::pkind: \
@@ -165,6 +184,7 @@ struct hash<zendnn::impl::primitive_hashing::key_t> {
             CASE(layer_normalization)
             CASE(lrn)
             CASE(matmul)
+            CASE(pooling)
             CASE(pooling_v2)
             CASE(prelu)
             CASE(reduction)
@@ -173,15 +193,17 @@ struct hash<zendnn::impl::primitive_hashing::key_t> {
             CASE(rnn)
             CASE(shuffle)
             CASE(softmax)
+            CASE(softmax_v2)
             CASE(sum)
             CASE(zero_pad)
-	    /* add for new primitive */
+            /* add for new primitive */
             CASE(embedding_bag)
             default: assert(!"unknown primitive_kind");
         }
             // clang-format on
 #undef CASE
-        seed = get_array_hash(seed, key.mds.data(), (int)key.mds.size());
+        seed = get_array_hash(
+                seed, key.hint_mds_.data(), (int)key.hint_mds_.size());
 
         return seed;
     }

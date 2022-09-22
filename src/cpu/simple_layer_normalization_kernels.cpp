@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -20,6 +20,7 @@
 *******************************************************************************/
 
 #include "common/compiler_workarounds.hpp"
+#include "common/zendnn_thread.hpp"
 
 #include "cpu/platform.hpp"
 
@@ -38,7 +39,7 @@ using namespace data_type;
 
 template <>
 void stat_and_data_kernel_t<f32>::operator()(const float *src, float *dst,
-        const float *ss, float *mean, float *var,
+        const float *scale, const float *shift, float *mean, float *var,
         const size_t block_size) const {
     // XXX: manual unrolling for use_scaleshift_ due to clang issue.
     //      see: CLANG_WA_01_SAFE_TO_USE_OMP_SIMD
@@ -65,11 +66,26 @@ void stat_and_data_kernel_t<f32>::operator()(const float *src, float *dst,
         }
 
         const float inv_sqrtvar = 1. / sqrtf(v_variance + eps_);
-        if (use_scaleshift_) {
+        if (use_scaleshift_ || (use_scale_ && use_shift_)) {
             ZENDNN_PRAGMA_OMP_SIMD()
             for (dim_t c = 0; c < C_; ++c) {
-                const float sm = ss[c] * inv_sqrtvar;
-                const float sv = ss[C_ + c];
+                const float sm = scale[c] * inv_sqrtvar;
+                const float sv = shift[c];
+                const size_t elem = c + C_ * offset;
+                dst[elem] = sm * (src[elem] - v_mean) + sv;
+            }
+        } else if (use_scale_) {
+            ZENDNN_PRAGMA_OMP_SIMD()
+            for (dim_t c = 0; c < C_; ++c) {
+                const float sm = scale[c] * inv_sqrtvar;
+                const size_t elem = c + C_ * offset;
+                dst[elem] = sm * (src[elem] - v_mean);
+            }
+        } else if (use_shift_) {
+            ZENDNN_PRAGMA_OMP_SIMD()
+            for (dim_t c = 0; c < C_; ++c) {
+                const float sm = 1.0f * inv_sqrtvar;
+                const float sv = shift[c];
                 const size_t elem = c + C_ * offset;
                 dst[elem] = sm * (src[elem] - v_mean) + sv;
             }
@@ -118,7 +134,7 @@ void diff_data_kernel_t<f32>::operator()(const float *src,
         // reduce gamma
         dd_gamma = dd_gamma_x = 0;
         if (calculate_diff_stats_) {
-            if (use_scaleshift_) {
+            if (use_scaleshift_ || use_scale_) {
                 ZENDNN_PRAGMA_OMP_SIMD(reduction(+ : dd_gamma, dd_gamma_x))
                 for (dim_t c = 0; c < C_; c++) {
                     const size_t elem = c + C_ * offset;
@@ -140,7 +156,7 @@ void diff_data_kernel_t<f32>::operator()(const float *src,
         }
 
         // calculate diff_dst
-        if (use_scaleshift_) {
+        if (use_scaleshift_ || use_scale_) {
             ZENDNN_PRAGMA_OMP_SIMD()
             for (dim_t c = 0; c < C_; c++) {
                 const size_t elem = c + C_ * offset;
@@ -179,8 +195,8 @@ void diff_data_kernel_t<bf16>::operator()(const bfloat16_t *src,
 
 template <>
 void stat_and_data_kernel_t<bf16>::operator()(const bfloat16_t *src,
-        bfloat16_t *dst, const float *ss, float *mean, float *var,
-        const size_t block_size) const {
+        bfloat16_t *dst, const float *scale, const float *shift, float *mean,
+        float *var, const size_t block_size) const {
     assert(!"No default stat_and_data_kernel_t operator() for bf16 input!");
 }
 

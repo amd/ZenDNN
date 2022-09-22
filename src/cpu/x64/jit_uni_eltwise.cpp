@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2021 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -321,10 +321,8 @@ status_t jit_uni_eltwise_fwd_t<isa, d_type>::init(engine_t *engine) {
 template <cpu_isa_t isa, data_type_t d_type>
 status_t jit_uni_eltwise_fwd_t<isa, d_type>::execute(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
 
     const memory_desc_wrapper data_d(pd()->data_md());
     const auto nelems = data_d.nelems(true);
@@ -389,12 +387,10 @@ status_t jit_uni_eltwise_bwd_t<isa, d_type>::init(engine_t *engine) {
 template <cpu_isa_t isa, data_type_t d_type>
 status_t jit_uni_eltwise_bwd_t<isa, d_type>::execute(
         const exec_ctx_t &ctx) const {
-    status_t status;
     auto src = pd()->use_dst() ? CTX_IN_MEM(const data_t *, ZENDNN_ARG_DST)
                                : CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DIFF_SRC);
 
     const memory_desc_wrapper data_d(pd()->data_md());
     const memory_desc_wrapper diff_data_d(pd()->diff_src_md());
@@ -427,13 +423,13 @@ status_t jit_uni_eltwise_bwd_t<isa, d_type>::execute(
 template struct jit_uni_eltwise_fwd_t<sse41, data_type::f32>;
 template struct jit_uni_eltwise_fwd_t<avx, data_type::f32>;
 template struct jit_uni_eltwise_fwd_t<avx2, data_type::f32>;
-template struct jit_uni_eltwise_fwd_t<avx512_common, data_type::f32>;
+template struct jit_uni_eltwise_fwd_t<avx512_core, data_type::f32>;
 template struct jit_uni_eltwise_fwd_t<avx512_core, data_type::bf16>;
 
 template struct jit_uni_eltwise_bwd_t<sse41, data_type::f32>;
 template struct jit_uni_eltwise_bwd_t<avx, data_type::f32>;
 template struct jit_uni_eltwise_bwd_t<avx2, data_type::f32>;
-template struct jit_uni_eltwise_bwd_t<avx512_common, data_type::f32>;
+template struct jit_uni_eltwise_bwd_t<avx512_core, data_type::f32>;
 template struct jit_uni_eltwise_bwd_t<avx512_core, data_type::bf16>;
 
 } // namespace x64

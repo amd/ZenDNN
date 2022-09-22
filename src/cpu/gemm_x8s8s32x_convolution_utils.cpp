@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -25,7 +25,9 @@
 
 #include "common/math_utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/primitive_attr_postops.hpp"
+#include "cpu/ref_io_helper.hpp"
 #include "cpu/simple_q10n.hpp"
 
 #if ZENDNN_X64
@@ -74,7 +76,6 @@ void ref_pp_ker_t<dst_data_t>::operator()(void *void_dst, const acc_data_t *acc,
     if (end <= start) return;
 
     assert(data_traits<dst_data_t>::data_type == jcp_.dst_data_type);
-    dst_data_t *dst = (dst_data_t *)void_dst;
 
     const lldiv_t dv_start = std::div((long long)start, (long long)jcp_.oc);
     const lldiv_t dv_end = std::div((long long)(end - 1), (long long)jcp_.oc);
@@ -106,12 +107,17 @@ void ref_pp_ker_t<dst_data_t>::operator()(void *void_dst, const acc_data_t *acc,
 
             if (jcp_.signed_input) data *= signed_scale;
 
-            if (jcp_.with_bias)
-                data += math::get_bias(
-                        bias, g * jcp_.oc + oc, jcp_.bias_data_type);
+            if (jcp_.with_bias) {
+                const float b = io::load_float_value(
+                        jcp_.bias_data_type, bias, g * jcp_.oc + oc);
+                data += b;
+            }
 
             data *= scales[(g * jcp_.oc + oc) * jcp_.scale_idx_mult];
-            if (jcp_.with_sum) data += sum_scale * dst[dst_off];
+            if (jcp_.with_sum)
+                data += sum_scale
+                        * io::load_float_value(
+                                jcp_.sum_data_type, void_dst, dst_off);
             if (jcp_.with_eltwise || jcp_.with_binary) {
                 args.l_offset = (g * jcp_.oc + oc) * jcp_.os;
                 ref_post_ops_->execute(data, args);
@@ -119,7 +125,7 @@ void ref_pp_ker_t<dst_data_t>::operator()(void *void_dst, const acc_data_t *acc,
 
             if (jcp_.zp.dst_exists) data += zp_dst_val;
 
-            dst[dst_off] = qz_a1b0<float, dst_data_t>()(data);
+            io::store_float_value(jcp_.dst_data_type, data, void_dst, dst_off);
         }
     }
 }
@@ -138,6 +144,7 @@ pp_ker_t *pp_ker_t::create(
 #endif
     switch (pd->dst_md()->data_type) {
         case data_type::f32: return new ref_pp_ker_t<float>(pd, jcp);
+        case data_type::bf16: return new ref_pp_ker_t<bfloat16_t>(pd, jcp);
         case data_type::s32: return new ref_pp_ker_t<int32_t>(pd, jcp);
         case data_type::s8: return new ref_pp_ker_t<int8_t>(pd, jcp);
         case data_type::u8: return new ref_pp_ker_t<uint8_t>(pd, jcp);
@@ -162,9 +169,9 @@ bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_t *dst_d) {
     return post_ops_ok(post_ops, &dst_md);
 }
 
-bool mayiuse_jit_pp_kernel() noexcept {
+bool mayiuse_jit_pp_kernel(data_type_t dst_dt) noexcept {
 #if ZENDNN_X64
-    return x64::gemm_x8s8s32x_convolution_utils::mayiuse_jit_pp_kernel();
+    return x64::gemm_x8s8s32x_convolution_utils::mayiuse_jit_pp_kernel(dst_dt);
 #else
     return false;
 #endif

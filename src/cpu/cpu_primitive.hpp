@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -59,6 +59,21 @@
                     const int32_t *, ZENDNN_ARG_ATTR_ZERO_POINTS | mem_arg); \
     if (zero_points_ptr == nullptr) return status::invalid_arguments; \
     MAYBE_UNUSED(zero_points_ptr);
+
+#define ASSIGN_INPUT_SCALE_VALUE(scale, mem_arg) \
+    if (pd()->attr()->scales_.get(mem_arg).defined()) { \
+        scale = pd()->attr()->scales_.get(mem_arg).scales_; \
+    } else { \
+        const auto scale_d \
+                = ctx.memory_mdw(ZENDNN_ARG_ATTR_INPUT_SCALES | mem_arg); \
+        bool ok = scale_d.data_type() == data_type::f32 \
+                && scale_d.ndims() == 1 && scale_d.dims()[0] == 1; \
+        if (!ok) return status::invalid_arguments; \
+        const float *scale_p = CTX_IN_MEM( \
+                const float *, ZENDNN_ARG_ATTR_INPUT_SCALES | mem_arg); \
+        if (scale_p == nullptr) return status::invalid_arguments; \
+        scale = scale_p; \
+    }
 
 #define DEFINE_ZERO_POINT_VALUE(zero_point, mem_arg) \
     int32_t zero_point = 0; \

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2021 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 *******************************************************************************/
 
 #include <assert.h>
+#include <functional>
 
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
@@ -42,8 +43,6 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-namespace {
-
 using namespace memory_tracking::names;
 
 using namespace Xbyak;
@@ -61,9 +60,11 @@ struct jit_bnorm_t : public jit_generator {
         size_t S_s, S_tail;
         size_t is_cblk_tail;
         acc_data_t chan_size, eps, one;
-        const acc_data_t *scale_shift;
+        const acc_data_t *scale;
+        const acc_data_t *shift;
         const acc_data_t *mean, *var;
-        const acc_data_t *diff_scale_shift;
+        const acc_data_t *diff_scale;
+        const acc_data_t *diff_shift;
         const void *src, *dst;
         const void *diff_src, *diff_dst;
         const acc_data_t *rbuf1, *rbuf2;
@@ -89,20 +90,22 @@ struct jit_bnorm_t : public jit_generator {
 
     Reg64 reg_param = abi_param1;
 
-    Reg64 reg_scale_shift = rbx;
+    Reg64 reg_scale = rbx;
     Reg64 reg_rbuf1 = abi_not_param1;
     Reg64 reg_rbuf2 = rdx;
     Reg64 reg_coff_max_fwd_copy = reg_rbuf2;
 
     Reg64 reg_mean = rbp;
     Reg64 reg_var = reg_param;
-    Reg64 reg_diff_scale_shift = rax;
-    Reg64 reg_coff_max_bwd_copy = reg_diff_scale_shift;
+    Reg64 reg_diff_scale = rax;
+    Reg64 reg_coff_max_bwd_copy = reg_diff_scale;
+    Reg64 reg_shift = reg_rbuf1;
 
     Reg64 reg_coff = r8;
     Reg64 reg_coff_max = r9;
     Reg64 reg_soff = r10;
     Reg64 reg_soff_max = r11;
+    Reg64 reg_diff_shift = reg_soff_max;
     Reg64 reg_ctr = r12;
     Reg64 reg_roff = r13;
 
@@ -123,8 +126,8 @@ struct jit_bnorm_t : public jit_generator {
 
     // Relu section
     bool with_relu, with_relu_inf_only;
-    Vmm vzero; // is_fwd() ? vdiff_beta : vbeta
     Reg64 reg_ws = reg_roff;
+    Reg64 reg_tmp_alpha = reg_diff_scale; // required in sse41
     Label l_relu_mask_avx2;
     Opmask kstore_mask = Opmask(1);
 
@@ -141,20 +144,22 @@ struct jit_bnorm_t : public jit_generator {
 
     size_t unroll_blocks;
     size_t unroll_regs;
-    Vmm vbuf = Vmm(isa == avx512_common ? 20 : 5);
-    Vmm vdiff_beta = Vmm(isa == avx512_common ? 21 : 6);
-    Vmm vdiff_gamma = Vmm(isa == avx512_common ? 22 : 7);
-    Vmm vsqrtvar = Vmm(isa == avx512_common ? 23 : 8);
-    Vmm vone = Vmm(isa == avx512_common ? 24 : 9);
-    Vmm vmean = Vmm(isa == avx512_common ? 25 : 10);
-    Vmm vgamma = Vmm(isa == avx512_common ? 26 : 11);
-    Vmm vbeta = Vmm(isa == avx512_common ? 27 : 12);
-    Vmm veps = Vmm(isa == avx512_common ? 28 : 13);
-    Vmm vchan_size = Vmm(isa == avx512_common ? 29 : 14);
-    Vmm vtail_mask = Vmm(isa == avx512_common ? 30 : 15);
+    Vmm vbuf = Vmm(isa == avx512_core ? 20 : 5);
+    Vmm vdiff_beta = Vmm(isa == avx512_core ? 21 : 6);
+    Vmm vdiff_gamma = Vmm(isa == avx512_core ? 22 : 7);
+    Vmm vsqrtvar = Vmm(isa == avx512_core ? 23 : 8);
+    Vmm vone = Vmm(isa == avx512_core ? 24 : 9);
+    Vmm vmean = Vmm(isa == avx512_core ? 25 : 10);
+    Vmm vgamma = Vmm(isa == avx512_core ? 26 : 11);
+    Vmm vbeta = Vmm(isa == avx512_core ? 27 : 12);
+    Vmm veps = Vmm(isa == avx512_core ? 28 : 13);
+    Vmm vchan_size = Vmm(isa == avx512_core ? 29 : 14);
+    Vmm vtail_mask = Vmm(isa == avx512_core ? 30 : 15);
+    Vmm vaux = Vmm(isa == avx512_core ? 31 : 5);
+    Vmm vdst_aux = vdiff_gamma; // used for ReLU in AVX2 & sse41
+    Vmm vmask = Vmm(0);
+    Vmm vzero; // is_fwd() ? vdiff_beta : vbeta
 
-    size_t t0_pf_offt;
-    size_t t1_pf_offt;
     size_t spat_size;
     size_t chan_data_offt;
     size_t spat_step;
@@ -168,7 +173,7 @@ struct jit_bnorm_t : public jit_generator {
         stack_off_dst = 24,
         stack_off_diff_src = 32,
         stack_off_diff_dst = 40,
-        stack_off_diff_scale_shift = 48,
+        stack_off_diff_scale = 48,
         stack_off_ws = 56,
         stack_off_barrier = 64,
         stack_off_spat_size_loc = 72,
@@ -176,7 +181,11 @@ struct jit_bnorm_t : public jit_generator {
         stack_off_s_tail = 88,
         stack_off_is_cblk_tail = 96,
         stack_off_ws_off_copy = 104,
-        stack_size_required = 112,
+        stack_off_shift = 112,
+        stack_off_diff_shift = 120,
+        stack_off_soff_max = 128,
+        stack_off_relu_alpha = 136,
+        stack_size_required = 144,
     };
 
     int bit_shift() { return 5 - is_bf16_; }
@@ -195,14 +204,6 @@ struct jit_bnorm_t : public jit_generator {
                 = is_nspc_ ? chan_data_offt / (1 + is_bf16_) : vlen_spat_data_;
         mb_offt = spat_step * spat_size;
         ws_mb_offt = (spat_step / (is_bf16_ ? 16 : 32)) * spat_size;
-
-        if (isa == avx512_mic) {
-            t0_pf_offt = 4096;
-            t1_pf_offt = 0;
-        } else {
-            t0_pf_offt = 0;
-            t1_pf_offt = 0;
-        }
     }
 
     void load_common_params() {
@@ -215,7 +216,7 @@ struct jit_bnorm_t : public jit_generator {
         shl(reg_coff_max, 2);
 
         mov(reg_mean, ptr[reg_param + PARAM_OFF(mean)]);
-        mov(reg_scale_shift, ptr[reg_param + PARAM_OFF(scale_shift)]);
+        mov(reg_scale, ptr[reg_param + PARAM_OFF(scale)]);
 
         uni_vbroadcastss(vchan_size, vmmword[reg_param + PARAM_OFF(chan_size)]);
         uni_vbroadcastss(vone, vmmword[reg_param + PARAM_OFF(one)]);
@@ -251,13 +252,23 @@ struct jit_bnorm_t : public jit_generator {
         }
 
         if (bdesc_->is_fwd()) {
+            mov(reg_tmp, ptr[reg_param + PARAM_OFF(shift)]);
+            mov(ptr[rsp + stack_off_shift], reg_tmp);
             mov(reg_tmp, ptr[reg_param + PARAM_OFF(var)]);
             mov(reg_var, reg_tmp);
         } else {
-            mov(reg_tmp, ptr[reg_param + PARAM_OFF(diff_scale_shift)]);
-            mov(ptr[rsp + stack_off_diff_scale_shift], reg_tmp);
+            mov(reg_tmp, ptr[reg_param + PARAM_OFF(diff_scale)]);
+            mov(ptr[rsp + stack_off_diff_scale], reg_tmp);
+            mov(reg_tmp, ptr[reg_param + PARAM_OFF(diff_shift)]);
+            mov(ptr[rsp + stack_off_diff_shift], reg_tmp);
+            mov(reg_tmp, ptr[reg_param + PARAM_OFF(soff_max)]);
+            mov(ptr[rsp + stack_off_soff_max], reg_tmp);
             mov(reg_tmp, ptr[reg_param + PARAM_OFF(var)]);
             mov(reg_var, reg_tmp);
+        }
+        if (with_relu_inf_only && bdesc_->alpha() != 0.f) {
+            mov(reg_tmp, float2int(bdesc_->alpha()));
+            mov(ptr[rsp + stack_off_relu_alpha], reg_tmp);
         }
 #undef PARAM_OFF
     }
@@ -287,7 +298,8 @@ struct jit_bnorm_t : public jit_generator {
 
     void prepare_relu() {
         with_relu = bdesc_->is_fwd()
-                ? bdesc_->with_relu_post_op() || bdesc_->fuse_norm_relu()
+                ? bdesc_->with_relu_post_op(bdesc_->is_training())
+                        || bdesc_->fuse_norm_relu()
                 : bdesc_->fuse_norm_relu();
         with_relu_inf_only = with_relu && bdesc_->is_fwd()
                 && !(bdesc_->fuse_norm_relu() && bdesc_->is_training());
@@ -310,7 +322,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void fwd_process_relu_avx2(Vmm vdst, int offt, Vmm vstore_mask) {
-        Reg64 reg_store_mask = reg_diff_scale_shift;
+        Reg64 reg_store_mask = reg_diff_scale;
         shr(reg_soff, bit_shift());
         vcmpps(vstore_mask, vzero, vdst, _cmp_lt_os);
         vmovmskps(reg_store_mask, vstore_mask);
@@ -328,6 +340,42 @@ struct jit_bnorm_t : public jit_generator {
                 kstore_mask);
         vblendmps(vdst | kstore_mask, vzero, vdst);
         shl(is_nspc_ ? reg_soff_nspc : reg_soff, bit_shift());
+    }
+
+    void fwd_process_relu_alpha(Vmm vmm_dst) {
+        if (isa == avx512_core)
+            fwd_process_relu_alpha_avx512_common(vmm_dst);
+        else {
+            assert(utils::one_of(isa, avx2, sse41));
+            if (vmm_dst.getIdx() == 0) {
+                uni_vmovups(vdst_aux, vmm_dst);
+                fwd_process_relu_alpha_avx2(vdst_aux);
+                uni_vmovups(Vmm(0), vdst_aux);
+            } else
+                fwd_process_relu_alpha_avx2(vmm_dst);
+        }
+    }
+    void fwd_process_relu_alpha_avx512_common(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vaux.getIdx());
+        vmovq(xmm_aux, ptr[rsp + stack_off_relu_alpha]);
+        vbroadcastss(vaux, xmm_aux);
+        vcmpps(kstore_mask, vzero, vmm_dst, _cmp_lt_os);
+        vmulps(vaux, vmm_dst, vaux);
+        vblendmps(vmm_dst | kstore_mask, vaux, vmm_dst);
+    }
+
+    void fwd_process_relu_alpha_avx2(Vmm vmm_dst) {
+        const Xmm xmm_aux = Xmm(vaux.getIdx());
+        uni_vpxor(vmask, vmask, vmask);
+        if (isa == sse41) {
+            mov(reg_tmp_alpha, ptr[rsp + stack_off_relu_alpha]);
+            uni_vmovq(xmm_aux, reg_tmp_alpha);
+        } else
+            vmovq(xmm_aux, ptr[rsp + stack_off_relu_alpha]);
+        uni_vbroadcastss(vaux, xmm_aux);
+        uni_vcmpps(vmask, vmm_dst, vzero, _cmp_lt_os);
+        uni_vmulps(vaux, vaux, vmm_dst);
+        uni_vblendvps(vmm_dst, vmm_dst, vaux, vmask);
     }
 
     void bwd_process_relu_avx2(Vmm vdiff_dst, int offt, Vmm vstore_mask) {
@@ -410,8 +458,8 @@ struct jit_bnorm_t : public jit_generator {
             lea(reg_tmp, ptr[reg_coff + vlen]);
             cmp(reg_tmp, reg_coff_max);
             jl(l_no_mask);
-            assert(isa == avx512_common || isa == avx2);
-            if (isa == avx512_common)
+            assert(isa == avx512_core || isa == avx2);
+            if (isa == avx512_core)
                 uni_vmovups_tail_avx512_common(dst, src, l_ret);
             else if (isa == avx2)
                 uni_vmovups_tail_avx2_common(dst, src, l_ret);
@@ -432,29 +480,27 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     Address mean_ptr(size_t offt = 0) {
-        return vmmword[reg_mean + reg_coff + offt + 0 * chan_data_offt];
+        return vmmword[reg_mean + reg_coff + offt];
     }
 
     Address var_ptr(size_t offt = 0) {
-        return vmmword[reg_var + reg_coff + offt + 0 * chan_data_offt];
+        return vmmword[reg_var + reg_coff + offt];
     }
 
     Address diff_gamma_ptr(size_t offt = 0) {
-        return vmmword[reg_diff_scale_shift + reg_coff + offt
-                + 0 * chan_data_offt];
+        return vmmword[reg_diff_scale + reg_coff + offt];
     }
 
     Address diff_beta_ptr(size_t offt = 0) {
-        return vmmword[reg_diff_scale_shift + reg_coff + offt
-                + 1 * chan_data_offt];
+        return vmmword[reg_diff_shift + reg_coff + offt];
     }
 
     Address gamma_ptr(size_t offt = 0) {
-        return vmmword[reg_scale_shift + reg_coff + offt + 0 * chan_data_offt];
+        return vmmword[reg_scale + reg_coff + offt];
     }
 
     Address beta_ptr(size_t offt = 0) {
-        return vmmword[reg_scale_shift + reg_coff + offt + 1 * chan_data_offt];
+        return vmmword[reg_shift + reg_coff + offt];
     }
 
     template <typename init_t, typename body_t, typename fini_t>
@@ -515,10 +561,6 @@ struct jit_bnorm_t : public jit_generator {
                         uni_vmovups_spat_data(
                                 v1, vmmword[reg_src + reg_soff + offt]);
                         uni_vaddps(v0, v0, v1);
-                        mic_prefetcht0(
-                                ptr[reg_src + reg_soff + offt + t0_pf_offt]);
-                        mic_prefetcht1(
-                                ptr[reg_src + reg_soff + offt + t1_pf_offt]);
                     },
                     [=](size_t base_reg) {
                         Vmm b = Vmm(0);
@@ -633,9 +675,20 @@ struct jit_bnorm_t : public jit_generator {
                         uni_vmovups_maybe_tail(vgamma, gamma_ptr(coff));
                         uni_vmovups_maybe_tail(vbeta, beta_ptr(coff));
                     }
+                    if (bdesc_->use_scale()) {
+                        uni_vmovups_maybe_tail(vgamma, gamma_ptr(coff));
+                    }
+                    if (bdesc_->use_shift()) {
+                        uni_vmovups_maybe_tail(vbeta, beta_ptr(coff));
+                    }
 
-                    Vmm vscale = bdesc_->use_scaleshift() ? vgamma : vone;
-                    Vmm vdiv = bdesc_->use_scaleshift() ? vgamma : vsqrtvar;
+                    Vmm vscale
+                            = (bdesc_->use_scaleshift() || bdesc_->use_scale())
+                            ? vgamma
+                            : vone;
+                    Vmm vdiv = (bdesc_->use_scaleshift() || bdesc_->use_scale())
+                            ? vgamma
+                            : vsqrtvar;
 
                     vdivps(vdiv, vscale, vsqrtvar);
 
@@ -644,14 +697,25 @@ struct jit_bnorm_t : public jit_generator {
 
                     uni_vsubps(Vmm(idx), Vmm(idx), vmean);
 
-                    if (bdesc_->use_scaleshift()) { // --flags=S
+                    if (bdesc_->use_scaleshift()
+                            || (bdesc_->use_scale() && bdesc_->use_shift())) {
+                        // --flags=S,CH
                         uni_vfmadd213ps(Vmm(idx), vgamma, vbeta);
+                    } else if (bdesc_->use_scale()) {
+                        // --flags=C
+                        uni_vmulps(Vmm(idx), Vmm(idx), vgamma);
+                    } else if (bdesc_->use_shift()) {
+                        // --flags=H
+                        uni_vfmadd213ps(Vmm(idx), vsqrtvar, vbeta);
                     } else {
                         uni_vmulps(Vmm(idx), Vmm(idx), vsqrtvar);
                     }
 
                     if (with_relu_inf_only) { // --attr=post_ops='relu'
-                        uni_vmaxps(Vmm(idx), Vmm(idx), vzero);
+                        if (bdesc_->alpha() != 0.f)
+                            fwd_process_relu_alpha(Vmm(idx));
+                        else
+                            uni_vmaxps(Vmm(idx), Vmm(idx), vzero);
                     } else if (with_relu) { // --flags=R
                         fwd_process_relu_avx512_common(Vmm(idx));
                     }
@@ -754,11 +818,6 @@ struct jit_bnorm_t : public jit_generator {
                             vsubps(vtmp1, vmean, vtmp0);
                         }
                         uni_vfmadd231ps(v, vtmp1, vtmp1);
-
-                        mic_prefetcht0(
-                                ptr[reg_src + reg_soff + offt + t0_pf_offt]);
-                        mic_prefetcht1(
-                                ptr[reg_src + reg_soff + offt + t1_pf_offt]);
                     },
                     [=](size_t base_reg) {
                         Vmm b = Vmm(0);
@@ -940,9 +999,19 @@ struct jit_bnorm_t : public jit_generator {
                 uni_vmovups_maybe_tail(vgamma, gamma_ptr());
                 uni_vmovups_maybe_tail(vbeta, beta_ptr());
             }
+            if (bdesc_->use_scale()) {
+                uni_vmovups_maybe_tail(vgamma, gamma_ptr());
+            }
+            if (bdesc_->use_shift()) {
+                uni_vmovups_maybe_tail(vbeta, beta_ptr());
+            }
 
-            Vmm vscale = bdesc_->use_scaleshift() ? vgamma : vone;
-            Vmm vdiv = bdesc_->use_scaleshift() ? vgamma : vsqrtvar;
+            Vmm vscale = (bdesc_->use_scaleshift() || bdesc_->use_scale())
+                    ? vgamma
+                    : vone;
+            Vmm vdiv = (bdesc_->use_scaleshift() || bdesc_->use_scale())
+                    ? vgamma
+                    : vsqrtvar;
 
             if (isa == sse41) {
                 movups(vbuf, vscale);
@@ -952,42 +1021,53 @@ struct jit_bnorm_t : public jit_generator {
                 vdivps(vdiv, vscale, vsqrtvar);
             }
 
-            auto compute = [=](bool stream_store_allowed) {
-                spat_loop(
-                        spat_size, unroll_blocks, unroll_regs,
-                        [](size_t base_reg) { UNUSED(base_reg); },
-                        [=](size_t base_reg, size_t i) {
-                            Vmm v = Vmm(base_reg);
-                            size_t offt = i * vlen_spat_data_;
-                            uni_vmovups_spat_data(
-                                    v, vmmword[reg_src + reg_soff + offt]);
-                            mic_prefetcht0(ptr[reg_src + reg_soff + offt
-                                    + t0_pf_offt]);
-                            mic_prefetcht1(ptr[reg_src + reg_soff + offt
-                                    + t1_pf_offt]);
-                            uni_vsubps(v, v, vmean);
-                            if (bdesc_->use_scaleshift()) {
-                                uni_vfmadd213ps(v, vgamma, vbeta);
-                            } else {
-                                uni_vmulps(v, v, vsqrtvar);
-                            }
-                            if (with_relu_inf_only) {
-                                uni_vmaxps(v, v, vzero);
-                            } else if (with_relu) {
-                                if (isa == avx512_common)
-                                    fwd_process_relu_avx512_common(v, offt);
-                                else
-                                    fwd_process_relu_avx2(v, offt, Vmm(3));
-                            }
-                            if (stream_store_allowed) {
-                                uni_vmovntps(
-                                        vmmword[reg_dst + reg_soff + offt], v);
-                            } else {
-                                uni_vmovups_spat_data(
-                                        vmmword[reg_dst + reg_soff + offt], v);
-                            }
-                        },
-                        [](size_t base_reg) { UNUSED(base_reg); });
+            const auto spat_loop_init_fin
+                    = [](size_t base_reg) { UNUSED(base_reg); };
+
+            const auto spat_loop_body = [=](size_t base_reg, size_t i,
+                                                bool stream_store_allowed) {
+                const Vmm v = Vmm(base_reg);
+                const size_t offt = i * vlen_spat_data_;
+                uni_vmovups_spat_data(v, vmmword[reg_src + reg_soff + offt]);
+                uni_vsubps(v, v, vmean);
+                if (bdesc_->use_scaleshift()
+                        || (bdesc_->use_scale() && bdesc_->use_shift())) {
+                    // --flags=S,CH
+                    uni_vfmadd213ps(v, vgamma, vbeta);
+                } else if (bdesc_->use_scale()) {
+                    // --flags=C
+                    uni_vmulps(v, v, vgamma);
+                } else if (bdesc_->use_shift()) {
+                    // --flags=H
+                    uni_vfmadd213ps(v, vsqrtvar, vbeta);
+                } else {
+                    uni_vmulps(v, v, vsqrtvar);
+                }
+                if (with_relu_inf_only) { // --attr=post_ops='relu'
+                    if (bdesc_->alpha() != 0.f) {
+                        fwd_process_relu_alpha(v);
+                    } else
+                        uni_vmaxps(v, v, vzero);
+                } else if (with_relu) { // --flags=R
+                    if (isa == avx512_core)
+                        fwd_process_relu_avx512_common(v, offt);
+                    else
+                        fwd_process_relu_avx2(v, offt, Vmm(3));
+                }
+                if (stream_store_allowed) {
+                    uni_vmovntps(vmmword[reg_dst + reg_soff + offt], v);
+                } else {
+                    uni_vmovups_spat_data(
+                            vmmword[reg_dst + reg_soff + offt], v);
+                }
+            };
+
+            const auto compute = [=](bool stream_store_allowed) {
+                using namespace std::placeholders;
+                spat_loop(spat_size, unroll_blocks, unroll_regs,
+                        spat_loop_init_fin,
+                        std::bind(spat_loop_body, _1, _2, stream_store_allowed),
+                        spat_loop_init_fin);
             };
 
             if (stream_store_supported()) {
@@ -1059,6 +1139,7 @@ struct jit_bnorm_t : public jit_generator {
         mov(reg_src, ptr[rsp + stack_off_src]);
         mov(reg_dst, ptr[rsp + stack_off_dst]);
         mov(reg_ws, ptr[rsp + stack_off_ws]);
+        mov(reg_shift, ptr[rsp + stack_off_shift]);
 
         xor_(reg_soff, reg_soff);
         Label dst_spatial;
@@ -1133,7 +1214,7 @@ struct jit_bnorm_t : public jit_generator {
                         uni_vmovups_spat_data(
                                 t2, vmmword[reg_diff_dst + reg_soff + offt]);
                         if (with_relu) {
-                            if (isa == avx512_common)
+                            if (isa == avx512_core)
                                 bwd_process_relu_avx512_common(t2, offt);
                             else if (isa == avx2)
                                 bwd_process_relu_avx2(t2, offt, t3);
@@ -1148,14 +1229,6 @@ struct jit_bnorm_t : public jit_generator {
                             vfnmadd231ps(o0, t3, t2);
                         }
                         uni_vaddps(o1, o1, t2);
-                        mic_prefetcht0(ptr[reg_diff_dst + reg_soff + offt
-                                + t0_pf_offt]);
-                        mic_prefetcht0(
-                                ptr[reg_src + reg_soff + offt + t0_pf_offt]);
-                        mic_prefetcht1(ptr[reg_diff_dst + reg_soff + offt
-                                + t1_pf_offt]);
-                        mic_prefetcht1(
-                                ptr[reg_src + reg_soff + offt + t1_pf_offt]);
                     },
                     [=](size_t base_reg) {
                         Vmm b0 = Vmm(0);
@@ -1204,7 +1277,7 @@ struct jit_bnorm_t : public jit_generator {
                         vmmword[reg_diff_dst + reg_soff_nspc + offt]);
 
                 if (with_relu) {
-                    if (isa == avx512_common)
+                    if (isa == avx512_core)
                         bwd_process_relu_avx512_common(Vmm(sp_idx + 1), offt);
                     else
                         assert(false);
@@ -1265,7 +1338,7 @@ struct jit_bnorm_t : public jit_generator {
 
         // comeback
         mov(reg_coff_max, reg_coff_max_bwd_copy);
-        mov(reg_diff_scale_shift, ptr[rsp + stack_off_diff_scale_shift]);
+        mov(reg_diff_scale, ptr[rsp + stack_off_diff_scale]);
 
         if (is_bf16_) shr(reg_coff_max, 1);
         sub(reg_src, reg_coff_max);
@@ -1288,7 +1361,7 @@ struct jit_bnorm_t : public jit_generator {
             uni_vaddps(vsqrtvar, vsqrtvar, veps);
             uni_vsqrtps(vsqrtvar, vsqrtvar);
             uni_vdivps(vsqrtvar, vone, vsqrtvar, vbuf);
-            if (bdesc_->use_scaleshift())
+            if (bdesc_->use_scaleshift() || bdesc_->use_scale())
                 uni_vmovups_maybe_tail(vgamma, gamma_ptr());
             uni_vmovups_maybe_tail(vdiff_gamma, diff_gamma_ptr());
             uni_vmovups_maybe_tail(vdiff_beta, diff_beta_ptr());
@@ -1296,56 +1369,50 @@ struct jit_bnorm_t : public jit_generator {
             uni_vdivps(vdiff_beta, vdiff_beta, vchan_size);
             uni_vdivps(vdiff_gamma, vdiff_gamma, vchan_size);
 
-            auto compute = [=](bool stream_store_allowed) {
-                spat_loop(
-                        spat_size, unroll_blocks, unroll_regs,
-                        [=](size_t base_reg) { UNUSED(base_reg); },
-                        [=](size_t base_reg, size_t i) {
-                            Vmm v(base_reg * 2 + 0);
-                            Vmm t(base_reg * 2 + 1);
-                            Vmm t1(base_reg * 2 + 2);
-                            size_t offt = i * vlen_spat_data_;
-                            uni_vmovups_spat_data(
-                                    v, vmmword[reg_diff_dst + reg_soff + offt]);
-                            if (with_relu) {
-                                if (isa == avx512_common)
-                                    bwd_process_relu_avx512_common(v, offt);
-                                else if (isa == avx2)
-                                    bwd_process_relu_avx2(v, offt, t);
-                                else
-                                    assert(false);
-                            }
-                            if (!bdesc_->use_global_stats()) {
-                                uni_vsubps(v, v, vdiff_beta);
-                                uni_vmovups_spat_data(
-                                        t, vmmword[reg_src + reg_soff + offt]);
-                                uni_vsubps(t, vmean, t, t1);
-                                uni_vmulps(t, t, vdiff_gamma);
-                                uni_vaddps(v, v, t);
-                            }
-                            uni_vmulps(v, v, vsqrtvar);
-                            if (bdesc_->use_scaleshift()) {
-                                uni_vmulps(v, v, vgamma);
-                            }
-                            if (stream_store_allowed) {
-                                uni_vmovntps(
-                                        vmmword[reg_diff_src + reg_soff + offt],
-                                        v);
-                            } else {
-                                uni_vmovups_spat_data(
-                                        vmmword[reg_diff_src + reg_soff + offt],
-                                        v);
-                            }
-                            mic_prefetcht0(ptr[reg_diff_dst + reg_soff + offt
-                                    + t0_pf_offt]);
-                            mic_prefetcht0(ptr[reg_src + reg_soff + offt
-                                    + t0_pf_offt]);
-                            mic_prefetcht1(ptr[reg_diff_dst + reg_soff + offt
-                                    + t1_pf_offt]);
-                            mic_prefetcht1(ptr[reg_src + reg_soff + offt
-                                    + t1_pf_offt]);
-                        },
-                        [=](size_t base_reg) { UNUSED(base_reg); });
+            const auto spat_loop_init_fin
+                    = [=](size_t base_reg) { UNUSED(base_reg); };
+            const auto spat_loop_body = [=](size_t base_reg, size_t i,
+                                                bool stream_store_allowed) {
+                const Vmm v(base_reg * 2 + 0);
+                const Vmm t(base_reg * 2 + 1);
+                const Vmm t1(base_reg * 2 + 2);
+                const size_t offt = i * vlen_spat_data_;
+                uni_vmovups_spat_data(
+                        v, vmmword[reg_diff_dst + reg_soff + offt]);
+                if (with_relu) {
+                    if (isa == avx512_core)
+                        bwd_process_relu_avx512_common(v, offt);
+                    else if (isa == avx2)
+                        bwd_process_relu_avx2(v, offt, t);
+                    else
+                        assert(false);
+                }
+                if (!bdesc_->use_global_stats()) {
+                    uni_vsubps(v, v, vdiff_beta);
+                    uni_vmovups_spat_data(
+                            t, vmmword[reg_src + reg_soff + offt]);
+                    uni_vsubps(t, vmean, t, t1);
+                    uni_vmulps(t, t, vdiff_gamma);
+                    uni_vaddps(v, v, t);
+                }
+                uni_vmulps(v, v, vsqrtvar);
+                if (bdesc_->use_scaleshift() || bdesc_->use_scale()) {
+                    uni_vmulps(v, v, vgamma);
+                }
+                if (stream_store_allowed) {
+                    uni_vmovntps(vmmword[reg_diff_src + reg_soff + offt], v);
+                } else {
+                    uni_vmovups_spat_data(
+                            vmmword[reg_diff_src + reg_soff + offt], v);
+                }
+            };
+
+            const auto compute = [=](bool stream_store_allowed) {
+                using namespace std::placeholders;
+                spat_loop(spat_size, unroll_blocks, unroll_regs,
+                        spat_loop_init_fin,
+                        std::bind(spat_loop_body, _1, _2, stream_store_allowed),
+                        spat_loop_init_fin);
             };
 
             if (stream_store_supported()) {
@@ -1392,16 +1459,15 @@ struct jit_bnorm_t : public jit_generator {
                     uni_vsqrtps(vsqrtvar, vsqrtvar);
                     uni_vdivps(vsqrtvar, vone, vsqrtvar, vbuf);
 
-                    if (bdesc_->use_scaleshift())
+                    if (bdesc_->use_scaleshift() || bdesc_->use_scale())
                         uni_vmovups_maybe_tail(vgamma, gamma_ptr(coff));
 
                     mov(ptr[rsp + stack_off_ws_off_copy], reg_ws);
-                    mov(reg_ws, ptr[rsp + stack_off_diff_scale_shift]);
+                    mov(reg_ws, ptr[rsp + stack_off_diff_scale]);
                     uni_vmovups_maybe_tail(
                             vdiff_gamma, vmmword[reg_ws + reg_coff + coff]);
                     uni_vmovups_maybe_tail(vdiff_beta,
-                            vmmword[reg_ws + reg_coff + coff
-                                    + 1 * chan_data_offt]);
+                            vmmword[reg_diff_shift + reg_coff + coff]);
                     mov(reg_ws, ptr[rsp + stack_off_ws_off_copy]);
 
                     uni_vmulps(vdiff_gamma, vdiff_gamma, vsqrtvar);
@@ -1412,7 +1478,7 @@ struct jit_bnorm_t : public jit_generator {
                             vmmword[reg_diff_dst + reg_soff_nspc + offt]);
 
                     if (with_relu) {
-                        if (isa == avx512_common)
+                        if (isa == avx512_core)
                             bwd_process_relu_avx512_common(Vmm(idx), offt);
                         else
                             assert(false);
@@ -1430,7 +1496,7 @@ struct jit_bnorm_t : public jit_generator {
 
                     uni_vmulps(Vmm(idx), Vmm(idx), vsqrtvar);
 
-                    if (bdesc_->use_scaleshift()) {
+                    if (bdesc_->use_scaleshift() || bdesc_->use_scale()) {
                         uni_vmulps(Vmm(idx), Vmm(idx), vgamma);
                     }
 
@@ -1504,7 +1570,7 @@ struct jit_bnorm_t : public jit_generator {
 
         // comeback
         mov(reg_coff_max, reg_coff_max_bwd_copy);
-        mov(reg_diff_scale_shift, ptr[rsp + stack_off_diff_scale_shift]);
+        mov(reg_diff_scale, ptr[rsp + stack_off_diff_scale]);
 
         if (is_bf16_) shr(reg_coff_max, 1);
         sub(reg_diff_dst, reg_coff_max);
@@ -1534,7 +1600,7 @@ struct jit_bnorm_t : public jit_generator {
         mov(reg_src, ptr[rsp + stack_off_src]);
         mov(reg_diff_dst, ptr[rsp + stack_off_diff_dst]);
         if (with_relu) {
-            assert(isa == avx2 || isa == avx512_common);
+            assert(isa == avx2 || isa == avx512_core);
             mov(reg_ws, ptr[rsp + stack_off_ws]);
         }
 
@@ -1573,7 +1639,8 @@ struct jit_bnorm_t : public jit_generator {
             mov(reg_diff_dst, ptr[rsp + stack_off_diff_dst]);
         }
 
-        mov(reg_diff_scale_shift, ptr[rsp + stack_off_diff_scale_shift]);
+        mov(reg_diff_scale, ptr[rsp + stack_off_diff_scale]);
+        mov(reg_diff_shift, ptr[rsp + stack_off_diff_shift]);
 
         Label no_sh_reduction;
         barrier();
@@ -1617,7 +1684,7 @@ struct jit_bnorm_t : public jit_generator {
 
         mov(reg_diff_src, ptr[rsp + stack_off_diff_src]);
         if (with_relu) {
-            assert(isa == avx2 || isa == avx512_common);
+            assert(isa == avx2 || isa == avx512_core);
             mov(reg_ws, ptr[rsp + stack_off_ws]);
         }
 
@@ -1626,6 +1693,8 @@ struct jit_bnorm_t : public jit_generator {
         L(diff_spatial);
         {
             xor_(reg_coff, reg_coff);
+            // diff_shift is shared with soff_max.
+            mov(reg_diff_shift, ptr[rsp + stack_off_diff_shift]);
             if (isa == sse41) { mov(reg_tmp_off, reg_soff); }
             is_nspc_ ? backward_diff_channels_nspc() : backward_diff_channels();
             if (isa == sse41) {
@@ -1650,6 +1719,9 @@ struct jit_bnorm_t : public jit_generator {
             } else {
                 add(reg_soff, reg_mb_stride_Bc);
             }
+
+            // comeback soff_max. Shared with diff_shift.
+            mov(reg_soff_max, ptr[rsp + stack_off_soff_max]);
             cmp(reg_soff, reg_soff_max);
             jl(diff_spatial);
         }
@@ -1664,8 +1736,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     jit_bnorm_t(const batch_normalization_pd_t *bdesc) : bdesc_(bdesc) {
-        static_assert(isa == sse41 || isa == avx2 || isa == avx512_common
-                        || isa == avx512_mic,
+        static_assert(isa == sse41 || isa == avx2 || isa == avx512_core,
                 "unsupported isa");
 
         const int simd_w = isa == sse41
@@ -1681,8 +1752,8 @@ struct jit_bnorm_t : public jit_generator {
                 bdesc_, is_nspc_, simd_w, dt_size);
         vlen_spat_data_ = vlen / (1 + is_bf16_); // 32B of BF16 -> 64B of FP32
 
-        unroll_blocks = isa == avx512_common && !is_spatial_thr_ ? 4 : 1;
-        unroll_regs = isa == avx512_common && !is_spatial_thr_ ? 4 : 1;
+        unroll_blocks = isa == avx512_core && !is_spatial_thr_ ? 4 : 1;
+        unroll_regs = isa == avx512_core && !is_spatial_thr_ ? 4 : 1;
     }
 
     void generate() override {
@@ -1698,15 +1769,17 @@ struct jit_bnorm_t : public jit_generator {
             }
         }
 
-        if (isa == avx512_common)
+        if (isa == avx512_core)
             prepare_tail_mask_avx512_common();
         else if (isa == avx2)
             prepare_tail_mask_avx2_common();
 
         compute_static_strides();
+
+        prepare_relu();
+
         sub(rsp, stack_size_required);
         load_common_params();
-        prepare_relu();
 
         if (bdesc_->is_fwd()) {
             if (!bdesc_->stats_is_src()) { compute_mean_variance(); }
@@ -1722,13 +1795,12 @@ struct jit_bnorm_t : public jit_generator {
 
     ~jit_bnorm_t() override { delete bf16_emu_; }
 };
-} // namespace
 
 namespace bnorm_impl {
 
 template <cpu_isa_t isa>
 struct driver_t : public c_compatible {
-    driver_t(const batch_normalization_pd_t *bdesc)
+    driver_t(const batch_normalization_pd_t *bdesc, int nthr)
         : bdesc_(bdesc), ker_(bdesc_) {
         const dim_t C_PADDED = get_c_padded(bdesc_);
 
@@ -1739,8 +1811,7 @@ struct driver_t : public c_compatible {
         dt_size_ = types::data_type_size(bdesc_->desc()->data_desc.data_type);
         size_t data_size = dt_size_ * bdesc_->MB() * C_PADDED * bdesc_->D()
                 * bdesc_->H() * bdesc_->W();
-        l3_size_ = platform::get_per_core_cache_size(3) * zendnn_get_max_threads()
-                / 2; // XXX
+        l3_size_ = platform::get_per_core_cache_size(3) * nthr / 2; // XXX
         // TODO: cache balancing for nspc
         do_blocking_ = is_nspc_ ? false
                                 : (data_size >= l3_size_ / 2 && l3_size_ > 0);
@@ -1749,27 +1820,28 @@ struct driver_t : public c_compatible {
     ~driver_t() = default;
 
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
-            const batch_normalization_pd_t *bdesc) {
+            const batch_normalization_pd_t *bdesc, int nthr) {
         dim_t C_PADDED = get_c_padded(bdesc);
 
-        int sbuf_sz = use_tmp_stats(bdesc) * 2 * C_PADDED;
-        int pbuf_sz = use_tmp_diff_scale_shift(bdesc) * 2 * C_PADDED;
-        int rbuf_sz
-                = (bdesc->is_fwd() ? 1 : 2) * C_PADDED * zendnn_get_max_threads();
+        auto sbuf_sz = use_tmp_stats(bdesc) * 2 * C_PADDED;
+        auto pbuf_sz = (use_tmp_diff_scale(bdesc) + use_tmp_diff_shift(bdesc))
+                * C_PADDED;
+        auto rbuf_sz = (bdesc->is_fwd() ? 1 : 2) * C_PADDED * nthr;
 
         scratchpad.book<acc_data_t>(key_bnorm_tmp_stats, sbuf_sz);
         scratchpad.book<acc_data_t>(key_bnorm_tmp_diff_ss, pbuf_sz);
         scratchpad.book<acc_data_t>(key_bnorm_reduction, rbuf_sz);
 
         if (zendnn_thr_syncable()) {
-            int n_barriers = C_PADDED / simd_w;
+            auto n_barriers = C_PADDED / simd_w;
             scratchpad.book<barrier::ctx_64_t>(key_barrier, n_barriers);
         }
     }
 
     void exec(int ithr, int nthr, const void *src, void *diff_src, void *dst,
-            const void *diff_dst, const acc_data_t *scale_shift,
-            acc_data_t *diff_scale_shift, const acc_data_t *mean,
+            const void *diff_dst, const acc_data_t *scale,
+            acc_data_t *diff_scale, const acc_data_t *shift,
+            acc_data_t *diff_shift, const acc_data_t *mean,
             const acc_data_t *var, const uint8_t *ws,
             const memory_tracking::grantor_t &scratchpad) {
         auto sbuf = scratchpad.get<acc_data_t>(key_bnorm_tmp_stats);
@@ -1847,29 +1919,44 @@ struct driver_t : public c_compatible {
             int C_blks_thr = C_blk_e - C_blk_s;
             int N_thr = N_e - N_s;
 
+            if (C_blks_thr == 0 || N_thr == 0) continue;
+
             size_t coff_base = global_C_blk_s * simd_w;
             size_t soff_base = is_nspc_
                     ? coff_base + N_s * img_size
                     : global_C_blk_s * p.spat_size * simd_w + N_s * img_size;
+            size_t shift_off = use_tmp_diff_scale(bdesc_) ? bdesc_->C() : 0;
 
             p.spat_size_loc = S_e - S_s;
             p.S_s = S_s * vlen_spat_data;
             p.S_tail = (p.spat_size - S_e) * vlen_spat_data;
             p.coff_max = C_blks_thr * simd_w;
-            p.mean = (use_tmp_stats(bdesc_) ? sbuf : mean) + coff_base;
-            p.var = (use_tmp_stats(bdesc_) ? sbuf + C_PADDED : var) + coff_base;
-            p.scale_shift = scale_shift + coff_base;
-            p.diff_scale_shift
-                    = (use_tmp_diff_scale_shift(bdesc_) ? pbuf
-                                                        : diff_scale_shift)
-                    + coff_base;
+            const auto tmp_mean = use_tmp_stats(bdesc_) ? sbuf : mean;
+            if (tmp_mean != nullptr) p.mean = tmp_mean + coff_base;
+            const auto tmp_var = use_tmp_stats(bdesc_) ? sbuf + C_PADDED : var;
+            if (tmp_var != nullptr) p.var = tmp_var + coff_base;
+            if (scale != nullptr) p.scale = scale + coff_base;
+            if (shift != nullptr) p.shift = shift + coff_base;
+            const auto tmp_diff_scale
+                    = use_tmp_diff_scale(bdesc_) ? pbuf : diff_scale;
+            if (tmp_diff_scale != nullptr)
+                p.diff_scale = tmp_diff_scale + coff_base;
+            const auto tmp_diff_shift = use_tmp_diff_shift(bdesc_)
+                    ? &pbuf[shift_off]
+                    : diff_shift;
+            if (tmp_diff_shift != nullptr)
+                p.diff_shift = tmp_diff_shift + coff_base;
 
             p.soff_max = dt_size_ * N_thr * img_size;
-            p.src = (void *)((char *)src + soff_base * dt_size_);
-            p.dst = (void *)((char *)dst + soff_base * dt_size_);
-            p.diff_src = (void *)((char *)diff_src + soff_base * dt_size_);
-            p.diff_dst = (void *)((char *)diff_dst + soff_base * dt_size_);
-            p.ws = ws + soff_base / 8;
+            if (src != nullptr)
+                p.src = (void *)((char *)src + soff_base * dt_size_);
+            if (dst != nullptr)
+                p.dst = (void *)((char *)dst + soff_base * dt_size_);
+            if (diff_src != nullptr)
+                p.diff_src = (void *)((char *)diff_src + soff_base * dt_size_);
+            if (diff_dst != nullptr)
+                p.diff_dst = (void *)((char *)diff_dst + soff_base * dt_size_);
+            if (ws != nullptr) p.ws = ws + soff_base / 8;
 
             p.mb_stride_Bc = dt_size_ * (img_size - p.coff_max * p.spat_size);
 
@@ -1913,9 +2000,17 @@ private:
                 && bdesc->desc()->prop_kind == prop_kind::forward_inference;
     }
 
-    static bool use_tmp_diff_scale_shift(
-            const batch_normalization_pd_t *bdesc) {
-        return false || (bdesc->is_bwd() && !bdesc->use_scaleshift())
+    static bool use_tmp_diff_scale(const batch_normalization_pd_t *bdesc) {
+        return false
+                || (bdesc->is_bwd() && !bdesc->use_scaleshift()
+                        && !bdesc->use_scale())
+                || bdesc->desc()->prop_kind == prop_kind::backward_data;
+    }
+
+    static bool use_tmp_diff_shift(const batch_normalization_pd_t *bdesc) {
+        return false
+                || (bdesc->is_bwd() && !bdesc->use_scaleshift()
+                        && !bdesc->use_shift())
                 || bdesc->desc()->prop_kind == prop_kind::backward_data;
     }
 
@@ -1948,11 +2043,12 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
             && one_of(src_md()->data_type, f32, bf16)
             && IMPLICATION(src_md()->data_type == bf16, mayiuse(avx512_core))
             && check_scale_shift_data_type()
-            && (attr()->has_default_values() || this->with_relu_post_op());
+            && (attr()->has_default_values()
+                    || this->with_relu_post_op(is_training()));
     if (!ok) return status::unimplemented;
 
     const memory_desc_wrapper src_d(src_md());
-    if (isa == avx512_common) {
+    if (isa == avx512_core) {
         if (!src_d.matches_one_of_tag(nChw16c, nCdhw16c, nhwc, ndhwc))
             return status::unimplemented;
     } else {
@@ -1976,8 +2072,9 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
         return status::unimplemented;
     }
 
+    nthr_ = zendnn_get_max_threads();
     auto scratchpad = scratchpad_registry().registrar();
-    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this);
+    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this, nthr_);
 
     return status::success;
 }
@@ -1989,40 +2086,50 @@ jit_uni_batch_normalization_fwd_t<isa>::jit_uni_batch_normalization_fwd_t(
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_fwd_t<isa>::init(engine_t *engine) {
-    CHECK(safe_ptr_assign(bnorm_driver_, new bnorm_impl::driver_t<isa>(pd())));
+    CHECK(safe_ptr_assign(
+            bnorm_driver_, new bnorm_impl::driver_t<isa>(pd(), pd()->nthr_)));
     return bnorm_driver_->create_kernel();
 }
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_fwd_t<isa>::execute(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
-    auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
-    auto scale_shift = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SCALE_SHIFT);
 
-    auto mean = pd()->stats_is_src()
-            ? const_cast<acc_data_t *>(
-                    CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_MEAN))
-            : CTX_OUT_CLEAN_MEM(acc_data_t *, ZENDNN_ARG_MEAN, status);
-    CHECK(status);
+    const memory_desc_wrapper ss_d(pd()->weights_md());
+
+    const auto use_ss = pd()->use_scaleshift();
+    const auto use_sc = pd()->use_scale();
+    const auto use_sh = pd()->use_shift();
+
+    const size_t shift_off
+            = use_ss && !ss_d.has_zero_dim() ? ss_d.off(1, 0) : 0;
+
+    auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
+    auto scale = CTX_IN_MEM(
+            const acc_data_t *, use_sc ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
+    auto shift = use_sh ? CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SHIFT)
+                        : use_ss ? &CTX_IN_MEM(const acc_data_t *,
+                                  ZENDNN_ARG_SCALE_SHIFT)[shift_off]
+                                 : nullptr;
+
+    auto mean = pd()->stats_is_src() ? const_cast<acc_data_t *>(
+                        CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_MEAN))
+                                     : CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_MEAN);
     auto var = pd()->stats_is_src()
             ? const_cast<acc_data_t *>(
                     CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_VARIANCE))
-            : CTX_OUT_CLEAN_MEM(acc_data_t *, ZENDNN_ARG_VARIANCE, status);
-    CHECK(status);
-
-    auto dst = CTX_OUT_CLEAN_MEM(void *, ZENDNN_ARG_DST, status);
-    CHECK(status);
-    auto ws = CTX_OUT_CLEAN_MEM(uint8_t *, ZENDNN_ARG_WORKSPACE, status);
-    CHECK(status);
+            : CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_VARIANCE);
+    auto dst = CTX_OUT_MEM(void *, ZENDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(uint8_t *, ZENDNN_ARG_WORKSPACE);
 
     auto scratchpad = ctx.get_scratchpad_grantor();
 
     bnorm_driver_->init_barriers(scratchpad);
+    const int nthr = pd()->nthr_;
 
-    parallel(0, [&](const int ithr, const int nthr) {
-        bnorm_driver_->exec(ithr, nthr, src, nullptr, dst, nullptr, scale_shift,
-                nullptr, mean, var, ws, scratchpad);
+    parallel(nthr, [&](const int ithr, const int nthr) {
+        bnorm_driver_->exec(ithr, nthr, src, nullptr, dst, nullptr, scale,
+                nullptr, shift, nullptr, mean, var, ws, scratchpad);
     });
 
     return status::success;
@@ -2054,7 +2161,7 @@ status_t jit_uni_batch_normalization_bwd_t<isa>::pd_t::init(engine_t *engine) {
     const memory_desc_wrapper diff_src_d(diff_src_md());
 
     format_tag_t src_tag, diff_src_tag;
-    if (isa == avx512_common) {
+    if (isa == avx512_core) {
         src_tag = src_d.matches_one_of_tag(nChw16c, nCdhw16c, nhwc, ndhwc);
         diff_src_tag
                 = diff_src_d.matches_one_of_tag(nChw16c, nCdhw16c, nhwc, ndhwc);
@@ -2085,8 +2192,9 @@ status_t jit_uni_batch_normalization_bwd_t<isa>::pd_t::init(engine_t *engine) {
 
     /* TODO: extra checks required */
 
+    nthr_ = zendnn_get_max_threads();
     auto scratchpad = scratchpad_registry().registrar();
-    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this);
+    bnorm_impl::driver_t<isa>::init_scratchpad(scratchpad, this, nthr_);
 
     return status::success;
 }
@@ -2098,34 +2206,45 @@ jit_uni_batch_normalization_bwd_t<isa>::jit_uni_batch_normalization_bwd_t(
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_bwd_t<isa>::init(engine_t *engine) {
-    CHECK(safe_ptr_assign(bnorm_driver_, new bnorm_impl::driver_t<isa>(pd())));
+    CHECK(safe_ptr_assign(
+            bnorm_driver_, new bnorm_impl::driver_t<isa>(pd(), pd()->nthr_)));
     return bnorm_driver_->create_kernel();
 }
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_bwd_t<isa>::execute(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
+    const memory_desc_wrapper diff_ss_d(pd()->diff_weights_md());
+
+    const auto use_ss = pd()->use_scaleshift();
+    const auto use_sc = pd()->use_scale();
+    const auto use_sh = pd()->use_shift();
+
+    const size_t diff_shift_off
+            = use_ss && !diff_ss_d.has_zero_dim() ? diff_ss_d.off(1, 0) : 0;
+
     auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
     auto mean = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_MEAN);
     auto var = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_VARIANCE);
     auto diff_dst = CTX_IN_MEM(const void *, ZENDNN_ARG_DIFF_DST);
-    auto scale_shift = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SCALE_SHIFT);
+    auto scale = CTX_IN_MEM(
+            const acc_data_t *, use_sc ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
     auto ws = CTX_IN_MEM(const uint8_t *, ZENDNN_ARG_WORKSPACE);
 
-    auto diff_src = CTX_OUT_CLEAN_MEM(void *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
-    auto diff_scale_shift = CTX_OUT_CLEAN_MEM(
-            acc_data_t *, ZENDNN_ARG_DIFF_SCALE_SHIFT, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(void *, ZENDNN_ARG_DIFF_SRC);
+    auto diff_scale = CTX_OUT_MEM(acc_data_t *,
+            use_sc ? ZENDNN_ARG_DIFF_SCALE : ZENDNN_ARG_DIFF_SCALE_SHIFT);
+    auto diff_shift = use_sh ? CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_DIFF_SHIFT)
+                             : use_ss ? &diff_scale[diff_shift_off] : nullptr;
 
     auto scratchpad = ctx.get_scratchpad_grantor();
 
     bnorm_driver_->init_barriers(scratchpad);
+    const int nthr = pd()->nthr_;
 
-    parallel(0, [&](const int ithr, const int nthr) {
-        bnorm_driver_->exec(ithr, nthr, src, diff_src, nullptr, diff_dst,
-                scale_shift, diff_scale_shift, mean, var, ws, scratchpad);
+    parallel(nthr, [&](const int ithr, const int nthr) {
+        bnorm_driver_->exec(ithr, nthr, src, diff_src, nullptr, diff_dst, scale,
+                diff_scale, nullptr, diff_shift, mean, var, ws, scratchpad);
     });
 
     return status::success;
@@ -2141,8 +2260,8 @@ template struct jit_uni_batch_normalization_fwd_t<sse41>;
 template struct jit_uni_batch_normalization_bwd_t<sse41>;
 template struct jit_uni_batch_normalization_fwd_t<avx2>;
 template struct jit_uni_batch_normalization_bwd_t<avx2>;
-template struct jit_uni_batch_normalization_fwd_t<avx512_common>;
-template struct jit_uni_batch_normalization_bwd_t<avx512_common>;
+template struct jit_uni_batch_normalization_fwd_t<avx512_core>;
+template struct jit_uni_batch_normalization_bwd_t<avx512_core>;
 
 } // namespace x64
 } // namespace cpu

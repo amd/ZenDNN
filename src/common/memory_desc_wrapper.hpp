@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -121,31 +121,43 @@ struct memory_desc_wrapper : public c_compatible {
                         | compensation_conv_asymmetric_src));
     }
 
+    /** returns the size required for a particular extra memory buffer */
+    size_t additional_buffer_size(memory_extra_flags_t flag) const {
+        using namespace memory_extra_flags;
+
+        auto calculate_size = [=](int cmask, size_t buff_data_size) {
+            assert(utils::one_of(cmask, 1, 2, 3, 13, 27));
+            dim_t prod = 1;
+            for (int d = 0; d < ndims(); ++d)
+                if (cmask & (1 << d)) { prod *= padded_dims()[d]; }
+            return (size_t)prod * buff_data_size;
+        };
+
+        if (extra().flags & compensation_conv_s8s8) {
+            return calculate_size(extra().compensation_mask,
+                    additional_buffer_data_size(flag));
+        }
+        if (extra().flags & rnn_u8s8_compensation) {
+            return calculate_size(extra().compensation_mask,
+                    additional_buffer_data_size(flag));
+        }
+        if (extra().flags & compensation_conv_asymmetric_src) {
+            return calculate_size(extra().asymm_compensation_mask,
+                    additional_buffer_data_size(flag));
+        }
+
+        return 0;
+    }
+
     /** returns the size of the appended buffer when the memory descriptor
      * requires extra space to hold compensation data */
     size_t additional_buffer_size() const {
         using namespace memory_extra_flags;
 
-        auto calculate_size = [=](int cmask, size_t buff_data_size) {
-            assert(cmask == 1 || cmask == 3 || cmask == 13 || cmask == 27);
-            dim_t prod = 1;
-            for (int d = 0; d < ndims(); ++d)
-                if (cmask & (1 << d)) prod *= padded_dims()[d];
-            return (size_t)prod * buff_data_size;
-        };
-
         size_t buff_size = 0;
-        const uint64_t comp_flags
-                = compensation_conv_s8s8 | rnn_u8s8_compensation;
-        if (extra().flags & comp_flags) {
-            buff_size += calculate_size(extra().compensation_mask,
-                    additional_buffer_data_size(comp_flags));
-        }
-        if (extra().flags & compensation_conv_asymmetric_src) {
-            buff_size += calculate_size(extra().asymm_compensation_mask,
-                    additional_buffer_data_size(
-                            compensation_conv_asymmetric_src));
-        }
+        buff_size += additional_buffer_size(compensation_conv_s8s8);
+        buff_size += additional_buffer_size(rnn_u8s8_compensation);
+        buff_size += additional_buffer_size(compensation_conv_asymmetric_src);
         return buff_size;
     }
 
@@ -182,7 +194,15 @@ struct memory_desc_wrapper : public c_compatible {
                 max_size = utils::array_product(bd.inner_blks, bd.inner_nblks);
             }
 
-            return max_size * data_type_size() + additional_buffer_size();
+            size_t data_size = max_size * data_type_size();
+            if (is_additional_buffer()) {
+                // The additional buffers, typically of data type int32_t, float
+                // are stored at the end of data. Pad the data, so that the
+                // buffers are properly aligned to their data type.
+                const size_t alignment_in_bytes = 4;
+                data_size = utils::rnd_up(data_size, alignment_in_bytes);
+            }
+            return data_size + additional_buffer_size();
         }
     }
 
@@ -192,6 +212,15 @@ struct memory_desc_wrapper : public c_compatible {
         for (int d = 0; d < ndims(); d++)
             if (bd.strides[d] == 0) return true;
         return false;
+    }
+
+    /** returns true if number of non unit dims is <= `n`. */
+    bool count_non_unit_dims(int n) const {
+        int non_unit_dims = 0;
+        for (int d = 0; d < ndims(); d++) {
+            if (dims()[d] != 1) non_unit_dims++;
+        }
+        return non_unit_dims <= n;
     }
 
     /** returns true if data is dense in memory */

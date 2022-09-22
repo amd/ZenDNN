@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,25 +27,55 @@
 #include "common/zendnn_thread.hpp"
 #include "common/type_helpers.hpp"
 
+#include "cpu/ref_io_helper.hpp"
 #include "cpu/ref_softmax.hpp"
 
 namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <impl::data_type_t data_type>
-status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
-        const exec_ctx_t &ctx) const {
-    status_t status = status::success;
-    auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+static bool is_padding(const memory_desc_wrapper &md) {
+    for (int i = 0; i < md.ndims(); i++)
+        if (md.dims()[i] != md.padded_dims()[i]) return true;
+    return false;
+}
 
-    const auto ou_stride = pd()->outer_stride();
+status_t ref_softmax_fwd_t::execute_forward_dense(const exec_ctx_t &ctx) const {
+    using namespace memory_tracking::names;
 
-    parallel_nd(outer_size_, [&](int ou) {
-        const data_t *src_data = src + ou * ou_stride;
-        data_t *dst_data = dst + ou * ou_stride;
+    auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
+    auto dst = CTX_OUT_MEM(void *, ZENDNN_ARG_DST);
+    const float *scales = pd()->attr()->output_scales_.scales_;
+    float *scratchpad_int8 = ctx.get_scratchpad_grantor().template get<float>(
+            key_softmax_interim_store);
+
+    const memory_desc_wrapper src_d(pd()->src_md());
+    const memory_desc_wrapper dst_d(pd()->dst_md());
+
+    const auto interim_dt
+            = pd()->need_int8_scratchpad() ? data_type::f32 : dst_d.data_type();
+
+    const dim_t ou_stride = pd()->outer_stride();
+    const auto is_inplace = (src == dst);
+    const auto has_padding = is_padding(dst_d);
+    const auto zero_padding = has_padding && !is_inplace;
+    const auto axis = pd()->axis();
+    const auto axis_size = pd()->axis_size(true);
+    const auto axis_blk_size = src_d.padded_dims()[axis] - src_d.dims()[axis];
+    const auto src_dt_size = types::data_type_size(pd()->src_md()->data_type);
+    const auto dst_dt_size = types::data_type_size(pd()->dst_md()->data_type);
+
+    const int nthr = pd()->nthr_;
+
+    parallel_nd_ext(nthr, outer_size_, [&](int ithr, int, dim_t ou) {
+        const void *src_data = reinterpret_cast<const char *>(src)
+                + ou * ou_stride * src_dt_size;
+        void *dst_data
+                = reinterpret_cast<char *>(dst) + ou * ou_stride * dst_dt_size;
+        void *interim_ptr = pd()->need_int8_scratchpad()
+                ? (scratchpad_int8 + ithr * axis_size)
+                : dst_data;
+
         float space_max = -FLT_MAX;
         float space_denom = 0;
         constexpr int unroll_factor = 32;
@@ -61,20 +91,23 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
         if (channels_ < unroll_factor) {
             float max_val = -FLT_MAX;
             for (int i = 0; i < channels_; i++) {
-                max_val = max_wrapper(max_val, src_data[i]);
+                max_val = max_wrapper(max_val,
+                        io::load_float_value(src_d.data_type(), src_data, i));
             }
             space_max = max_val;
         } else {
             float max_values[unroll_factor];
 
             for (int i = 0; i < unroll_factor; i++) {
-                max_values[i] = src_data[i];
+                max_values[i]
+                        = io::load_float_value(src_d.data_type(), src_data, i);
             }
             for (int i = unroll_factor; i < channels_; i += unroll_factor) {
                 int offset = min_wrapper(i, channels_ - unroll_factor);
                 for (int j = 0; j < unroll_factor; j++) {
-                    max_values[j]
-                            = max_wrapper(max_values[j], src_data[offset + j]);
+                    max_values[j] = max_wrapper(max_values[j],
+                            io::load_float_value(
+                                    src_d.data_type(), src_data, offset + j));
                 }
             }
             float max_val = -FLT_MAX;
@@ -85,35 +118,38 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
         }
 #else
         for (int c = 0; c < channels_; ++c)
-            space_max = nstl::max(space_max, (float)src_data[c]);
+            space_max = nstl::max(space_max,
+                    io::load_float_value(src_d.data_type(), src_data, c));
 #endif
 
         // sub + exp + sum
         int tail = channels_ % unroll_factor;
         for (int i = 0; i < channels_ - tail; i += unroll_factor) {
-            ZENDNN_PRAGMA_OMP_SIMD()
+            ZENDNN_PRAGMA_OMP_SIMD(reduction(+ : space_denom))
             for (int j = 0; j < unroll_factor; j++) {
+                float s = io::load_float_value(
+                        src_d.data_type(), src_data, i + j);
+                float d = s - space_max;
                 if (pd()->is_softmax()) {
-                    float D = expf(src_data[i + j] - space_max);
-                    space_denom += D;
-                    dst_data[i + j] = D;
+                    d = expf(d);
+                    space_denom += d;
                 } else if (pd()->is_logsoftmax()) {
-                    float D = src_data[i + j] - space_max;
-                    space_denom += expf(D);
-                    dst_data[i + j] = D;
+                    space_denom += expf(d);
                 }
+
+                io::store_float_value(interim_dt, d, interim_ptr, i + j);
             }
         }
         for (int i = channels_ - tail; i < channels_; i++) {
+            float s = io::load_float_value(src_d.data_type(), src_data, i);
+            float d = s - space_max;
             if (pd()->is_softmax()) {
-                float D = expf(src_data[i] - space_max);
-                space_denom += D;
-                dst_data[i] = D;
+                d = expf(d);
+                space_denom += d;
             } else if (pd()->is_logsoftmax()) {
-                float D = src_data[i] - space_max;
-                space_denom += expf(D);
-                dst_data[i] = D;
+                space_denom += expf(d);
             }
+            io::store_float_value(interim_dt, d, interim_ptr, i);
         }
 
         // scal
@@ -123,32 +159,71 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
             space_denom = logf(space_denom);
         }
         for (int c = 0; c < channels_; ++c) {
+            float d = io::load_float_value(interim_dt, interim_ptr, c);
+            float val = 0;
             if (pd()->is_softmax()) {
-                dst_data[c] = dst_data[c] * space_denom;
+                val = d * space_denom;
             } else if (pd()->is_logsoftmax()) {
-                dst_data[c] = dst_data[c] - space_denom;
+                val = d - space_denom;
             }
+            val *= scales[0];
+            io::store_float_value(dst_d.data_type(), val, dst_data, c);
+        }
+        if (zero_padding) {
+            ZENDNN_PRAGMA_OMP_SIMD()
+            for (int i = 0; i < axis_blk_size; i++)
+                io::store_float_value(
+                        dst_d.data_type(), 0, dst_data, channels_ + i);
         }
     });
     return status::success;
 }
 
-template <impl::data_type_t data_type>
-status_t ref_softmax_fwd_t<data_type>::execute_forward_generic(
+status_t ref_softmax_fwd_t::execute_forward_generic(
         const exec_ctx_t &ctx) const {
+    using namespace memory_tracking::names;
 
-    status_t status = status::success;
-    auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+    auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
+    auto dst = CTX_OUT_MEM(void *, ZENDNN_ARG_DST);
+    const float *scales = pd()->attr()->output_scales_.scales_;
+    float *scratchpad_int8 = ctx.get_scratchpad_grantor().template get<float>(
+            key_softmax_interim_store);
 
-    const memory_desc_wrapper data_d(pd()->src_md());
+    const memory_desc_wrapper src_d(pd()->src_md());
+    const memory_desc_wrapper dst_d(pd()->dst_md());
 
-    parallel_nd(outer_size_, [&](int ou) {
+    void *interim_ptr = pd()->need_int8_scratchpad() ? scratchpad_int8 : dst;
+    const auto interim_dt
+            = pd()->need_int8_scratchpad() ? data_type::f32 : dst_d.data_type();
+
+    const auto is_inplace = (src == dst);
+    const auto has_padding = is_padding(dst_d);
+    if (has_padding && !is_inplace) {
+        if (dst_d.is_dense(true)) {
+            const auto res = std::div(static_cast<int>(dst_d.size()), PAGE_4K);
+            if (!res.quot)
+                std::memset(dst, 0, res.rem);
+            else
+                parallel_nd(res.quot, [&](dim_t i) {
+                    const auto tail = (i + 1 == res.quot) ? res.rem : 0;
+                    const auto ptr_dst = reinterpret_cast<unsigned char *>(dst)
+                            + i * PAGE_4K;
+                    std::memset(ptr_dst, 0, PAGE_4K + tail);
+                });
+        } else
+            // needed for submemory correctness
+            ctx.zero_pad_output(ZENDNN_ARG_DST);
+    }
+
+    const auto axis_size = pd()->axis_size(true);
+    const int nthr = pd()->nthr_;
+
+    parallel_nd_ext(nthr, outer_size_, [&](int ithr, int, dim_t ou) {
+        const dim_t thr_shift = ithr * axis_size;
+
         float space_max_val = 0, space_denom_val = 0;
         float *space_max = &space_max_val, *space_denom = &space_denom_val;
         if (inner_size_ > 1) {
-            using namespace memory_tracking::names;
             space_max = ctx.get_scratchpad_grantor().template get<float>(
                                 key_softmax_reduction)
                     + ou * 2 * inner_size_;
@@ -162,21 +237,26 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_generic(
             dim_t ou_in_offset = ou * channels_ * inner_size_ + in;
 
             for (int c = 0; c < channels_; c++) {
-                size_t off = data_d.off_l(ou_in_offset + c * inner_size_);
-                space_max[in] = nstl::max(space_max[in], (float)src[off]);
+                size_t off = src_d.off_l(ou_in_offset + c * inner_size_);
+                float s = io::load_float_value(src_d.data_type(), src, off);
+                space_max[in] = nstl::max(space_max[in], s);
             }
 
             for (int c = 0; c < channels_; c++) {
-                size_t off = data_d.off_l(ou_in_offset + c * inner_size_);
+                size_t src_off = src_d.off_l(ou_in_offset + c * inner_size_);
+                float s = io::load_float_value(src_d.data_type(), src, src_off);
+                float d = s - space_max[in];
                 if (pd()->is_softmax()) {
-                    float D = expf(src[off] - space_max[in]);
-                    space_denom[in] += D;
-                    dst[off] = D;
+                    d = expf(d);
+                    space_denom[in] += d;
                 } else if (pd()->is_logsoftmax()) {
-                    float D = src[off] - space_max[in];
-                    space_denom[in] += expf(D);
-                    dst[off] = D;
+                    space_denom[in] += expf(d);
                 }
+                size_t dst_off = dst_d.off_l(ou_in_offset + c * inner_size_);
+                size_t interim_off = pd()->need_int8_scratchpad()
+                        ? thr_shift + c
+                        : dst_off;
+                io::store_float_value(interim_dt, d, interim_ptr, interim_off);
             }
 
             if (pd()->is_logsoftmax()) {
@@ -184,92 +264,145 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_generic(
             }
 
             for (int c = 0; c < channels_; c++) {
-                size_t off = data_d.off_l(ou_in_offset + c * inner_size_);
+                size_t dst_off = dst_d.off_l(ou_in_offset + c * inner_size_);
+                size_t interim_off = pd()->need_int8_scratchpad()
+                        ? thr_shift + c
+                        : dst_off;
+                float d = io::load_float_value(
+                        interim_dt, interim_ptr, interim_off);
+                float sd = space_denom[in];
                 if (pd()->is_softmax()) {
-                    dst[off] = dst[off] / space_denom[in];
+                    d /= sd;
                 } else if (pd()->is_logsoftmax()) {
-                    dst[off] = dst[off] - space_denom[in];
+                    d -= sd;
                 }
+                d *= scales[0];
+                io::store_float_value(dst_d.data_type(), d, dst, dst_off);
             }
         }
     });
     return status::success;
 }
 
-template struct ref_softmax_fwd_t<data_type::bf16>;
-template struct ref_softmax_fwd_t<data_type::f32>;
-
 // softmax along last physical dimension
-template <impl::data_type_t data_type>
-status_t ref_softmax_bwd_t<data_type>::execute_backward_dense(
+status_t ref_softmax_bwd_t::execute_backward_dense(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
-    auto dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DST);
-    auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto dst = CTX_IN_MEM(const void *, ZENDNN_ARG_DST);
+    auto diff_dst = CTX_IN_MEM(const void *, ZENDNN_ARG_DIFF_DST);
+    auto diff_src = CTX_OUT_MEM(void *, ZENDNN_ARG_DIFF_SRC);
+
+    const memory_desc_wrapper dst_d(pd()->dst_md());
+    const memory_desc_wrapper diff_dst_d(pd()->diff_dst_md());
+    const memory_desc_wrapper diff_src_d(pd()->diff_src_md());
 
     const auto ou_stride = pd()->outer_stride();
 
-    parallel_nd(outer_size_, [&](int ou) {
+    parallel_nd(outer_size_, [&](dim_t ou) {
         float sbr = 0;
         size_t off = ou * ou_stride;
         if (pd()->is_softmax()) {
-            for (size_t loff = off; loff < off + channels_; ++loff)
-                sbr += diff_dst[loff] * dst[loff];
-            for (size_t loff = off; loff < off + channels_; ++loff)
-                diff_src[loff] = dst[loff] * (diff_dst[loff] - sbr);
+            for (size_t loff = off; loff < off + channels_; ++loff) {
+                float d = io::load_float_value(dst_d.data_type(), dst, loff);
+                float dd = io::load_float_value(
+                        diff_dst_d.data_type(), diff_dst, loff);
+                sbr += dd * d;
+            }
+            for (size_t loff = off; loff < off + channels_; ++loff) {
+                float d = io::load_float_value(dst_d.data_type(), dst, loff);
+                float dd = io::load_float_value(
+                        diff_dst_d.data_type(), diff_dst, loff);
+                float val = d * (dd - sbr);
+                io::store_float_value(
+                        diff_src_d.data_type(), val, diff_src, loff);
+            }
         } else if (pd()->is_logsoftmax()) {
-            for (size_t loff = off; loff < off + channels_; ++loff)
-                sbr += diff_dst[loff];
-            for (size_t loff = off; loff < off + channels_; ++loff)
-                diff_src[loff] = diff_dst[loff] - expf(dst[loff]) * sbr;
+            for (size_t loff = off; loff < off + channels_; ++loff) {
+                float dd = io::load_float_value(
+                        diff_dst_d.data_type(), diff_dst, loff);
+                sbr += dd;
+            }
+            for (size_t loff = off; loff < off + channels_; ++loff) {
+                float d = io::load_float_value(dst_d.data_type(), dst, loff);
+                float dd = io::load_float_value(
+                        diff_dst_d.data_type(), diff_dst, loff);
+                float val = dd - expf(d) * sbr;
+                io::store_float_value(
+                        diff_src_d.data_type(), val, diff_src, loff);
+            }
         }
     });
     return status::success;
 }
 
-template <impl::data_type_t data_type>
-status_t ref_softmax_bwd_t<data_type>::execute_backward_generic(
+status_t ref_softmax_bwd_t::execute_backward_generic(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
-    auto dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DST);
-    auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto dst = CTX_IN_MEM(const void *, ZENDNN_ARG_DST);
+    auto diff_dst = CTX_IN_MEM(const void *, ZENDNN_ARG_DIFF_DST);
+    auto diff_src = CTX_OUT_MEM(void *, ZENDNN_ARG_DIFF_SRC);
 
-    const memory_desc_wrapper diff_d(pd()->diff_src_md());
-    const memory_desc_wrapper data_d(pd()->dst_md());
+    const memory_desc_wrapper dst_d(pd()->dst_md());
+    const memory_desc_wrapper diff_dst_d(pd()->diff_dst_md());
+    const memory_desc_wrapper diff_src_d(pd()->diff_src_md());
 
-    parallel_nd(outer_size_, inner_size_, [&](int ou, int in) {
+    const auto is_inplace = (diff_dst == diff_src);
+    const auto has_padding = is_padding(diff_dst_d);
+    if (has_padding && !is_inplace) {
+        if (diff_dst_d.is_dense(true)) {
+            const auto res
+                    = std::div(static_cast<int>(diff_dst_d.size()), PAGE_4K);
+            if (!res.quot)
+                std::memset(diff_src, 0, res.rem);
+            else
+                parallel_nd(res.quot, [&](dim_t i) {
+                    const auto tail = (i + 1 == res.quot) ? res.rem : 0;
+                    const auto ptr_dst
+                            = reinterpret_cast<unsigned char *>(diff_src)
+                            + i * PAGE_4K;
+                    std::memset(ptr_dst, 0, PAGE_4K + tail);
+                });
+        } else
+            // needed for submemory correctness
+            ctx.zero_pad_output(ZENDNN_ARG_DIFF_SRC);
+    }
+
+    parallel_nd(outer_size_, inner_size_, [&](dim_t ou, dim_t in) {
         dim_t ou_in_offset = ou * channels_ * inner_size_ + in;
         float sbr = 0;
         for (int c = 0; c < channels_; ++c) {
-            auto off_diff = diff_d.off_l(ou_in_offset + c * inner_size_);
+            auto diff_dst_off
+                    = diff_dst_d.off_l(ou_in_offset + c * inner_size_);
+            float dd = io::load_float_value(
+                    diff_dst_d.data_type(), diff_dst, diff_dst_off);
             if (pd()->is_softmax()) {
-                auto off_data = data_d.off_l(ou_in_offset + c * inner_size_);
-                sbr += diff_dst[off_diff] * dst[off_data];
+                auto dst_off = dst_d.off_l(ou_in_offset + c * inner_size_);
+                float d = io::load_float_value(dst_d.data_type(), dst, dst_off);
+                sbr += dd * d;
             } else if (pd()->is_logsoftmax()) {
-                sbr += diff_dst[off_diff];
+                sbr += dd;
             }
         }
 
         for (int c = 0; c < channels_; ++c) {
-            auto off_diff = diff_d.off_l(ou_in_offset + c * inner_size_);
-            auto off_data = data_d.off_l(ou_in_offset + c * inner_size_);
+            auto diff_dst_off
+                    = diff_dst_d.off_l(ou_in_offset + c * inner_size_);
+            auto dst_off = dst_d.off_l(ou_in_offset + c * inner_size_);
+            float d = io::load_float_value(dst_d.data_type(), dst, dst_off);
+            float dd = io::load_float_value(
+                    diff_dst_d.data_type(), diff_dst, diff_dst_off);
+            float val = 0;
             if (pd()->is_softmax()) {
-                diff_src[off_diff] = dst[off_data] * (diff_dst[off_diff] - sbr);
+                val = d * (dd - sbr);
             } else if (pd()->is_logsoftmax()) {
-                diff_src[off_diff]
-                        = diff_dst[off_diff] - expf(dst[off_data]) * sbr;
+                val = dd - expf(d) * sbr;
             }
+            auto diff_src_off
+                    = diff_src_d.off_l(ou_in_offset + c * inner_size_);
+            io::store_float_value(
+                    diff_src_d.data_type(), val, diff_src, diff_src_off);
         }
     });
     return status::success;
 }
-
-template struct ref_softmax_bwd_t<data_type::bf16>;
-template struct ref_softmax_bwd_t<data_type::f32>;
 
 } // namespace cpu
 } // namespace impl

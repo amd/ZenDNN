@@ -1,4 +1,9 @@
 ﻿/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -70,7 +75,7 @@ status_t zendnn_pool_kernel<isa>::init_conf(jit_pool_conf_t &jpp,
         return status::unimplemented;
     }
 
-    bool is_avx512 = utils::one_of(isa, avx512_common, avx512_core);
+    bool is_avx512 = utils::one_of(isa, avx512_core);
     const int simd_w = is_avx512 ? 16 : 8;
     const int ndims = src_d.ndims();
 

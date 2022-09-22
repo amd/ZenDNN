@@ -1,5 +1,10 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -42,6 +47,10 @@
 #if defined(_WIN32) && !defined(__GNUC__)
 #define __PRETTY_FUNCTION__ __FUNCSIG__
 #endif
+
+#define Z_NOT_0 1
+#define Z_NOT_1 0
+#define Z_NOT(cond) CONCAT2(Z_NOT_, cond)
 
 #define Z_DO_IF_0(...)
 #define Z_DO_IF_1(...) __VA_ARGS__

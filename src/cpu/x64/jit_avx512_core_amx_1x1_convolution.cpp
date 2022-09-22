@@ -1,10 +1,11 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -50,10 +51,8 @@ using namespace nstl;
                                     ? (md).blk_off((n), (c), (h), (w)) \
                                     : (md).blk_off((n), (c), (d), (h), (w))))
 
-template <data_type_t src_type, data_type_t wei_type, data_type_t dst_type>
-void jit_avx512_core_amx_1x1_convolution_fwd_t<src_type, wei_type,
-        dst_type>::prepare_padded_bias(const char *&bias,
-        const memory_tracking::grantor_t &scratchpad) const {
+void jit_avx512_core_amx_1x1_convolution_fwd_t::prepare_padded_bias(
+        const char *&bias, const memory_tracking::grantor_t &scratchpad) const {
     if (!pd()->wants_padded_bias()) return;
 
     const size_t bia_dt_size = pd()->jcp_.typesize_bia;
@@ -66,9 +65,8 @@ void jit_avx512_core_amx_1x1_convolution_fwd_t<src_type, wei_type,
     bias = padded_bias;
 }
 
-template <data_type_t src_type, data_type_t wei_type, data_type_t dst_type>
-status_t jit_avx512_core_amx_1x1_convolution_fwd_t<src_type, wei_type,
-        dst_type>::execute_forward(const exec_ctx_t &ctx) const {
+status_t jit_avx512_core_amx_1x1_convolution_fwd_t::execute_forward(
+        const exec_ctx_t &ctx) const {
 
     auto src = CTX_IN_MEM(const char *, ZENDNN_ARG_SRC);
     auto weights = CTX_IN_MEM(const char *, ZENDNN_ARG_WEIGHTS);
@@ -131,7 +129,7 @@ status_t jit_avx512_core_amx_1x1_convolution_fwd_t<src_type, wei_type,
             = (size_t)jcp.mb * jcp.ngroups * os_chunks * oc_chunks;
     kernel_->tile_configure(tcfg);
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(jcp.nthr, [&](const int ithr, const int nthr) {
         size_t start {0}, end {0};
         balance211(work_amount, nthr, ithr, start, end);
 
@@ -218,30 +216,11 @@ status_t jit_avx512_core_amx_1x1_convolution_fwd_t<src_type, wei_type,
             nd_iterator_step(mb, jcp.mb, g, jcp.ngroups, _osb, os_chunks, _ocb,
                     oc_chunks);
         }
+
+        amx_tile_release();
     });
     return status::success;
 }
-
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::s8,
-        data_type::s8, data_type::u8>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::u8,
-        data_type::s8, data_type::u8>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::s8,
-        data_type::s8, data_type::s8>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::u8,
-        data_type::s8, data_type::s8>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::s8,
-        data_type::s8, data_type::s32>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::u8,
-        data_type::s8, data_type::s32>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::s8,
-        data_type::s8, data_type::f32>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::u8,
-        data_type::s8, data_type::f32>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::bf16,
-        data_type::bf16, data_type::bf16>;
-template struct jit_avx512_core_amx_1x1_convolution_fwd_t<data_type::bf16,
-        data_type::bf16, data_type::f32>;
 
 } // namespace x64
 } // namespace cpu

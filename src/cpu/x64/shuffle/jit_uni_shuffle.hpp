@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -44,7 +44,7 @@ struct jit_uni_shuffle_t : public primitive_t {
         using cpu_shuffle_pd_t::cpu_shuffle_pd_t;
 
         DECLARE_COMMON_PD_T(
-                JIT_IMPL_NAME_HELPER("jit:", isa, ""), jit_uni_shuffle_t);
+                JIT_IMPL_NAME_HELPER("jit:", conf_.isa, ""), jit_uni_shuffle_t);
 
         status_t init(engine_t *engine);
 

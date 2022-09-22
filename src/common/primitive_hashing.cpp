@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -23,9 +23,7 @@
 #include "type_helpers.hpp"
 #include "utils.hpp"
 
-#include "pooling_pd.hpp"
-#include "shuffle_pd.hpp"
-
+#include "zendnn_thread.hpp"
 #include "engine.hpp"
 #include "primitive_hashing.hpp"
 
@@ -33,111 +31,34 @@ namespace zendnn {
 namespace impl {
 namespace primitive_hashing {
 
-key_t::key_t(const primitive_desc_t *pd, const engine_t *engine, int impl_nthr)
-    : primitive_kind_(pd->kind())
-    , op_desc_(pd->op_desc())
-    , attr_(pd->attr())
-    , impl_id_(pd->impl_id())
-    , impl_nthr_(impl_nthr)
-    , engine_kind_(engine ? engine->kind() : engine_kind::any_engine)
-    , runtime_kind_(engine ? engine->runtime_kind() : runtime_kind::none)
-    , device_id_(engine ? engine->device_id() : device_id_t(0, 0, 0))
+key_t::key_t(const engine_t *engine, const op_desc_t *op_desc,
+        const primitive_attr_t *attr, int pd_iterator_offset,
+        const std::vector<memory_desc_t> &hint_mds)
+    : primitive_kind_(get_pkind(op_desc->kind))
+    , op_desc_(op_desc)
+    , attr_(attr)
+    , pd_iterator_offset_(pd_iterator_offset)
+    , impl_nthr_(zendnn_get_max_threads())
+    , hint_mds_(hint_mds)
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    , engine_id_(engine->engine_id())
+#else
+    , engine_kind_(engine->kind())
+    , runtime_kind_(engine->runtime_kind())
+    , device_id_(engine->device_id())
+#endif
     , thread_id_(std::this_thread::get_id()) {
-    init_mds(pd);
 }
 
-void key_t::init_mds(const primitive_desc_t *pd) {
-    // Put only **relevant** memory descriptors to the list that might
-    // affect the equality. The current cases are:
-    // - Backward pooling and shuffle (rationale: implementation might depend
-    //   on the fwd_hint_pd).
-    //
-    // Later this list can be extended. For instance, currently we don't store
-    // convolution mds, because nthrs + op_desc (even with format=`any`) +
-    // attributes fully define particular implementation.
-    //
-    // XXX: There is too much knowledge about in the internals...
+key_t::key_t(const primitive_desc_t *pd, const engine_t *engine)
+    : key_t(engine, pd->op_desc(), pd->attr(), pd->pd_iterator_offset(),
+            pd->hint_mds(false /* is_hint */)) {}
 
-    switch ((int)primitive_kind_) {
-        case primitive_kind::batch_normalization: {
-            break;
-        }
-        case primitive_kind::binary: {
-            break;
-        }
-        case primitive_kind::concat: {
-            break;
-        }
-        case primitive_kind::convolution: {
-            break;
-        }
-        case primitive_kind::deconvolution: {
-            break;
-        }
-        case primitive_kind::eltwise: {
-            break;
-        }
-        case primitive_kind::gemm: {
-            break;
-        }
-        case primitive_kind::inner_product: {
-            break;
-        }
-        case primitive_kind::layer_normalization: {
-            break;
-        }
-        case primitive_kind::lrn: {
-            break;
-        }
-        case primitive_kind::matmul: {
-            break;
-        }
-        case primitive_kind::pooling_v2: {
-            auto typed_pd = utils::downcast<const pooling_pd_t *>(pd);
-            if (!typed_pd->is_fwd()) {
-                mds.push_back(*typed_pd->diff_dst_md(0));
-                mds.push_back(*typed_pd->diff_src_md(0));
-            }
-            break;
-        }
-        case primitive_kind::prelu: {
-            break;
-        }
-        case primitive_kind::reduction: {
-            break;
-        }
-        case primitive_kind::reorder: {
-            break;
-        }
-        case primitive_kind::resampling: {
-            break;
-        }
-        case primitive_kind::rnn: {
-            break;
-        }
-        case primitive_kind::shuffle: {
-            auto typed_pd = utils::downcast<const shuffle_pd_t *>(pd);
-            if (!typed_pd->is_fwd()) {
-                mds.push_back(*typed_pd->diff_dst_md(0));
-                mds.push_back(*typed_pd->diff_src_md(0));
-            }
-            break;
-        }
-        case primitive_kind::softmax: {
-            break;
-        }
-        case primitive_kind::sum: {
-            break;
-        }
-        case primitive_kind::zero_pad: {
-            break;
-        }
-        case primitive_kind::embedding_bag: {
-          /* add new primitive */
-            break;
-        }
-
-        default: assert(!"unknown primitive_kind");
+primitive_kind_t key_t::get_pkind(primitive_kind_t pkind) {
+    switch (pkind) {
+        case primitive_kind::softmax:
+        case primitive_kind::logsoftmax: return primitive_kind::softmax;
+        default: return pkind;
     }
 }
 
@@ -147,11 +68,15 @@ bool key_t::operator==(const key_t &rhs) const {
     bool ret = true
         // Less expensive comparisons come first
         && primitive_kind_ == rhs.primitive_kind_
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+        && engine_id_ == rhs.engine_id_
+#else
         && engine_kind_ == rhs.engine_kind_
         && runtime_kind_ == rhs.runtime_kind_
         && device_id_ == rhs.device_id_
-        && mds.size() == rhs.mds.size()
-        && impl_id_ == rhs.impl_id_
+#endif
+        && hint_mds_.size() == rhs.hint_mds_.size()
+        && pd_iterator_offset_ == rhs.pd_iterator_offset_
         && impl_nthr_ == rhs.impl_nthr_
         && (*attr_) == (*rhs.attr_);
 
@@ -175,6 +100,7 @@ bool key_t::operator==(const key_t &rhs) const {
             CASE(layer_normalization)
             CASE(lrn)
             CASE(matmul)
+            CASE(pooling)
             CASE(pooling_v2)
             CASE(prelu)
             CASE(reduction)
@@ -183,6 +109,7 @@ bool key_t::operator==(const key_t &rhs) const {
             CASE(rnn)
             CASE(shuffle)
             CASE(softmax)
+            CASE(softmax_v2)
             CASE(sum)
             CASE(zero_pad)
             CASE(embedding_bag)
@@ -193,8 +120,8 @@ bool key_t::operator==(const key_t &rhs) const {
 
     if (!ret) return false;
 
-    for (size_t i = 0; i < mds.size(); ++i)
-        if (mds[i] != rhs.mds[i]) return false;
+    for (size_t i = 0; i < hint_mds_.size(); ++i)
+        if (hint_mds_[i] != rhs.hint_mds_[i]) return false;
 
     return true;
 }
@@ -285,6 +212,8 @@ size_t get_attr_hash(const primitive_attr_t &attr) {
     size_t seed = 0;
     // scratchpad_mode
     seed = hash_combine(seed, static_cast<size_t>(attr.scratchpad_mode_));
+    // fpmath_mode
+    seed = hash_combine(seed, static_cast<size_t>(attr.fpmath_mode_));
 
     if (!attr.output_scales_.has_default_values()) {
         // output_scales: mask
@@ -333,7 +262,11 @@ size_t get_attr_hash(const primitive_attr_t &attr) {
                 break;
             case primitive_kind::convolution:
                 seed = hash_combine(
+                        seed, static_cast<size_t>(entry.depthwise_conv.kernel));
+                seed = hash_combine(
                         seed, static_cast<size_t>(entry.depthwise_conv.stride));
+                seed = hash_combine(seed,
+                        static_cast<size_t>(entry.depthwise_conv.padding));
                 seed = hash_combine(
                         seed, static_cast<size_t>(entry.depthwise_conv.wei_dt));
                 seed = hash_combine(seed,
@@ -350,7 +283,12 @@ size_t get_attr_hash(const primitive_attr_t &attr) {
             case primitive_kind::binary:
                 seed = hash_combine(
                         seed, static_cast<size_t>(entry.binary.alg));
-                seed = hash_combine(seed, get_md_hash(entry.binary.src1_desc));
+                seed = hash_combine(
+                        seed, get_md_hash(entry.binary.user_src1_desc));
+                break;
+            case primitive_kind::prelu:
+                seed = hash_combine(
+                        seed, static_cast<size_t>(entry.prelu.mask));
                 break;
             default: assert(!"unknown post_op");
         }
@@ -377,13 +315,13 @@ size_t get_desc_hash(const concat_desc_t &desc) {
     // Kinds
     seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
     // Memory descriptors
-    seed = hash_combine(seed, get_md_hash(desc.dst_md));
+    seed = hash_combine(seed, get_md_hash(*desc.dst_md));
     // N
     seed = hash_combine(seed, desc.n);
     // Concat dimension
     seed = hash_combine(seed, desc.concat_dimension);
     // Array of mds
-    seed = get_array_hash(seed, desc.src_mds.data(), desc.n);
+    seed = get_array_hash(seed, desc.src_mds, desc.n);
     // Combined hash for concat desc
     return seed;
 }
@@ -558,7 +496,7 @@ size_t get_desc_hash(const matmul_desc_t &desc) {
     return seed;
 }
 
-size_t get_desc_hash(const pooling_v2_desc_t &desc) {
+size_t get_desc_hash(const pooling_desc_t &desc) {
     size_t seed = 0;
     // Kinds
     seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
@@ -572,12 +510,19 @@ size_t get_desc_hash(const pooling_v2_desc_t &desc) {
     // Strides, dilates, padding
     seed = get_array_hash(seed, desc.strides, ZENDNN_MAX_NDIMS);
     seed = get_array_hash(seed, desc.kernel, ZENDNN_MAX_NDIMS);
-    seed = get_array_hash(seed, desc.dilation, ZENDNN_MAX_NDIMS);
     seed = get_array_hash(seed, desc.padding[0], ZENDNN_MAX_NDIMS);
     seed = get_array_hash(seed, desc.padding[1], ZENDNN_MAX_NDIMS);
     // Accumulator type
     seed = hash_combine(seed, static_cast<size_t>(desc.accum_data_type));
     // Combined hash for pooling desc
+    return seed;
+}
+
+size_t get_desc_hash(const pooling_v2_desc_t &desc) {
+    const auto &v1_desc = *reinterpret_cast<const pooling_desc_t *>(&desc);
+    size_t seed = get_desc_hash(v1_desc);
+    seed = get_array_hash(seed, desc.dilation, ZENDNN_MAX_NDIMS);
+    // Combined hash for pooling_v2 desc
     return seed;
 }
 
@@ -591,7 +536,7 @@ size_t get_desc_hash(const prelu_desc_t &desc) {
     seed = hash_combine(seed, get_md_hash(desc.diff_data_desc));
     seed = hash_combine(seed, get_md_hash(desc.weights_desc));
     seed = hash_combine(seed, get_md_hash(desc.diff_weights_desc));
-    // Combined hash for pooling desc
+    // Combined hash for prelu desc
     return seed;
 }
 
@@ -615,11 +560,12 @@ size_t get_desc_hash(const reorder_desc_t &desc) {
     // Kinds
     seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
     // Memory descriptors
-    seed = hash_combine(seed, get_md_hash(desc.src_md));
-    seed = hash_combine(seed, get_md_hash(desc.dst_md));
+    seed = hash_combine(seed, get_md_hash(*desc.src_md));
+    seed = hash_combine(seed, get_md_hash(*desc.dst_md));
     // Kinds of source and destination engines
     seed = hash_combine(seed, static_cast<size_t>(desc.src_engine_kind));
     seed = hash_combine(seed, static_cast<size_t>(desc.dst_engine_kind));
+    seed = hash_combine(seed, desc.is_cross_engine);
     // Combined hash for reorder desc
     return seed;
 }
@@ -711,20 +657,30 @@ size_t get_desc_hash(const softmax_desc_t &desc) {
     return seed;
 }
 
+size_t get_desc_hash(const softmax_v2_desc_t &desc) {
+    const auto &v1_desc = *reinterpret_cast<const softmax_desc_t *>(&desc);
+    size_t seed = get_desc_hash(v1_desc);
+    // Kinds
+    seed = hash_combine(seed, static_cast<size_t>(desc.alg_kind));
+    // Memory descriptors
+    seed = hash_combine(seed, get_md_hash(desc.dst_desc));
+    seed = hash_combine(seed, get_md_hash(desc.diff_dst_desc));
+    // Combined hash for softmax_v2 desc
+    return seed;
+}
+
 size_t get_desc_hash(const sum_desc_t &desc) {
     size_t seed = 0;
     // Kinds
     seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
     // Memory descriptors
-    seed = hash_combine(seed, get_md_hash(desc.dst_md));
+    seed = hash_combine(seed, get_md_hash(*desc.dst_md));
     // N
     seed = hash_combine(seed, desc.n);
     // Scales
-    if (!desc.scales.empty()) {
-        seed = get_array_hash(seed, desc.scales.data(), desc.n);
-    }
+    if (desc.scales) { seed = get_array_hash(seed, desc.scales, desc.n); }
     // Array of mds
-    seed = get_array_hash(seed, desc.src_mds.data(), desc.n);
+    seed = get_array_hash(seed, desc.src_mds, desc.n);
     // Combined hash for sum desc
     return seed;
 }

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -34,25 +34,6 @@ namespace zendnn {
 namespace impl {
 
 struct concat_pd_t : public primitive_desc_t {
-    concat_pd_t(const primitive_attr_t *attr, const memory_desc_t *dst_md,
-            int n, int concat_dim, const memory_desc_t *src_mds)
-        : primitive_desc_t(attr, primitive_kind::concat)
-        , n_(n)
-        , concat_dim_(concat_dim)
-        , dst_md_(*dst_md) {
-        src_mds_.reserve(n_);
-        for (int i = 0; i < n_; ++i)
-            src_mds_.push_back(src_mds[i]);
-
-        // Fill a desc that is intended for internal use only
-        desc_ = concat_desc_t();
-        desc_.primitive_kind = primitive_kind::concat;
-        desc_.dst_md = dst_md_;
-        desc_.n = n_;
-        desc_.concat_dimension = concat_dim_;
-        desc_.src_mds = src_mds_;
-    }
-
     const concat_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
         return reinterpret_cast<const op_desc_t *>(this->desc());
@@ -94,6 +75,7 @@ struct concat_pd_t : public primitive_desc_t {
 protected:
     int n_, concat_dim_;
     memory_desc_t dst_md_;
+    memory_desc_t original_dst_;
     std::vector<memory_desc_t> src_mds_;
 
     /* contains images of srcs in the dst memory (if possible)
@@ -103,6 +85,31 @@ protected:
 
 protected:
     concat_desc_t desc_;
+
+    concat_pd_t(const primitive_attr_t *attr, const memory_desc_t *dst_md,
+            int n, int concat_dim, const memory_desc_t *src_mds)
+        : primitive_desc_t(attr, primitive_kind::concat)
+        , n_(n)
+        , concat_dim_(concat_dim)
+        , dst_md_(*dst_md)
+        , original_dst_(*dst_md) {
+        src_mds_.reserve(n_);
+        for (int i = 0; i < n_; ++i)
+            src_mds_.push_back(src_mds[i]);
+
+        init_desc();
+    }
+
+    concat_pd_t(const concat_pd_t &other) : primitive_desc_t(other) {
+        n_ = other.n_;
+        concat_dim_ = other.concat_dim_;
+        dst_md_ = other.dst_md_;
+        original_dst_ = other.original_dst_;
+        src_mds_ = other.src_mds_;
+        src_image_mds_ = other.src_image_mds_;
+
+        init_desc();
+    }
 
     /* inits src_image_mds_ and dst_md_ in simple cases. It is possible to
      * override dst_md_ by using force_dst_md.
@@ -173,13 +180,12 @@ protected:
         if (status == status::success) {
             /* check if we can create a sub-memory for the dst */
             bool desired_format_ok = true;
-            int current_concat_dim_offset = 0;
+            dims_t dims {}, offsets {};
+            utils::array_copy(dims, dst_md_.dims, ndims);
+
             for (int i = 0; i < n_; ++i) {
-                const int dim = src_mds_[i].dims[concat_dim_];
-                dims_t dims, offsets = {};
-                utils::array_copy(dims, dst_md_.dims, ndims);
+                const auto dim = src_mds_[i].dims[concat_dim_];
                 dims[concat_dim_] = dim;
-                offsets[concat_dim_] = current_concat_dim_offset;
 
                 memory_desc_t src_img_d;
                 status_t status = zendnn_memory_desc_init_submemory(
@@ -188,7 +194,7 @@ protected:
                     desired_format_ok = false;
                     break;
                 }
-                current_concat_dim_offset += dim;
+                offsets[concat_dim_] += dim;
             }
 
             if (!desired_format_ok) status = status::unimplemented;
@@ -213,6 +219,16 @@ protected:
 
         return status;
     }
+
+private:
+    void init_desc() {
+        desc_ = concat_desc_t();
+        desc_.primitive_kind = primitive_kind::concat;
+        desc_.dst_md = &original_dst_;
+        desc_.n = n_;
+        desc_.concat_dimension = concat_dim_;
+        desc_.src_mds = src_mds_.data();
+    }
 };
 
 #define DECLARE_CONCAT_PD_t(impl_name, ...) \
@@ -231,17 +247,16 @@ protected:
     } \
     status_t create_primitive( \
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive, \
-            engine_t *engine) const override { \
+            engine_t *engine, const cache_blob_t &cache_blob) const override { \
         return primitive_t::create_primitive_common<__VA_ARGS__, pd_t>( \
-                primitive, this, engine, false); \
+                primitive, this, engine, false, cache_blob); \
     } \
     pd_t *clone() const override { \
         auto new_pd = utils::make_unique<pd_t>(*this); \
         if (!new_pd->is_initialized()) return nullptr; \
         return new_pd.release(); \
     } \
-    const char *name() const override { return impl_name; } \
-    std::type_index impl_id() const override { return typeid(pd_t); }
+    const char *name() const override { return impl_name; }
 
 #define DECLARE_CONCAT_PD_T(impl_name, ...) \
     DECLARE_CONCAT_PD_t(impl_name, __VA_ARGS__)

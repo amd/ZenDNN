@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -40,18 +40,39 @@ struct jit_amx_tilecfg_t : public jit_generator {
 
 private:
     void generate() override {
-        preamble();
-
-        tilerelease();
         ldtilecfg(ptr[abi_param1]);
-
-        postamble();
+        ret();
     }
 };
 
-void amx_tile_configure(const char palette[64]) {
+struct jit_amx_tilerelease_t : public jit_generator {
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_amx_tilerelease_t)
+
+    // TODO: Need to check status
+    jit_amx_tilerelease_t()
+        : jit_generator(nullptr, MAX_CODE_SIZE, true, avx512_core_amx) {
+        create_kernel();
+    }
+
+    void tile_release() const { (*this)(); }
+
+private:
+    void generate() override {
+        tilerelease();
+        ret();
+    }
+};
+
+status_t amx_tile_configure(const char palette[AMX_PALETTE_SIZE]) {
     static const jit_amx_tilecfg_t tilecfg;
     tilecfg.tile_configure(palette);
+    return status::success;
+};
+
+status_t amx_tile_release() {
+    static const jit_amx_tilerelease_t tilerls;
+    tilerls.tile_release();
+    return status::success;
 };
 
 } // namespace x64

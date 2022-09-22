@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 * Copyright 2020 FUJITSU LIMITED
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,6 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "common/zendnn_private.hpp"
 #include "cpu/cpu_engine.hpp"
 
 #include "cpu/nchw_pooling.hpp"
@@ -31,6 +30,7 @@
 #include "cpu/x64/jit_uni_i8i8_pooling.hpp"
 #include "cpu/x64/jit_uni_pooling.hpp"
 #include "cpu/x64/zendnn_pooling.hpp"
+
 using namespace zendnn::impl::cpu::x64;
 #elif ZENDNN_AARCH64
 #include "cpu/aarch64/jit_uni_i8i8_pooling.hpp"
@@ -38,72 +38,78 @@ using namespace zendnn::impl::cpu::x64;
 using namespace zendnn::impl::cpu::aarch64;
 #endif
 
+#include "common/zendnn_private.hpp"
+
 namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace zendnn::impl::data_type;
+using namespace zendnn::impl::prop_kind;
 
 // clang-format off
-const pd_create_f impl_list[] = {
-        /* fp */
-#if ZENDNN_ENABLE
-#if ZENDNN_BLOCKED_POOLING
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx2, f32>)
-        CPU_INSTANCE(nchw_pooling_fwd_t<f32>)
-        CPU_INSTANCE(ref_pooling_fwd_t<f32>)
-#endif
-        CPU_INSTANCE_X64(zendnn_pooling_fwd_t<avx2, f32>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<avx2>)
-#else
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_core, bf16>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_core, bf16>)
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_core, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_core, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_common, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_common, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx2, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx2, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<sse41, f32>)
-        CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<sse41, f32>)
-        CPU_INSTANCE_AARCH64(jit_uni_pooling_fwd_t<sve_512, f32>)
-        CPU_INSTANCE_AARCH64(jit_uni_pooling_bwd_t<sve_512, f32>)
-        CPU_INSTANCE(nchw_pooling_fwd_t<bf16>)
-        CPU_INSTANCE(nchw_pooling_bwd_t<bf16>)
-        CPU_INSTANCE(nchw_pooling_fwd_t<f32>)
-        CPU_INSTANCE(nchw_pooling_bwd_t<f32>)
-        CPU_INSTANCE(nhwc_pooling_fwd_t<bf16>)
-        CPU_INSTANCE(nhwc_pooling_bwd_t<bf16>)
-        CPU_INSTANCE(nhwc_pooling_fwd_t<f32>)
-        CPU_INSTANCE(nhwc_pooling_bwd_t<f32>)
-        CPU_INSTANCE(ref_pooling_fwd_t<f32>)
-        CPU_INSTANCE(ref_pooling_fwd_t<bf16, f32>)
-        CPU_INSTANCE(ref_pooling_bwd_t<f32>)
-        CPU_INSTANCE(ref_pooling_bwd_t<bf16>)
-        /* int */
-        CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<avx512_core>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<avx2>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<sse41>)
-        CPU_INSTANCE_AARCH64(jit_uni_i8i8_pooling_fwd_t<sve_512>)
-        CPU_INSTANCE(ref_pooling_fwd_t<s32>)
-        CPU_INSTANCE(ref_pooling_fwd_t<s8, s32>)
-        CPU_INSTANCE(ref_pooling_fwd_t<u8, s32>)
-        CPU_INSTANCE(ref_pooling_bwd_t<s32>)
-        /* eol */
-#endif //ZENDNN_ENABLE
-        nullptr,
-};
+const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
+    static const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_POOLING_P({
+        {{forward}, {
+            /* fp */
+            CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_core, bf16>)
+            CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_core, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx2, f32>)
+            CPU_INSTANCE_X64(zendnn_pooling_fwd_t<avx2, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<sse41, f32>)
+            CPU_INSTANCE_AARCH64(jit_uni_pooling_fwd_t<sve_512, f32>)
+            CPU_INSTANCE(nchw_pooling_fwd_t<bf16>)
+            CPU_INSTANCE(nchw_pooling_fwd_t<f32>)
+            CPU_INSTANCE(nhwc_pooling_fwd_t<bf16>)
+            CPU_INSTANCE(nhwc_pooling_fwd_t<f32>)
+            CPU_INSTANCE(ref_pooling_fwd_t<f32>)
+            CPU_INSTANCE(ref_pooling_fwd_t<bf16, f32>)
+            /* int */
+            CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<avx512_core>)
+            CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<avx2>)
+            CPU_INSTANCE_X64(jit_uni_i8i8_pooling_fwd_t<sse41>)
+            CPU_INSTANCE_AARCH64(jit_uni_i8i8_pooling_fwd_t<sve_512>)
+            CPU_INSTANCE(ref_pooling_fwd_t<s32>)
+            CPU_INSTANCE(ref_pooling_fwd_t<s8, s32>)
+            CPU_INSTANCE(ref_pooling_fwd_t<u8, s32>)
+            nullptr,
+        }},
+        {{backward}, REG_BWD_PK({
+            CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_core, bf16>)
+            CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_core, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx2, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx, f32>)
+            CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<sse41, f32>)
+            CPU_INSTANCE_AARCH64(jit_uni_pooling_bwd_t<sve_512, f32>)
+            CPU_INSTANCE(nchw_pooling_bwd_t<bf16>)
+            CPU_INSTANCE(nchw_pooling_bwd_t<f32>)
+            CPU_INSTANCE(nhwc_pooling_bwd_t<bf16>)
+            CPU_INSTANCE(nhwc_pooling_bwd_t<f32>)
+            CPU_INSTANCE(ref_pooling_bwd_t<f32>)
+            CPU_INSTANCE(ref_pooling_bwd_t<bf16>)
+            nullptr,
+        })},
+    });
+    return the_map;
+}
 // clang-format on
 } // namespace
 
-const pd_create_f *get_pooling_v2_impl_list(const pooling_v2_desc_t *desc) {
-    UNUSED(desc);
-    return impl_list;
+const impl_list_item_t *get_pooling_v2_impl_list(
+        const pooling_v2_desc_t *desc) {
+    static const impl_list_item_t empty_list[] = {nullptr};
+
+    const bool is_fwd = utils::one_of(
+            desc->prop_kind, forward_training, forward_inference);
+    prop_kind_t prop_kind = is_fwd ? forward : backward;
+
+    pk_impl_key_t key {prop_kind};
+
+    const auto impl_list_it = impl_list_map().find(key);
+    return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()
+                                                  : empty_list;
 }
 
 } // namespace cpu

@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 * Copyright 2020 FUJITSU LIMITED
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,6 +36,12 @@
 #include "cpu/x64/cpu_isa_traits.hpp"
 #elif ZENDNN_AARCH64
 #include "cpu/aarch64/cpu_isa_traits.hpp"
+#endif
+
+// For ZENDNN_X64 build we compute the timestamp using rdtsc. Use std::chrono for
+// other builds.
+#if !ZENDNN_X64
+#include <chrono>
 #endif
 
 namespace zendnn {
@@ -158,7 +164,16 @@ unsigned get_num_cores() {
 // order to simulate the number of cores available in such environment, this
 // function supports process affinity.
 unsigned get_max_threads_to_use() {
+    // TODO: the logic below should involve number of sockets to provide exact
+    // number of cores on 2+ socket systems.
     int num_cores_per_socket = (int)zendnn::impl::cpu::platform::get_num_cores();
+    // It may happen that XByak doesn't get num of threads identified, e.g. for
+    // AMD. In order to make threadpool working, we supply an additional
+    // condition to have some reasonable number of threads available at
+    // primitive descriptor creation time.
+    if (num_cores_per_socket == 0)
+        num_cores_per_socket = std::thread::hardware_concurrency();
+
 #if defined(_WIN32)
     DWORD_PTR proc_affinity_mask;
     DWORD_PTR sys_affinity_mask;
@@ -184,7 +199,7 @@ unsigned get_max_threads_to_use() {
 int get_vector_register_size() {
 #if ZENDNN_X64
     using namespace x64;
-    if (mayiuse(avx512_common)) return cpu_isa_traits<avx512_common>::vlen;
+    if (mayiuse(avx512_core)) return cpu_isa_traits<avx512_core>::vlen;
     if (mayiuse(avx)) return cpu_isa_traits<avx>::vlen;
     if (mayiuse(sse41)) return cpu_isa_traits<sse41>::vlen;
 #elif ZENDNN_AARCH64
@@ -193,6 +208,23 @@ int get_vector_register_size() {
     if (mayiuse(sve_512)) return cpu_isa_traits<sve_512>::vlen;
 #endif
     return 0;
+}
+
+/* The purpose of this function is to provide a very efficient timestamp
+ * calculation (used primarily for primitive cache). For ZENDNN_X64, this can be
+ * accomplished using *rdtsc* since it provides a timestamp value that (i) is
+ * independent for each core, and (ii) is synchronized across cores in multiple
+ * sockets.
+ * TODO: For now, use std::chrono::steady_clock for other builds, however
+ * another more optimized function may be called here.
+ */
+size_t get_timestamp() {
+#if ZENDNN_X64
+    return static_cast<size_t>(Xbyak::util::Clock::getRdtsc());
+#else
+    return static_cast<size_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+#endif
 }
 
 } // namespace platform

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -42,7 +42,6 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <impl::data_type_t src_type, impl::data_type_t dst_type>
 struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         using dw_conv_pd_type = cpu_convolution_fwd_pd_t;
@@ -57,45 +56,44 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             if (copy(other) != status::success) is_initialized_ = false;
         }
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit_int8_1x1:",
-                                    ((jcp_.ver == ver_vnni) ? avx512_core_vnni
-                                                            : avx512_core),
-                                    ""),
+        DECLARE_COMMON_PD_T(
+                JIT_IMPL_NAME_HELPER("jit_int8_1x1:",
+                        ((jcp_.has_vnni) ? avx512_core_vnni : avx512_core), ""),
                 jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
-            bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(src_type, data_type::s8,
-                            data_type::undef, dst_type, data_type::s32)
+                    && utils::one_of(src_md(0)->data_type, s8, u8)
+                    && weights_md(0)->data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
+                            utils::one_of(
+                                    weights_md(1)->data_type, f32, s32, s8, u8))
+                    && utils::one_of(
+                            dst_md(0)->data_type, f32, s32, s8, u8, bf16)
+                    && desc()->accum_data_type == s32
                     && attr()->has_default_values(smask_t::oscale
                                     | smask_t::zero_points_runtime
-                                    | smask_t::post_ops,
-                            dst_type)
+                                    | smask_t::post_ops | smask_t::sum_dt,
+                            dst_md(0)->data_type)
+                    && attr()->post_ops_.check_sum_consistent_dt(
+                            dst_md(0)->data_type)
                     && !has_zero_dim_memory() && zero_points_ok()
                     && set_default_formats_common(
-                            dat_tag(), format_tag::any, dat_tag());
-
+                            dat_tag(), format_tag::any, dat_tag())
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
+
             const convolution_desc_t *conv_d = desc();
             const memory_desc_t *src_d = src_md();
             rtus_prepare(this, conv_d, src_d, dst_md(), weights_md());
 
-            status_t status
-                    = jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_conf(jcp_,
-                            *conv_d, src_d, weights_md_, dst_md_, bias_md_,
-                            *attr(), zendnn_get_max_threads(), rtus_.reduce_src_);
-            if (status != status::success) return status;
-
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
+            CHECK(jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_conf(jcp_,
+                    *conv_d, src_d, weights_md_, dst_md_, bias_md_, *attr(),
+                    zendnn_get_max_threads(), rtus_.reduce_src_));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_scratchpad(
@@ -138,9 +136,8 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
         reduce_to_unit_stride_t rtus_;
         jit_conv_conf_t *jcp_dw_; // doesn't own a resource
         std::unique_ptr<cpu_convolution_fwd_pd_t> dw_conv_pd_;
-        template <data_type_t sdt, data_type_t ddt>
-        using dw_pd_t = typename jit_avx512_core_x8s8s32x_convolution_fwd_t<sdt,
-                ddt>::pd_t;
+        using dw_pd_t =
+                typename jit_avx512_core_x8s8s32x_convolution_fwd_t::pd_t;
 
     protected:
         format_tag_t dat_tag() const {
@@ -149,13 +146,12 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
         }
 
         bool zero_points_ok() const {
-            using namespace data_type;
+            // Only common zero points are supported -> mask should only be 0
             int mask_src = 0, mask_dst = 0;
             attr()->zero_points_.get(ZENDNN_ARG_SRC, nullptr, &mask_src, nullptr);
             attr()->zero_points_.get(ZENDNN_ARG_DST, nullptr, &mask_dst, nullptr);
             return attr()->zero_points_.has_default_values(ZENDNN_ARG_WEIGHTS)
-                    && utils::one_of(mask_src, 0, 0x1, 0x3)
-                    && utils::one_of(mask_dst, 0, 0x1, 0x3);
+                    && mask_src == 0 && mask_dst == 0;
         }
 
         status_t copy(const pd_t &other) {
@@ -167,34 +163,8 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
                 dw_conv_pd_.reset(static_cast<cpu_convolution_fwd_pd_t *>(
                         other.dw_conv_pd_->clone()));
                 if (!dw_conv_pd_) return status::out_of_memory;
-#define CASE(sdt, ddt) \
-    case ddt: \
-        jcp_dw_ = &( \
-                static_cast<dw_pd_t<sdt, ddt> *>(dw_conv_pd_.get())->jcp_); \
-        break;
 
-                auto dw_dst_dt = dw_conv_pd_->dst_md()->data_type;
-                if (jcp_.dst_dt == data_type::u8) {
-                    switch (dw_dst_dt) {
-                        CASE(data_type::u8, data_type::u8);
-                        CASE(data_type::u8, data_type::s8);
-                        CASE(data_type::u8, data_type::s32);
-                        CASE(data_type::u8, data_type::f32);
-                        default: assert(!"unreachable");
-                    }
-                } else if (jcp_.dst_dt == data_type::s8) {
-                    switch (dw_dst_dt) {
-                        CASE(data_type::s8, data_type::u8);
-                        CASE(data_type::s8, data_type::s8);
-                        CASE(data_type::s8, data_type::s32);
-                        CASE(data_type::s8, data_type::f32);
-                        default: assert(!"unreachable");
-                    }
-                } else {
-                    assert(!"unreachable");
-                }
-
-#undef CASE
+                jcp_dw_ = &(static_cast<dw_pd_t *>(dw_conv_pd_.get())->jcp_);
             }
             return status::success;
         }
@@ -204,7 +174,6 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             auto &jcp_1x1 = jcp_;
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
 
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);
@@ -238,36 +207,11 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             CHECK(get_depthwise_conv_desc(
                     cd_dw, src_md, attr_1x1, attr_dw, dw_po_index));
 
-            auto dw_dst_dt = cd_dw.dst_desc.data_type;
-
-#define CASE(sdt, ddt) \
-    case ddt: { \
-        std::unique_ptr<dw_pd_t<sdt, ddt>> fusable_pd( \
-                new dw_pd_t<sdt, ddt>(&cd_dw, &attr_dw, nullptr)); \
-        CHECK(fusable_pd->init(engine)); \
-        jcp_dw_ = &(fusable_pd->jcp_); \
-        dw_conv_pd_ = std::move(fusable_pd); \
-        break; \
-    }
-            if (jcp_1x1.dst_dt == data_type::u8) {
-                switch (dw_dst_dt) {
-                    CASE(data_type::u8, data_type::u8);
-                    CASE(data_type::u8, data_type::s8);
-                    CASE(data_type::u8, data_type::s32);
-                    CASE(data_type::u8, data_type::f32);
-                    default: return status::unimplemented;
-                }
-            } else if (jcp_1x1.dst_dt == data_type::s8) {
-                switch (dw_dst_dt) {
-                    CASE(data_type::s8, data_type::u8);
-                    CASE(data_type::s8, data_type::s8);
-                    CASE(data_type::s8, data_type::s32);
-                    CASE(data_type::s8, data_type::f32);
-                    default: return status::unimplemented;
-                }
-            } else
-                return status::unimplemented;
-#undef CASE
+            std::unique_ptr<dw_pd_t> fusable_pd(
+                    new dw_pd_t(&cd_dw, &attr_dw, nullptr));
+            CHECK(fusable_pd->init(engine));
+            jcp_dw_ = &(fusable_pd->jcp_);
+            dw_conv_pd_ = std::move(fusable_pd);
 
             ok = true
                     && (zendnn_memory_desc_equal(&src_md, dw_conv_pd_->src_md(0)))
@@ -321,11 +265,8 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
     jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t(const pd_t *apd)
         : primitive_t(apd) {}
 
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    // Note: In case of fused depthwise convolution, the final output datatype
-    // after fusion may not be dst_data_t.
+    // Note: In case of fused depthwise convolution, the final output data type
+    // after fusion may not be same as for dst.
     typedef typename prec_traits<data_type::s32>::type acc_data_t;
 
     status_t init(engine_t *engine) override {
@@ -341,7 +282,7 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             CHECK(kernel_dw_->create_kernel());
         }
 
-        CHECK(init_rtus_driver<avx512_common>(this));
+        CHECK(init_rtus_driver<avx512_core>(this));
         return status::success;
     }
 
@@ -351,16 +292,16 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
 
 private:
     status_t execute_forward(const exec_ctx_t &ctx) const;
-    void execute_forward_thr(const int ithr, const int nthr,
-            const src_data_t *src, const wei_data_t *weights, const char *bias,
-            const wei_data_t *weights_dw, const char *bias_dw, dst_data_t *dst,
-            const int32_t *src_zero_point, const int32_t *dst_zero_point,
+    void execute_forward_thr(const int ithr, const int nthr, const char *src,
+            const char *weights, const char *bias, const char *weights_dw,
+            const char *bias_dw, char *dst, const int32_t *src_zero_point,
+            const int32_t *dst_zero_point,
             const memory_tracking::grantor_t &scratchpad,
             const void *post_ops_binary_rhs_arg_vec,
             const void *post_ops_binary_rhs_arg_vec_dw) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     std::unique_ptr<jit_avx512_core_x8s8s32x_1x1_conv_kernel> kernel_;
-    std::unique_ptr<rtus_driver_t<avx512_common>> rtus_driver_;
+    std::unique_ptr<rtus_driver_t<avx512_core>> rtus_driver_;
     using dw_conv_kernel_t = jit_avx512_core_x8s8s32x_fwd_kernel;
     std::unique_ptr<dw_conv_kernel_t> kernel_dw_;
 };

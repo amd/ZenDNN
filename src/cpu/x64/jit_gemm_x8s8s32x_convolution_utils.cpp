@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -192,7 +192,7 @@ jit_pp_ker_t::jit_pp_ker_t(
 #define PARAM_OFF(x) offsetof(ker_args_t, x)
         const rhs_arg_static_params_t rhs_arg_static_params {helper_vmm_idx,
                 r13, r14, preserve_gpr, preserve_vmm,
-                PARAM_OFF(post_ops_binary_rhs_arg_vec),
+                PARAM_OFF(post_ops_binary_rhs_arg_vec), PARAM_OFF(dst_orig),
                 memory_desc_wrapper(pd->dst_md()), tail_size, opmask_binary,
                 use_exact_tail_scalar_bcast};
 #undef PARAM_OFF
@@ -230,7 +230,8 @@ void jit_pp_ker_t::operator()(void *void_dst, const acc_data_t *acc,
     const ptrdiff_t g_oc_offset_prologue = g_oc_offset + oc_offset;
     args.bias = bias + g_oc_offset_prologue * bias_data_type_size_;
     args.zp_src = zp.src + (jcp_.zp.src_is_common ? 0 : g_oc_offset_prologue);
-    args.zp_src_comp = zp.src_comp + g_oc_offset_prologue;
+    args.zp_src_comp
+            = zp.src_comp ? zp.src_comp + g_oc_offset_prologue : nullptr;
     args.zp_dst = zp.dst;
     args.scales = scales + jcp_.scale_idx_mult * g_oc_offset_prologue;
     args.sum_scale = sum_scale;
@@ -333,23 +334,12 @@ void jit_pp_ker_t::apply_postops(const Xbyak::Reg64 &reg_dst, const int idx) {
     if (jcp_.with_eltwise || jcp_.with_binary) {
         if (jcp_.with_binary) {
             binary_injector::rhs_arg_dynamic_params_t rhs_arg_params;
-            const auto dst_offset_reg = reg_dst;
             const auto vmm_idx = vreg_dst_idx(idx);
-            rhs_arg_params.vmm_idx_to_oc_elem_off_addr.emplace(
-                    vmm_idx, ptr[reg_param_ + PARAM_OFF(g_oc_offset)]);
-            rhs_arg_params.vmm_idx_to_oc_off_oprnd.emplace(
-                    vmm_idx, reg_g_oc_off_);
-            rhs_arg_params.vmm_idx_to_out_off_oprnd.emplace(
-                    vmm_idx, dst_offset_reg);
-            rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
-                    vmm_idx, dst_l_offset_);
-            rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
 
-            const injector_utils::register_preserve_guard_t register_guard(
-                    this, {dst_offset_reg});
-            sub(dst_offset_reg, ptr[reg_param_ + PARAM_OFF(dst_orig)]);
-            const auto size = sizeof(jcp_.dst_data_type);
-            if (size) shr(dst_offset_reg, std::log2(size));
+            rhs_arg_params.vmm_idx_to_out_reg.emplace(vmm_idx, reg_dst);
+            rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(vmm_idx,
+                    dst_l_offset_ * types::data_type_size(jcp_.dst_data_type));
+            rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
 
             postops_injector_->compute_vector(
                     vreg_dst_idx(idx), rhs_arg_params);
@@ -484,7 +474,7 @@ void jit_pp_ker_t::generate() {
 
         if (jcp_.with_sum) {
             const auto vreg_prev_dst = get_vreg_prev_dst(idx);
-            load_as_f32(vreg_prev_dst, mask_reg, dst_addr, jcp_.dst_data_type);
+            load_as_f32(vreg_prev_dst, mask_reg, dst_addr, jcp_.sum_data_type);
             vfmadd231ps(vreg_dst_masked, vreg_prev_dst, vreg_sum_scale_);
         }
 
@@ -729,20 +719,23 @@ void jit_pp_ker_t::generate() {
     if (jcp_.with_eltwise) postops_injector_->prepare_table();
 }
 
-bool mayiuse_jit_pp_kernel() noexcept {
-    return mayiuse(avx512_core);
+bool mayiuse_jit_pp_kernel(data_type_t dst_dt) noexcept {
+    const auto is_bf16_dst_dt = dst_dt == data_type::bf16;
+    return mayiuse(avx512_core) && !is_bf16_dst_dt;
 }
 
 pp_ker_t *jit_pp_ker_create(
         const convolution_pd_t *pd, const conv_gemm_conf_t &jcp) {
-    return mayiuse_jit_pp_kernel() ? new jit_pp_ker_t(pd, jcp) : nullptr;
+    return mayiuse_jit_pp_kernel(pd->dst_md()->data_type)
+            ? new jit_pp_ker_t(pd, jcp)
+            : nullptr;
 }
 
 bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_wrapper *dst_d) {
     using namespace x64::injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = false;
-    return mayiuse_jit_pp_kernel()
+    return mayiuse_jit_pp_kernel(dst_d->data_type())
             && zendnn::impl::cpu::x64::injector::post_ops_ok(
                     {avx512_core, {binary, eltwise, sum}, post_ops, dst_d,
                             sum_at_pos_0_only, sum_requires_scale_one});

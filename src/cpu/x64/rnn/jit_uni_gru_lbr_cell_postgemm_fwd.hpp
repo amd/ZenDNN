@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #ifndef CPU_X64_RNN_JIT_UNI_GRU_LBR_CELL_POSTGEMM_FWD_HPP
 #define CPU_X64_RNN_JIT_UNI_GRU_LBR_CELL_POSTGEMM_FWD_HPP
 
+#include <memory>
 #include "cpu/x64/rnn/jit_uni_rnn_common_postgemm.hpp"
 
 namespace zendnn {
@@ -34,49 +35,44 @@ template <cpu_isa_t isa, impl::data_type_t src_data_t,
 struct jit_uni_gru_lbr_cell_postgemm_fwd : public jit_uni_rnn_postgemm {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_gru_lbr_cell_postgemm_fwd)
 
-    typedef typename utils::conditional<isa == avx512_core,
-            jit_uni_eltwise_injector_f32<avx512_common>,
-            jit_uni_eltwise_injector_f32<isa>>::type injector_t;
+    using injector_t = typename utils::conditional<isa == avx512_core,
+            jit_uni_eltwise_injector_f32<avx512_core>,
+            jit_uni_eltwise_injector_f32<isa>>::type;
 
     jit_uni_gru_lbr_cell_postgemm_fwd(
             const rnn_utils::rnn_conf_t &rnn, const rnn_pd_t *pd)
         : jit_uni_rnn_postgemm(rnn, pd) {}
 
-    ~jit_uni_gru_lbr_cell_postgemm_fwd() {
-        delete sigmoid_injector_;
-        delete tanh_injector_;
-    }
-
     status_t init(data_type_t sdt) override {
         jit_uni_rnn_postgemm::init(src_data_t);
         // we use rax for both constant tables and load correspondent label
         // into it when calling correspondent injector.
-        sigmoid_injector_ = new injector_t(
+        sigmoid_injector_ = utils::make_unique<injector_t>(
                 this, alg_kind::eltwise_logistic, 0.0f, 0.0f, 1.0f, true, rax);
-        tanh_injector_ = new injector_t(
+        tanh_injector_ = utils::make_unique<injector_t>(
                 this, alg_kind::eltwise_tanh, 0.0f, 0.0f, 1.0f, true, rax);
         return create_kernel();
     }
 
 protected:
-    injector_t *sigmoid_injector_;
-    injector_t *tanh_injector_;
+    std::unique_ptr<injector_t> sigmoid_injector_;
+    std::unique_ptr<injector_t> tanh_injector_;
 
     // register size in bytes
     using Vmm = typename jit_uni_eltwise_injector_f32<isa>::Vmm;
-    size_t vlen = cpu_isa_traits<isa>::vlen;
+    static constexpr size_t vlen = cpu_isa_traits<isa>::vlen;
 
-    size_t vlen_dst
+    const size_t vlen_dst
             = vlen / (sizeof(float) / types::data_type_size(src_data_t));
-    size_t hstate_dt_size = types::data_type_size(src_data_t);
-    size_t scratch_dt_size = types::data_type_size(scratch_data_t);
-    size_t gate_dt_size = types::data_type_size(src_data_t);
-    size_t bias_dt_size = sizeof(float);
+    const size_t vlen_bias_ = vlen / (sizeof(float) / bias_dt_size_);
+    const size_t hstate_dt_size = types::data_type_size(src_data_t);
+    const size_t scratch_dt_size = types::data_type_size(scratch_data_t);
+    const size_t gate_dt_size = types::data_type_size(src_data_t);
 
     void generate() override {
         using namespace Xbyak;
 
-        auto is_training
+        const auto is_training
                 = (pd_->desc()->prop_kind == prop_kind::forward_training);
 
         // Labels declaration
@@ -86,57 +82,57 @@ protected:
         Label table_label;
 
         // Register map
-        Reg64 loop_cnt(r10); // loop counter
-        Reg64 table_reg(rbx); // table is used for data scale and shifts
+        const Reg64 loop_cnt(r10); // loop counter
+        const Reg64 table_reg(rbx); // table is used for data scale and shifts
 
         // We skip vmm0 as it can be used by the injector for masks on sse4.1
-        Vmm G0(1), G1(2), G2(3), tmp1_vmm(5), tmp2_vmm(6);
+        const Vmm G0(1), G1(2), G2(3), tmp1_vmm(5), tmp2_vmm(6);
 
         // constant table map
-        Address one_addr = ptr[table_reg];
+        const Address one_addr = ptr[table_reg];
 
         // We start code generations here
         preamble();
 
         // extract addresses passed as parameter
-        auto addr_ws_gates_reg = abi_param1;
-        auto addr_scratch_gates_reg = abi_param2;
-        auto addr_bias_reg = abi_param3;
-        auto addr_states_t_l_reg = abi_param4;
+        const auto addr_ws_gates_reg = abi_param1;
+        const auto addr_scratch_gates_reg = abi_param2;
+        const auto addr_bias_reg = abi_param3;
+        const auto addr_states_t_l_reg = abi_param4;
 #ifdef _WIN32
-        auto addr_states_t_l_copy_reg = r11;
-        auto addr_states_tm1_l_reg = r12;
-        auto addr_scratch_cell_reg = rsi;
-        auto addr_ws_h_reg = rdi;
+        const auto addr_states_t_l_copy_reg = r11;
+        const auto addr_states_tm1_l_reg = r12;
+        const auto addr_scratch_cell_reg = rsi;
+        const auto addr_ws_h_reg = rdi;
         // Here we cannot use rbp to have initial stack pointer so we
         // use rsp and offset it with the size of pushed registers in
         // preamble
-        auto base_args = get_stack_params_address();
+        const auto base_args = get_stack_params_address();
         mov(addr_states_t_l_copy_reg, ptr[base_args]);
         mov(addr_states_tm1_l_reg, ptr[base_args + 8]);
         mov(addr_scratch_cell_reg, ptr[base_args + 16]);
         mov(addr_ws_h_reg, ptr[base_args + 24]);
 #else
-        auto addr_states_t_l_copy_reg = abi_param5;
-        auto addr_states_tm1_l_reg = abi_param6;
-        auto addr_scratch_cell_reg = r11;
-        auto addr_ws_h_reg = r12;
-        auto base_args = get_stack_params_address();
+        const auto addr_states_t_l_copy_reg = abi_param5;
+        const auto addr_states_tm1_l_reg = abi_param6;
+        const auto addr_scratch_cell_reg = r11;
+        const auto addr_ws_h_reg = r12;
+        const auto base_args = get_stack_params_address();
         mov(addr_scratch_cell_reg, ptr[base_args]);
         mov(addr_ws_h_reg, ptr[base_args + 8]);
 #endif
 
         // helper lambda to address the gates and biases
-        auto sg_addr = [&](int i) {
+        const auto sg_addr = [&](int i) {
             return ptr[addr_scratch_gates_reg + i * rnn_.dhc * scratch_dt_size];
         };
-        auto wg_addr = [&](int i) {
+        const auto wg_addr = [&](int i) {
             return ptr[addr_ws_gates_reg + i * rnn_.dhc * gate_dt_size];
         };
-        auto B_addr = [&](int i) {
-            return ptr[addr_bias_reg + i * rnn_.dhc * bias_dt_size];
+        const auto B_addr = [&](int i) {
+            return ptr[addr_bias_reg + i * rnn_.dhc * bias_dt_size_];
         };
-        auto sc_addr = [&](int i) {
+        const auto sc_addr = [&](int i) {
             return ptr[addr_scratch_cell_reg + i * rnn_.dhc * scratch_dt_size];
         };
 
@@ -152,61 +148,61 @@ protected:
         {
             // Compute gate 0
             uni_vmovups(G0, sg_addr(0));
-            uni_vmovups(tmp1_vmm, B_addr(0));
+            to_float(tmp1_vmm, B_addr(0), rnn_.bias_dt, vlen);
             uni_vaddps(G0, G0, tmp1_vmm);
             uni_vmovups(tmp1_vmm, sc_addr(0));
             uni_vaddps(G0, G0, tmp1_vmm);
             sigmoid_injector_->load_table_addr();
             sigmoid_injector_->compute_vector(G0.getIdx());
             // if training we write back the gates
-            if (is_training) to_src<src_data_t>(wg_addr(0), G0, vlen);
+            if (is_training) to_src(wg_addr(0), G0, src_data_t, vlen);
 
             // Compute gate 1
             uni_vmovups(G1, sg_addr(1));
-            uni_vmovups(tmp1_vmm, B_addr(1));
+            to_float(tmp1_vmm, B_addr(1), rnn_.bias_dt, vlen);
             uni_vaddps(G1, G1, tmp1_vmm);
             uni_vmovups(tmp1_vmm, sc_addr(1));
             uni_vaddps(G1, G1, tmp1_vmm);
             sigmoid_injector_->load_table_addr();
             sigmoid_injector_->compute_vector(G1.getIdx());
             // if training we write back the gates
-            if (is_training) to_src<src_data_t>(wg_addr(1), G1, vlen);
+            if (is_training) to_src(wg_addr(1), G1, src_data_t, vlen);
 
             // compute last gate
-            auto wh_b_addr = sc_addr(2);
-            auto ws_h_addr = ptr[addr_ws_h_reg];
+            const auto wh_b_addr = sc_addr(2);
+            const auto ws_h_addr = ptr[addr_ws_h_reg];
             uni_vmovups(tmp1_vmm, wh_b_addr);
-            uni_vmovups(tmp2_vmm, B_addr(3));
+            to_float(tmp2_vmm, B_addr(3), rnn_.bias_dt, vlen);
             uni_vaddps(tmp1_vmm, tmp1_vmm, tmp2_vmm);
-            if (is_training) to_src<src_data_t>(ws_h_addr, tmp1_vmm, vlen);
+            if (is_training) to_src(ws_h_addr, tmp1_vmm, src_data_t, vlen);
             uni_vmovups(G2, sg_addr(2));
-            uni_vmovups(tmp2_vmm, B_addr(2));
+            to_float(tmp2_vmm, B_addr(2), rnn_.bias_dt, vlen);
             uni_vaddps(G2, G2, tmp2_vmm);
             uni_vfmadd231ps(G2, G1, tmp1_vmm);
             tanh_injector_->load_table_addr();
             tanh_injector_->compute_vector(G2.getIdx());
             // if training we write back the gates
-            if (is_training) to_src<src_data_t>(wg_addr(2), G2, vlen);
+            if (is_training) to_src(wg_addr(2), G2, src_data_t, vlen);
 
             // states_t_l = states_tm1_l * G0 + (1 - G0) * G2
             uni_vmovups(tmp1_vmm, one_addr);
             uni_vsubps(tmp1_vmm, tmp1_vmm, G0);
-            to_float<src_data_t>(tmp2_vmm, ptr[addr_states_tm1_l_reg], vlen);
+            to_float(tmp2_vmm, ptr[addr_states_tm1_l_reg], src_data_t, vlen);
             uni_vmulps(G0, G0, tmp2_vmm);
             uni_vfmadd231ps(G0, tmp1_vmm, G2);
 
             // write back the result
-            to_src<src_data_t>(ptr[addr_states_t_l_reg], G0, vlen);
+            to_src(ptr[addr_states_t_l_reg], G0, src_data_t, vlen);
             // if states_t_l_copy is a non null ptr, we write the output to it too
             cmp(addr_states_t_l_copy_reg, rnn_.dhc * hstate_dt_size);
             jle(vector_loop_inc_regs);
-            to_src<src_data_t>(ptr[addr_states_t_l_copy_reg], G0, vlen, true);
+            to_src(ptr[addr_states_t_l_copy_reg], G0, src_data_t, vlen, true);
 
             // increment address pointers
             L(vector_loop_inc_regs);
             add(addr_scratch_gates_reg, vlen);
             add(addr_ws_h_reg, vlen_dst);
-            add(addr_bias_reg, vlen);
+            add(addr_bias_reg, vlen_bias_);
             add(addr_states_t_l_reg, vlen_dst);
             add(addr_states_t_l_copy_reg, vlen_dst);
             add(addr_states_tm1_l_reg, vlen_dst);
@@ -227,66 +223,71 @@ protected:
         L(rem_loop_start_label);
         {
             // remaping registers to Xmms
-            Xmm G0s(G0.getIdx()), G1s(G1.getIdx()), G2s(G2.getIdx());
-            Xmm tmp1s_vmm(tmp1_vmm.getIdx()), tmp2s_vmm(tmp2_vmm.getIdx());
+            const Xmm G0s(G0.getIdx()), G1s(G1.getIdx()), G2s(G2.getIdx());
+            const Xmm tmp1s_vmm(tmp1_vmm.getIdx()),
+                    tmp2s_vmm(tmp2_vmm.getIdx());
 
             // Compute gate 0
             uni_vmovss(G0s, sg_addr(0));
-            uni_vaddss(G0s, G0s, B_addr(0));
+            to_float(tmp1s_vmm, B_addr(0), rnn_.bias_dt, sizeof(float));
+            uni_vaddss(G0s, G0s, tmp1s_vmm);
             uni_vaddss(G0s, G0s, sc_addr(0));
             sigmoid_injector_->load_table_addr();
             sigmoid_injector_->compute_vector(G0s.getIdx());
             // if training we write back the gates
             if (is_training)
-                to_src<src_data_t>(wg_addr(0), G0, scratch_dt_size);
+                to_src(wg_addr(0), G0, src_data_t, scratch_dt_size);
 
             // Compute gate 1
             uni_vmovss(G1s, sg_addr(1));
-            uni_vaddss(G1s, G1s, B_addr(1));
+            to_float(tmp1s_vmm, B_addr(1), rnn_.bias_dt, sizeof(float));
+            uni_vaddss(G1s, G1s, tmp1s_vmm);
             uni_vaddss(G1s, G1s, sc_addr(1));
             sigmoid_injector_->load_table_addr();
             sigmoid_injector_->compute_vector(G1s.getIdx());
             // if training we write back the gates
             if (is_training)
-                to_src<src_data_t>(wg_addr(1), G1, scratch_dt_size);
+                to_src(wg_addr(1), G1, src_data_t, scratch_dt_size);
 
             // compute last gate
-            auto wh_b_addr = sc_addr(2);
-            auto ws_h_addr = ptr[addr_ws_h_reg];
+            const auto wh_b_addr = sc_addr(2);
+            const auto ws_h_addr = ptr[addr_ws_h_reg];
             uni_vmovss(tmp1s_vmm, wh_b_addr);
-            uni_vaddss(tmp1s_vmm, tmp1s_vmm, B_addr(3));
+            to_float(tmp2s_vmm, B_addr(3), rnn_.bias_dt, sizeof(float));
+            uni_vaddss(tmp1s_vmm, tmp1s_vmm, tmp2s_vmm);
             if (is_training)
-                to_src<src_data_t>(ws_h_addr, tmp1_vmm, scratch_dt_size);
+                to_src(ws_h_addr, tmp1_vmm, src_data_t, scratch_dt_size);
             uni_vmovss(G2s, sg_addr(2));
-            uni_vaddss(G2s, G2s, B_addr(2));
+            to_float(tmp2s_vmm, B_addr(2), rnn_.bias_dt, sizeof(float));
+            uni_vaddss(G2s, G2s, tmp2s_vmm);
             uni_vfmadd231ss(G2s, G1s, tmp1s_vmm);
             tanh_injector_->load_table_addr();
             tanh_injector_->compute_vector(G2s.getIdx());
             // if training we write back the gates
             if (is_training)
-                to_src<src_data_t>(wg_addr(2), G2, scratch_dt_size);
+                to_src(wg_addr(2), G2, src_data_t, scratch_dt_size);
 
             // states_t_l = states_tm1_l * G0 + (1 - G0) * G2
             uni_vmovss(tmp1s_vmm, one_addr);
             uni_vsubss(tmp1s_vmm, tmp1s_vmm, G0s);
-            to_float<src_data_t>(
-                    tmp2s_vmm, ptr[addr_states_tm1_l_reg], scratch_dt_size);
+            to_float(tmp2s_vmm, ptr[addr_states_tm1_l_reg], src_data_t,
+                    scratch_dt_size);
             uni_vmulss(G0s, G0s, tmp2s_vmm);
             uni_vfmadd231ss(G0s, tmp1s_vmm, G2s);
 
             // write back the result
-            to_src<src_data_t>(ptr[addr_states_t_l_reg], G0, scratch_dt_size);
+            to_src(ptr[addr_states_t_l_reg], G0, src_data_t, scratch_dt_size);
             // if states_t_l_copy is a non null ptr, we write the output to it too
             cmp(addr_states_t_l_copy_reg, rnn_.dhc * hstate_dt_size);
             jle(rem_loop_inc_regs);
-            to_src<src_data_t>(
-                    ptr[addr_states_t_l_copy_reg], G0, scratch_dt_size, true);
+            to_src(ptr[addr_states_t_l_copy_reg], G0, src_data_t,
+                    scratch_dt_size, true);
 
             // increment address pointers
             L(rem_loop_inc_regs);
             add(addr_scratch_gates_reg, scratch_dt_size);
             add(addr_ws_h_reg, gate_dt_size);
-            add(addr_bias_reg, bias_dt_size);
+            add(addr_bias_reg, bias_dt_size_);
             add(addr_states_t_l_reg, hstate_dt_size);
             add(addr_states_t_l_copy_reg, hstate_dt_size);
             add(addr_states_tm1_l_reg, hstate_dt_size);

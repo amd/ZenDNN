@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -47,6 +47,8 @@ struct zendnn_f32_matmul_t : public primitive_t {
         status_t init(engine_t *engine);
         const gemm_based::params_t &params() const { return params_; }
 
+        int nthr_; // To not exceed the limit in execute used for set up.
+
     private:
         status_t check_and_configure_attributes();
         gemm_based::params_t params_;
@@ -56,10 +58,12 @@ struct zendnn_f32_matmul_t : public primitive_t {
 
     status_t init(engine_t *engine) override {
         if (pd()->params().has_pp_kernel_) {
+            const int nthr = pd()->nthr_;
             CHECK(safe_ptr_assign(pp_kernel_,
-                        pp_kernel_t::create(pd()->N(), pd()->M(), pd()->ldc(),
-                            &pd()->params().pp_attr_,
-                            pd()->desc()->bias_desc.data_type, pd()->dst_md(),
+                        inner_product_utils::pp_kernel_t::create(pd()->N(),
+                            pd()->M(), pd()->ldc(), &pd()->params().pp_attr_,
+                            pd()->desc()->bias_desc.data_type,
+                            pd()->desc()->accum_data_type, pd()->dst_md(),
                             false)));
             return pp_kernel_->create_kernel();
         }
@@ -85,8 +89,7 @@ private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     status_t execute_ref(const exec_ctx_t &ctx) const;
 
-    using pp_kernel_t = inner_product_utils::pp_kernel_t<acc_type, dst_type>;
-    std::unique_ptr<pp_kernel_t> pp_kernel_;
+    std::unique_ptr<inner_product_utils::pp_kernel_t> pp_kernel_;
 };
 
 } // namespace matmul

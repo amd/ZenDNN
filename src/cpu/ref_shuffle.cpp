@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -126,7 +126,7 @@ status_t ref_shuffle_t::execute_(const exec_ctx_t &ctx) const {
         const dim_t dim = axis_size * inner_size;
 
         parallel_nd(outer_size, axis_size, inner_size,
-                [&](dim_t ou, int a, dim_t in) {
+                [&](dim_t ou, dim_t a, dim_t in) {
                     const dim_t off = ou * dim + in;
                     auto &o = output[data_d.off_l(off + a * inner_size)];
                     o = input[data_d.off_l(

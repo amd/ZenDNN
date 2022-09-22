@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
- * Copyright 2020 Intel Corporation
+ * Copyright 2020-2021 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,8 @@
 #include <windows.h>
 #endif
 
-#if defined __linux__ || defined __APPLE__ || defined __FreeBSD__
+#if defined __unix__ || defined __APPLE__ || defined __FreeBSD__ \
+        || defined __Fuchsia__
 #include <unistd.h>
 #include <sys/mman.h>
 #endif

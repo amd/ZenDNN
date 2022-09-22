@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
+
 #include "cpu/x64/prelu/jit_prelu_reduction_kernel.hpp"
 #include "common/nstl.hpp"
+#include "cpu/x64/prelu/jit_prelu_utils.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -35,15 +37,17 @@ static dim_t get_C(const cpu_prelu_bwd_pd_t *pd) {
 
 jit_prelu_reduction_kernel_t::jit_prelu_reduction_kernel_t(
         const cpu_prelu_bwd_pd_t *pd, int simd_w)
-    : simd_w_(simd_w)
-    , scratchpad_c_block_offset_(
-              utils::rnd_up(get_C(pd), alignment) * sizeof(float))
+    : scratchpad_c_block_offset_(
+            utils::rnd_up(get_C(pd), alignment) * sizeof(float))
+    , simd_w_(simd_w)
     , data_type_(pd->diff_weights_md(0)->data_type)
-    , tail_size_(get_C(pd) % simd_w_) {}
+    , tail_size_(get_C(pd) % simd_w)
+    , tail_block_size_(prelu::get_block_tail_size(pd->diff_weights_md(0)))
+    , c_blk_nelems_(prelu::c_blk_nelems(pd->diff_weights_md(0), false)) {}
 
 #define PARAM_OFF(x) offsetof(call_params_t, x)
 
-size_t jit_prelu_reduction_kernel_t::simd_w() {
+size_t jit_prelu_reduction_kernel_t::simd_w() const {
     return simd_w_;
 }
 
@@ -53,6 +57,7 @@ void jit_prelu_reduction_kernel_t::load_kernel_call_params() {
             ptr[abi_param1 + PARAM_OFF(weights_diff_scratch)]);
     mov(reg_weights_diff_, ptr[abi_param1 + PARAM_OFF(weights_diff)]);
     mov(reg_tail_, byte[abi_param1 + PARAM_OFF(tail)]);
+    mov(reg_last_c_blk_byte_, byte[abi_param1 + PARAM_OFF(is_last_c_blk)]);
 }
 
 #undef PARAM_OFF
@@ -136,8 +141,12 @@ jit_uni_prelu_reduction_kernel_t<Vmm>::jit_uni_prelu_reduction_kernel_t(
               tail_size_ && utils::one_of(isa, avx, avx2) ? reserve_vmm() : 0)
     , saturation_lower_bound_(saturation_needed_ ? reserve_vmm() : 0)
     , saturation_upper_bound_(saturation_needed_ ? reserve_vmm() : 0)
-    , io_(this, isa, data_type_, tail_size_, tail_opmask_, tail_vmm_mask_,
-              saturation_lower_bound_, saturation_upper_bound_, reg_tmp_) {}
+    , io_(this, isa_, data_type_, {},
+              io::io_tail_conf_t {simd_w_, tail_size_, tail_opmask_,
+                      tail_vmm_mask_.getIdx(), reg_tmp_},
+              io::io_emu_bf16_conf_t {},
+              io::io_saturation_conf_t {saturation_lower_bound_.getIdx(),
+                      saturation_upper_bound_.getIdx(), reg_tmp_}) {}
 
 template <typename Vmm>
 size_t jit_uni_prelu_reduction_kernel_t<Vmm>::get_unrolling_factor(
@@ -156,6 +165,15 @@ size_t jit_uni_prelu_reduction_kernel_t<Vmm>::get_unrolling_factor(
 template <typename Vmm>
 void jit_uni_prelu_reduction_kernel_t<Vmm>::finalize(bool tail) {
     io_.store(accumulator_, ptr[reg_weights_diff_], tail);
+
+    if (!tail_block_size_) return;
+    Xbyak::Label end;
+    cmp(reg_last_c_blk_byte_, 1);
+    jne(end, T_NEAR);
+    const auto base_off = (c_blk_nelems_ % simd_w_) ? tail_size_ : simd_w_;
+    prelu::apply_zero_padding(this, base_off, data_type_, tail_block_size_,
+            reg_weights_diff_, nullptr);
+    L(end);
 }
 
 template <typename Vmm>
@@ -163,6 +181,7 @@ void jit_uni_prelu_reduction_kernel_t<Vmm>::prepare_kernel_const_vars(
         bool tail) {
     uni_vxorps(accumulator_, accumulator_, accumulator_);
 
+    io_.init_bf16();
     if (tail) io_.prepare_tail_mask();
     if (saturation_needed_) io_.init_saturate_f32();
 }
@@ -186,7 +205,7 @@ jit_prelu_reduction_kernel_t *jit_prelu_reduction_kernel_t::create(
 
     const auto isa = prelu::get_supported_isa();
 
-    if (is_superset(isa, avx512_common))
+    if (is_superset(isa, avx512_core))
         return new jit_uni_prelu_reduction_kernel_t<Xbyak::Zmm>(pd, isa);
     else if (is_superset(isa, avx))
         if (isa == avx && prelu::is_s8u8({pd->diff_weights_md(0)->data_type}))

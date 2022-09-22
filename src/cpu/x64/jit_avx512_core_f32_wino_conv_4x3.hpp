@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -130,29 +130,26 @@ struct jit_avx512_core_f32_wino_conv_4x3_fwd_t
                 jit_avx512_core_f32_wino_conv_4x3_fwd_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            using namespace data_type;
+            bool ok = is_fwd()
                     && utils::one_of(desc()->alg_kind,
                             alg_kind::convolution_auto,
                             alg_kind::convolution_winograd)
-                    && expect_data_types(data_type::f32, data_type::f32,
-                            data_type::f32, data_type::f32, data_type::f32)
+                    && expect_data_types(f32, f32, f32, f32, f32)
                     && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::post_ops,
-                            data_type::f32)
-                    && set_default_formats();
+                            primitive_attr_t::skip_mask_t::post_ops, f32)
+                    && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
-            status_t status
-                    = jit_avx512_core_f32_wino_conv_4x3_fwd_kernel::init_conf(
-                            jcp_, *desc(), src_md_, weights_md_, dst_md_,
-                            *attr());
-            if (status != status::success) return status;
+            CHECK(jit_avx512_core_f32_wino_conv_4x3_fwd_kernel::init_conf(
+                    jcp_, *desc(), src_md_, weights_md_, dst_md_, *attr()));
             set_default_alg_kind(alg_kind::convolution_winograd);
 
             auto scratchpad = scratchpad_registry().registrar();
             winograd_avx512_core::init_scratchpad(scratchpad, jcp_);
 
-            return status;
+            return status::success;
         }
 
         jit_conv_winograd_conf_t jcp_;

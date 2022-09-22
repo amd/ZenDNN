@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -20,6 +20,7 @@
 *******************************************************************************/
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 
 #include "common/zendnn_thread.hpp"
@@ -144,8 +145,8 @@ struct xbyak_gemm_smalln_tn_t : public jit_generator {
                 ptr[rsp + tempzmm_offset + 64 * 7]};
 
         int numMREM = (numN == 1) ? 16 : 8;
-        Label label_mremT[17], label_kremT[16], label_k_loopT[16],
-                label_no_k_remT[16];
+        std::vector<Label> label_mremT(17), label_kremT(16), label_k_loopT(16),
+                label_no_k_remT(16);
 
         zmm_reg = zmmreg;
         TEMPZMM = TEMPZMM_;
@@ -728,16 +729,16 @@ zendnn_status_t sgemm_smalln_tn(const dim_t m, const dim_t n, const dim_t k,
         const dim_t ldb, const float beta, float *C, const dim_t ldc) {
     using namespace avx512_core_gemm_smalln_tn_f32;
 
-    static xbyak_gemm_smalln_tn_t *kernels[4][3][3];
+    static std::unique_ptr<xbyak_gemm_smalln_tn_t> kernels[4][3][3];
     static std::once_flag initialized;
 
-    zendnn_status_t st = zendnn_success;
+    static zendnn_status_t st = zendnn_success;
     std::call_once(initialized, [&] {
         for (dim_t N : {1, 2, 3, 4}) {
             for (float al : {0.0f, 1.0f, 2.0f}) {
                 for (float be : {0.0f, 1.0f, 2.0f}) {
                     auto &kern = kernels[N - 1][(dim_t)al][(dim_t)be];
-                    kern = new xbyak_gemm_smalln_tn_t(N, be, al);
+                    kern.reset(new xbyak_gemm_smalln_tn_t(N, be, al));
                     st = kern->create_kernel();
                     if (st != zendnn_success) return;
                 }

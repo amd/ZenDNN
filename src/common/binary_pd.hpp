@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -38,16 +38,6 @@ struct binary_pd_t : public primitive_desc_t {
 
     typedef binary_pd_t base_class;
     typedef binary_pd_t hint_class;
-
-    binary_pd_t(const binary_desc_t *adesc, const primitive_attr_t *attr,
-            const binary_pd_t *hint_fwd_pd)
-        : primitive_desc_t(attr, base_pkind)
-        , desc_(*adesc)
-        , src0_md_(desc_.src_desc[0])
-        , src1_md_(desc_.src_desc[1])
-        , dst_md_(desc_.dst_desc) {
-        init_broadcast_dims();
-    }
 
     const binary_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
@@ -118,6 +108,16 @@ protected:
     memory_desc_t dst_md_;
 
     dims_t broadcast_dims_;
+
+    binary_pd_t(const binary_desc_t *adesc, const primitive_attr_t *attr,
+            const binary_pd_t *hint_fwd_pd)
+        : primitive_desc_t(attr, base_pkind)
+        , desc_(*adesc)
+        , src0_md_(desc_.src_desc[0])
+        , src1_md_(desc_.src_desc[1])
+        , dst_md_(desc_.dst_desc) {
+        init_broadcast_dims();
+    }
 
     status_t set_default_params() {
         if (dst_md_.format_kind != format_kind::any) return status::success;

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ jit_sse41_1x1_conv_kernel_f32::jit_sse41_1x1_conv_kernel_f32(
 
         const binary_injector::rhs_arg_static_params_t rhs_arg_static_params {
                 helper_vmm_idx, r13, r14, preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md), tail_size,
                 use_exact_tail_scalar_bcast};
         const binary_injector::static_params_t static_params {
@@ -117,7 +117,7 @@ void jit_sse41_1x1_conv_kernel_f32::generate_bcast_loop(int load_loop_blk) {
 }
 
 size_t jit_sse41_1x1_conv_kernel_f32::get_fwd_output_ptr_l_off(
-        int i, int j, int n) {
+        int i, int j, int n) const {
     return i * get_output_i_offset(jcp) + j * get_output_j_offset(jcp) + n * 4;
 }
 
@@ -138,32 +138,25 @@ void jit_sse41_1x1_conv_kernel_f32::apply_postops(
     injector_utils::vmm_index_set_t vmm_idxs;
     if (jcp.with_binary) {
         binary_injector::rhs_arg_dynamic_params_t rhs_arg_params;
-        const auto oc_off_oprnd = r12;
         iterate(load_loop_blk, ur, [&](const int i, const int j, const int n) {
             const bool mask_flag = (2 * i + n) == load_loop_blk - 1;
-            const int aux_output_offset = get_fwd_output_ptr_l_off(i, j, n);
+            const size_t aux_output_offset
+                    = get_fwd_output_ptr_l_off(i, j, n) * sizeof(float);
             const auto vmm_idx = reg_accum_idx(load_loop_blk, i, j, n);
             vmm_idxs.emplace(vmm_idx);
 
-            rhs_arg_params.vmm_idx_to_oc_elem_off_addr.emplace(
-                    vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-            rhs_arg_params.vmm_idx_to_oc_elem_off_val.emplace(
-                    vmm_idx, (2 * i + n) * jcp.load_block / 2);
-            rhs_arg_params.vmm_idx_to_oc_off_oprnd.emplace(
-                    vmm_idx, oc_off_oprnd);
+            rhs_arg_params.vmm_idx_to_out_reg.emplace(
+                    vmm_idx, aux_reg_output_data);
             rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
                     vmm_idx, aux_output_offset);
             if (mask_flag) rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
         });
         const injector_utils::register_preserve_guard_t register_guard(
-                this, {abi_param1, oc_off_oprnd});
+                this, {abi_param1});
         const size_t reg_guard_stack_occupied
                 = register_guard.stack_space_occupied();
         mov(abi_param1,
                 ptr[rsp + reg_abi_param1_backup + reg_guard_stack_occupied]);
-        mov(oc_off_oprnd,
-                ptr[rsp + reg_binary_post_op_acc_off
-                        + reg_guard_stack_occupied]);
 
         postops_injector_->compute_vector_range(vmm_idxs, rhs_arg_params);
     } else {
@@ -618,8 +611,10 @@ status_t jit_sse41_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({sse41, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero});
     if (!post_ops_ok_) return status::unimplemented;
 
     const auto dat_tag_nxc = utils::pick(ndims - 3, nwc, nhwc);

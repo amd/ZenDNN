@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@
 
 #include <atomic>
 #include <cassert>
+#include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -168,11 +170,11 @@ std::unique_ptr<T> make_unique(Args &&... args) {
 }
 
 template <typename T, typename P>
-inline bool everyone_is(T val, P item) {
+constexpr bool everyone_is(T val, P item) {
     return val == item;
 }
 template <typename T, typename P, typename... Args>
-inline bool everyone_is(T val, P item, Args... item_others) {
+constexpr bool everyone_is(T val, P item, Args... item_others) {
     return val == item && everyone_is(val, item_others...);
 }
 
@@ -195,7 +197,7 @@ constexpr P map(T pat, P def, T item, P ival, Args... item_others) {
 }
 
 template <typename... Args>
-inline bool any_null(Args... ptrs) {
+constexpr bool any_null(Args... ptrs) {
     return one_of(nullptr, ptrs...);
 }
 
@@ -226,13 +228,13 @@ constexpr int product_impl(const T *arr, int2type<0>) {
 }
 
 template <typename T, size_t num>
-inline T product_impl(const T *arr, int2type<num>) {
+constexpr T product_impl(const T *arr, int2type<num>) {
     return arr[0] * product_impl(arr + 1, int2type<num - 1>());
 }
 } // namespace product_impl
 
 template <size_t num, typename T>
-inline T array_product(const T *arr) {
+constexpr T array_product(const T *arr) {
     return product_impl::product_impl(arr, product_impl::int2type<num - 1>());
 }
 
@@ -250,6 +252,10 @@ inline R array_min(const T *arr, size_t size) {
     for (size_t i = 0; i < size; ++i)
         min = std::min(min, arr[i]);
     return min;
+}
+
+inline bool equal_with_nan(float v1, float v2) {
+    return (v1 == v2) || (std::isnan(v1) && std::isnan(v2));
 }
 
 /* Sorts an array of @p vals using @p comparator. Uses @p vals_2nd_level as a
@@ -284,7 +290,7 @@ inline void simultaneous_sort(
 }
 
 template <typename T>
-inline const T &saturate(const T &low, const T &upper, const T &a) {
+constexpr const T &saturate(const T &low, const T &upper, const T &a) {
     return nstl::max(low, nstl::min(upper, a));
 }
 
@@ -300,8 +306,27 @@ inline typename remove_reference<T>::type rnd_up(const T a, const U b) {
 }
 
 template <typename T, typename U>
-inline typename remove_reference<T>::type rnd_dn(const T a, const U b) {
+constexpr typename remove_reference<T>::type rnd_dn(const T a, const U b) {
     return static_cast<typename remove_reference<T>::type>((a / b) * b);
+}
+
+template <typename T>
+inline typename remove_reference<T>::type rnd_up_pow2(const T a) {
+    using R = typename remove_reference<T>::type;
+    if (a <= 0)
+        return static_cast<R>(1);
+    else {
+        T b = a - 1;
+        for (size_t v = 1; v < sizeof(T) * CHAR_BIT; v <<= 1)
+            b |= (b >> v);
+        return static_cast<R>(b + 1);
+    }
+}
+
+template <typename T>
+inline typename remove_reference<T>::type rnd_down_pow2(const T a) {
+    auto ret = rnd_up_pow2(a);
+    return ret == a ? ret : ret / 2;
 }
 
 template <typename T, typename U>
@@ -312,6 +337,11 @@ inline typename remove_reference<T>::type max_div(const T a, const U b) {
         div--;
     }
     return static_cast<typename remove_reference<T>::type>(div);
+}
+
+template <typename T>
+inline typename remove_reference<T>::type max_pow2_div(const T a) {
+    return static_cast<typename remove_reference<T>::type>(((a - 1) & ~a) + 1);
 }
 
 template <typename T>
@@ -384,11 +414,11 @@ inline bool nd_iterator_jump(
 }
 
 template <typename T>
-inline T pick(size_t i, const T &x0) {
+constexpr T pick(size_t i, const T &x0) {
     return x0;
 }
 template <typename T, typename... Args>
-inline T pick(size_t i, const T &x0, Args &&... args) {
+constexpr T pick(size_t i, const T &x0, Args &&... args) {
     return i == 0 ? x0 : pick(i - 1, utils::forward<Args>(args)...);
 }
 
@@ -417,26 +447,31 @@ struct array_offset_calculator {
     array_offset_calculator(Telem *base, Targs... Fargs) : _dims {Fargs...} {
         _base_ptr = base;
     }
+
     template <typename... Targs>
-    inline Telem &operator()(Targs... Fargs) {
+    array_offset_calculator(std::nullptr_t, Targs... Fargs) = delete;
+
+    template <typename... Targs>
+    inline Telem &operator()(Targs... Fargs) const {
+        assert(static_cast<bool>(_base_ptr));
         return *(_base_ptr + _offset(1, Fargs...));
     }
 
 private:
     template <typename... Targs>
-    inline size_t _offset(size_t const dimension, size_t element) {
+    inline size_t _offset(size_t const dimension, size_t element) const {
         return element;
     }
 
     template <typename... Targs>
     inline size_t _offset(
-            size_t const dimension, size_t theta, size_t element) {
+            size_t const dimension, size_t theta, size_t element) const {
         return element + (_dims[dimension] * theta);
     }
 
     template <typename... Targs>
     inline size_t _offset(size_t const dimension, size_t theta, size_t element,
-            Targs... Fargs) {
+            Targs... Fargs) const {
         size_t t_prime = element + (_dims[dimension] * theta);
         return _offset(dimension + 1, t_prime, Fargs...);
     }
@@ -496,10 +531,14 @@ inline void l_dims_by_l_offset(
     }
 }
 
-inline int get_dims_mask(const dims_t dims1, const dims_t dims2, int ndims) {
+inline int get_dims_mask(const dims_t dims1, const dims_t dims2, int ndims,
+        bool skip_dim_of_one = false) {
     int mask = 0;
-    for (int d = 0; d < ndims; ++d)
-        mask += dims1[d] == dims2[d] ? (1 << d) : 0;
+    for (int d = 0; d < ndims; ++d) {
+        // Disable mask_bit for dimensions of `1` by request.
+        int mask_bit = skip_dim_of_one && dims1[d] == 1 ? 0 : (1 << d);
+        mask += dims1[d] == dims2[d] ? mask_bit : 0;
+    }
     return mask;
 };
 
@@ -549,13 +588,31 @@ inline void yield_thread() {}
 // retrieve the length of the environment variable value string.
 //
 int getenv(const char *name, char *buffer, int buffer_size);
-// Reads an integer from the environment
+// Reads an integer from the environment. For internal needs.
 int getenv_int(const char *name, int default_value = 0);
+// Reads an integer from user environment. Takes a var name without
+// prefix and checks both supported variants - with "ZENDNN_" (primary) and
+// "ZENDNN_" (secondary) prefixes.
+int getenv_int_user(const char *name, int default_value = 0);
+// Reads a string literal from user environment. Takes a var name without
+// prefix and checks both supported variants - with "ZENDNN_" (primary) and
+// "ZENDNN_" (secondary) prefixes.
+std::string getenv_string_user(const char *name);
+
+// Various getter for profiling info
 bool get_jit_dump();
 unsigned get_jit_profiling_flags();
 std::string get_jit_profiling_jitdumpdir();
 FILE *fopen(const char *filename, const char *mode);
 int getpagesize();
+
+// return current library fpmath_mode
+fpmath_mode_t get_fpmath_mode();
+// checks if an fpmath_mode is valid
+status_t check_fpmath_mode(fpmath_mode_t mode);
+// Returns true if values reprensented by type sub_dt can all be
+// represented in dt. return false eotherwise
+bool is_fpsubtype(data_type_t sub_dt, data_type_t dt);
 
 constexpr int msan_enabled = MSAN_ENABLED;
 inline void msan_unpoison(void *ptr, size_t size) {
@@ -572,8 +629,8 @@ private:
     bool initialized_;
 
 public:
-    setting_t() : initialized_ {false} {}
-    setting_t(const T init) : value_ {init}, initialized_ {false} {}
+    constexpr setting_t() : value_ {}, initialized_ {false} {}
+    constexpr setting_t(const T init) : value_ {init}, initialized_ {false} {}
     bool initialized() { return initialized_; }
     T get() { return value_; }
     void set(T new_value) {
@@ -629,41 +686,46 @@ struct device_id_hash_t {
 // get() method also has a 'soft' mode when the setting is not locked for
 // re-setting. This is used for testing purposes.
 template <typename T>
-struct set_before_first_get_setting_t {
+struct set_once_before_first_get_setting_t {
 private:
     T value_;
     std::atomic<unsigned> state_;
-    enum : unsigned { idle = 0, busy_setting = 1, locked_after_a_get = 2 };
+    enum : unsigned { idle = 0, busy_setting = 1, locked = 2 };
 
 public:
-    set_before_first_get_setting_t(T init) : value_ {init}, state_ {idle} {}
+    set_once_before_first_get_setting_t(T init)
+        : value_ {init}, state_ {idle} {}
 
     bool set(T new_value) {
-        if (state_.load() == locked_after_a_get) return false;
+        if (state_.load() == locked) return false;
 
         while (true) {
             unsigned expected = idle;
             if (state_.compare_exchange_weak(expected, busy_setting)) break;
-            if (expected == locked_after_a_get) return false;
+            if (expected == locked) return false;
         }
 
         value_ = new_value;
-        state_.store(idle);
+        state_.store(locked);
         return true;
     }
 
     T get(bool soft = false) {
-        if (!soft && state_.load() != locked_after_a_get) {
+        if (!soft && state_.load() != locked) {
             while (true) {
                 unsigned expected = idle;
-                if (state_.compare_exchange_weak(expected, locked_after_a_get))
-                    break;
-                if (expected == locked_after_a_get) break;
+                if (state_.compare_exchange_weak(expected, locked)) break;
+                if (expected == locked) break;
             }
         }
         return value_;
     }
 };
+
+inline bool is_native_runtime(runtime_kind_t kind) {
+    return utils::one_of(kind, runtime_kind::seq, runtime_kind::omp,
+            runtime_kind::tbb, runtime_kind::threadpool);
+}
 
 } // namespace impl
 } // namespace zendnn

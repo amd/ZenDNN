@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,25 +26,28 @@
 
 #include "c_types_map.hpp"
 #include "engine.hpp"
+#include "impl_list_item.hpp"
 #include "primitive_attr.hpp"
+#include "primitive_cache.hpp"
 #include "primitive_desc.hpp"
+#include "primitive_hashing.hpp"
 #include "type_helpers.hpp"
 
 struct zendnn_primitive_desc_iterator : public zendnn::impl::c_compatible {
-    using pd_create_f = zendnn::impl::engine_t::primitive_desc_create_f;
-
     zendnn_primitive_desc_iterator(zendnn::impl::engine_t *engine,
             const zendnn::impl::op_desc_t *op_desc,
             const zendnn::impl::primitive_attr_t *attr,
-            const zendnn::impl::primitive_desc_t *hint_fwd_pd)
+            const zendnn::impl::primitive_desc_t *hint_fwd_pd, int skip_idx = -1)
         : idx_(-1)
         , engine_(engine)
         , op_desc_(op_desc)
         , attr_(attr ? *attr : zendnn::impl::primitive_attr_t())
         , hint_fwd_pd_(hint_fwd_pd)
         , impl_list_(engine_->get_implementation_list(op_desc_))
-        , last_idx_(0) {
-        while (impl_list_[last_idx_] != nullptr)
+        , last_idx_(0)
+        , skip_idx_(skip_idx)
+        , offset_(-1) {
+        while (impl_list_[last_idx_])
             ++last_idx_;
         is_initialized_ = is_initialized_ && attr_.is_initialized();
     }
@@ -63,11 +66,26 @@ struct zendnn_primitive_desc_iterator : public zendnn::impl::c_compatible {
     }
 
     zendnn::impl::primitive_desc_iterator_t &operator++() {
+        // Quick return to preserve state of the iterator that reached the end.
+        // The state is equal to the state of the iterator that end() returns.
+        if (idx_ == last_idx_) return *this;
+
+        offset_++;
         pd_.reset();
+
+        std::vector<zendnn::impl::memory_desc_t> hint_mds;
+        if (hint_fwd_pd_) hint_mds = hint_fwd_pd_->hint_mds(true /* is_hint */);
+        zendnn::impl::primitive_hashing::key_t key(
+                engine_, op_desc_, &attr_, offset_, hint_mds);
+
+        pd_ = zendnn::impl::primitive_cache().get_pd(key);
+        if (pd_) { return *this; }
+
         while (++idx_ != last_idx_) {
+            if (idx_ == skip_idx_) continue;
             zendnn::impl::primitive_desc_t *candidate_pd = nullptr;
-            auto s = impl_list_[idx_](
-                    &candidate_pd, op_desc_, &attr_, engine_, hint_fwd_pd_);
+            auto s = impl_list_[idx_](&candidate_pd, op_desc_, &attr_, engine_,
+                    hint_fwd_pd_, offset_);
             if (s == zendnn::impl::status::success) {
                 pd_.reset(candidate_pd);
                 break;
@@ -76,20 +94,9 @@ struct zendnn_primitive_desc_iterator : public zendnn::impl::c_compatible {
         return *this;
     }
 
-    zendnn::impl::primitive_desc_t *operator*() const {
+    std::shared_ptr<zendnn::impl::primitive_desc_t> operator*() const {
         if (*this == end() || pd_ == nullptr) return nullptr;
-        return pd_->clone();
-    }
-
-    // Unlike `operator*()`, fetch_once() returns the current primitive
-    // descriptor and invalidates the underlying primitive descriptor (but
-    // saves the current position in the implementation list). Hence, the
-    // subsequent calls to `operator*()` and / or `fetch_once()` will return
-    // nullptr, until the iterator moves to the next implementation.
-    zendnn::impl::primitive_desc_t *fetch_once() {
-        if (*this == end() || pd_ == nullptr) return nullptr;
-        zendnn::impl::primitive_desc_t *return_pd = pd_.release();
-        return return_pd;
+        return pd_;
     }
 
     const zendnn::impl::primitive_attr_t &attr() const { return attr_; }
@@ -99,12 +106,14 @@ struct zendnn_primitive_desc_iterator : public zendnn::impl::c_compatible {
 protected:
     int idx_;
     zendnn::impl::engine_t *engine_;
-    std::unique_ptr<zendnn::impl::primitive_desc_t> pd_;
+    std::shared_ptr<zendnn::impl::primitive_desc_t> pd_;
     const zendnn::impl::op_desc_t *op_desc_;
     const zendnn::impl::primitive_attr_t attr_;
     const zendnn::impl::primitive_desc_t *hint_fwd_pd_;
-    const pd_create_f *impl_list_;
+    const zendnn::impl::impl_list_item_t *impl_list_;
     int last_idx_;
+    int skip_idx_;
+    int offset_;
 
 private:
     zendnn_primitive_desc_iterator(zendnn::impl::engine_t *engine, int last_idx)
@@ -113,7 +122,9 @@ private:
         , op_desc_(nullptr)
         , hint_fwd_pd_(nullptr)
         , impl_list_(nullptr)
-        , last_idx_(last_idx) {}
+        , last_idx_(last_idx)
+        , skip_idx_(-1)
+        , offset_(-1) {}
 
     zendnn_primitive_desc_iterator(zendnn_primitive_desc_iterator &&other)
         : idx_(other.idx_)
@@ -122,7 +133,9 @@ private:
         , op_desc_(other.op_desc_)
         , attr_(other.attr_)
         , hint_fwd_pd_(other.hint_fwd_pd_)
-        , impl_list_(other.impl_list_) {}
+        , impl_list_(other.impl_list_)
+        , skip_idx_(other.skip_idx_)
+        , offset_(other.offset_) {}
 
     ZENDNN_DISALLOW_COPY_AND_ASSIGN(zendnn_primitive_desc_iterator);
 };

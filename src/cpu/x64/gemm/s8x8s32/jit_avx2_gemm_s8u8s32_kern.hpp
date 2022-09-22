@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -52,7 +52,7 @@ protected:
     void dot_product(const Xbyak::Xmm &dst, const Xbyak::Xmm &src1,
             const Xbyak::Xmm &src2);
     void kernel_loop(int unroll_m, int unroll_n, bool cfetch);
-    void remainder_kernel(int unroll_m, int unroll_n, int bwidth);
+    void remainder_kernel(int unroll_m, int unroll_n, int unroll_k, int bwidth);
     void innerloop(int unroll_m, int unroll_n);
     void outerloop(int unroll_x, int unroll_y, Xbyak::Label *&outerloop_label);
 
@@ -65,8 +65,8 @@ private:
     static const int isize_ = 1;
 
     // Prefetch configuration
-    static const int prefetch_size_a_ = 128;
-    static const int prefetch_size_b_ = 64;
+    static const int prefetch_size_a_ = 704;
+    static const int prefetch_size_b_ = 384;
 
     static const int offset_a_ = 128, offset_b_ = 128;
     static const int max_unroll_m_ = 24, max_unroll_n_ = 4;

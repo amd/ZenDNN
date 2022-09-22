@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -38,13 +38,10 @@ namespace impl {
 // Memory storage is engine-specific and has different implementations for
 // different engines.
 struct memory_storage_t : public c_compatible {
-    memory_storage_t(engine_t *engine)
-        : engine_(engine), parent_storage_(this) {}
+    memory_storage_t(engine_t *engine, const memory_storage_t *parent_storage);
+    memory_storage_t(engine_t *engine) : memory_storage_t(engine, this) {}
 
-    memory_storage_t(engine_t *engine, const memory_storage_t *parent_storage)
-        : engine_(engine), parent_storage_(parent_storage) {}
-
-    virtual ~memory_storage_t() = default;
+    virtual ~memory_storage_t();
 
     status_t init(unsigned flags, size_t size, void *handle);
 

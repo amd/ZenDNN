@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
 #include <stdio.h>
@@ -7,7 +7,7 @@
 #include <omp.h>
 #include <string.h>
 #include <stdbool.h> // for padding_zone()
-#include <zendnn_private.hpp>
+#include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
 #include "zendnn_helper.hpp"
 

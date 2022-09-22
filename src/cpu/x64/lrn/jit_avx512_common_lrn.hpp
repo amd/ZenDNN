@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ struct jit_avx512_common_lrn_fwd_t : public primitive_t {
                         (d_type == data_type::bf16) ? (mayiuse(avx512_core_bf16)
                                         ? avx512_core_bf16
                                         : bf16_emulation_t::get_isa())
-                                                    : avx512_common,
+                                                    : avx512_core,
                         ""),
                 jit_avx512_common_lrn_fwd_t);
 
@@ -80,7 +80,7 @@ struct jit_avx512_common_lrn_bwd_t : public primitive_t {
                         (d_type == data_type::bf16) ? (mayiuse(avx512_core_bf16)
                                         ? avx512_core_bf16
                                         : bf16_emulation_t::get_isa())
-                                                    : avx512_common,
+                                                    : avx512_core,
                         ""),
                 jit_avx512_common_lrn_bwd_t);
 

@@ -4,7 +4,7 @@
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -567,6 +567,157 @@ typedef enum {
     zendnn_ABcde16b32a2b,
     zendnn_ABcde16b48a2b,
     zendnn_ABcde16b64a2b,
+    zendnn_ABc32a16b,
+    zendnn_ABcd32a16b,
+    zendnn_ABcde32a16b,
+    zendnn_AB48a16b,
+    zendnn_AB48a32b,
+    zendnn_ABc40a16b,
+    zendnn_ABc40a32b,
+    zendnn_aBC48b16c,
+    zendnn_aBC48b32c,
+    zendnn_ABcd40a16b,
+    zendnn_ABcd40a32b,
+    zendnn_abCd32c,
+    zendnn_abdCe32c,
+    zendnn_abdCE32c2e,
+    zendnn_BA16a16b2a,
+    zendnn_BA16a32b2a,
+    zendnn_BA16a48b2a,
+    zendnn_BA16a64b2a,
+    zendnn_BA16a16b4a,
+    zendnn_BA16a32b4a,
+    zendnn_BA16a48b4a,
+    zendnn_BA16a64b4a,
+    zendnn_ABcd8a2b,
+    zendnn_aBdeC16c16b2c,
+    zendnn_aBdeC16c16b4c,
+    zendnn_aBdefC16c16b2c,
+    zendnn_AcB16b16a2b,
+    zendnn_AcB16b16a4b,
+    zendnn_AcdB16b16a2b,
+    zendnn_AcdB16b16a4b,
+    zendnn_AcdeB16b16a2b,
+    zendnn_aBdefC16c16b4c,
+    zendnn_AcdeB16b16a4b,
+    zendnn_AcB16b32a2b,
+    zendnn_AcB16b32a4b,
+    zendnn_AcB16b48a2b,
+    zendnn_AcB16b48a4b,
+    zendnn_AcB16b64a2b,
+    zendnn_AcB16b64a4b,
+    zendnn_aBdC16c16b2c,
+    zendnn_aBdC16c16b4c,
+    zendnn_aBdC16c32b2c,
+    zendnn_aBdC16c32b4c,
+    zendnn_aBdC16c48b2c,
+    zendnn_aBdC16c48b4c,
+    zendnn_aBdC16c64b2c,
+    zendnn_aBdC16c64b4c,
+    zendnn_AcdB16b32a2b,
+    zendnn_AcdB16b32a4b,
+    zendnn_AcdB16b48a2b,
+    zendnn_AcdB16b48a4b,
+    zendnn_AcdB16b64a2b,
+    zendnn_AcdB16b64a4b,
+    zendnn_aBdeC16c32b2c,
+    zendnn_aBdeC16c32b4c,
+    zendnn_aBdeC16c48b2c,
+    zendnn_aBdeC16c48b4c,
+    zendnn_aBdeC16c64b2c,
+    zendnn_aBdeC16c64b4c,
+    zendnn_AcdeB16b32a2b,
+    zendnn_AcdeB16b32a4b,
+    zendnn_AcdeB16b48a2b,
+    zendnn_AcdeB16b48a4b,
+    zendnn_AcdeB16b64a2b,
+    zendnn_AcdeB16b64a4b,
+    zendnn_aBdefC16c32b2c,
+    zendnn_aBdefC16c32b4c,
+    zendnn_aBdefC16c48b2c,
+    zendnn_aBdefC16c48b4c,
+    zendnn_aBdefC16c64b2c,
+    zendnn_aBdefC16c64b4c,
+    zendnn_decbA16a,
+    zendnn_ABc4a2b,
+    zendnn_ABc8a2b,
+    zendnn_aBCd8b2c,
+    zendnn_ABcde4a2b,
+    zendnn_ABcde8a2b,
+    zendnn_ABcde40a16b,
+    zendnn_ABcde40a32b,
+    zendnn_aBCde8b2c,
+    zendnn_ABcde4a8b8a2b,
+    zendnn_ABcd4a8b8a2b,
+    zendnn_ABc4a8b8a2b,
+    zendnn_aBCdef4b8c8b2c,
+    zendnn_aBCde4b8c8b2c,
+    zendnn_aBCd4b8c8b2c,
+    zendnn_BAcde4b8a8b2a,
+    zendnn_BAcd4b8a8b2a,
+    zendnn_BAc4b8a8b2a,
+    zendnn_aCBdef4c8b8c2b,
+    zendnn_aCBde4c8b8c2b,
+    zendnn_aCBd4c8b8c2b,
+    zendnn_aBCdef8b2c,
+    zendnn_AB32a16b,
+    zendnn_AB32a32b,
+    zendnn_BA4b8a8b2a,
+    zendnn_BA4b8a8b4a,
+    zendnn_aBC32b16c,
+    zendnn_aBC32b32c,
+    zendnn_aCB4c8b8c2b,
+    zendnn_aCB4c8b8c4b,
+    zendnn_ABcd4a2b,
+    zendnn_ABc2b8a16b4a,
+    zendnn_ABcd2b8a16b4a,
+    zendnn_ABcde2b8a16b4a,
+    zendnn_ABc2a8b16a4b,
+    zendnn_ABc2a8b16a2b,
+    zendnn_ABc2b32a8b,
+    zendnn_ABcd2a8b16a4b,
+    zendnn_ABcd2a8b16a2b,
+    zendnn_aCBd2c8b16c2b,
+    zendnn_ABcd2b32a8b,
+    zendnn_aBCd2c8b16c2b,
+    zendnn_ABcde2a8b16a4b,
+    zendnn_ABcde2a8b16a2b,
+    zendnn_aCBde2c8b16c2b,
+    zendnn_ABcde2b32a8b,
+    zendnn_aBC2b8c16b2c,
+    zendnn_aBCd2b8c16b2c,
+    zendnn_aBCde2b8c16b2c,
+    zendnn_aBCdef2b8c16b2c,
+    zendnn_BAcde2b8a16b4a,
+    zendnn_BAcd2b8a16b4a,
+    zendnn_BAc2b8a16b4a,
+    zendnn_BAcde2b8a16b2a,
+    zendnn_BAcd2b8a16b2a,
+    zendnn_BAc2b8a16b2a,
+    zendnn_aBCde2c8b16c2b,
+    zendnn_aBCdef2c8b16c2b,
+    zendnn_aCBdef2c8b16c2b,
+    zendnn_aBCd2b8c16b4c,
+    zendnn_aBCde2b8c16b4c,
+    zendnn_BA4b8a16b2a,
+    zendnn_BA4b8a16b4a,
+    zendnn_aCB4c8b16c2b,
+    zendnn_aCB4c8b16c4b,
+    zendnn_BA16a16b,
+    zendnn_BA16a32b,
+    zendnn_BA16a48b,
+    zendnn_BA16a64b,
+    zendnn_aCB16c2b,
+    zendnn_aCB16c4b,
+    zendnn_BA16b2a,
+    zendnn_BA16b4a,
+    zendnn_aBC16b16c,
+    zendnn_aBC16b32c,
+    zendnn_AB16a16b,
+    zendnn_AB16a32b,
+    zendnn_adbc,
+    zendnn_ABcde16a16b2a,
+    zendnn_aBCdef16b16c2b,
 
     /// Just a sentinel, not real memory format tag. Must be changed after new
     /// format tag is added.
@@ -655,6 +806,9 @@ typedef enum {
     /// 6D CNN weights tensor (incl. groups), an alias to #zendnn_defcab
     zendnn_dhwigo = zendnn_defcab,
 
+    /// 4D CNN activations tensor, an alias to #zendnn_cdba
+    zendnn_hwcn = zendnn_cdba,
+
     /// 3D RNN data tensor in the format (seq_length, batch, input channels),
     /// an alias to #zendnn_abc.
     zendnn_tnc = zendnn_abc,
@@ -696,10 +850,13 @@ typedef enum {
     /// 5D LSTM projection tensor
     zendnn_ldOi32o = zendnn_abDc32d,
     zendnn_ldOI32o4i = zendnn_abDC32d4c,
+    zendnn_ldIo32i = zendnn_abCd32c,
     /// 6D RNN weights tensor
     zendnn_ldgOi32o = zendnn_abdEc32e,
     zendnn_ldgOI32o2i = zendnn_abdEC32e2c,
     zendnn_ldgOI32o4i = zendnn_abdEC32e4c,
+    zendnn_ldgIo32i = zendnn_abdCe32c,
+    zendnn_ldgIO32i2o = zendnn_abdCE32c2e,
 
     // Opaque data types, are not to be used explicitly
 
@@ -743,6 +900,9 @@ typedef enum {
     zendnn_NCw16n16c = zendnn_ABc16a16b,
     zendnn_NCdhw16n16c = zendnn_ABcde16a16b,
     zendnn_NChw16n16c = zendnn_ABcd16a16b,
+    zendnn_NCw32n16c = zendnn_ABc32a16b,
+    zendnn_NChw32n16c = zendnn_ABcd32a16b,
+    zendnn_NCdhw32n16c = zendnn_ABcde32a16b,
     zendnn_NCw32n32c = zendnn_ABc32a32b,
     zendnn_NChw32n32c = zendnn_ABcd32a32b,
     zendnn_NCdhw32n32c = zendnn_ABcde32a32b,
@@ -855,6 +1015,7 @@ typedef enum {
     zendnn_IOdhw16i16o = zendnn_BAcde16b16a,
     zendnn_OIdhw4o8i8o4i = zendnn_ABcde4a8b8a4b,
     zendnn_IOdhw16o16i = zendnn_BAcde16a16b,
+    zendnn_OIdhw16o16i2o = zendnn_ABcde16a16b2a,
 
     // weights w/ groups, 3D
     zendnn_Goiw16g = zendnn_Abcd16a,
@@ -955,6 +1116,7 @@ typedef enum {
     zendnn_gOIdhw2i8o4i = zendnn_aBCdef2c8b4c,
     zendnn_gOIdhw16i16o2i = zendnn_aBCdef16c16b2c,
     zendnn_gOIdhw16o16i = zendnn_aBCdef16b16c,
+    zendnn_gOIdhw16o16i2o = zendnn_aBCdef16b16c2b,
     zendnn_gOidhw16o = zendnn_aBcdef16b,
     zendnn_gOIdhw4i4o = zendnn_aBCdef4c4b,
     zendnn_gOIdhw4o4i = zendnn_aBCdef4b4c,
@@ -1068,8 +1230,99 @@ typedef enum {
     zendnn_OIdhw16i32o2i = zendnn_ABcde16b32a2b,
     zendnn_OIdhw16i48o2i = zendnn_ABcde16b48a2b,
     zendnn_OIdhw16i64o2i = zendnn_ABcde16b64a2b,
-    /// 4D CNN activations tensor, an alias to #zendnn_cdba
-    zendnn_hwcn = zendnn_cdba,
+    zendnn_OwI16i16o2i = zendnn_AcB16b16a2b,
+    zendnn_OwI16i16o4i = zendnn_AcB16b16a4b,
+    zendnn_OhwI16i16o2i = zendnn_AcdB16b16a2b,
+    zendnn_OhwI16i16o4i = zendnn_AcdB16b16a4b,
+    zendnn_OdhwI16i16o2i = zendnn_AcdeB16b16a2b,
+    zendnn_OdhwI16i16o4i = zendnn_AcdeB16b16a4b,
+    zendnn_gOwI16i16o2i = zendnn_aBdC16c16b2c,
+    zendnn_gOwI16i16o4i = zendnn_aBdC16c16b4c,
+    zendnn_gOhwI16i16o2i = zendnn_aBdeC16c16b2c,
+    zendnn_gOhwI16i16o4i = zendnn_aBdeC16c16b4c,
+    zendnn_gOdhwI16i16o2i = zendnn_aBdefC16c16b2c,
+    zendnn_gOdhwI16i16o4i = zendnn_aBdefC16c16b4c,
+    zendnn_OwI16i32o2i = zendnn_AcB16b32a2b,
+    zendnn_OwI16i32o4i = zendnn_AcB16b32a4b,
+    zendnn_OwI16i48o2i = zendnn_AcB16b48a2b,
+    zendnn_OwI16i48o4i = zendnn_AcB16b48a4b,
+    zendnn_OwI16i64o2i = zendnn_AcB16b64a2b,
+    zendnn_OwI16i64o4i = zendnn_AcB16b64a4b,
+    zendnn_gOwI16i32o2i = zendnn_aBdC16c32b2c,
+    zendnn_gOwI16i32o4i = zendnn_aBdC16c32b4c,
+    zendnn_gOwI16i48o2i = zendnn_aBdC16c48b2c,
+    zendnn_gOwI16i48o4i = zendnn_aBdC16c48b4c,
+    zendnn_gOwI16i64o2i = zendnn_aBdC16c64b2c,
+    zendnn_gOwI16i64o4i = zendnn_aBdC16c64b4c,
+    zendnn_OhwI16i32o2i = zendnn_AcdB16b32a2b,
+    zendnn_OhwI16i32o4i = zendnn_AcdB16b32a4b,
+    zendnn_OhwI16i48o2i = zendnn_AcdB16b48a2b,
+    zendnn_OhwI16i48o4i = zendnn_AcdB16b48a4b,
+    zendnn_OhwI16i64o2i = zendnn_AcdB16b64a2b,
+    zendnn_OhwI16i64o4i = zendnn_AcdB16b64a4b,
+    zendnn_gOhwI16i32o2i = zendnn_aBdeC16c32b2c,
+    zendnn_gOhwI16i32o4i = zendnn_aBdeC16c32b4c,
+    zendnn_gOhwI16i48o2i = zendnn_aBdeC16c48b2c,
+    zendnn_gOhwI16i48o4i = zendnn_aBdeC16c48b4c,
+    zendnn_gOhwI16i64o2i = zendnn_aBdeC16c64b2c,
+    zendnn_gOhwI16i64o4i = zendnn_aBdeC16c64b4c,
+    zendnn_OdhwI16i32o2i = zendnn_AcdeB16b32a2b,
+    zendnn_OdhwI16i32o4i = zendnn_AcdeB16b32a4b,
+    zendnn_OdhwI16i48o2i = zendnn_AcdeB16b48a2b,
+    zendnn_OdhwI16i48o4i = zendnn_AcdeB16b48a4b,
+    zendnn_OdhwI16i64o2i = zendnn_AcdeB16b64a2b,
+    zendnn_OdhwI16i64o4i = zendnn_AcdeB16b64a4b,
+    zendnn_gOdhwI16i32o2i = zendnn_aBdefC16c32b2c,
+    zendnn_gOdhwI16i32o4i = zendnn_aBdefC16c32b4c,
+    zendnn_gOdhwI16i48o2i = zendnn_aBdefC16c48b2c,
+    zendnn_gOdhwI16i48o4i = zendnn_aBdefC16c48b4c,
+    zendnn_gOdhwI16i64o2i = zendnn_aBdefC16c64b2c,
+    zendnn_gOdhwI16i64o4i = zendnn_aBdefC16c64b4c,
+    zendnn_hwioG16g = zendnn_decbA16a,
+    zendnn_NCdhw40n16c = zendnn_ABcde40a16b,
+    zendnn_NCw40n16c = zendnn_ABc40a16b,
+    zendnn_NChw40n16c = zendnn_ABcd40a16b,
+    zendnn_NCw40n32c = zendnn_ABc40a32b,
+    zendnn_NChw40n32c = zendnn_ABcd40a32b,
+    zendnn_NCdhw40n32c = zendnn_ABcde40a32b,
+    zendnn_OIdhw4o8i8o2i = zendnn_ABcde4a8b8a2b,
+    zendnn_OIhw4o8i8o2i = zendnn_ABcd4a8b8a2b,
+    zendnn_OIw4o8i8o2i = zendnn_ABc4a8b8a2b,
+    zendnn_gOIdhw4o8i8o2i = zendnn_aBCdef4b8c8b2c,
+    zendnn_gOIhw4o8i8o2i = zendnn_aBCde4b8c8b2c,
+    zendnn_gOIw4o8i8o2i = zendnn_aBCd4b8c8b2c,
+    zendnn_IOdhw4i8o8i2o = zendnn_BAcde4b8a8b2a,
+    zendnn_IOhw4i8o8i2o = zendnn_BAcd4b8a8b2a,
+    zendnn_IOw4i8o8i2o = zendnn_BAc4b8a8b2a,
+    zendnn_gIOdhw4i8o8i2o = zendnn_aCBdef4c8b8c2b,
+    zendnn_gIOhw4i8o8i2o = zendnn_aCBde4c8b8c2b,
+    zendnn_gIOw4i8o8i2o = zendnn_aCBd4c8b8c2b,
+    zendnn_NCw2c32n8c = zendnn_ABc2b32a8b,
+    zendnn_NChw2c32n8c = zendnn_ABcd2b32a8b,
+    zendnn_NCdhw2c32n8c = zendnn_ABcde2b32a8b,
+    zendnn_OIw2i8o16i4o = zendnn_ABc2b8a16b4a,
+    zendnn_OIhw2i8o16i4o = zendnn_ABcd2b8a16b4a,
+    zendnn_OIdhw2i8o16i4o = zendnn_ABcde2b8a16b4a,
+    zendnn_OIw2o8i16o4i = zendnn_ABc2a8b16a4b,
+    zendnn_OIw2o8i16o2i = zendnn_ABc2a8b16a2b,
+    zendnn_IOw2i8o16i4o = zendnn_BAc2b8a16b4a,
+    zendnn_IOw2i8o16i2o = zendnn_BAc2b8a16b2a,
+    zendnn_OIhw2o8i16o4i = zendnn_ABcd2a8b16a4b,
+    zendnn_OIhw2o8i16o2i = zendnn_ABcd2a8b16a2b,
+    zendnn_IOhw2i8o16i4o = zendnn_BAcd2b8a16b4a,
+    zendnn_IOhw2i8o16i2o = zendnn_BAcd2b8a16b2a,
+    zendnn_OIdhw2o8i16o4i = zendnn_ABcde2a8b16a4b,
+    zendnn_OIdhw2o8i16o2i = zendnn_ABcde2a8b16a2b,
+    zendnn_IOdhw2i8o16i4o = zendnn_BAcde2b8a16b4a,
+    zendnn_IOdhw2i8o16i2o = zendnn_BAcde2b8a16b2a,
+    zendnn_gOIw2o8i16o2i = zendnn_aBCd2b8c16b2c,
+    zendnn_gIOw2i8o16i2o = zendnn_aCBd2c8b16c2b,
+    zendnn_gIOhw2i8o16i2o = zendnn_aBCde2c8b16c2b,
+    zendnn_gIOdhw2i8o16i2o = zendnn_aBCdef2c8b16c2b,
+    zendnn_gOIhw2o8i16o2i = zendnn_aBCde2b8c16b2c,
+    zendnn_gOIdhw2o8i16o2i = zendnn_aBCdef2b8c16b2c,
+    zendnn_gOIw2o8i16o4i = zendnn_aBCd2b8c16b4c,
+    zendnn_gOIhw2o8i16o4i = zendnn_aBCde2b8c16b4c,
 } zendnn_format_tag_t;
 
 /// @} zendnn_api_memory
@@ -1154,7 +1407,9 @@ typedef enum {
     zendnn_reduction,
     /// A PReLU primitive.
     zendnn_prelu,
-
+    /// A softmax version 2 primitive (softmax with destination memory
+    /// descriptor and algorithm kind).
+    zendnn_softmax_v2,
     /* add new primitive */
     /// An embedding bag primitive.
     zendnn_embedding_bag,
@@ -1270,6 +1525,10 @@ typedef enum {
     /// Primitive expects 4 biases on input:
     /// \f$[b_{u}, b_{r}, b_{c_x}, b_{c_h}]\f$
     zendnn_lbr_gru = 0x4fff,
+    /// AUGRU cell
+    zendnn_vanilla_augru = 0x5fff,
+    /// AUGRU cell with linear before reset
+    zendnn_lbr_augru = 0x6fff,
     /// Binary add
     zendnn_binary_add = 0x1fff0,
     /// Binary mul
@@ -1316,9 +1575,12 @@ typedef enum {
     zendnn_reduction_norm_lp_power_p_max,
     /// Reduction using lp norm without final pth-root
     zendnn_reduction_norm_lp_power_p_sum,
-
+    /// Softmax
+    zendnn_softmax_accurate = 0x30000,
+    /// Logsoftmax
+    zendnn_softmax_log,
     /* add new primitive */
-    zendnn_embedding_bag_sum  = 0x3000,
+    zendnn_embedding_bag_sum  = 0x4000,
     zendnn_embedding_bag_mean,
     zendnn_embedding_bag_max,
 } zendnn_alg_kind_t;
@@ -1352,7 +1614,7 @@ typedef enum {
     ///
     /// If specified:
     ///  - on forward propagation use scale and shift (aka scale and bias) for
-    ///    the batch normalization results
+    ///    the normalization results
     ///  - on backward propagation (for prop_kind == #zendnn_backward) compute
     ///    diff wrt scale and shift (hence one extra output used)
     ///
@@ -1373,6 +1635,23 @@ typedef enum {
     ///  - on training primitive requires workspace (required to be able to
     ///    perform backward pass)
     zendnn_fuse_norm_relu = 0x4U,
+
+    /// Use scale parameter
+    ///
+    /// If specified:
+    ///  - on forward propagation use scale for the normalization results
+    ///  - on backward propagation (for prop_kind == #zendnn_backward) compute
+    ///    diff wrt scale (hence one extra output used)
+    zendnn_use_scale = 0x8U,
+
+    /// Use shift parameter
+    ///
+    /// If specified:
+    ///  - on forward propagation use shift (aka bias) for the normalization
+    ///    results
+    ///  - on backward propagation (for prop_kind == #zendnn_backward) compute
+    ///    diff wrt shift (hence one extra output used)
+    zendnn_use_shift = 0x10U,
 } zendnn_normalization_flags_t;
 
 /// @} zendnn_api_primitives_common
@@ -1507,6 +1786,7 @@ typedef enum {
     zendnn_memory_extra_flag_gpu_rnn_u8s8_compensation
     = zendnn_memory_extra_flag_rnn_u8s8_compensation,
     zendnn_memory_extra_flag_compensation_conv_asymmetric_src = 0x8U,
+    zendnn_memory_extra_flag_rnn_s8s8_compensation = 0x16U,
 } zendnn_memory_extra_flags_t;
 
 /// Description of extra information stored in memory
@@ -1766,8 +2046,8 @@ typedef struct {
     /// The kind of primitive. Used for self-identifying the primitive
     /// descriptor. Must be #zendnn_softmax.
     zendnn_primitive_kind_t primitive_kind;
-    /// The kind of propagation. Possible values: #zendnn_forward_training and
-    /// #zendnn_forward_inference.
+    /// The kind of propagation. Possible values: #zendnn_forward_training,
+    /// #zendnn_forward_inference, and #zendnn_backward_data.
     zendnn_prop_kind_t prop_kind;
     /// Source and destination memory descriptor.
     zendnn_memory_desc_t data_desc;
@@ -1778,6 +2058,34 @@ typedef struct {
 } zendnn_softmax_desc_t;
 
 /// @} zendnn_api_softmax
+
+/// @addtogroup zendnn_api_softmax_v2
+/// @{
+
+/// A descriptor of a Softmax operation.
+typedef struct {
+    /// The kind of primitive. Used for self-identifying the primitive
+    /// descriptor. Must be #zendnn_softmax_v2.
+    zendnn_primitive_kind_t primitive_kind;
+    /// The kind of propagation. Possible values: #zendnn_forward_training,
+    /// #zendnn_forward_inference, and #zendnn_backward_data.
+    zendnn_prop_kind_t prop_kind;
+    /// Source memory descriptor.
+    zendnn_memory_desc_t src_desc;
+    /// Source gradient memory descriptor.
+    zendnn_memory_desc_t diff_src_desc;
+    /// The axis along which to perform the softmax.
+    int softmax_axis;
+    /// Softmax algorithm. Possible values: #zendnn_softmax_accurate and
+    /// #zendnn_softmax_log.
+    zendnn_alg_kind_t alg_kind;
+    /// Destination memory descriptor.
+    zendnn_memory_desc_t dst_desc;
+    /// Destination gradient memory descriptor.
+    zendnn_memory_desc_t diff_dst_desc;
+} zendnn_softmax_v2_desc_t;
+
+/// @} zendnn_api_softmax_v2
 
 /// @addtogroup zendnn_api_logsoftmax
 /// @{
@@ -2322,7 +2630,7 @@ typedef struct zendnn_primitive_desc_iterator *zendnn_primitive_desc_iterator_t;
 
 /// @brief A constant primitive descriptor iterator handle.
 typedef const struct zendnn_primitive_desc_iterator
-    *const_zendnn_primitive_desc_iterator_t;
+        *const_zendnn_primitive_desc_iterator_t;
 
 /// @struct zendnn_primitive_desc
 /// @brief An opaque structure to describe a primitive descriptor.
@@ -2338,6 +2646,18 @@ typedef const struct zendnn_primitive_desc *const_zendnn_primitive_desc_t;
 
 /// @addtogroup zendnn_api_attributes
 /// @{
+
+/// Floating-point math mode
+typedef enum {
+    /// Default behavior, no downconversions allowed
+    zendnn_fpmath_mode_strict,
+    /// Implicit f32->bf16 conversions allowed
+    zendnn_fpmath_mode_bf16,
+    /// Implicit f32->f16 conversions allowed
+    zendnn_fpmath_mode_f16,
+    /// Implicit f32->f16 or f32->bf16 conversions allowed
+    zendnn_fpmath_mode_any,
+} zendnn_fpmath_mode_t;
 
 /// Scratchpad mode
 typedef enum {
@@ -2444,6 +2764,9 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 
 /// Source argument #3.
 #define ZENDNN_ARG_SRC_3 4
+/// A special mnemonic for RNN input recurrent cell attention vector. An alias for
+/// #ZENDNN_ARG_SRC_3.
+#define ZENDNN_ARG_AUGRU_ATTENTION ZENDNN_ARG_SRC_3
 
 /// Destination argument #0.
 #define ZENDNN_ARG_DST_0 17
@@ -2506,6 +2829,11 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 /// Variance values tensor argument.
 #define ZENDNN_ARG_VARIANCE 50
 
+/// A special mnemonic for scale argument of normalization primitives.
+#define ZENDNN_ARG_SCALE 51
+/// A special mnemonic for shift argument of normalization primitives.
+#define ZENDNN_ARG_SHIFT 52
+
 /// Workspace tensor argument. Workspace is used to pass information
 /// from forward propagation to backward propagation computations.
 #define ZENDNN_ARG_WORKSPACE 64
@@ -2532,6 +2860,12 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 /// A special mnemonic for gradient (diff) of RNN input recurrent cell state
 /// vector. An alias for #ZENDNN_ARG_DIFF_SRC_1.
 #define ZENDNN_ARG_DIFF_SRC_ITER_C ZENDNN_ARG_DIFF_SRC_2
+
+/// Gradient (diff) of the source argument #3.
+#define ZENDNN_ARG_DIFF_SRC_3 132
+/// A special mnemonic for gradient (diff) of RNN input recurrent cell attention
+/// vector. An alias for #ZENDNN_ARG_DIFF_SRC_3.
+#define ZENDNN_ARG_DIFF_AUGRU_ATTENTION ZENDNN_ARG_DIFF_SRC_3
 
 /// Gradient (diff) of the destination argument #0.
 #define ZENDNN_ARG_DIFF_DST_0 145
@@ -2592,6 +2926,11 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 #define ZENDNN_ARG_BN_MEAN      178
 #define ZENDNN_ARG_BN_OFFSET    179
 
+/// A special mnemonic for scale argument of normalization primitives.
+#define ZENDNN_ARG_DIFF_SCALE 255
+/// A special mnemonic for shift argument of normalization primitives.
+#define ZENDNN_ARG_DIFF_SHIFT 256
+
 /// Output scaling factors provided at execution time.
 #define ZENDNN_ARG_ATTR_OUTPUT_SCALES 513
 
@@ -2617,8 +2956,8 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 #define ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) \
     (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP_BASE * ((idx) + 1))
 
-// XXX: next define should have a (1 << 20) = 1048576 value to preserve 5 bits
-// for ZENDNN_ARG_ATTR_MULTIPLE_POST_OP argument.
+/// Input scaling factors provided at execution time.
+#define ZENDNN_ARG_ATTR_INPUT_SCALES 1048576
 
 /// A structure that contains an index and a memory object, and is used to pass
 /// arguments to zendnn_primitive_execute().
@@ -2650,6 +2989,7 @@ typedef struct {
 /// zendnn_query_*_md                 | const #zendnn_memory_desc_t **
 /// zendnn_query_*_\<op\>_d           | const zendnn_\<op\>_desc_t **
 /// zendnn_query_*_pd                 | #const_zendnn_primitive_desc_t *
+/// zendnn_query_cache_blob_id        | const uint8_t **
 ///
 /// @note
 ///     Rule of thumb: all opaque types and structures are returned by
@@ -2686,6 +3026,9 @@ typedef enum {
 
     zendnn_query_prop_kind, ///< propagation kind
 
+    zendnn_query_cache_blob_id_size_s64, ///< size of cache blob ID in bytes
+    zendnn_query_cache_blob_id, ///< cache blob  ID (pointer to array)
+
     // memory and op descriptor section
     zendnn_query_some_d = 64, ///< stub
     zendnn_query_op_d, ///< op descriptor
@@ -2708,7 +3051,7 @@ typedef enum {
     zendnn_query_pooling_v2_d, ///< pooling version 2 descriptor
     zendnn_query_reduction_d, ///< reduction descriptor
     zendnn_query_prelu_d, ///< prelu descriptor
-
+    zendnn_query_softmax_v2_d, ///< softmax version 2 descriptor
     /* add new primitive */
     zendnn_query_embedding_bag_d, ///< embedding_bag descriptor
 
@@ -2827,11 +3170,11 @@ typedef enum {
     /// Intel Advanced Vector Extensions 2 (Intel AVX2)
     zendnn_cpu_isa_avx2 = 0x7,
 
-    /// Intel Advanced Vector Extensions 512 (Intel AVX-512) subset
+    /// (deprecated) Intel Advanced Vector Extensions 512 (Intel AVX-512) subset
     /// for Intel Xeon Phi processors x200 Series.
     zendnn_cpu_isa_avx512_mic = 0xf,
 
-    /// Intel AVX-512 subset
+    /// (deprecated) Intel AVX-512 subset
     /// for Intel Xeon Phi processors 7235, 7285, 7295 Series.
     zendnn_cpu_isa_avx512_mic_4ops = 0x1f,
 
@@ -2851,7 +3194,6 @@ typedef enum {
 
     /// Intel AVX-512, Intel DL Boost and bfloat16 support and
     /// Intel AMX with 8-bit integer and bfloat16 support
-    /// (initial support)
     zendnn_cpu_isa_avx512_core_amx = 0x3e7,
 
     /// Intel AVX2 and Intel Deep Learning Boost (Intel DL Boost) support

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,8 +37,6 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <data_type_t src_type, data_type_t wei_type = src_type,
-        data_type_t dst_type = src_type, data_type_t acc_type = dst_type>
 struct ref_inner_product_fwd_t : public primitive_t {
     struct pd_t : public cpu_inner_product_fwd_pd_t {
         using cpu_inner_product_fwd_pd_t::cpu_inner_product_fwd_pd_t;
@@ -48,33 +46,30 @@ struct ref_inner_product_fwd_t : public primitive_t {
         status_t init(engine_t *engine) {
             using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
+            const auto src_type = src_md(0)->data_type;
+            const auto wei_type = weights_md(0)->data_type;
+            const auto bia_type = weights_md(1)->data_type;
+            const auto dst_type = dst_md(0)->data_type;
 
-            bool ok = is_fwd()
-                    && expect_data_types(src_type, wei_type, data_type::undef,
-                            dst_type, acc_type)
-                    && platform::has_data_type_support(src_type)
+            const bool allow_all_tags = true; // ref should support all tags
+
+            bool ok = is_fwd() && platform::has_data_type_support(src_type)
                     && platform::has_data_type_support(wei_type)
+                    && platform::has_data_type_support(bia_type)
                     && platform::has_data_type_support(dst_type)
+                    && utils::one_of(src_type, f32, bf16)
+                    && utils::one_of(wei_type, f32, bf16)
+                    && utils::one_of(dst_type, f32, bf16)
+                    && src_type == wei_type
+                    && IMPLICATION(src_type == f32, dst_type == f32)
                     && IMPLICATION(with_bias(),
-                            IMPLICATION(src_type == u8,
-                                    utils::one_of(bias_md_.data_type, f32, s32,
-                                            s8, u8))
-                                    && IMPLICATION(src_type == f32,
-                                            bias_md_.data_type == f32))
-                    && set_default_params() == status::success
-                    && attr()->has_default_values(
-                            smask_t::oscale | smask_t::post_ops)
-                    && output_scales_mask_ok();
+                            utils::one_of(bia_type, f32, bf16)
+                                    && IMPLICATION(
+                                            src_type == f32, bia_type == f32))
+                    && set_default_params(allow_all_tags) == status::success
+                    && attr()->has_default_values(smask_t::post_ops)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             return ok ? status::success : status::unimplemented;
-        }
-
-    private:
-        bool output_scales_mask_ok() const {
-            using namespace data_type;
-            const auto &mask = attr()->output_scales_.mask_;
-            return IMPLICATION(!utils::one_of(src_type, s8, u8),
-                           attr()->output_scales_.has_default_values())
-                    && (mask == 0 || mask == 1 << 1);
         }
     };
 
@@ -87,24 +82,16 @@ struct ref_inner_product_fwd_t : public primitive_t {
         return status::success;
     }
 
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<wei_type>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    typedef typename prec_traits<acc_type>::type acc_data_t;
-
     status_t execute(const exec_ctx_t &ctx) const override {
-        execute_forward(ctx);
-        return status::success;
+        return execute_forward(ctx);
     }
 
 private:
-    void execute_forward(const exec_ctx_t &ctx) const;
+    status_t execute_forward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     std::unique_ptr<ref_post_ops_t> ref_post_ops;
 };
 
-template <data_type_t diff_src_type, data_type_t wei_type,
-        data_type_t diff_dst_type, data_type_t acc_type = diff_src_type>
 struct ref_inner_product_bwd_data_t : public primitive_t {
     struct pd_t : public cpu_inner_product_bwd_data_pd_t {
         using cpu_inner_product_bwd_data_pd_t::cpu_inner_product_bwd_data_pd_t;
@@ -112,35 +99,39 @@ struct ref_inner_product_bwd_data_t : public primitive_t {
         DECLARE_COMMON_PD_T("ref:any", ref_inner_product_bwd_data_t);
 
         status_t init(engine_t *engine) {
-            bool ok = true && desc()->prop_kind == prop_kind::backward_data
-                    && diff_src_md()->data_type == diff_src_type
-                    && weights_md()->data_type == wei_type
-                    && desc()->accum_data_type == acc_type
-                    && diff_dst_md()->data_type == diff_dst_type
+            using namespace data_type;
+            const auto diff_src_type = diff_src_md(0)->data_type;
+            const auto wei_type = weights_md(0)->data_type;
+            const auto diff_dst_type = diff_dst_md(0)->data_type;
+
+            const bool allow_all_tags = true; // ref should support all tags
+
+            bool ok = desc()->prop_kind == prop_kind::backward_data
+                    && platform::has_data_type_support(diff_src_type)
+                    && platform::has_data_type_support(wei_type)
+                    && platform::has_data_type_support(diff_dst_type)
+                    && utils::one_of(diff_src_type, f32, bf16)
+                    && utils::one_of(wei_type, f32, bf16)
+                    && utils::one_of(diff_dst_type, f32, bf16)
+                    && diff_dst_type == wei_type
+                    && IMPLICATION(diff_dst_type == f32, diff_src_type == f32)
                     && attr()->has_default_values()
-                    && set_default_params() == status::success;
+                    && set_default_params(allow_all_tags) == status::success;
             return ok ? status::success : status::unimplemented;
         }
     };
 
     ref_inner_product_bwd_data_t(const pd_t *apd) : primitive_t(apd) {}
 
-    typedef typename prec_traits<diff_src_type>::type diff_src_data_t;
-    typedef typename prec_traits<wei_type>::type wei_data_t;
-    typedef typename prec_traits<diff_dst_type>::type diff_dst_data_t;
-    typedef typename prec_traits<acc_type>::type acc_data_t;
-
     status_t execute(const exec_ctx_t &ctx) const override {
-        execute_backward_data(ctx);
-        return status::success;
+        return execute_backward_data(ctx);
     }
 
 private:
-    void execute_backward_data(const exec_ctx_t &ctx) const;
+    status_t execute_backward_data(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };
 
-template <data_type_t data_type>
 struct ref_inner_product_bwd_weights_t : public primitive_t {
     struct pd_t : public cpu_inner_product_bwd_weights_pd_t {
         using cpu_inner_product_bwd_weights_pd_t::
@@ -149,28 +140,42 @@ struct ref_inner_product_bwd_weights_t : public primitive_t {
         DECLARE_COMMON_PD_T("ref:any", ref_inner_product_bwd_weights_t);
 
         status_t init(engine_t *engine) {
-            bool ok = true && desc()->prop_kind == prop_kind::backward_weights
-                    && utils::everyone_is(data_type, src_md()->data_type,
-                            diff_dst_md()->data_type,
-                            diff_weights_md()->data_type)
+            using namespace data_type;
+            const auto src_type = src_md(0)->data_type;
+            const auto diff_wei_type = diff_weights_md(0)->data_type;
+            const auto diff_bia_type = diff_weights_md(1)->data_type;
+            const auto diff_dst_type = diff_dst_md(0)->data_type;
+
+            const bool allow_all_tags = true; // ref should support all tags
+
+            bool ok = desc()->prop_kind == prop_kind::backward_weights
+                    && platform::has_data_type_support(src_type)
+                    && platform::has_data_type_support(diff_wei_type)
+                    && platform::has_data_type_support(diff_bia_type)
+                    && platform::has_data_type_support(diff_dst_type)
+                    && utils::one_of(src_type, f32, bf16)
+                    && utils::one_of(diff_wei_type, f32, bf16)
+                    && utils::one_of(diff_dst_type, f32, bf16)
                     && IMPLICATION(with_bias(),
-                            data_type == diff_weights_md(1)->data_type)
+                            utils::one_of(diff_bia_type, f32, bf16)
+                                    && IMPLICATION(diff_dst_type == f32,
+                                            diff_bia_type == f32))
+                    && diff_dst_type == src_type
+                    && IMPLICATION(diff_dst_type == f32, diff_wei_type == f32)
                     && attr()->has_default_values()
-                    && set_default_params() == status::success;
+                    && set_default_params(allow_all_tags) == status::success;
             return ok ? status::success : status::unimplemented;
         }
     };
 
     ref_inner_product_bwd_weights_t(const pd_t *apd) : primitive_t(apd) {}
-    typedef typename prec_traits<data_type>::type data_t;
 
     status_t execute(const exec_ctx_t &ctx) const override {
-        execute_backward_weights(ctx);
-        return status::success;
+        return execute_backward_weights(ctx);
     }
 
 private:
-    void execute_backward_weights(const exec_ctx_t &ctx) const;
+    status_t execute_backward_weights(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };
 

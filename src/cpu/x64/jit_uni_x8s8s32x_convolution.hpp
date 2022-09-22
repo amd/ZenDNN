@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <cpu_isa_t isa, impl::data_type_t src_type, impl::data_type_t dst_type>
+template <cpu_isa_t isa>
 struct jit_uni_x8s8s32x_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
@@ -46,60 +46,55 @@ struct jit_uni_x8s8s32x_convolution_fwd_t : public primitive_t {
 
         DECLARE_COMMON_PD_T(
                 JIT_IMPL_NAME_HELPER("jit_uni_int8:",
-                        isa == avx2 && jcp_.ver == ver_vnni ? avx2_vnni : isa,
-                        ""),
+                        isa == avx2 && jcp_.has_vnni ? avx2_vnni : isa, ""),
                 jit_uni_x8s8s32x_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
-            const bool args_ok = true && is_fwd()
+            const bool args_ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(src_type, data_type::s8,
-                            data_type::undef, dst_type, data_type::s32)
+                    && utils::one_of(src_md(0)->data_type, s8, u8)
+                    && weights_md(0)->data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(bias_md_.data_type, data_type::f32,
-                                    data_type::s32, data_type::s8,
-                                    data_type::u8))
+                            utils::one_of(
+                                    weights_md(1)->data_type, f32, s32, s8, u8))
+                    && utils::one_of(dst_md(0)->data_type, f32, s32, s8, u8)
+                    && desc()->accum_data_type == s32
                     && attr()->has_default_values(smask_t::oscale
                                     | smask_t::zero_points_runtime
-                                    | smask_t::post_ops,
-                            dst_type)
+                                    | smask_t::post_ops | smask_t::sum_dt,
+                            dst_md(0)->data_type)
+                    && attr()->post_ops_.check_sum_consistent_dt(
+                            dst_md(0)->data_type)
                     && !has_zero_dim_memory() && zero_points_ok();
             if (!args_ok) return status::unimplemented;
 
-            const auto status = jit_uni_x8s8s32x_fwd_kernel<isa>::init_conf(
-                    jcp_, *desc(), src_md_, weights_md_, dst_md_, bias_md_,
-                    *attr(), zendnn_get_max_threads());
-            if (status != status::success) return status;
+            CHECK(jit_uni_x8s8s32x_fwd_kernel<isa>::init_conf(jcp_, *desc(),
+                    src_md_, weights_md_, dst_md_, bias_md_, attr_,
+                    zendnn_get_max_threads()));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_uni_x8s8s32x_fwd_kernel<isa>::init_scratchpad(
                     scratchpad, jcp_, *attr());
 
-            return status;
+            return attr_.set_default_formats(dst_md(0));
         }
 
         jit_conv_conf_t jcp_;
 
     protected:
         bool zero_points_ok() const {
-            using namespace data_type;
+            // Only common zero points are supported -> mask should only be 0
             int mask_src = 0, mask_dst = 0;
-            const int c_mask = 0x1,
-                      g_mask = 0x3; // mask for i/o-channel and ngroups
             attr()->zero_points_.get(ZENDNN_ARG_SRC, nullptr, &mask_src, nullptr);
             attr()->zero_points_.get(ZENDNN_ARG_DST, nullptr, &mask_dst, nullptr);
             return attr()->zero_points_.has_default_values(ZENDNN_ARG_WEIGHTS)
-                    && utils::one_of(mask_src, 0, c_mask, g_mask)
-                    && utils::one_of(mask_dst, 0, c_mask, g_mask);
+                    && mask_src == 0 && mask_dst == 0;
         }
     };
 
     jit_uni_x8s8s32x_convolution_fwd_t(const pd_t *apd) : primitive_t(apd) {}
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
 
     status_t init(engine_t *engine) override {
         CHECK(safe_ptr_assign(kernel_,

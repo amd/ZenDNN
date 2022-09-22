@@ -319,7 +319,8 @@ struct primitive : public handle<zendnn_primitive_t> {
         reduction = zendnn_reduction,
         /// A PReLU primitive.
         prelu = zendnn_prelu,
-
+        /// A softmax version 2 primitive.
+        softmax_v2 = zendnn_softmax_v2,
         /* add new primitive */
         /// An embedding bag primitive.
         embedding_bag = zendnn_embedding_bag,
@@ -335,10 +336,23 @@ struct primitive : public handle<zendnn_primitive_t> {
     /// @param c_pd C API primitive descriptor.
     primitive(const_zendnn_primitive_desc_t c_pd);
 
+    /// Constructs a primitive from a C API primitive descriptor and a cache blob.
+    ///
+    /// @param c_pd C API primitive descriptor.
+    /// @param cache_blob Cache blob.
+    primitive(const_zendnn_primitive_desc_t c_pd,
+            const std::vector<uint8_t> &cache_blob);
+
     /// Constructs a primitive from a primitive descriptor.
     ///
     /// @param pd Primitive descriptor.
     primitive(const primitive_desc &pd);
+
+    /// Constructs a primitive from a primitive descriptor and a cache blob.
+    ///
+    /// @param pd Primitive descriptor.
+    /// @param cache_blob Cache blob.
+    primitive(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob);
 
     /// Returns the C API primitive descriptor of the underlying C API
     /// primitive.
@@ -350,6 +364,15 @@ struct primitive : public handle<zendnn_primitive_t> {
     ///
     /// @returns The primitive kind.
     inline kind get_kind() const;
+
+    /// Returns a cache blob for the primitive.
+    ///
+    /// @returns Vector containing the cache blob.
+    ///
+    /// @note The cache blob can be empty. It's the user's responsibility to
+    ///     check whether it's empty prior to passing it to the primitive
+    ///     constructor.
+    inline std::vector<uint8_t> get_cache_blob() const;
 
     /// Executes computations specified by the primitive in a specified stream.
     ///
@@ -393,6 +416,18 @@ zendnn::primitive::kind primitive::get_kind() const {
     return static_cast<zendnn::primitive::kind>(kind);
 }
 
+std::vector<uint8_t> primitive::get_cache_blob() const {
+    size_t size;
+    error::wrap_c_api(zendnn_primitive_get_cache_blob(get(), &size, nullptr),
+            "could not get cache blob size from a primitive");
+
+    std::vector<uint8_t> cache_blob(size);
+    error::wrap_c_api(
+            zendnn_primitive_get_cache_blob(get(), &size, cache_blob.data()),
+            "could not get a cache blob from a primitive");
+    return cache_blob;
+}
+
 /// @} zendnn_api_primitives_common
 
 /// @addtogroup zendnn_api_attributes
@@ -406,6 +441,26 @@ zendnn::primitive::kind primitive::get_kind() const {
 /// @sa @ref dev_guide_attributes_post_ops
 ///
 /// @{
+
+/// Floating-point math mode
+enum class fpmath_mode {
+    /// Default behavior, no downconversions allowed
+    strict = zendnn_fpmath_mode_strict,
+    /// Implicit f32->bf16 conversions allowed
+    bf16 = zendnn_fpmath_mode_bf16,
+    /// Implicit f32->f16 conversions allowed
+    f16 = zendnn_fpmath_mode_f16,
+    /// Implicit f32->f16 or f32->bf16 conversions allowed
+    any = zendnn_fpmath_mode_any
+};
+
+/// Converts an fpmath mode enum value from C++ API to C API type.
+///
+/// @param mode C++ API fpmath mode enum value.
+/// @returns Corresponding C API fpmath mode enum value.
+inline zendnn_fpmath_mode_t convert_to_c(fpmath_mode mode) {
+    return static_cast<zendnn_fpmath_mode_t>(mode);
+}
 
 /// Scratchpad mode
 enum class scratchpad_mode {
@@ -563,7 +618,7 @@ enum class algorithm {
     /// Max pooling
     pooling_max = zendnn_pooling_max,
     /// Average pooling exclude padding,
-    /// alias for #zendnn::algorithm::pooling_avg_include_padding
+    /// alias for #zendnn::algorithm::pooling_avg_exclude_padding
     pooling_avg = zendnn_pooling_avg,
     /// Average pooling include padding
     pooling_avg_include_padding = zendnn_pooling_avg_include_padding,
@@ -581,6 +636,10 @@ enum class algorithm {
     /// LRB GRU expects 4 bias tensors on input:
     /// \f$[b_{u}, b_{r}, b_{c_x}, b_{c_h}]\f$
     lbr_gru = zendnn_lbr_gru,
+    /// AUGRU cell
+    vanilla_augru = zendnn_vanilla_augru,
+    /// AUGRU cell with linear before reset
+    lbr_augru = zendnn_lbr_augru,
     /// Binary add
     binary_add = zendnn_binary_add,
     /// Binary mul
@@ -627,7 +686,10 @@ enum class algorithm {
     reduction_norm_lp_power_p_max = zendnn_reduction_norm_lp_power_p_max,
     /// Reduction using norm_lp_power_p_sum operation
     reduction_norm_lp_power_p_sum = zendnn_reduction_norm_lp_power_p_sum,
-
+    /// Softmax, numerically stable
+    softmax_accurate = zendnn_softmax_accurate,
+    /// LogSoftmax, numerically stable
+    softmax_log = zendnn_softmax_log,
     /* add new primitive */
     embedding_bag_sum  = zendnn_embedding_bag_sum,
     embedding_bag_mean = zendnn_embedding_bag_mean,
@@ -674,7 +736,17 @@ enum class normalization_flags : unsigned {
     /// the workspace to implement backward propagation. On inference, the
     /// workspace is not required and behavior is the same as when normalization
     /// is fused with ReLU using the post-ops API.
-    fuse_norm_relu = zendnn_fuse_norm_relu
+    fuse_norm_relu = zendnn_fuse_norm_relu,
+
+    /// Use scale parameter. If specified, the user is expected to pass scale as
+    /// input on forward propagation. On backward propagation of type
+    /// #zendnn::prop_kind::backward, the library computes its derivative.
+    use_scale = zendnn_use_scale,
+
+    /// Use shift parameter. If specified, the user is expected to pass shift as
+    /// input on forward propagation. On backward propagation of type
+    /// #zendnn::prop_kind::backward, the library computes its derivative.
+    use_shift = zendnn_use_shift,
 };
 
 /// Converts normalization flags enum value from C++ API to C API type.
@@ -813,6 +885,12 @@ enum class query {
 
     /// propagation kind
     prop_kind = zendnn_query_prop_kind,
+
+    /// size of cache blob ID in bytes
+    cache_blob_id_size_s64 = zendnn_query_cache_blob_id_size_s64,
+
+    /// cache blob ID (pointer to array)
+    cache_blob_id = zendnn_query_cache_blob_id,
 
     /// operation descriptor
     op_d = zendnn_query_op_d,
@@ -1276,7 +1354,11 @@ struct memory : public handle<zendnn_memory_t> {
         /// permuted 4D tensor
         abdc = zendnn_abdc,
         /// permuted 4D tensor
+        acbd = zendnn_acbd,
+        /// permuted 4D tensor
         acdb = zendnn_acdb,
+        /// permuted 4D tensor
+        adbc = zendnn_adbc,
         /// permuted 4D tensor
         bacd = zendnn_bacd,
         /// permuted 4D tensor
@@ -1372,6 +1454,9 @@ struct memory : public handle<zendnn_memory_t> {
         ncdhw = abcde,
         /// 5D CNN activations tensor; an alias for #zendnn::memory::format_tag::acdeb
         ndhwc = acdeb,
+
+        //hwcn format_tag
+        hwcn = zendnn_hwcn,
 
         /// 2D CNN weights tensor; an alias for #zendnn::memory::format_tag::ab
         oi = ab,
@@ -1560,6 +1645,7 @@ struct memory : public handle<zendnn_memory_t> {
         ABcd8a16b2a = zendnn_ABcd8a16b2a,
         ABcd8a8b = zendnn_ABcd8a8b,
         ABcd8a4b = zendnn_ABcd8a4b,
+        ABcd8a2b = zendnn_ABcd8a2b,
         /// 4D tensor blocked by 2nd dimension with block size 8
         aBcd8b = zendnn_aBcd8b,
         ABcd8b16a2b = zendnn_ABcd8b16a2b,
@@ -1688,9 +1774,12 @@ struct memory : public handle<zendnn_memory_t> {
         AB8a2b = zendnn_AB8a2b,
         abDc32d = zendnn_abDc32d,
         abDC32d4c = zendnn_abDC32d4c,
+        abCd32c = zendnn_abCd32c,
         abdEc32e = zendnn_abdEc32e,
         abdEC32e2c = zendnn_abdEC32e2c,
         abdEC32e4c = zendnn_abdEC32e4c,
+        abdCe32c = zendnn_abdCe32c,
+        abdCE32c2e = zendnn_abdCE32c2e,
         aBCdef16c16b4c = zendnn_aBCdef16c16b4c,
         aBdC16b4c = zendnn_aBdC16b4c,
         aBdeC16b4c = zendnn_aBdeC16b4c,
@@ -1766,6 +1855,58 @@ struct memory : public handle<zendnn_memory_t> {
         adefcb = zendnn_adefcb,
         adefCb2c = zendnn_adefCb2c,
         adefCb4c = zendnn_adefCb4c,
+        ABc32a32b = zendnn_ABc32a32b,
+        BAc8a16b2a = zendnn_BAc8a16b2a,
+        BAcd8a16b2a = zendnn_BAcd8a16b2a,
+        ABcde8a16b2a = zendnn_ABcde8a16b2a,
+        aCBd8b16c2b = zendnn_aCBd8b16c2b,
+        BAcde8a16b2a = zendnn_BAcde8a16b2a,
+        aCBde8b16c2b = zendnn_aCBde8b16c2b,
+        ABcde32a32b = zendnn_ABcde32a32b,
+        ABc4a8b8a4b = zendnn_ABc4a8b8a4b,
+        ABcde4a8b8a4b = zendnn_ABcde4a8b8a4b,
+        BAc4b8a8b4a = zendnn_BAc4b8a8b4a,
+        BAcd4b8a8b4a = zendnn_BAcd4b8a8b4a,
+        BAcde4b8a8b4a = zendnn_BAcde4b8a8b4a,
+        aBCd4b8c8b4c = zendnn_aBCd4b8c8b4c,
+        aBCdef4b8c8b4c = zendnn_aBCdef4b8c8b4c,
+        aBCdef8b16c2b = zendnn_aBCdef8b16c2b,
+        aCBdef8b16c2b = zendnn_aCBdef8b16c2b,
+        aBdC16b2c = zendnn_aBdC16b2c,
+        aBdeC16b2c = zendnn_aBdeC16b2c,
+        aBdefC16b2c = zendnn_aBdefC16b2c,
+        aBedc16b = zendnn_aBedc16b,
+        AcB16a2b = zendnn_AcB16a2b,
+        AcdB16a4b = zendnn_AcdB16a4b,
+        AcdeB16a2b = zendnn_AcdeB16a2b,
+        Adcb16a = zendnn_Adcb16a,
+        aCBd4c8b8c4b = zendnn_aCBd4c8b8c4b,
+        aCBde4c8b8c4b = zendnn_aCBde4c8b8c4b,
+        aCBdef4c8b8c4b = zendnn_aCBdef4c8b8c4b,
+        ABc32a16b = zendnn_ABc32a16b,
+        ABcd32a16b = zendnn_ABcd32a16b,
+        ABcde32a16b = zendnn_ABcde32a16b,
+        AB48a16b = zendnn_AB48a16b,
+        AB48a32b = zendnn_AB48a32b,
+        ABc40a16b = zendnn_ABc40a16b,
+        ABc40a32b = zendnn_ABc40a32b,
+        aBC48b16c = zendnn_aBC48b16c,
+        aBC48b32c = zendnn_aBC48b32c,
+        ABcd40a16b = zendnn_ABcd40a16b,
+        ABcd40a32b = zendnn_ABcd40a32b,
+        BA16a16b = zendnn_BA16a16b,
+        BA16a32b = zendnn_BA16a32b,
+        BA16a48b = zendnn_BA16a48b,
+        BA16a64b = zendnn_BA16a64b,
+        BA16a16b2a = zendnn_BA16a16b2a,
+        BA16a32b2a = zendnn_BA16a32b2a,
+        BA16a48b2a = zendnn_BA16a48b2a,
+        BA16a64b2a = zendnn_BA16a64b2a,
+        BA16a16b4a = zendnn_BA16a16b4a,
+        BA16a32b4a = zendnn_BA16a32b4a,
+        BA16a48b4a = zendnn_BA16a48b4a,
+        BA16a64b4a = zendnn_BA16a64b4a,
+        decbA16a = zendnn_decbA16a,
 
         format_tag_last = zendnn_format_tag_last,
 
@@ -1866,6 +2007,7 @@ struct memory : public handle<zendnn_memory_t> {
         OIdhw16i32o = zendnn_OIdhw16i32o,
         OIdhw16i64o = zendnn_OIdhw16i64o,
         OIdhw16o16i = zendnn_OIdhw16o16i,
+        OIdhw16o16i2o = zendnn_OIdhw16o16i2o,
         Oidhw16o = zendnn_Oidhw16o,
         OIdhw4i4o = zendnn_OIdhw4i4o,
         OIdhw4o4i = zendnn_OIdhw4o4i,
@@ -1959,6 +2101,7 @@ struct memory : public handle<zendnn_memory_t> {
         gOdhwi8o = zendnn_gOdhwi8o,
         gOIdhw16i16o = zendnn_gOIdhw16i16o,
         gOIdhw16o16i = zendnn_gOIdhw16o16i,
+        gOIdhw16o16i2o = zendnn_gOIdhw16o16i2o,
         gOidhw16o = zendnn_gOidhw16o,
         gOIdhw4i4o = zendnn_gOIdhw4i4o,
         gOIdhw4o4i = zendnn_gOIdhw4o4i,
@@ -2064,8 +2207,260 @@ struct memory : public handle<zendnn_memory_t> {
         gdhwio = zendnn_gdhwio,
         gdhwIo2i = zendnn_gdhwIo2i,
         gdhwIo4i = zendnn_gdhwIo4i,
-        //hwcn format_tag
-        hwcn = zendnn_hwcn,
+        ldIo32i = zendnn_ldIo32i,
+        ldgIo32i = zendnn_ldgIo32i,
+        ldgIO32i2o = zendnn_ldgIO32i2o,
+        nCdhw32c = zendnn_nCdhw32c,
+        nChw32c = zendnn_nChw32c,
+        nCw32c = zendnn_nCw32c,
+        NCw32n16c = zendnn_NCw32n16c,
+        NChw32n16c = zendnn_NChw32n16c,
+        NCdhw32n16c = zendnn_NCdhw32n16c,
+        NCw32n32c = zendnn_NCw32n32c,
+        OI16i16o4i = zendnn_OI16i16o4i,
+        IOw8o16i2o = zendnn_IOw8o16i2o,
+        IOhw8o16i2o = zendnn_IOhw8o16i2o,
+        Owhi16o = zendnn_Owhi16o,
+        OIdhw8o16i2o = zendnn_OIdhw8o16i2o,
+        IOdhw8o16i2o = zendnn_IOdhw8o16i2o,
+        Goiw4g = zendnn_Goiw4g,
+        gIOw8o16i2o = zendnn_gIOw8o16i2o,
+        Goiw32g = zendnn_Goiw32g,
+        Goihw4g = zendnn_Goihw4g,
+        gIOhw8o16i2o = zendnn_gIOhw8o16i2o,
+        Goihw32g = zendnn_Goihw32g,
+        gOwhi16o = zendnn_gOwhi16o,
+        IOw4i8o8i4o = zendnn_IOw4i8o8i4o,
+        IOhw4i8o8i4o = zendnn_IOhw4i8o8i4o,
+        IOdhw4i8o8i4o = zendnn_IOdhw4i8o8i4o,
+        gIOw4i8o8i4o = zendnn_gIOw4i8o8i4o,
+        gIOhw4i8o8i4o = zendnn_gIOhw4i8o8i4o,
+        gIOdhw4i8o8i4o = zendnn_gIOdhw4i8o8i4o,
+        gOIdhw8o16i2o = zendnn_gOIdhw8o16i2o,
+        gIOdhw8o16i2o = zendnn_gIOdhw8o16i2o,
+        Goidhw32g = zendnn_Goidhw32g,
+        OI16i32o4i = zendnn_OI16i32o4i,
+        OI16i48o4i = zendnn_OI16i48o4i,
+        OI16i64o4i = zendnn_OI16i64o4i,
+        OI16i16o2i = zendnn_OI16i16o2i,
+        OI16i32o2i = zendnn_OI16i32o2i,
+        OI16i48o2i = zendnn_OI16i48o2i,
+        OI16i64o2i = zendnn_OI16i64o2i,
+        aBdeC16c16b4c = zendnn_aBdeC16c16b4c,
+        AcB16b16a2b = zendnn_AcB16b16a2b,
+        aBdC16c16b2c = zendnn_aBdC16c16b2c,
+        AcB16b16a4b = zendnn_AcB16b16a4b,
+        aBdC16c16b4c = zendnn_aBdC16c16b4c,
+        AcdB16b16a2b = zendnn_AcdB16b16a2b,
+        aBdefC16c16b4c = zendnn_aBdefC16c16b4c,
+        AcdeB16b16a4b = zendnn_AcdeB16b16a4b,
+        AcB16b32a2b = zendnn_AcB16b32a2b,
+        AcB16b32a4b = zendnn_AcB16b32a4b,
+        AcB16b48a2b = zendnn_AcB16b48a2b,
+        AcB16b48a4b = zendnn_AcB16b48a4b,
+        AcB16b64a2b = zendnn_AcB16b64a2b,
+        AcB16b64a4b = zendnn_AcB16b64a4b,
+        aBdC16c32b2c = zendnn_aBdC16c32b2c,
+        aBdC16c32b4c = zendnn_aBdC16c32b4c,
+        aBdC16c48b2c = zendnn_aBdC16c48b2c,
+        aBdC16c48b4c = zendnn_aBdC16c48b4c,
+        aBdC16c64b2c = zendnn_aBdC16c64b2c,
+        aBdC16c64b4c = zendnn_aBdC16c64b4c,
+        AcdB16b32a2b = zendnn_AcdB16b32a2b,
+        AcdB16b32a4b = zendnn_AcdB16b32a4b,
+        AcdB16b48a2b = zendnn_AcdB16b48a2b,
+        AcdB16b48a4b = zendnn_AcdB16b48a4b,
+        AcdB16b64a2b = zendnn_AcdB16b64a2b,
+        AcdB16b64a4b = zendnn_AcdB16b64a4b,
+        aBdeC16c32b2c = zendnn_aBdeC16c32b2c,
+        aBdeC16c32b4c = zendnn_aBdeC16c32b4c,
+        aBdeC16c48b2c = zendnn_aBdeC16c48b2c,
+        aBdeC16c48b4c = zendnn_aBdeC16c48b4c,
+        aBdeC16c64b2c = zendnn_aBdeC16c64b2c,
+        aBdeC16c64b4c = zendnn_aBdeC16c64b4c,
+        AcdeB16b32a2b = zendnn_AcdeB16b32a2b,
+        AcdeB16b32a4b = zendnn_AcdeB16b32a4b,
+        AcdeB16b48a2b = zendnn_AcdeB16b48a2b,
+        AcdeB16b48a4b = zendnn_AcdeB16b48a4b,
+        AcdeB16b64a2b = zendnn_AcdeB16b64a2b,
+        AcdeB16b64a4b = zendnn_AcdeB16b64a4b,
+        aBdefC16c32b2c = zendnn_aBdefC16c32b2c,
+        aBdefC16c32b4c = zendnn_aBdefC16c32b4c,
+        aBdefC16c48b2c = zendnn_aBdefC16c48b2c,
+        aBdefC16c48b4c = zendnn_aBdefC16c48b4c,
+        aBdefC16c64b2c = zendnn_aBdefC16c64b2c,
+        aBdefC16c64b4c = zendnn_aBdefC16c64b4c,
+        OwI16i16o2i = zendnn_OwI16i16o2i,
+        gOwI16i16o2i = zendnn_gOwI16i16o2i,
+        OhwI16i16o2i = zendnn_OhwI16i16o2i,
+        gOhwI16i16o2i = zendnn_gOhwI16i16o2i,
+        OdhwI16i16o2i = zendnn_OdhwI16i16o2i,
+        gOdhwI16i16o2i = zendnn_gOdhwI16i16o2i,
+        OwI16i16o4i = zendnn_OwI16i16o4i,
+        gOwI16i16o4i = zendnn_gOwI16i16o4i,
+        OhwI16i16o4i = zendnn_OhwI16i16o4i,
+        gOhwI16i16o4i = zendnn_gOhwI16i16o4i,
+        OdhwI16i16o4i = zendnn_OdhwI16i16o4i,
+        gOdhwI16i16o4i = zendnn_gOdhwI16i16o4i,
+        OwI16i32o2i = zendnn_OwI16i32o2i,
+        OwI16i32o4i = zendnn_OwI16i32o4i,
+        OwI16i48o2i = zendnn_OwI16i48o2i,
+        OwI16i48o4i = zendnn_OwI16i48o4i,
+        OwI16i64o2i = zendnn_OwI16i64o2i,
+        OwI16i64o4i = zendnn_OwI16i64o4i,
+        gOwI16i32o2i = zendnn_gOwI16i32o2i,
+        gOwI16i32o4i = zendnn_gOwI16i32o4i,
+        gOwI16i48o2i = zendnn_gOwI16i48o2i,
+        gOwI16i48o4i = zendnn_gOwI16i48o4i,
+        gOwI16i64o2i = zendnn_gOwI16i64o2i,
+        gOwI16i64o4i = zendnn_gOwI16i64o4i,
+        OhwI16i32o2i = zendnn_OhwI16i32o2i,
+        OhwI16i32o4i = zendnn_OhwI16i32o4i,
+        OhwI16i48o2i = zendnn_OhwI16i48o2i,
+        OhwI16i48o4i = zendnn_OhwI16i48o4i,
+        OhwI16i64o2i = zendnn_OhwI16i64o2i,
+        OhwI16i64o4i = zendnn_OhwI16i64o4i,
+        gOhwI16i32o2i = zendnn_gOhwI16i32o2i,
+        gOhwI16i32o4i = zendnn_gOhwI16i32o4i,
+        gOhwI16i48o2i = zendnn_gOhwI16i48o2i,
+        gOhwI16i48o4i = zendnn_gOhwI16i48o4i,
+        gOhwI16i64o2i = zendnn_gOhwI16i64o2i,
+        gOhwI16i64o4i = zendnn_gOhwI16i64o4i,
+        OdhwI16i32o2i = zendnn_OdhwI16i32o2i,
+        OdhwI16i32o4i = zendnn_OdhwI16i32o4i,
+        OdhwI16i48o2i = zendnn_OdhwI16i48o2i,
+        OdhwI16i48o4i = zendnn_OdhwI16i48o4i,
+        OdhwI16i64o2i = zendnn_OdhwI16i64o2i,
+        OdhwI16i64o4i = zendnn_OdhwI16i64o4i,
+        gOdhwI16i32o2i = zendnn_gOdhwI16i32o2i,
+        gOdhwI16i32o4i = zendnn_gOdhwI16i32o4i,
+        gOdhwI16i48o2i = zendnn_gOdhwI16i48o2i,
+        gOdhwI16i48o4i = zendnn_gOdhwI16i48o4i,
+        gOdhwI16i64o2i = zendnn_gOdhwI16i64o2i,
+        gOdhwI16i64o4i = zendnn_gOdhwI16i64o4i,
+        aBdeC16c16b2c = zendnn_aBdeC16c16b2c,
+        aBdefC16c16b2c = zendnn_aBdefC16c16b2c,
+        AcdB16b16a4b = zendnn_AcdB16b16a4b,
+        AcdeB16b16a2b = zendnn_AcdeB16b16a2b,
+        hwioG16g = zendnn_hwioG16g,
+        ABc4a2b = zendnn_ABc4a2b,
+        ABc8a2b = zendnn_ABc8a2b,
+        ABcd4a2b = zendnn_ABcd4a2b,
+        ABcde4a2b = zendnn_ABcde4a2b,
+        ABcde8a2b = zendnn_ABcde8a2b,
+        ABcd4a8b8a2b = zendnn_ABcd4a8b8a2b,
+        NCdhw40n32c = zendnn_NCdhw40n32c,
+        NChw40n32c = zendnn_NChw40n32c,
+        NCw40n32c = zendnn_NCw40n32c,
+        OIdhw4o8i8o2i = zendnn_OIdhw4o8i8o2i,
+        OIhw4o8i8o2i = zendnn_OIhw4o8i8o2i,
+        OIw4o8i8o2i = zendnn_OIw4o8i8o2i,
+        gOIdhw4o8i8o2i = zendnn_gOIdhw4o8i8o2i,
+        gOIhw4o8i8o2i = zendnn_gOIhw4o8i8o2i,
+        gOIw4o8i8o2i = zendnn_gOIw4o8i8o2i,
+        IOdhw4i8o8i2o = zendnn_IOdhw4i8o8i2o,
+        IOhw4i8o8i2o = zendnn_IOhw4i8o8i2o,
+        IOw4i8o8i2o = zendnn_IOw4i8o8i2o,
+        gIOdhw4i8o8i2o = zendnn_gIOdhw4i8o8i2o,
+        gIOhw4i8o8i2o = zendnn_gIOhw4i8o8i2o,
+        gIOw4i8o8i2o = zendnn_gIOw4i8o8i2o,
+        aBCd8b2c = zendnn_aBCd8b2c,
+        ABcde40a16b = zendnn_ABcde40a16b,
+        ABcde40a32b = zendnn_ABcde40a32b,
+        aBCde8b2c = zendnn_aBCde8b2c,
+        ABcde4a8b8a2b = zendnn_ABcde4a8b8a2b,
+        ABc4a8b8a2b = zendnn_ABc4a8b8a2b,
+        aBCdef4b8c8b2c = zendnn_aBCdef4b8c8b2c,
+        aBCde4b8c8b2c = zendnn_aBCde4b8c8b2c,
+        aBCd4b8c8b2c = zendnn_aBCd4b8c8b2c,
+        BAcde4b8a8b2a = zendnn_BAcde4b8a8b2a,
+        BAcd4b8a8b2a = zendnn_BAcd4b8a8b2a,
+        BAc4b8a8b2a = zendnn_BAc4b8a8b2a,
+        aCBdef4c8b8c2b = zendnn_aCBdef4c8b8c2b,
+        aCBde4c8b8c2b = zendnn_aCBde4c8b8c2b,
+        aCBd4c8b8c2b = zendnn_aCBd4c8b8c2b,
+        aBCdef8b2c = zendnn_aBCdef8b2c,
+        AB32a16b = zendnn_AB32a16b,
+        AB32a32b = zendnn_AB32a32b,
+        BA4b8a8b2a = zendnn_BA4b8a8b2a,
+        BA4b8a8b4a = zendnn_BA4b8a8b4a,
+        aBC32b16c = zendnn_aBC32b16c,
+        aBC32b32c = zendnn_aBC32b32c,
+        aCB4c8b8c2b = zendnn_aCB4c8b8c2b,
+        aCB4c8b8c4b = zendnn_aCB4c8b8c4b,
+        ABc2b8a16b4a = zendnn_ABc2b8a16b4a,
+        ABcd2b8a16b4a = zendnn_ABcd2b8a16b4a,
+        ABcde2b8a16b4a = zendnn_ABcde2b8a16b4a,
+        ABc2a8b16a4b = zendnn_ABc2a8b16a4b,
+        ABc2a8b16a2b = zendnn_ABc2a8b16a2b,
+        ABc2b32a8b = zendnn_ABc2b32a8b,
+        ABcd2a8b16a4b = zendnn_ABcd2a8b16a4b,
+        ABcd2a8b16a2b = zendnn_ABcd2a8b16a2b,
+        aCBd2c8b16c2b = zendnn_aCBd2c8b16c2b,
+        ABcd2b32a8b = zendnn_ABcd2b32a8b,
+        aBCd2c8b16c2b = zendnn_aBCd2c8b16c2b,
+        ABcde2a8b16a4b = zendnn_ABcde2a8b16a4b,
+        ABcde2a8b16a2b = zendnn_ABcde2a8b16a2b,
+        aCBde2c8b16c2b = zendnn_aCBde2c8b16c2b,
+        ABcde2b32a8b = zendnn_ABcde2b32a8b,
+        aBC2b8c16b2c = zendnn_aBC2b8c16b2c,
+        aBCd2b8c16b2c = zendnn_aBCd2b8c16b2c,
+        aBCde2b8c16b2c = zendnn_aBCde2b8c16b2c,
+        aBCdef2b8c16b2c = zendnn_aBCdef2b8c16b2c,
+        BAcde2b8a16b4a = zendnn_BAcde2b8a16b4a,
+        BAcd2b8a16b4a = zendnn_BAcd2b8a16b4a,
+        BAc2b8a16b4a = zendnn_BAc2b8a16b4a,
+        BAcde2b8a16b2a = zendnn_BAcde2b8a16b2a,
+        BAcd2b8a16b2a = zendnn_BAcd2b8a16b2a,
+        BAc2b8a16b2a = zendnn_BAc2b8a16b2a,
+        aBCde2c8b16c2b = zendnn_aBCde2c8b16c2b,
+        aBCdef2c8b16c2b = zendnn_aBCdef2c8b16c2b,
+        aCBdef2c8b16c2b = zendnn_aCBdef2c8b16c2b,
+        aBCd2b8c16b4c = zendnn_aBCd2b8c16b4c,
+        aBCde2b8c16b4c = zendnn_aBCde2b8c16b4c,
+        NCdhw40n16c = zendnn_NCdhw40n16c,
+        NCw40n16c = zendnn_NCw40n16c,
+        NChw40n16c = zendnn_NChw40n16c,
+        NCw2c32n8c = zendnn_NCw2c32n8c,
+        NChw2c32n8c = zendnn_NChw2c32n8c,
+        NCdhw2c32n8c = zendnn_NCdhw2c32n8c,
+        OIw2i8o16i4o = zendnn_OIw2i8o16i4o,
+        OIhw2i8o16i4o = zendnn_OIhw2i8o16i4o,
+        OIdhw2i8o16i4o = zendnn_OIdhw2i8o16i4o,
+        OIw2o8i16o4i = zendnn_OIw2o8i16o4i,
+        OIw2o8i16o2i = zendnn_OIw2o8i16o2i,
+        IOw2i8o16i4o = zendnn_IOw2i8o16i4o,
+        IOw2i8o16i2o = zendnn_IOw2i8o16i2o,
+        OIhw2o8i16o4i = zendnn_OIhw2o8i16o4i,
+        OIhw2o8i16o2i = zendnn_OIhw2o8i16o2i,
+        IOhw2i8o16i4o = zendnn_IOhw2i8o16i4o,
+        IOhw2i8o16i2o = zendnn_IOhw2i8o16i2o,
+        OIdhw2o8i16o4i = zendnn_OIdhw2o8i16o4i,
+        OIdhw2o8i16o2i = zendnn_OIdhw2o8i16o2i,
+        IOdhw2i8o16i4o = zendnn_IOdhw2i8o16i4o,
+        IOdhw2i8o16i2o = zendnn_IOdhw2i8o16i2o,
+        gOIw2o8i16o2i = zendnn_gOIw2o8i16o2i,
+        gIOw2i8o16i2o = zendnn_gIOw2i8o16i2o,
+        gIOhw2i8o16i2o = zendnn_gIOhw2i8o16i2o,
+        gIOdhw2i8o16i2o = zendnn_gIOdhw2i8o16i2o,
+        gOIhw2o8i16o2i = zendnn_gOIhw2o8i16o2i,
+        gOIdhw2o8i16o2i = zendnn_gOIdhw2o8i16o2i,
+        gOIw2o8i16o4i = zendnn_gOIw2o8i16o4i,
+        gOIhw2o8i16o4i = zendnn_gOIhw2o8i16o4i,
+        BA4b8a16b2a = zendnn_BA4b8a16b2a,
+        BA4b8a16b4a = zendnn_BA4b8a16b4a,
+        aCB4c8b16c2b = zendnn_aCB4c8b16c2b,
+        aCB4c8b16c4b = zendnn_aCB4c8b16c4b,
+        aCB16c2b = zendnn_aCB16c2b,
+        aCB16c4b = zendnn_aCB16c4b,
+        BA16b2a = zendnn_BA16b2a,
+        BA16b4a = zendnn_BA16b4a,
+        aBC16b16c = zendnn_aBC16b16c,
+        aBC16b32c = zendnn_aBC16b32c,
+        AB16a16b = zendnn_AB16a16b,
+        AB16a32b = zendnn_AB16a32b,
+        ABcde16a16b2a = zendnn_ABcde16a16b2a,
+        aBCdef16b16c2b = zendnn_aBCdef16b16c2b,
     };
 
     /// A memory descriptor.
@@ -2574,13 +2969,13 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// activations have different logical scaling factors.
     ///
     /// In the simplest case when the accumulation is the only post-op,
-    /// the computations would be `dst[:] := scale * dst[:] + op(...)`
+    /// the computations will be `dst[:] := scale * dst[:] + op(...)`
     /// instead of `dst[:] := op(...)`.
     ///
     /// If @p data_type is specified, the original dst tensor will be
     /// reinterpreted as a tensor with the provided data type. Because it is a
     /// reinterpretation, data_type and dst data type should have the same size.
-    /// As a result, computations would be `dst[:] <- scale *
+    /// As a result, computations will be `dst[:] <- scale *
     /// as_data_type(dst[:]) + op(...)` instead of `dst[:] <- op(...)`.
     ///
     /// @note
@@ -2598,6 +2993,42 @@ struct post_ops : public handle<zendnn_post_ops_t> {
             error::wrap_c_api(zendnn_post_ops_append_sum_v2(get(), scale,
                                       memory::convert_to_c(data_type)),
                     "could not append a sum post-op");
+    }
+
+    /// Appends an accumulation (sum) post-op. Prior to accumulating the
+    /// result, the previous value will be will be reduced by zero point
+    /// @p zero_point and multiplied by a scaling factor @p scale.
+    ///
+    /// The kind of this post-op is #zendnn::primitive::kind::sum.
+    ///
+    /// This feature may improve performance for cases like dequantize the
+    /// asymmetrically quantized sum's src1 tensor to f32 domain before
+    /// performing the sum operation by subtracting @p zero_point before the
+    /// scaling.
+    ///
+    /// In the simplest case when the accumulation is the only post-op,
+    /// the computations will be `dst[:] := scale * (dst[:] - zero_point) +
+    /// op(...)` instead of `dst[:] := op(...)`.
+    ///
+    /// If @p data_type is specified, the original dst tensor will be
+    /// reinterpreted as a tensor with the provided data type. Because it is a
+    /// reinterpretation, data_type and dst data type should have the same size.
+    /// As a result, computations will be `dst[:] <- scale *
+    /// (as_data_type(dst[:]) - zero_point) + op(...)` instead of
+    /// `dst[:] <- op(...)`.
+    ///
+    /// @note
+    ///     This post-op executes in-place and does not change the
+    ///     destination layout.
+    ///
+    /// @param scale Scaling factor.
+    /// @param zero_point Zero point.
+    /// @param data_type Data type.
+    void append_sum(float scale, int32_t zero_point,
+            memory::data_type data_type = memory::data_type::undef) {
+        error::wrap_c_api(zendnn_post_ops_append_sum_v3(get(), scale, zero_point,
+                                  memory::convert_to_c(data_type)),
+                "could not append a sum post-op");
     }
 
     /// Returns the parameters of an accumulation (sum) post-op.
@@ -2619,6 +3050,21 @@ struct post_ops : public handle<zendnn_post_ops_t> {
         zendnn_data_type_t c_data_type;
         error::wrap_c_api(zendnn_post_ops_get_params_sum_v2(
                                   get(), index, &scale, &c_data_type),
+                "could not get parameters of a sum post-op");
+        data_type = static_cast<memory::data_type>(c_data_type);
+    }
+
+    /// Returns the parameters of an accumulation (sum) post-op.
+    ///
+    /// @param index Index of the sum post-op.
+    /// @param scale Scaling factor of the sum post-op.
+    /// @param zero_point Single scalar int32_t value of zeropoint.
+    /// @param data_type Data type of the sum post-op.
+    void get_params_sum(int index, float &scale, int32_t &zero_point,
+            memory::data_type &data_type) const {
+        zendnn_data_type_t c_data_type;
+        error::wrap_c_api(zendnn_post_ops_get_params_sum_v3(get(), index, &scale,
+                                  &zero_point, &c_data_type),
                 "could not get parameters of a sum post-op");
         data_type = static_cast<memory::data_type>(c_data_type);
     }
@@ -2659,6 +3105,101 @@ struct post_ops : public handle<zendnn_post_ops_t> {
         aalgorithm = static_cast<zendnn::algorithm>(c_alg);
     }
 
+    /// Appends a depthwise post-op convolution.
+    ///
+    /// This post-op can only be fused with a 2D 1x1 convolution (convolution
+    /// with weights spatial dimension equal to 1 i.e., kh=kw=1).
+    ///
+    /// The kind of this post-op is #zendnn_convolution.
+    ///
+    /// The number of outputs for primitive remain same as before. The output
+    /// spatial size can be derived as below:
+    ///
+    /// output_height = ceil(output_height_1x1_convolution, stride)
+    /// output_width = ceil(output_width_1x1_convolution, stride)
+    ///
+    /// See @ref dev_guide_attributes_post_ops_depthwise and
+    /// @ref dev_guide_attributes_post_ops_depthwise_fusion for more info.
+    ///
+    /// @param weights_data_type Weights data type of depthwise post-op
+    /// @param bias_data_type Bias data type of depthwise post-op
+    /// @param dst_data_type Output data type of depthwise post-op
+    /// @param kernel_size Size of kernel of depthwise post-op
+    /// @param stride_size Size of stride of depthwise post-op
+    /// @param padding_l_size Size of left and top paddings of depthwise post-op
+    /// @param mask Output scaling factors correspondence mask that defines the
+    ///     correspondence between the output tensor dimensions and the
+    ///     @p scales array. The set i-th bit indicates that a dedicated output
+    ///     scaling factor is used for each index along that dimension. The mask
+    ///     value of 0 implies a common scaling factor for the whole output
+    ///     tensor.
+    /// @param scales Output pointer to a constant array of float scaling
+    ///     factors.
+    void append_dw(memory::data_type weights_data_type,
+            memory::data_type bias_data_type, memory::data_type dst_data_type,
+            memory::dim kernel_size, memory::dim stride_size,
+            memory::dim padding_l_size, int mask,
+            const std::vector<float> &scales) {
+
+        error::wrap_c_api(zendnn_post_ops_append_dw(get(),
+                                  memory::convert_to_c(weights_data_type),
+                                  memory::convert_to_c(bias_data_type),
+                                  memory::convert_to_c(dst_data_type),
+                                  kernel_size, stride_size, padding_l_size,
+                                  scales.size(), mask, scales.data()),
+                "could not append depthwise post-op");
+    }
+
+    /// Returns the parameters of an depthwise post-op with stride 1.
+    ///
+    /// @param index Index of the elementwise post-op.
+    /// @param weights_data_type Weights data type of depthwise post-op
+    /// @param bias_data_type Bias data type of depthwise post-op
+    /// @param dst_data_type Output data type of depthwise post-op
+    /// @param mask Output scaling factors correspondence mask that defines the
+    ///     correspondence between the output tensor dimensions and the
+    ///     @p scales array. The set i-th bit indicates that a dedicated output
+    ///     scaling factor is used for each index along that dimension. The mask
+    ///     value of 0 implies a common scaling factor for the whole output
+    ///     tensor.
+    /// @param scales Output pointer to a constant array of float scaling
+    ///     factors.
+    void get_params_dw(int index, memory::data_type &weights_data_type,
+            memory::data_type &bias_data_type, memory::data_type &dst_data_type,
+            memory::dim &kernel_size, memory::dim &stride_size,
+            memory::dim &padding_l_size, int &mask,
+            std::vector<float> &scales) const {
+
+        zendnn_data_type_t c_weights_data_type;
+        zendnn_data_type_t c_bias_data_type;
+        zendnn_data_type_t c_dst_data_type;
+        zendnn_dim_t c_kernel_size;
+        zendnn_dim_t c_stride_size;
+        zendnn_dim_t c_padding_l_size;
+        zendnn_dim_t count;
+        int c_mask;
+        const float *c_scales;
+        error::wrap_c_api(
+                zendnn_post_ops_get_params_dw(get(), index, &c_weights_data_type,
+                        &c_bias_data_type, &c_dst_data_type, &c_kernel_size,
+                        &c_stride_size, &c_padding_l_size, &count, &c_mask,
+                        &c_scales),
+                "could not get parameters of depthwise post-op");
+
+        weights_data_type = static_cast<memory::data_type>(c_weights_data_type);
+        bias_data_type = static_cast<memory::data_type>(c_bias_data_type);
+        dst_data_type = static_cast<memory::data_type>(c_dst_data_type);
+        kernel_size = c_kernel_size;
+        stride_size = c_stride_size;
+        padding_l_size = c_padding_l_size;
+        scales.resize(count);
+
+        mask = c_mask;
+        for (zendnn_dim_t c = 0; c < count; ++c)
+            scales[c] = c_scales[c];
+        return;
+    }
+
     /// Appends a depthwise post-op convolution with stride 1.
     ///
     /// This post-op can only be fused with a 2D 1x1 convolution (convolution
@@ -2691,12 +3232,8 @@ struct post_ops : public handle<zendnn_post_ops_t> {
             memory::data_type bias_data_type, memory::data_type dst_data_type,
             int mask, const std::vector<float> &scales) {
 
-        error::wrap_c_api(zendnn_post_ops_append_dw_k3s1p1(get(),
-                                  memory::convert_to_c(weights_data_type),
-                                  memory::convert_to_c(bias_data_type),
-                                  memory::convert_to_c(dst_data_type),
-                                  scales.size(), mask, &scales[0]),
-                "could not append depthwise post-op");
+        append_dw(weights_data_type, bias_data_type, dst_data_type, 3, 1, 1,
+                mask, scales);
     }
 
     /// Returns the parameters of an depthwise post-op with stride 1.
@@ -2717,26 +3254,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
             memory::data_type &bias_data_type, memory::data_type &dst_data_type,
             int &mask, std::vector<float> &scales) const {
 
-        zendnn_data_type_t c_weights_data_type;
-        zendnn_data_type_t c_bias_data_type;
-        zendnn_data_type_t c_dst_data_type;
-        zendnn_dim_t count;
-        int c_mask;
-        const float *c_scales;
-        error::wrap_c_api(zendnn_post_ops_get_params_dw_k3s1p1(get(), index,
-                                  &c_weights_data_type, &c_bias_data_type,
-                                  &c_dst_data_type, &count, &c_mask, &c_scales),
-                "could not get parameters of depthwise post-op");
-
-        weights_data_type = static_cast<memory::data_type>(c_weights_data_type);
-        bias_data_type = static_cast<memory::data_type>(c_bias_data_type);
-        dst_data_type = static_cast<memory::data_type>(c_dst_data_type);
-        scales.resize(count);
-
-        mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
-            scales[c] = c_scales[c];
-        return;
+        memory::dim kernel_size;
+        memory::dim stride_size;
+        memory::dim padding_l_size;
+        get_params_dw(index, weights_data_type, bias_data_type, dst_data_type,
+                kernel_size, stride_size, padding_l_size, mask, scales);
     }
 
     /// Appends a depthwise post-op convolution with stride 2.
@@ -2775,13 +3297,8 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     void append_dw_k3s2p1(memory::data_type weights_data_type,
             memory::data_type bias_data_type, memory::data_type dst_data_type,
             int mask, const std::vector<float> &scales) {
-
-        error::wrap_c_api(zendnn_post_ops_append_dw_k3s2p1(get(),
-                                  memory::convert_to_c(weights_data_type),
-                                  memory::convert_to_c(bias_data_type),
-                                  memory::convert_to_c(dst_data_type),
-                                  scales.size(), mask, &scales[0]),
-                "could not append depthwise post-op");
+        append_dw(weights_data_type, bias_data_type, dst_data_type, 3, 2, 1,
+                mask, scales);
     }
 
     /// Returns the parameters of an depthwise post-op with stride 2.
@@ -2802,26 +3319,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
             memory::data_type &bias_data_type, memory::data_type &dst_data_type,
             int &mask, std::vector<float> &scales) const {
 
-        zendnn_data_type_t c_weights_data_type;
-        zendnn_data_type_t c_bias_data_type;
-        zendnn_data_type_t c_dst_data_type;
-        zendnn_dim_t count;
-        int c_mask;
-        const float *c_scales;
-        error::wrap_c_api(zendnn_post_ops_get_params_dw_k3s2p1(get(), index,
-                                  &c_weights_data_type, &c_bias_data_type,
-                                  &c_dst_data_type, &count, &c_mask, &c_scales),
-                "could not get parameters of depthwise post-op");
-
-        weights_data_type = static_cast<memory::data_type>(c_weights_data_type);
-        bias_data_type = static_cast<memory::data_type>(c_bias_data_type);
-        dst_data_type = static_cast<memory::data_type>(c_dst_data_type);
-        scales.resize(count);
-
-        mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
-            scales[c] = c_scales[c];
-        return;
+        memory::dim kernel_size;
+        memory::dim stride_size;
+        memory::dim padding_l_size;
+        get_params_dw(index, weights_data_type, bias_data_type, dst_data_type,
+                kernel_size, stride_size, padding_l_size, mask, scales);
     }
 
     /// Appends a binary post-op.
@@ -2859,6 +3361,71 @@ struct post_ops : public handle<zendnn_post_ops_t> {
         aalgorithm = static_cast<zendnn::algorithm>(c_alg);
         src1_desc.data = *data;
     }
+
+    /// Appends a prelu forward post-op.
+    ///
+    /// The kind of this post-op is #zendnn::primitive::kind::prelu.
+    ///
+    /// The post-op can be defined as:
+    ///
+    ///      dst[:] <- prelu(dst[:], weights[:])
+    ///      prelu:
+    ///      dst[:] <- dst[:] if dst[:] > 0
+    ///      dst[:] <- dst[:] * weights[:] if dst[:] <= 0
+    ///
+    ///
+    /// Example usage:
+    /// @code
+    ///     int mb = 32, oc = 32,
+    ///         oh = 14, ow = 14; // convolution output params
+    ///     // unique weights per output channel
+    ///     vector<float> weights = { ... };
+    ///     int oc_dim = 1; // mb_dim = 0, channel_dim = 1, height_dim = 2, ...
+    ///
+    ///     // construct a convolution descriptor
+    ///     zendnn::convolution::desc conv_d;
+    ///
+    ///     zendnn::primitive_attr attr;
+    ///     attr.append_prelu(1 << oc_dim);
+    ///
+    ///     zendnn::primitive_desc conv_pd(conv_d, attr, engine);
+    ///     memory prelu_weights({{1}, dt::f32, {1}}, eng, weights.data());
+    ///
+    ///     std::unordered_map<int, memory> conv_args;
+    ///
+    ///     conv_args.insert(
+    ///      {ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_WEIGHTS, prelu_weights})
+
+    /// @note
+    ///     The order of dimensions does not depend on how elements are laid
+    ///     out in memory. For example:
+    ///     - for a 2D CNN activations tensor the order is always (n, c)
+    ///     - for a 4D CNN activations tensor the order is always (n, c, h, w)
+    ///     - for a 5D CNN weights tensor the order is always
+    ///        (g, oc, ic, kh, kw)
+    ///
+    ///    Prelu weights tensor is passed in runtime execution phase. Prelu
+    ///    weights tensor data type is implicitly assumed as f32 using plain
+    ///    layout (a, ab, acb, acdb, acdeb)
+
+    /// @param mask Defines the correspondence between the output tensor
+    ///     dimensions and the prelu weights tensor. The set i-th bit indicates
+    ///     that a dedicated weights value is used for each index along that
+    ///     dimension. Set the mask to 0 to use a common weights value
+    ///     for the whole output tensor.
+    void append_prelu(int mask) {
+        error::wrap_c_api(zendnn_post_ops_append_prelu(get(), mask),
+                "could not append a prelu post-op");
+    }
+
+    /// Returns the parameters of a prelu post-op.
+    ///
+    /// @param index Index of the prelu post-op.
+    /// @param maks Weights mask of prelu post-op.
+    void get_params_prelu(int index, int &mask) const {
+        error::wrap_c_api(zendnn_post_ops_get_params_prelu(get(), index, &mask),
+                "could not get parameters of a binary post-op");
+    }
 };
 
 /// @cond DO_NOT_DOCUMENT_THIS
@@ -2891,6 +3458,23 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     /// @param attr The C API primitive attributes.
     primitive_attr(zendnn_primitive_attr_t attr)
         : handle<zendnn_primitive_attr_t>(attr) {}
+
+    /// Returns the fpmath mode
+    fpmath_mode get_fpmath_mode() const {
+        zendnn_fpmath_mode_t result;
+        error::wrap_c_api(zendnn_primitive_attr_get_fpmath_mode(get(), &result),
+                "could not get fpmath mode primitive attribute");
+        return fpmath_mode(result);
+    }
+
+    /// Sets fpmath mode.
+    ///
+    /// @param mode Specified fpmath mode.
+    void set_fpmath_mode(fpmath_mode mode) {
+        error::wrap_c_api(zendnn_primitive_attr_set_fpmath_mode(
+                                  get(), zendnn::convert_to_c(mode)),
+                "could not set fpmath mode primitive attribute");
+    }
 
     /// Returns the scratchpad mode.
     scratchpad_mode get_scratchpad_mode() const {
@@ -3516,6 +4100,25 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
         return static_cast<zendnn::primitive::kind>(kind);
     }
 
+    /// Returns the cache blob ID of the primitive descriptor.
+    /// @returns The cache blob ID of the primitive descriptor.
+    std::vector<uint8_t> get_cache_blob_id() const {
+        zendnn_dim_t count;
+        const uint8_t *c_id;
+        error::wrap_c_api(
+                zendnn_primitive_desc_query(get(),
+                        zendnn::convert_to_c(query::cache_blob_id_size_s64), 0,
+                        (void *)&count),
+                "could not get size of cache blob ID from a primitive "
+                "descriptor");
+        error::wrap_c_api(zendnn_primitive_desc_query(get(),
+                                  zendnn::convert_to_c(query::cache_blob_id), 0,
+                                  (void **)&c_id),
+                "could not get cache blob ID from a primitive descriptor");
+        std::vector<uint8_t> id(c_id, c_id + count);
+        return id;
+    }
+
 protected:
     /// Resets the value of the handle to a clone of a C API primitive
     /// descriptor.
@@ -3734,6 +4337,12 @@ struct reorder : public primitive {
     /// @param pd Primitive descriptor for reorder primitive.
     reorder(const primitive_desc &pd) : primitive(pd.get()) {}
 
+    /// Constructs a reorder primitive from a cache blob.
+    /// @param pd Primitive descriptor for reorder primitive.
+    /// @param cache_blob Cache blob.
+    reorder(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
+
     /// Constructs a reorder primitive that would reorder data between memory
     /// objects having the same memory descriptors as memory objects @p src and
     /// @p dst.
@@ -3860,6 +4469,12 @@ struct concat : public primitive {
     /// Constructs a concatenation primitive.
     /// @param pd Primitive descriptor for concatenation primitive.
     concat(const primitive_desc &pd) : primitive(pd.get()) {}
+
+    /// Constructs a concatenation primitive from a cache blob.
+    /// @param pd Primitive descriptor for concatenation primitive.
+    /// @param cache_blob Cache blob.
+    concat(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
 };
 
 /// @} zendnn_api_concat
@@ -3957,6 +4572,12 @@ struct sum : public primitive {
     /// Constructs a sum primitive.
     /// @param pd Primitive descriptor for sum primitive.
     sum(const primitive_desc &pd) : primitive(pd.get()) {}
+
+    /// Constructs a sum primitive from a cache blob.
+    /// @param pd Primitive descriptor for sum primitive.
+    /// @param cache_blob Cache blob.
+    sum(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd.get(), cache_blob) {}
 };
 
 /// @} zendnn_api_sum
@@ -4252,6 +4873,34 @@ struct convolution_forward : public primitive {
         /// bias using @p aprop_kind (possible values are
         /// #zendnn::forward_training and #zendnn::forward_inference),
         /// @p aalgorithm, memory descriptors, @p strides, @p padding_l, and
+        /// @p padding_r. relu fusion
+        ///
+        /// @note Memory descriptors are allowed to be initialized with
+        ///       #zendnn::memory::format_tag::any value of @p format_kind.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &bias_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &padding_l,
+             const memory::dims &padding_r, bool reluFused) {
+            memory::validate_dims(strides, src_desc.data.ndims - 2);
+            memory::validate_dims(padding_l, src_desc.data.ndims - 2);
+            memory::validate_dims(padding_r, src_desc.data.ndims - 2);
+            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            error::wrap_c_api(
+                zendnn_fused_convolution_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &weights_desc.data, &bias_desc.data, &dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0], reluFused,
+                        false, nullptr, nullptr, nullptr),
+                "could not create a descriptor for a relu fused convolution "
+                "forward propagation primitive");
+        }
+
+        /// Initializes a descriptor for convolution forward propagation with
+        /// bias using @p aprop_kind (possible values are
+        /// #zendnn::forward_training and #zendnn::forward_inference),
+        /// @p aalgorithm, memory descriptors, @p strides, @p padding_l, and
         /// @p padding_r. relu fusion, BatchNorm fusion
         ///
         /// @note Memory descriptors are allowed to be initialized with
@@ -4276,7 +4925,8 @@ struct convolution_forward : public primitive {
                         &strides[0], &padding_l[0], &padding_r[0], reluFused,
                         batchNormFused, &batchNormScale_desc.data,
                         &batchNormMean_desc.data, &batchNormOffset_desc.data),
-                "could not create a convolution forward descriptor");
+                "could not create a descriptor for a relu or batchnorm fused "
+                "convolution forward propagation primitive");
         }
     };
 
@@ -4358,6 +5008,14 @@ struct convolution_forward : public primitive {
     convolution_forward(const primitive_desc &pd) : primitive(pd) {
         zendnnInfo(ZENDNN_APILOG, "Convolution primitive create");
     }
+    /// Constructs a convolution forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a convolution forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Convolution backward propagation primitive.
@@ -4527,6 +5185,15 @@ struct convolution_backward_data : public primitive {
     /// @param pd Primitive descriptor for a convolution backward propagation
     ///     primitive.
     convolution_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a convolution backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a convolution backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Convolution weights gradient primitive.
@@ -4797,6 +5464,14 @@ struct convolution_backward_weights : public primitive {
     /// @param pd Primitive descriptor for a convolution weights gradient
     ///     primitive.
     convolution_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a convolution weights gradient primitive from a cache blob.
+    /// @param pd Primitive descriptor for a convolution weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    convolution_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_convolution
@@ -5072,6 +5747,15 @@ struct deconvolution_forward : public primitive {
     /// @param pd Primitive descriptor for a deconvolution forward propagation
     ///     primitive.
     deconvolution_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Deconvolution backward propagation primitive.
@@ -5238,6 +5922,15 @@ struct deconvolution_backward_data : public primitive {
     /// @param pd Primitive descriptor for a deconvolution backward propagation
     ///     primitive.
     deconvolution_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Deconvolution weights gradient primitive.
@@ -5503,6 +6196,15 @@ struct deconvolution_backward_weights : public primitive {
     /// @param pd Primitive descriptor for a deconvolution weights gradient
     ///     primitive.
     deconvolution_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a deconvolution weights gradient primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a deconvolution weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    deconvolution_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_deconvolution
@@ -5609,6 +6311,14 @@ struct lrn_forward : public primitive {
     /// @param pd Primitive descriptor for an LRN forward propagation
     ///     primitive.
     lrn_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LRN forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LRN forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lrn_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Local response normalization (LRN) backward propagation primitive.
@@ -5711,6 +6421,14 @@ struct lrn_backward : public primitive {
     /// @param pd Primitive descriptor for an LRN backward propagation
     ///     primitive.
     lrn_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LRN backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LRN backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lrn_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_lrn
@@ -5833,6 +6551,14 @@ struct pooling_forward : public primitive {
     /// @param pd Primitive descriptor for a pooling forward propagation
     ///     primitive.
     pooling_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Pooling backward propagation primitive.
@@ -5950,6 +6676,14 @@ struct pooling_backward : public primitive {
     /// @param pd Primitive descriptor for a pooling backward propagation
     ///     primitive.
     pooling_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling backward propagation primitive froma cache blob.
+    /// @param pd Primitive descriptor for a pooling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_pooling
@@ -6066,6 +6800,14 @@ struct eltwise_forward : public primitive {
     /// @param pd Primitive descriptor for an eltwise forward propagation
     ///     primitive.
     eltwise_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an eltwise forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an eltwise forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    eltwise_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Elementwise unary operation backward propagation primitive.
@@ -6169,6 +6911,14 @@ struct eltwise_backward : public primitive {
     /// @param pd Primitive descriptor for an eltwise backward propagation
     ///     primitive.
     eltwise_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an eltwise backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an eltwise backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    eltwise_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_eltwise
@@ -6269,6 +7019,14 @@ struct softmax_forward : public primitive {
     /// @param pd Primitive descriptor for a softmax forward propagation
     ///     primitive.
     softmax_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Softmax backward propagation primitive.
@@ -6369,9 +7127,245 @@ struct softmax_backward : public primitive {
     /// @param pd Primitive descriptor for a softmax backward propagation
     ///     primitive.
     softmax_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_softmax
+
+/// @addtogroup zendnn_api_softmax_v2 Softmax_v2
+///
+/// A primitive to perform softmax.
+///
+/// @sa @ref dev_guide_softmax in developer guide
+///
+/// @{
+
+/// Softmax forward propagation primitive.
+struct softmax_v2_forward : public primitive {
+    /// Descriptor for a softmax forward propagation primitive.
+    struct desc {
+        zendnn_softmax_v2_desc_t data;
+
+        /// Default constructor. Produces an empty object.
+        desc() = default;
+
+        /// Constructs a descriptor for a softmax forward propagation
+        /// primitive.
+        ///
+        /// @param aprop_kind Propagation kind. Possible values are
+        ///     #zendnn::prop_kind::forward_training, and
+        ///     #zendnn::prop_kind::forward_inference.
+        /// @param aalgorithm Softmax algorithm kind: either
+        ///     #zendnn::algorithm::softmax_accurate,
+        ///     or #zendnn::algorithm::softmax_log.
+        /// @param src_desc Source memory descriptor.
+        /// @param dst_desc Destination memory descriptor.
+        /// @param softmax_axis Axis over which softmax is computed.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+                const memory::desc &src_desc, const memory::desc &dst_desc,
+                int softmax_axis) {
+            error::wrap_c_api(
+                    zendnn_softmax_v2_forward_desc_init(&data,
+                            zendnn::convert_to_c(aprop_kind),
+                            zendnn::convert_to_c(aalgorithm), &src_desc.data,
+                            &dst_desc.data, softmax_axis),
+                    "could not create a descriptor for a softmax forward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for a softmax forward propagation primitive.
+    struct primitive_desc : public zendnn::primitive_desc {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for a softmax forward
+        /// propagation primitive.
+        ///
+        /// @param adesc descriptor for a softmax forward propagation
+        ///     primitive.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                bool allow_empty = false)
+            : zendnn::primitive_desc(
+                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for a softmax forward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for a softmax forward propagation
+        ///     primitive.
+        /// @param aengine Engine to use.
+        /// @param attr Primitive attributes to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine, bool allow_empty = false)
+            : zendnn::primitive_desc(
+                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for a softmax forward
+        /// propagation primitive from a C API primitive descriptor that must
+        /// have a matching kind.
+        ///
+        /// @param pd C API primitive descriptor for a softmax forward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax_v2,
+                    zendnn::prop_kind::forward_training,
+                    zendnn::prop_kind::forward_inference) {}
+
+        /// @copydoc zendnn::primitive_desc_base::src_desc()const
+        memory::desc src_desc() const { return base::src_desc(0); }
+
+        /// @copydoc zendnn::primitive_desc_base::dst_desc()const
+        memory::desc dst_desc() const { return base::dst_desc(0); }
+    };
+
+    /// Default constructor. Produces an empty object.
+    softmax_v2_forward() = default;
+
+    /// Constructs a softmax forward propagation primitive.
+    /// @param pd Primitive descriptor for a softmax forward propagation
+    ///     primitive.
+    softmax_v2_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_v2_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// Softmax backward propagation primitive.
+struct softmax_v2_backward : public primitive {
+    /// Descriptor for a softmax backward propagation primitive.
+    struct desc {
+        zendnn_softmax_v2_desc_t data;
+
+        /// Default constructor. Produces an empty object.
+        desc() = default;
+
+        /// Constructs a descriptor for a softmax backward propagation
+        /// primitive.
+        ///
+        /// @param aalgorithm Softmax algorithm kind: either
+        ///     #zendnn::algorithm::softmax_accurate,
+        ///     or #zendnn::algorithm::softmax_log.
+        /// @param diff_src_desc Diff source memory descriptor.
+        /// @param diff_dst_desc Diff destination memory descriptor.
+        /// @param dst_desc Destination memory descriptor.
+        /// @param softmax_axis Axis over which softmax is computed.
+        desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
+                const memory::desc &diff_dst_desc, const memory::desc &dst_desc,
+                int softmax_axis) {
+            error::wrap_c_api(
+                    zendnn_softmax_v2_backward_desc_init(&data,
+                            zendnn::convert_to_c(aalgorithm), &diff_src_desc.data,
+                            &diff_dst_desc.data, &dst_desc.data, softmax_axis),
+                    "could not create a descriptor for a softmax backward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for a softmax backward propagation primitive.
+    struct primitive_desc : public zendnn::primitive_desc {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for a softmax backward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for a softmax backward propagation
+        ///     primitive.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for a softmax forward
+        ///     propagation primitive. It is used as a hint for deciding which
+        ///     memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                const softmax_v2_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for a softmax backward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for a softmax backward propagation
+        ///     primitive.
+        /// @param attr Primitive attributes to use.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for a softmax forward
+        ///     propagation primitive. It is used as a hint for deciding which
+        ///     memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine,
+                const softmax_v2_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : zendnn::primitive_desc(&adesc.data, &attr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for a softmax backward
+        /// propagation primitive from a C API primitive descriptor that must
+        /// have a matching kind.
+        ///
+        /// @param pd C API primitive descriptor for a softmax backward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax_v2,
+                    zendnn::prop_kind::backward_data) {}
+
+        /// @copydoc zendnn::primitive_desc_base::dst_desc()const
+        memory::desc dst_desc() const { return base::dst_desc(0); }
+
+        /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
+        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+
+        /// @copydoc zendnn::primitive_desc_base::dst_desc()const
+        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+    };
+
+    /// Default constructor. Produces an empty object.
+    softmax_v2_backward() = default;
+
+    /// Constructs a softmax backward propagation primitive.
+    /// @param pd Primitive descriptor for a softmax backward propagation
+    ///     primitive.
+    softmax_v2_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a softmax backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a softmax backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    softmax_v2_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// @} zendnn_api_softmax_v2
 
 /// @addtogroup zendnn_api_logsoftmax LogSoftmax
 ///
@@ -6473,6 +7467,15 @@ struct logsoftmax_forward : public primitive {
     /// @param pd Primitive descriptor for a logsoftmax forward propagation
     ///     primitive.
     logsoftmax_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a logsoftmax forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a logsoftmax forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    logsoftmax_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Logsoftmax backward propagation primitive.
@@ -6577,6 +7580,15 @@ struct logsoftmax_backward : public primitive {
     /// @param pd Primitive descriptor for a logsoftmax backward propagation
     ///     primitive.
     logsoftmax_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a logsoftmax backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a logsoftmax backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    logsoftmax_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_logsoftmax
@@ -6592,10 +7604,11 @@ struct logsoftmax_backward : public primitive {
 ///
 /// The batch normalization primitives computations can be controlled by
 /// specifying different @ref zendnn::normalization_flags values. For example,
-/// batch normalization can compute the mean and variance on its own or take
-/// them as inputs.  It can either perform scaling and shifting using gamma
-/// and beta parameters or not. Optionally, it can also perform a fused ReLU,
-/// which in case of training would also require a workspace.
+/// batch normalization forward propagation can be configured to either
+/// compute the mean and variance or take them as arguments. It can either
+/// perform scaling and shifting using gamma and beta parameters or not.
+/// Optionally, it can also perform a fused ReLU, which in case of training
+/// would also require a workspace.
 ///
 /// @sa @ref dev_guide_batch_normalization in developer guide
 ///
@@ -6728,6 +7741,15 @@ struct batch_normalization_forward : public primitive {
     /// @param pd Primitive descriptor for a batch normalization forward
     ///     propagation primitive.
     batch_normalization_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a batch normalization forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a batch normalization forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    batch_normalization_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Batch normalization backward propagation primitive.
@@ -6857,6 +7879,15 @@ struct batch_normalization_backward : public primitive {
     /// @param pd Primitive descriptor for a batch normalization backward
     ///     propagation primitive.
     batch_normalization_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a batch normalization backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a batch normalization backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    batch_normalization_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_batch_normalization
@@ -6872,12 +7903,10 @@ struct batch_normalization_backward : public primitive {
 /// backward propagation.
 ///
 /// The layer normalization primitives computations can be controlled by
-/// specifying different zendnn::normalization_flags values. For example,
+/// specifying different @ref zendnn::normalization_flags values. For example,
 /// layer normalization forward propagation can be configured to either
 /// compute the mean and variance or take them as arguments. It can either
 /// perform scaling and shifting using gamma and beta parameters or not.
-/// Optionally, it can also perform a fused ReLU, which in case of training
-/// would also require a workspace.
 ///
 /// @sa @ref dev_guide_layer_normalization in developer guide
 ///
@@ -7026,6 +8055,15 @@ struct layer_normalization_forward : public primitive {
     /// @param pd Primitive descriptor for a layer normalization forward
     ///     propagation primitive.
     layer_normalization_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a layer normalization forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a layer normalization forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    layer_normalization_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Layer normalization backward propagation primitive.
@@ -7180,6 +8218,15 @@ struct layer_normalization_backward : public primitive {
     /// @param pd Primitive descriptor for a layer normalization backward
     ///     propagation primitive.
     layer_normalization_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a layer normalization backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a layer normalization backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    layer_normalization_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_layer_normalization
@@ -7209,9 +8256,9 @@ struct inner_product_forward : public primitive {
         ///     #zendnn::prop_kind::forward_training, and
         ///     #zendnn::prop_kind::forward_inference.
         /// @param src_desc Memory descriptor for src.
-        /// @param weights_desc Memory descriptor for diff weights.
-        /// @param bias_desc Memory descriptor for diff bias.
-        /// @param dst_desc Memory descriptor for diff dst.
+        /// @param weights_desc Memory descriptor for weights.
+        /// @param bias_desc Memory descriptor for bias.
+        /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
                 const memory::desc &weights_desc, const memory::desc &bias_desc,
                 const memory::desc &dst_desc) {
@@ -7234,7 +8281,7 @@ struct inner_product_forward : public primitive {
         ///     #zendnn::prop_kind::forward_training, and
         ///     #zendnn::prop_kind::forward_inference.
         /// @param src_desc Memory descriptor for src.
-        /// @param weights_desc Memory descriptor for diff weights.
+        /// @param weights_desc Memory descriptor for weights.
         /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
                 const memory::desc &weights_desc,
@@ -7315,6 +8362,15 @@ struct inner_product_forward : public primitive {
     /// @param pd Primitive descriptor for an inner product forward
     ///     propagation primitive.
     inner_product_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for an inner product forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Inner product backward propagation primitive.
@@ -7417,6 +8473,15 @@ struct inner_product_backward_data : public primitive {
     /// @param pd Primitive descriptor for an inner product backward
     ///     propagation primitive.
     inner_product_backward_data(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product backward propagation primitive from
+    /// a cache blob.
+    /// @param pd Primitive descriptor for an inner product backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_backward_data(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Inner product weights gradient primitive.
@@ -7549,6 +8614,15 @@ struct inner_product_backward_weights : public primitive {
     /// @param pd Primitive descriptor for an inner product weights gradient
     ///     primitive.
     inner_product_backward_weights(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an inner product weights gradient primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for an inner product weights gradient
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    inner_product_backward_weights(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_inner_product
@@ -7583,6 +8657,12 @@ struct rnn_primitive_desc_base : public primitive_desc {
     /// @returns Source layer memory descriptor.
     memory::desc src_layer_desc() const {
         return base::query_md(query::exec_arg_md, ZENDNN_ARG_SRC_LAYER);
+    }
+
+    /// Returns AUGRU attention memory descriptor.
+    /// @returns AUGRU attention memory descriptor.
+    memory::desc augru_attention_desc() const {
+        return base::query_md(query::exec_arg_md, ZENDNN_ARG_AUGRU_ATTENTION);
     }
 
     /// Returns source iteration memory descriptor.
@@ -7655,6 +8735,13 @@ struct rnn_primitive_desc_base : public primitive_desc {
     /// @returns Diff source layer memory descriptor.
     memory::desc diff_src_layer_desc() const {
         return base::query_md(query::exec_arg_md, ZENDNN_ARG_DIFF_SRC_LAYER);
+    }
+
+    /// Returns diff AUGRU attention memory descriptor.
+    /// @returns Diff AUGRU attention memory descriptor.
+    memory::desc diff_augru_attention_desc() const {
+        return base::query_md(
+                query::exec_arg_md, ZENDNN_ARG_DIFF_AUGRU_ATTENTION);
     }
 
     /// Returns diff source iteration memory descriptor.
@@ -7927,6 +9014,15 @@ struct vanilla_rnn_forward : public primitive {
     /// @param pd Primitive descriptor for a vanilla RNN forward
     ///     propagation primitive.
     vanilla_rnn_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a vanilla RNN forward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a vanilla RNN forward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    vanilla_rnn_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Vanilla RNN backward propagation primitive.
@@ -8154,6 +9250,15 @@ struct vanilla_rnn_backward : public primitive {
     /// @param pd Primitive descriptor for a vanilla RNN backward
     ///     propagation primitive.
     vanilla_rnn_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a vanilla RNN backward propagation primitive from
+    ///     a cache blob.
+    /// @param pd Primitive descriptor for a vanilla RNN backward
+    ///     propagation primitive.
+    /// @param cache_blob Cache blob.
+    vanilla_rnn_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LSTM forward propagation primitive.
@@ -8471,6 +9576,14 @@ struct lstm_forward : public primitive {
     /// @param pd Primitive descriptor for an LSTM forward propagation
     ///     primitive.
     lstm_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LSTM forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LSTM forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lstm_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LSTM backward propagation primitive.
@@ -8975,6 +10088,14 @@ struct lstm_backward : public primitive {
     /// @param pd Primitive descriptor for an LSTM backward propagation
     ///     primitive.
     lstm_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LSTM backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LSTM backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lstm_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// GRU forward propagation primitive.
@@ -9124,6 +10245,14 @@ struct gru_forward : public primitive {
     /// @param pd Primitive descriptor for a GRU forward propagation
     ///     primitive.
     gru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a GRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a GRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    gru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// GRU backward propagation primitive.
@@ -9339,6 +10468,14 @@ struct gru_backward : public primitive {
     /// @param pd Primitive descriptor for a GRU backward propagation
     ///     primitive.
     gru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a GRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a GRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    gru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LBR GRU forward propagation primitive.
@@ -9491,6 +10628,14 @@ struct lbr_gru_forward : public primitive {
     /// @param pd Primitive descriptor for an LBR GRU forward propagation
     ///     primitive.
     lbr_gru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR GRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR GRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_gru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// LBR GRU backward propagation primitive.
@@ -9709,6 +10854,827 @@ struct lbr_gru_backward : public primitive {
     /// @param pd Primitive descriptor for an LBR GRU backward propagation
     ///     primitive.
     lbr_gru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR GRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR GRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_gru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// AUGRU forward propagation primitive.
+struct augru_forward : public primitive {
+    /// Descriptor for an AUGRU forward propagation primitive.
+    struct desc {
+        zendnn_rnn_desc_t data;
+
+        /// Constructs a descriptor for an AUGRU forward propagation primitive.
+        ///
+        /// The following arguments may point to a zero memory descriptor:
+        /// - @p src_iter_desc,
+        /// - @p bias_desc,
+        /// - @p dst_iter_desc.
+        ///
+        /// This would then indicate that the AUGRU forward propagation
+        /// primitive should not use them and should default to zero values
+        /// instead.
+        ///
+        /// @note
+        ///     All memory descriptors except @p src_iter_desc may be
+        ///     initialized with an #zendnn::memory::format_tag::any value of @p
+        ///     format_tag.
+        ///
+        /// @param aprop_kind Propagation kind. Possible values are
+        ///     #zendnn::prop_kind::forward_training, and
+        ///     #zendnn::prop_kind::forward_inference.
+        /// @param direction RNN direction. See @ref zendnn::rnn_direction for
+        ///     more info.
+        /// @param src_layer_desc Memory descriptor for the input vector.
+        /// @param src_iter_desc Memory descriptor for the input recurrent
+        ///     hidden state vector.
+        /// @param attention_desc Memory descriptor for the attention vector.
+        /// @param weights_layer_desc Memory descriptor for the weights
+        ///     applied to the layer input.
+        /// @param weights_iter_desc Memory descriptor for the weights applied
+        ///     to the recurrent input.
+        /// @param bias_desc Bias memory descriptor.
+        /// @param dst_layer_desc Memory descriptor for the output vector.
+        /// @param dst_iter_desc Memory descriptor for the output recurrent
+        ///     hidden state vector.
+        /// @param flags Unused.
+        desc(prop_kind aprop_kind, rnn_direction direction,
+                const memory::desc &src_layer_desc,
+                const memory::desc &src_iter_desc,
+                const memory::desc &attention_desc,
+                const memory::desc &weights_layer_desc,
+                const memory::desc &weights_iter_desc,
+                const memory::desc &bias_desc,
+                const memory::desc &dst_layer_desc,
+                const memory::desc &dst_iter_desc,
+                rnn_flags flags = rnn_flags::undef) {
+            error::wrap_c_api(
+                    zendnn_augru_forward_desc_init(&data,
+                            zendnn::convert_to_c(aprop_kind),
+                            zendnn::convert_to_c(direction), &src_layer_desc.data,
+                            &src_iter_desc.data, &attention_desc.data,
+                            &weights_layer_desc.data, &weights_iter_desc.data,
+                            &bias_desc.data, &dst_layer_desc.data,
+                            &dst_iter_desc.data, zendnn::convert_to_c(flags)),
+                    "could not create a descriptor for an AUGRU forward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for an AUGRU forward propagation primitive.
+    struct primitive_desc : public rnn_primitive_desc_base {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an AUGRU forward propagation
+        /// primitive.
+        ///
+        /// @param adesc Descriptor for an AUGRU forward propagation primitive.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(
+                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an AUGRU forward propagation
+        /// primitive.
+        ///
+        /// @param adesc Descriptor for an AUGRU forward propagation primitive.
+        /// @param attr Primitive attributes to use.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine, bool allow_empty = false)
+            : rnn_primitive_desc_base(
+                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an AUGRU forward propagation
+        /// primitive from a C API primitive descriptor that must have a
+        /// matching kind.
+        ///
+        /// @param pd C API primitive descriptor for an AUGRU forward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
+                    zendnn::prop_kind::forward_inference,
+                    zendnn::algorithm::vanilla_augru) {}
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
+        memory::desc src_layer_desc() const {
+            return rnn_base::src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
+        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
+        memory::desc attention_desc() const {
+            return rnn_base::augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
+        memory::desc weights_layer_desc() const {
+            return rnn_base::weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_iter_desc()const
+        memory::desc weights_iter_desc() const {
+            return rnn_base::weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
+        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
+        memory::desc dst_layer_desc() const {
+            return rnn_base::dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
+        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
+        memory::desc workspace_desc() const {
+            return rnn_base::workspace_desc();
+        }
+    };
+
+    /// Default constructor. Produces an empty object.
+    augru_forward() = default;
+
+    /// Constructs an AUGRU forward propagation primitive.
+    /// @param pd Primitive descriptor for an AUGRU forward propagation
+    ///     primitive.
+    augru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an AUGRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an AUGRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    augru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// AUGRU backward propagation primitive.
+struct augru_backward : public primitive {
+    /// Descriptor for an AUGRU backward propagation primitive.
+    struct desc {
+        zendnn_rnn_desc_t data;
+
+        /// Constructs a descriptor for an AUGRU backward propagation primitive.
+        ///
+        /// The following arguments may point to a zero memory descriptor:
+        /// - @p src_iter_desc together with @p diff_src_iter_desc,
+        /// - @p bias_desc together with @p diff_bias_desc,
+        /// - @p dst_iter_desc together with @p diff_dst_iter_desc.
+        ///
+        /// This would then indicate that the AUGRU backward propagation
+        /// primitive should not use them and should default to zero values
+        /// instead.
+        ///
+        /// @note
+        ///     All memory descriptors may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///
+        /// @param aprop_kind Propagation kind. Must be
+        ///     #zendnn::prop_kind::backward.
+        /// @param direction RNN direction. See @ref zendnn::rnn_direction for
+        ///     more info.
+        /// @param src_layer_desc Memory descriptor for the input vector.
+        /// @param src_iter_desc Memory descriptor for the input recurrent
+        ///     hidden state vector.
+        /// @param attention_desc Memory descriptor for the attention vector.
+        /// @param weights_layer_desc Memory descriptor for the weights
+        ///     applied to the layer input.
+        /// @param weights_iter_desc Memory descriptor for the weights applied
+        ///     to the recurrent input.
+        /// @param bias_desc Bias memory descriptor.
+        /// @param dst_layer_desc Memory descriptor for the output vector.
+        /// @param dst_iter_desc Memory descriptor for the output recurrent
+        ///     hidden state vector.
+        /// @param diff_src_layer_desc Memory descriptor for the diff of input
+        ///     vector.
+        /// @param diff_src_iter_desc Memory descriptor for the diff of input
+        ///     recurrent hidden state vector.
+        /// @param diff_attention_desc Memory descriptor for the diff of
+        ///     attention vector.
+        /// @param diff_weights_layer_desc Memory descriptor for the diff of
+        ///     weights applied to the layer input.
+        /// @param diff_weights_iter_desc Memory descriptor for the diff of
+        ///     weights applied to the recurrent input.
+        /// @param diff_bias_desc Diff bias memory descriptor.
+        /// @param diff_dst_layer_desc Memory descriptor for the diff of
+        ///     output vector.
+        /// @param diff_dst_iter_desc Memory descriptor for the diff of output
+        ///     recurrent hidden state vector.
+        /// @param flags Unused.
+        desc(prop_kind aprop_kind, rnn_direction direction,
+                const memory::desc &src_layer_desc,
+                const memory::desc &src_iter_desc,
+                const memory::desc &attention_desc,
+                const memory::desc &weights_layer_desc,
+                const memory::desc &weights_iter_desc,
+                const memory::desc &bias_desc,
+                const memory::desc &dst_layer_desc,
+                const memory::desc &dst_iter_desc,
+                const memory::desc &diff_src_layer_desc,
+                const memory::desc &diff_src_iter_desc,
+                const memory::desc &diff_attention_desc,
+                const memory::desc &diff_weights_layer_desc,
+                const memory::desc &diff_weights_iter_desc,
+                const memory::desc &diff_bias_desc,
+                const memory::desc &diff_dst_layer_desc,
+                const memory::desc &diff_dst_iter_desc,
+                rnn_flags flags = rnn_flags::undef) {
+            error::wrap_c_api(
+                    zendnn_augru_backward_desc_init(&data,
+                            zendnn::convert_to_c(aprop_kind),
+                            zendnn::convert_to_c(direction), &src_layer_desc.data,
+                            &src_iter_desc.data, &attention_desc.data,
+                            &weights_layer_desc.data, &weights_iter_desc.data,
+                            &bias_desc.data, &dst_layer_desc.data,
+                            &dst_iter_desc.data, &diff_src_layer_desc.data,
+                            &diff_src_iter_desc.data, &diff_attention_desc.data,
+                            &diff_weights_layer_desc.data,
+                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                            zendnn::convert_to_c(flags)),
+                    "could not create a descriptor for an AUGRU backward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for an AUGRU backward propagation primitive.
+    struct primitive_desc : public rnn_primitive_desc_base {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an AUGRU backward propagation
+        /// primitive.
+        ///
+        /// @param adesc Descriptor for an AUGRU backward propagation primitive.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for an AUGRU
+        ///     forward propagation primitive. It is used as a hint for
+        ///     deciding which memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                const augru_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for an AUGRU backward propagation
+        /// primitive.
+        ///
+        /// @param adesc Descriptor for an AUGRU backward propagation primitive.
+        /// @param attr Primitive attributes to use.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for an AUGRU
+        ///     forward propagation primitive. It is used as a hint for
+        ///     deciding which memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine,
+                const augru_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for an AUGRU backward propagation
+        /// primitive from a C API primitive descriptor that must have a
+        /// matching kind.
+        ///
+        /// @param pd C API primitive descriptor for an AUGRU backward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
+                    zendnn::algorithm::vanilla_augru) {}
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
+        memory::desc src_layer_desc() const {
+            return rnn_base::src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
+        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
+        memory::desc attention_desc() const {
+            return rnn_base::augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
+        memory::desc weights_layer_desc() const {
+            return rnn_base::weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_iter_desc()const
+        memory::desc weights_iter_desc() const {
+            return rnn_base::weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
+        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
+        memory::desc dst_layer_desc() const {
+            return rnn_base::dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
+        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
+        memory::desc workspace_desc() const {
+            return rnn_base::workspace_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_src_layer_desc()const
+        memory::desc diff_src_layer_desc() const {
+            return rnn_base::diff_src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_src_iter_desc()const
+        memory::desc diff_src_iter_desc() const {
+            return rnn_base::diff_src_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_attention_desc()const
+        memory::desc diff_attention_desc() const {
+            return rnn_base::diff_augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_weights_layer_desc()const
+        memory::desc diff_weights_layer_desc() const {
+            return rnn_base::diff_weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_weights_iter_desc()const
+        memory::desc diff_weights_iter_desc() const {
+            return rnn_base::diff_weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_bias_desc()const
+        memory::desc diff_bias_desc() const {
+            return rnn_base::diff_bias_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_dst_layer_desc()const
+        memory::desc diff_dst_layer_desc() const {
+            return rnn_base::diff_dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_dst_iter_desc()const
+        memory::desc diff_dst_iter_desc() const {
+            return rnn_base::diff_dst_iter_desc();
+        }
+    };
+
+    /// Default constructor. Produces an empty object.
+    augru_backward() = default;
+
+    /// Constructs an AUGRU backward propagation primitive.
+    /// @param pd Primitive descriptor for an AUGRU backward propagation
+    ///     primitive.
+    augru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an AUGRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an AUGRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    augru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// LBR AUGRU forward propagation primitive.
+struct lbr_augru_forward : public primitive {
+    /// Descriptor for an LBR AUGRU forward propagation primitive.
+    struct desc {
+        zendnn_rnn_desc_t data;
+
+        /// Constructs a descriptor for LBR AUGRU forward propagation primitive.
+        ///
+        /// The following arguments may point to a zero memory descriptor:
+        /// - @p src_iter_desc,
+        /// - @p bias_desc,
+        /// - @p dst_iter_desc.
+        ///
+        /// This would then indicate that the LBR AUGRU forward propagation
+        /// primitive should not use them and should default to zero values
+        /// instead.
+        ///
+        /// @note
+        ///     All memory descriptors except @p src_iter_desc may be
+        ///     initialized with an #zendnn::memory::format_tag::any value of @p
+        ///     format_tag.
+        ///
+        /// @param aprop_kind Propagation kind. Possible values are
+        ///     #zendnn::prop_kind::forward_training, and
+        ///     #zendnn::prop_kind::forward_inference.
+        /// @param direction RNN direction. See @ref zendnn::rnn_direction for
+        ///     more info.
+        /// @param src_layer_desc Memory descriptor for the input vector.
+        /// @param src_iter_desc Memory descriptor for the input recurrent
+        ///     hidden state vector.
+        /// @param attention_desc Memory descriptor for the attention vector.
+        /// @param weights_layer_desc Memory descriptor for the weights
+        ///     applied to the layer input.
+        /// @param weights_iter_desc Memory descriptor for the weights applied
+        ///     to the recurrent input.
+        /// @param bias_desc Bias memory descriptor.
+        /// @param dst_layer_desc Memory descriptor for the output vector.
+        /// @param dst_iter_desc Memory descriptor for the output recurrent
+        ///     hidden state vector.
+        /// @param flags Unused.
+        desc(prop_kind aprop_kind, rnn_direction direction,
+                const memory::desc &src_layer_desc,
+                const memory::desc &src_iter_desc,
+                const memory::desc &attention_desc,
+                const memory::desc &weights_layer_desc,
+                const memory::desc &weights_iter_desc,
+                const memory::desc &bias_desc,
+                const memory::desc &dst_layer_desc,
+                const memory::desc &dst_iter_desc,
+                rnn_flags flags = rnn_flags::undef) {
+            error::wrap_c_api(
+                    zendnn_lbr_augru_forward_desc_init(&data,
+                            zendnn::convert_to_c(aprop_kind),
+                            zendnn::convert_to_c(direction), &src_layer_desc.data,
+                            &src_iter_desc.data, &attention_desc.data,
+                            &weights_layer_desc.data, &weights_iter_desc.data,
+                            &bias_desc.data, &dst_layer_desc.data,
+                            &dst_iter_desc.data, zendnn::convert_to_c(flags)),
+                    "could not create a descriptor for an LBR AUGRU forward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for an LBR AUGRU forward propagation primitive.
+    struct primitive_desc : public rnn_primitive_desc_base {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an LBR AUGRU forward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for an LBR AUGRU forward propagation
+        ///     primitive.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(
+                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an LBR AUGRU forward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for an LBR AUGRU forward propagation
+        ///     primitive.
+        /// @param attr Primitive attributes to use.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine, bool allow_empty = false)
+            : rnn_primitive_desc_base(
+                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an LBR AUGRU forward propagation
+        /// primitive from a C API primitive descriptor that must have a
+        /// matching kind.
+        ///
+        /// @param pd C API primitive descriptor for an LBR AUGRU forward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
+                    zendnn::prop_kind::forward_inference,
+                    zendnn::algorithm::lbr_augru) {}
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
+        memory::desc src_layer_desc() const {
+            return rnn_base::src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
+        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
+        memory::desc attention_desc() const {
+            return rnn_base::augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
+        memory::desc weights_layer_desc() const {
+            return rnn_base::weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_iter_desc()const
+        memory::desc weights_iter_desc() const {
+            return rnn_base::weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
+        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
+        memory::desc dst_layer_desc() const {
+            return rnn_base::dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
+        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
+        memory::desc workspace_desc() const {
+            return rnn_base::workspace_desc();
+        }
+    };
+
+    /// Default constructor. Produces an empty object.
+    lbr_augru_forward() = default;
+
+    /// Constructs an LBR AUGRU forward propagation primitive.
+    /// @param pd Primitive descriptor for an LBR AUGRU forward propagation
+    ///     primitive.
+    lbr_augru_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR AUGRU forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR AUGRU forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_augru_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
+};
+
+/// LBR AUGRU backward propagation primitive.
+struct lbr_augru_backward : public primitive {
+    /// Descriptor for an LBR AUGRU backward propagation primitive.
+    struct desc {
+        zendnn_rnn_desc_t data;
+
+        /// Constructs a descriptor for LBR AUGRU backward propagation
+        /// primitive.
+        ///
+        /// The following arguments may point to a zero memory descriptor:
+        /// - @p src_iter_desc together with @p diff_src_iter_desc,
+        /// - @p bias_desc together with @p diff_bias_desc,
+        /// - @p dst_iter_desc together with @p diff_dst_iter_desc.
+        ///
+        /// This would then indicate that the LBR AUGRU backward propagation
+        /// primitive should not use them and should default to zero values
+        /// instead.
+        ///
+        /// @note
+        ///     All memory descriptors may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///
+        /// @param aprop_kind Propagation kind. Must be
+        ///     #zendnn::prop_kind::backward.
+        /// @param direction RNN direction. See @ref zendnn::rnn_direction for
+        ///     more info.
+        /// @param src_layer_desc Memory descriptor for the input vector.
+        /// @param src_iter_desc Memory descriptor for the input recurrent
+        ///     hidden state vector.
+        /// @param attention_desc Memory descriptor for the attention vector.
+        /// @param weights_layer_desc Memory descriptor for the weights
+        ///     applied to the layer input.
+        /// @param weights_iter_desc Memory descriptor for the weights applied
+        ///     to the recurrent input.
+        /// @param bias_desc Bias memory descriptor.
+        /// @param dst_layer_desc Memory descriptor for the output vector.
+        /// @param dst_iter_desc Memory descriptor for the output recurrent
+        ///     hidden state vector.
+        /// @param diff_src_layer_desc Memory descriptor for the diff of input
+        ///     vector.
+        /// @param diff_src_iter_desc Memory descriptor for the diff of input
+        ///     recurrent hidden state vector.
+        /// @param diff_attention_desc Memory descriptor for the diff of
+        ///     attention vector.
+        /// @param diff_weights_layer_desc Memory descriptor for the diff of
+        ///     weights applied to the layer input.
+        /// @param diff_weights_iter_desc Memory descriptor for the diff of
+        ///     weights applied to the recurrent input.
+        /// @param diff_bias_desc Diff bias memory descriptor.
+        /// @param diff_dst_layer_desc Memory descriptor for the diff of
+        ///     output vector.
+        /// @param diff_dst_iter_desc Memory descriptor for the diff of output
+        ///     recurrent hidden state vector.
+        /// @param flags Unused.
+        desc(prop_kind aprop_kind, rnn_direction direction,
+                const memory::desc &src_layer_desc,
+                const memory::desc &src_iter_desc,
+                const memory::desc &attention_desc,
+                const memory::desc &weights_layer_desc,
+                const memory::desc &weights_iter_desc,
+                const memory::desc &bias_desc,
+                const memory::desc &dst_layer_desc,
+                const memory::desc &dst_iter_desc,
+                const memory::desc &diff_src_layer_desc,
+                const memory::desc &diff_src_iter_desc,
+                const memory::desc &diff_attention_desc,
+                const memory::desc &diff_weights_layer_desc,
+                const memory::desc &diff_weights_iter_desc,
+                const memory::desc &diff_bias_desc,
+                const memory::desc &diff_dst_layer_desc,
+                const memory::desc &diff_dst_iter_desc,
+                rnn_flags flags = rnn_flags::undef) {
+            error::wrap_c_api(
+                    zendnn_lbr_augru_backward_desc_init(&data,
+                            zendnn::convert_to_c(aprop_kind),
+                            zendnn::convert_to_c(direction), &src_layer_desc.data,
+                            &src_iter_desc.data, &attention_desc.data,
+                            &weights_layer_desc.data, &weights_iter_desc.data,
+                            &bias_desc.data, &dst_layer_desc.data,
+                            &dst_iter_desc.data, &diff_src_layer_desc.data,
+                            &diff_src_iter_desc.data, &diff_attention_desc.data,
+                            &diff_weights_layer_desc.data,
+                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                            zendnn::convert_to_c(flags)),
+                    "could not create a descriptor for an LBR AUGRU backward "
+                    "propagation primitive");
+        }
+    };
+
+    /// Primitive descriptor for an LBR AUGRU backward propagation primitive.
+    struct primitive_desc : public rnn_primitive_desc_base {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an LBR AUGRU backward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for an LBR AUGRU backward propagation
+        ///     primitive.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for an LBR AUGRU
+        ///     forward propagation primitive. It is used as a hint for
+        ///     deciding which memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const engine &aengine,
+                const lbr_augru_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for an LBR AUGRU backward
+        /// propagation primitive.
+        ///
+        /// @param adesc Descriptor for an LBR AUGRU backward propagation
+        ///     primitive.
+        /// @param attr Primitive attributes to use.
+        /// @param aengine Engine to use.
+        /// @param hint_fwd_pd Primitive descriptor for an LBR AUGRU
+        ///     forward propagation primitive. It is used as a hint for
+        ///     deciding which memory format to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                const engine &aengine,
+                const lbr_augru_forward::primitive_desc &hint_fwd_pd,
+                bool allow_empty = false)
+            : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
+                    hint_fwd_pd.get(), allow_empty) {}
+
+        /// Constructs a primitive descriptor for an LBR AUGRU backward
+        /// propagation primitive from a C API primitive descriptor that must
+        /// have a matching kind.
+        ///
+        /// @param pd C API primitive descriptor for an LBR AUGRU backward
+        ///     propagation primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+            : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
+                    zendnn::algorithm::lbr_augru) {}
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
+        memory::desc src_layer_desc() const {
+            return rnn_base::src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
+        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
+        memory::desc attention_desc() const {
+            return rnn_base::augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
+        memory::desc weights_layer_desc() const {
+            return rnn_base::weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::weights_iter_desc()const
+        memory::desc weights_iter_desc() const {
+            return rnn_base::weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
+        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
+        memory::desc dst_layer_desc() const {
+            return rnn_base::dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
+        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
+        memory::desc workspace_desc() const {
+            return rnn_base::workspace_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_src_layer_desc()const
+        memory::desc diff_src_layer_desc() const {
+            return rnn_base::diff_src_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_src_iter_desc()const
+        memory::desc diff_src_iter_desc() const {
+            return rnn_base::diff_src_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_attention_desc()const
+        memory::desc diff_attention_desc() const {
+            return rnn_base::diff_augru_attention_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_weights_layer_desc()const
+        memory::desc diff_weights_layer_desc() const {
+            return rnn_base::diff_weights_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_weights_iter_desc()const
+        memory::desc diff_weights_iter_desc() const {
+            return rnn_base::diff_weights_iter_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_bias_desc()const
+        memory::desc diff_bias_desc() const {
+            return rnn_base::diff_bias_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_dst_layer_desc()const
+        memory::desc diff_dst_layer_desc() const {
+            return rnn_base::diff_dst_layer_desc();
+        }
+
+        /// @copydoc zendnn::rnn_primitive_desc_base::diff_dst_iter_desc()const
+        memory::desc diff_dst_iter_desc() const {
+            return rnn_base::diff_dst_iter_desc();
+        }
+    };
+
+    /// Default constructor. Produces an empty object.
+    lbr_augru_backward() = default;
+
+    /// Constructs an LBR AUGRU backward propagation primitive.
+    /// @param pd Primitive descriptor for an LBR AUGRU backward propagation
+    ///     primitive.
+    lbr_augru_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an LBR AUGRU backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an LBR AUGRU backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    lbr_augru_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_rnn
@@ -9793,6 +11759,14 @@ struct shuffle_forward : public primitive {
     /// @param pd Primitive descriptor for a shuffle forward propagation
     ///     primitive.
     shuffle_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a shuffle forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a shuffle forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    shuffle_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Shuffle backward propagation primitive.
@@ -9867,6 +11841,14 @@ struct shuffle_backward : public primitive {
     /// @param pd Primitive descriptor for a shuffle backward propagation
     ///     primitive.
     shuffle_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a shuffle backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a shuffle backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    shuffle_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_shuffle
@@ -9967,6 +11949,13 @@ struct binary : public primitive {
     /// @param pd Primitive descriptor for an elementwise binary operation
     ///     primitive.
     binary(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs an elementwise binary operation primitive from a cache blob.
+    /// @param pd Primitive descriptor for an elementwise binary operation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    binary(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_binary
@@ -10086,7 +12075,13 @@ struct matmul : public primitive {
     /// @param pd Primitive descriptor for a matmul primitive.
     matmul(const primitive_desc &pd) : primitive(pd) {
         zendnnInfo(ZENDNN_APILOG, "matmul primitive create");
-    }
+		}
+
+    /// Constructs a matmul primitive from a cache blob.
+    /// @param pd Primitive descriptor for a matmul primitive.
+    /// @param cache_blob Cache blob.
+    matmul(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_matmul
@@ -10243,6 +12238,15 @@ struct resampling_forward : public primitive {
     /// @param pd Primitive descriptor for a resampling forward propagation
     ///     primitive.
     resampling_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a resampling forward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a resampling forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    resampling_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Resampling backward propagation primitive.
@@ -10357,6 +12361,15 @@ struct resampling_backward : public primitive {
     /// @param pd Primitive descriptor for a resampling backward propagation
     ///     primitive.
     resampling_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a resampling backward propagation primitive from a cache
+    ///     blob.
+    /// @param pd Primitive descriptor for a resampling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    resampling_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_resampling
@@ -10488,6 +12501,15 @@ struct pooling_v2_forward : public primitive {
     /// @param pd Primitive descriptor for a pooling v2
     /// (dilated pooling) forward propagation primitive.
     pooling_v2_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling v2 (dilated pooling) forward
+    /// propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling v2
+    /// (dilated pooling) forward propagation primitive.
+    /// @param cache_blob Cache blob.
+    pooling_v2_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// Pooling v2 (dilated pooling) backward propagation primitive.
@@ -10613,6 +12635,15 @@ struct pooling_v2_backward : public primitive {
     /// @param pd Primitive descriptor for a pooling backward propagation
     ///     primitive.
     pooling_v2_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a pooling v2 (dilated pooling) backward
+    /// propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a pooling backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    pooling_v2_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_pooling_v2
@@ -10711,6 +12742,14 @@ struct prelu_forward : public primitive {
     /// @param pd Primitive descriptor for a prelu forward propagation
     ///     primitive.
     prelu_forward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a prelu forward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a prelu forward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    prelu_forward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// PReLU backward propagation primitive.
@@ -10811,6 +12850,14 @@ struct prelu_backward : public primitive {
     /// @param pd Primitive descriptor for a prelu backward propagation
     ///     primitive.
     prelu_backward(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a prelu backward propagation primitive from a cache blob.
+    /// @param pd Primitive descriptor for a prelu backward propagation
+    ///     primitive.
+    /// @param cache_blob Cache blob.
+    prelu_backward(
+            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_prelu
@@ -10911,6 +12958,12 @@ struct reduction : public primitive {
     /// Constructs a reduction primitive.
     /// @param pd Primitive descriptor for a reduction primitive.
     reduction(const primitive_desc &pd) : primitive(pd) {}
+
+    /// Constructs a reduction primitive from a cache blob.
+    /// @param pd Primitive descriptor for a reduction primitive.
+    /// @param cache_blob Cache blob.
+    reduction(const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        : primitive(pd, cache_blob) {}
 };
 
 /// @} zendnn_api_reduction
@@ -11186,6 +13239,23 @@ inline const version_t *version() {
     return zendnn_version();
 }
 
+/// Returns the floating-point math mode that will be used by default
+/// for all subsequently created primitives.
+///
+/// @returns Output FP math mode.
+inline fpmath_mode get_default_fpmath_mode() {
+    zendnn_fpmath_mode_t mode;
+    error::wrap_c_api(zendnn_get_default_fpmath_mode(&mode),
+            "could not get a default fpmath mode");
+    return static_cast<fpmath_mode>(mode);
+}
+
+/// @copydoc zendnn_set_default_fpmath_mode()
+inline status set_default_fpmath_mode(fpmath_mode mode) {
+    return static_cast<status>(
+            zendnn_set_default_fpmath_mode(convert_to_c(mode)));
+}
+
 /// @copydoc zendnn_set_jit_dump()
 inline status set_jit_dump(int enable) {
     return static_cast<status>(zendnn_set_jit_dump(enable));
@@ -11327,7 +13397,21 @@ inline primitive::primitive(const_zendnn_primitive_desc_t c_pd) {
     reset(result);
 }
 
+inline primitive::primitive(const_zendnn_primitive_desc_t c_pd,
+        const std::vector<uint8_t> &cache_blob) {
+    zendnn_primitive_t result;
+    size_t size = cache_blob.size();
+    const uint8_t *cache_blob_data = cache_blob.data();
+    error::wrap_c_api(zendnn_primitive_create_from_cache_blob(
+                              &result, c_pd, size, cache_blob_data),
+            "could not create a primitive from a cache blob");
+    reset(result);
+}
+
 inline primitive::primitive(const primitive_desc &pd) : primitive(pd.get()) {}
+inline primitive::primitive(
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+    : primitive(pd.get(), cache_blob) {}
 
 inline void primitive::execute(const stream &astream,
         const std::unordered_map<int, memory> &args) const {
@@ -11346,7 +13430,6 @@ inline void primitive::execute(const stream &astream,
 #undef ZENDNN_DEFINE_BITMASK_OPS
 
 } // namespace zendnn
-
 
 /// @} zendnn_api
 

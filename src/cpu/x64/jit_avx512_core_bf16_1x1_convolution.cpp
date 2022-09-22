@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2021 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -155,7 +155,7 @@ void jit_avx512_core_bf16_1x1_convolution_fwd_t<dst_type>::execute_forward_thr(
 
     auto p = jit_1x1_conv_call_s();
 
-    auto rp = rtus_driver_t<avx512_common>::call_params_t();
+    auto rp = rtus_driver_t<avx512_core>::call_params_t();
 
     const int nb_oc = jcp.nb_load;
     const int nb_ic = jcp.nb_reduce;
@@ -452,8 +452,10 @@ void jit_avx512_core_bf16_1x1_convolution_fwd_t<dst_type>::execute_forward_thr(
     }
 }
 
-template struct jit_avx512_core_bf16_1x1_convolution_fwd_t<data_type::f32>;
-template struct jit_avx512_core_bf16_1x1_convolution_fwd_t<data_type::bf16>;
+REG_AVX512_ISA(template struct jit_avx512_core_bf16_1x1_convolution_fwd_t<
+        data_type::f32>);
+REG_AVX512_ISA(template struct jit_avx512_core_bf16_1x1_convolution_fwd_t<
+        data_type::bf16>);
 
 template <data_type_t diff_src_type>
 void jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
@@ -501,7 +503,7 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
 
     auto p = jit_1x1_conv_call_s();
 
-    auto rp = rtus_driver_t<avx512_common>::call_params_t();
+    auto rp = rtus_driver_t<avx512_core>::call_params_t();
     const int nb_ic = jcp.nb_load;
     const int nb_oc = jcp.nb_reduce;
     const int os_block = jcp.bcast_block;
@@ -614,9 +616,10 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
     }
 }
 
-template struct jit_avx512_core_bf16_1x1_convolution_bwd_data_t<data_type::f32>;
-template struct jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
-        data_type::bf16>;
+REG_AVX512_ISA(template struct jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
+        data_type::f32>);
+REG_AVX512_ISA(template struct jit_avx512_core_bf16_1x1_convolution_bwd_data_t<
+        data_type::bf16>);
 
 /* convolution backward wtr weights */
 
@@ -661,7 +664,7 @@ jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::init(
         }
     }
 
-    CHECK(init_rtus_driver<avx512_common>(this));
+    CHECK(init_rtus_driver<avx512_core>(this));
     return status::success;
 }
 
@@ -726,6 +729,29 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::
 
     const bool is_ddst_layout_nxc = utils::one_of(
             jcp.dst_tag, format_tag::nwc, format_tag::nhwc, format_tag::ndhwc);
+
+    auto maybe_zero_icpad = [&](const int g_start, const int g_end,
+                                    const int ocb_start, const int ocb_end) {
+        // write zeros to IC padded region.
+        const int ic_tail = jcp.ic_without_padding % jcp.ic_block;
+        if (ic_tail != 0) {
+            for_(int g = g_start; g < g_end; ++g)
+            for (int z_ocb = ocb_start; z_ocb < ocb_end; ++z_ocb) {
+                const int z_icb = jcp.nb_bcast - 1;
+                const size_t off = wht_blk_off(diff_weights_d, g, z_ocb, z_icb)
+                        + ic_tail * jcp.oc_block;
+                diff_wei_data_t *z_wei = diff_weights + off;
+                const int zero_work
+                        = (jcp.nb_bcast * jcp.ic_block - jcp.ic_without_padding)
+                        * jcp.oc_block;
+                ZENDNN_PRAGMA_OMP_SIMD()
+                for (int o = 0; o < zero_work; ++o) {
+                    z_wei[o] = 0;
+                }
+            }
+        }
+    };
+
     auto ker = [&](const int ithr, const int nthr) {
         assert(nthr == jcp.nthr);
 
@@ -813,7 +839,7 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::
                         const src_data_t *local_src = diff_src;
 
                         auto p = jit_1x1_conv_call_s();
-                        auto rp = rtus_driver_t<avx512_common>::call_params_t();
+                        auto rp = rtus_driver_t<avx512_core>::call_params_t();
 
                         p.output_stride = utils::rnd_up(jcp.ic, jcp.oc_block)
                                 * jcp.oc_block * jcp.typesize_out;
@@ -1086,6 +1112,9 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::
                 }
             }
         }
+        if (ic_b_end >= jcp.nb_bcast) {
+            maybe_zero_icpad(g_start, g_end, oc_b_start, oc_b_end);
+        }
     };
 
     parallel(jcp.nthr, [&](const int ithr, const int nthr) {
@@ -1109,10 +1138,12 @@ void jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<diff_weights_type>::
     }
 }
 
-template struct jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<
-        data_type::f32>;
-template struct jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<
-        data_type::bf16>;
+REG_AVX512_ISA(
+        template struct jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<
+                data_type::f32>);
+REG_AVX512_ISA(
+        template struct jit_avx512_core_bf16_1x1_convolution_bwd_weights_t<
+                data_type::bf16>);
 
 } // namespace x64
 } // namespace cpu

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -22,6 +22,7 @@
 #include <math.h>
 
 #include "common/c_types_map.hpp"
+#include "common/zendnn_thread.hpp"
 #include "common/nstl.hpp"
 
 #include "cpu/simple_q10n.hpp"

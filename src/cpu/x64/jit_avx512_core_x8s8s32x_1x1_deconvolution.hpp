@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -31,17 +31,16 @@
 
 #include "cpu/cpu_convolution_pd.hpp"
 #include "cpu/cpu_deconvolution_pd.hpp"
+#include "cpu/zero_point_utils.hpp"
 
 #include "cpu/x64/jit_avx512_core_x8s8s32x_1x1_convolution.hpp"
 #include "cpu/x64/jit_uni_1x1_conv_utils.hpp"
-#include "cpu/zero_point_utils.hpp"
 
 namespace zendnn {
 namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <impl::data_type_t src_type, impl::data_type_t dst_type>
 struct jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_deconvolution_fwd_pd_t {
         pd_t(const deconvolution_desc_t *adesc, const primitive_attr_t *attr,
@@ -59,53 +58,53 @@ struct jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t : public primitive_t {
 
         status_t init_convolution(engine_t *engine) {
             convolution_desc_t cd;
-            status_t status;
 
             auto dd = desc();
-            status = conv_desc_init(&cd, prop_kind::forward_training,
+            CHECK(conv_desc_init(&cd, prop_kind::forward_training,
                     alg_kind::convolution_direct, &(dd->src_desc),
                     &(dd->weights_desc), &(dd->bias_desc), &(dd->dst_desc),
                     dd->strides, dd->dilates, dd->padding[0], dd->padding[1],
-                    false, false, nullptr, nullptr, nullptr);
+                    false, false, nullptr, nullptr, nullptr));
 
-            if (status == status::success) {
-                primitive_desc_t *_conv_pd = nullptr;
-                primitive_attr_t conv_attr(*attr());
-                if (!conv_attr.is_initialized()) return status::out_of_memory;
-                conv_attr.set_scratchpad_mode(scratchpad_mode::user);
-                status = primitive_desc_t::create<conv_pd_t>(&_conv_pd,
-                        (op_desc_t *)&cd, &conv_attr, engine, nullptr);
-                conv_pd_.reset(_conv_pd);
+            primitive_attr_t conv_attr(*attr());
+            if (!conv_attr.is_initialized()) return status::out_of_memory;
+            zendnn_primitive_desc_iterator it(
+                    engine, (op_desc_t *)&cd, &conv_attr, nullptr);
+            if (!it.is_initialized()) return status::out_of_memory;
+
+            while (++it != it.end()) {
+                conv_pd_ = *it;
+                // XXX: find another way to create required implementation.
+                if (dynamic_cast<conv_pd_t *>(conv_pd_.get()))
+                    return set_default_params();
             }
 
-            if (status == status::success) status = set_default_params();
-
-            return status;
+            return status::unimplemented;
         };
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            using namespace data_type;
+            using skip_mask_t = primitive_attr_t::skip_mask_t;
+            bool ok = is_fwd()
                     && desc()->alg_kind == alg_kind::deconvolution_direct
                     && !has_zero_dim_memory()
-                    && desc()->src_desc.data_type == src_type
-                    && desc()->dst_desc.data_type == dst_type
-                    && desc()->weights_desc.data_type == data_type::s8
+                    && utils::one_of(src_md(0)->data_type, s8, u8)
+                    && weights_md(0)->data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
-                    && desc()->accum_data_type == data_type::s32
-                    && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::oscale
-                            | primitive_attr_t::skip_mask_t::post_ops
-                            | primitive_attr_t::skip_mask_t::
-                                    zero_points_runtime)
+                            utils::one_of(
+                                    weights_md(1)->data_type, f32, s32, s8, u8))
+                    && utils::one_of(dst_md(0)->data_type, f32, s32, s8, u8)
+                    && desc()->accum_data_type == s32
+                    && attr()->has_default_values(skip_mask_t::oscale
+                            | skip_mask_t::post_ops
+                            | skip_mask_t::zero_points_runtime)
                     && zero_points_valid(
                             attr(), true /*per_oc_bcast_accepted*/);
 
             if (!ok) return status::unimplemented;
 
             CHECK(init_convolution(engine));
+            CHECK(attr_.set_default_formats(dst_md(0)));
             init_scratchpad();
 
             return status::success;
@@ -122,11 +121,10 @@ struct jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t : public primitive_t {
         }
 
         using conv_pd_t =
-                typename jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t<
-                        src_type, dst_type>::pd_t;
+                typename jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t::pd_t;
         friend jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t;
 
-        std::unique_ptr<primitive_desc_t> conv_pd_;
+        std::shared_ptr<primitive_desc_t> conv_pd_;
 
     private:
         void init_scratchpad() {

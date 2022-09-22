@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -164,34 +164,31 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
 
     const auto alg = pd()->desc()->alg_kind;
 
-    status_t status = status::success;
     const auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
-    auto ws = CTX_OUT_CLEAN_MEM(unsigned char *, ZENDNN_ARG_WORKSPACE, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(unsigned char *, ZENDNN_ARG_WORKSPACE);
 
     const memory_desc_wrapper MEM_D(src)(pd()->src_md());
     const memory_desc_wrapper MEM_D(dst)(pd()->dst_md());
     const memory_desc_wrapper MEM_D(ws)(pd()->workspace_md());
 
-    const int MB = pd()->MB();
-    const int OD = pd()->OD();
-    const int OC = pd()->C();
-    const int OH = pd()->OH();
-    const int OW = pd()->OW();
-    const int ID = pd()->ID();
-    const int IH = pd()->IH();
-    const int IW = pd()->IW();
-    const int KD = pd()->KD();
-    const int KH = pd()->KH();
-    const int KW = pd()->KW();
-    const int SD = pd()->KSD();
-    const int SH = pd()->KSH();
-    const int SW = pd()->KSW();
-    const int padF = pd()->padFront();
-    const int padT = pd()->padT();
-    const int padL = pd()->padL();
+    const dim_t MB = pd()->MB();
+    const dim_t OC = pd()->OC();
+    const dim_t OD = pd()->OD();
+    const dim_t OH = pd()->OH();
+    const dim_t OW = pd()->OW();
+    const dim_t ID = pd()->ID();
+    const dim_t IH = pd()->IH();
+    const dim_t IW = pd()->IW();
+    const dim_t KD = pd()->KD();
+    const dim_t KH = pd()->KH();
+    const dim_t KW = pd()->KW();
+    const dim_t SD = pd()->KSD();
+    const dim_t SH = pd()->KSH();
+    const dim_t SW = pd()->KSW();
+    const dim_t padF = pd()->padFront();
+    const dim_t padT = pd()->padT();
+    const dim_t padL = pd()->padL();
 
     const bool is_1d = pd()->desc()->src_desc.ndims == 3;
     const bool is_3d = pd()->desc()->src_desc.ndims == 5;
@@ -209,12 +206,12 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
     const dim_t OSP = SP * OD;
 
     const auto get_logical_offset
-            = [&](int mb, int oc, int od, int oh, int ow) -> dim_t {
+            = [&](dim_t mb, dim_t oc, dim_t od, dim_t oh, dim_t ow) -> dim_t {
         return OSP * OC * mb + OSP * oc + SP * od + OW * oh + ow;
     };
     const bool are_postops_set = !(pd()->attr()->post_ops_.entry_.empty());
 
-    parallel_nd(MB, OD, OH, OW, [&](int mb, int od, int oh, int ow) {
+    parallel_nd(MB, OD, OH, OW, [&](dim_t mb, dim_t od, dim_t oh, dim_t ow) {
         const size_t dst_offset_init = strided_offset(mb, dst_n_stride, od,
                 dst_d_stride, oh, dst_h_stride, ow, dst_w_stride);
         if (alg == alg_kind::pooling_max) {
@@ -231,7 +228,7 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
             if (!ws) {
                 auto *const d = dst + dst_offset_init;
                 ZENDNN_PRAGMA_OMP_SIMD()
-                for (int oc = 0; oc < OC; ++oc) {
+                for (dim_t oc = 0; oc < OC; ++oc) {
                     d[oc] = nstl::numeric_limits<data_t>::lowest();
                 }
             } else {
@@ -239,12 +236,12 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
                         OC, dst + dst_offset_init, ws, ws_offset_init, ws_dt);
             }
 
-            for_(int kd = 0; kd < KD; ++kd)
-            for_(int kh = 0; kh < KH; ++kh)
-            for (int kw = 0; kw < KW; ++kw) {
-                const int id = od * SD - padF + kd;
-                const int ih = oh * SH - padT + kh;
-                const int iw = ow * SW - padL + kw;
+            for_(dim_t kd = 0; kd < KD; ++kd)
+            for_(dim_t kh = 0; kh < KH; ++kh)
+            for (dim_t kw = 0; kw < KW; ++kw) {
+                const dim_t id = od * SD - padF + kd;
+                const dim_t ih = oh * SH - padT + kh;
+                const dim_t iw = ow * SW - padL + kw;
 
                 if (id < 0 || id >= ID) continue;
                 if (ih < 0 || ih >= IH) continue;
@@ -257,7 +254,7 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
                     auto *const s = src + src_offset_init;
                     auto *const d = dst + dst_offset_init;
                     ZENDNN_PRAGMA_OMP_SIMD()
-                    for (int oc = 0; oc < OC; ++oc) {
+                    for (dim_t oc = 0; oc < OC; ++oc) {
                         d[oc] = nstl::max(s[oc], d[oc]);
                     }
                 } else {
@@ -283,9 +280,9 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
             // as the typical kernel is small
             size_t num_summands = 0;
 
-            for_(int id = id_start; id < id_end; ++id)
-            for_(int ih = ih_start; ih < ih_end; ++ih)
-            for (int iw = iw_start; iw < iw_end; ++iw) {
+            for_(dim_t id = id_start; id < id_end; ++id)
+            for_(dim_t ih = ih_start; ih < ih_end; ++ih)
+            for (dim_t iw = iw_start; iw < iw_end; ++iw) {
                 const size_t src_offset_init = strided_offset(mb, src_n_stride,
                         id, src_d_stride, ih, src_h_stride, iw, src_w_stride);
                 const auto s = src + src_offset_init;
@@ -313,7 +310,7 @@ status_t nhwc_pooling_fwd_t<d_type>::execute_forward(
             args.l_offset = get_logical_offset(mb, 0, od, oh, ow);
             args.dst_md = pd()->dst_md();
 
-            for (int oc = 0; oc < OC; ++oc) {
+            for (dim_t oc = 0; oc < OC; ++oc) {
                 ref_post_ops_.execute(d[oc], args);
                 args.l_offset += OSP;
             }
@@ -328,12 +325,9 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
 
     const auto alg = pd()->desc()->alg_kind;
 
-    status_t status = status::success;
     const auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
-    auto ws = CTX_OUT_CLEAN_MEM(unsigned char *, ZENDNN_ARG_WORKSPACE, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(unsigned char *, ZENDNN_ARG_WORKSPACE);
 
     auto scratchpad = ctx.get_scratchpad_grantor();
     float *const bf16cvt_src_wsp = scratchpad.template get<float>(
@@ -345,23 +339,23 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
     const memory_desc_wrapper MEM_D(dst)(pd()->dst_md());
     const memory_desc_wrapper MEM_D(ws)(pd()->workspace_md());
 
-    const int MB = pd()->MB();
-    const int OD = pd()->OD();
-    const int OC = pd()->C();
-    const int OH = pd()->OH();
-    const int OW = pd()->OW();
-    const int ID = pd()->ID();
-    const int IH = pd()->IH();
-    const int IW = pd()->IW();
-    const int KD = pd()->KD();
-    const int KH = pd()->KH();
-    const int KW = pd()->KW();
-    const int SD = pd()->KSD();
-    const int SH = pd()->KSH();
-    const int SW = pd()->KSW();
-    const int padF = pd()->padFront();
-    const int padT = pd()->padT();
-    const int padL = pd()->padL();
+    const dim_t MB = pd()->MB();
+    const dim_t OC = pd()->OC();
+    const dim_t OD = pd()->OD();
+    const dim_t OH = pd()->OH();
+    const dim_t OW = pd()->OW();
+    const dim_t ID = pd()->ID();
+    const dim_t IH = pd()->IH();
+    const dim_t IW = pd()->IW();
+    const dim_t KD = pd()->KD();
+    const dim_t KH = pd()->KH();
+    const dim_t KW = pd()->KW();
+    const dim_t SD = pd()->KSD();
+    const dim_t SH = pd()->KSH();
+    const dim_t SW = pd()->KSW();
+    const dim_t padF = pd()->padFront();
+    const dim_t padT = pd()->padT();
+    const dim_t padL = pd()->padL();
 
     const bool is_1d = pd()->desc()->src_desc.ndims == 3;
     const bool is_3d = pd()->desc()->src_desc.ndims == 5;
@@ -371,7 +365,7 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
     DECLARE_READ_STRIDES(src);
     DECLARE_READ_STRIDES(dst);
 
-    const auto apply_offset = [&](int index, int offset) {
+    const auto apply_offset = [&](dim_t index, dim_t offset) {
         return (index > offset) ? index - offset : 0;
     };
 
@@ -379,13 +373,14 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
     const dim_t OSP = SP * OD;
 
     const auto get_logical_offset
-            = [&](int mb, int oc, int od, int oh, int ow) -> dim_t {
+            = [&](dim_t mb, dim_t oc, dim_t od, dim_t oh, dim_t ow) -> dim_t {
         return OSP * OC * mb + OSP * oc + SP * od + OW * oh + ow;
     };
     const bool are_postops_set = !(pd()->attr()->post_ops_.entry_.empty());
+    const int nthr = pd()->nthr_;
 
-    parallel_nd_ext(0, MB, OD, OH, OW,
-            [&](int ithr, int, int mb, int od, int oh, int ow) {
+    parallel_nd_ext(nthr, MB, OD, OH, OW,
+            [&](int ithr, int, dim_t mb, dim_t od, dim_t oh, dim_t ow) {
                 const size_t dst_offset_init = strided_offset(mb, dst_n_stride,
                         od, dst_d_stride, oh, dst_h_stride, ow, dst_w_stride);
                 float *const dst_f32 = &bf16cvt_dst_wsp[ithr * OC];
@@ -404,7 +399,7 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
                     //    array_nhwc_initialize, array_nhwc_max
                     if (!ws) {
                         ZENDNN_PRAGMA_OMP_SIMD()
-                        for (int oc = 0; oc < OC; ++oc) {
+                        for (dim_t oc = 0; oc < OC; ++oc) {
                             dst_f32[oc]
                                     = nstl::numeric_limits<data_t>::lowest();
                         }
@@ -413,12 +408,12 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
                                 OC, dst_f32, ws, ws_offset_init, ws_dt);
                     }
 
-                    for_(int kd = 0; kd < KD; ++kd)
-                    for_(int kh = 0; kh < KH; ++kh)
-                    for (int kw = 0; kw < KW; ++kw) {
-                        const int id = od * SD - padF + kd;
-                        const int ih = oh * SH - padT + kh;
-                        const int iw = ow * SW - padL + kw;
+                    for_(dim_t kd = 0; kd < KD; ++kd)
+                    for_(dim_t kh = 0; kh < KH; ++kh)
+                    for (dim_t kw = 0; kw < KW; ++kw) {
+                        const dim_t id = od * SD - padF + kd;
+                        const dim_t ih = oh * SH - padT + kh;
+                        const dim_t iw = ow * SW - padL + kw;
 
                         if (id < 0 || id >= ID) continue;
                         if (ih < 0 || ih >= IH) continue;
@@ -433,7 +428,7 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
 
                         if (!ws) {
                             ZENDNN_PRAGMA_OMP_SIMD()
-                            for (int oc = 0; oc < OC; ++oc) {
+                            for (dim_t oc = 0; oc < OC; ++oc) {
                                 dst_f32[oc]
                                         = nstl::max(src_f32[oc], dst_f32[oc]);
                             }
@@ -458,9 +453,9 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
                     // as the typical kernel is small
                     size_t num_summands = 0;
 
-                    for_(int id = id_start; id < id_end; ++id)
-                    for_(int ih = ih_start; ih < ih_end; ++ih)
-                    for (int iw = iw_start; iw < iw_end; ++iw) {
+                    for_(dim_t id = id_start; id < id_end; ++id)
+                    for_(dim_t ih = ih_start; ih < ih_end; ++ih)
+                    for (dim_t iw = iw_start; iw < iw_end; ++iw) {
                         size_t src_offset_init = strided_offset(mb,
                                 src_n_stride, id, src_d_stride, ih,
                                 src_h_stride, iw, src_w_stride);
@@ -489,7 +484,7 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
                     args.l_offset = get_logical_offset(mb, 0, od, oh, ow);
                     args.dst_md = pd()->dst_md();
 
-                    for (int oc = 0; oc < OC; ++oc) {
+                    for (dim_t oc = 0; oc < OC; ++oc) {
                         ref_post_ops_.execute(dst_f32[oc], args);
                         args.l_offset += OSP;
                     }
@@ -502,33 +497,31 @@ status_t nhwc_pooling_fwd_t<data_type::bf16>::execute_forward(
 template <data_type_t d_type>
 status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
     auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
     auto ws = CTX_IN_MEM(const unsigned char *, ZENDNN_ARG_WORKSPACE);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DIFF_SRC);
 
     const memory_desc_wrapper MEM_D(diff_src)(pd()->diff_src_md());
     const memory_desc_wrapper MEM_D(diff_dst)(pd()->diff_dst_md());
     const memory_desc_wrapper MEM_D(ws)(pd()->workspace_md());
 
-    const int MB = pd()->MB();
-    const int ID = pd()->ID();
-    const int IH = pd()->IH();
-    const int IW = pd()->IW();
-    const int KD = pd()->KD();
-    const int KH = pd()->KH();
-    const int KW = pd()->KW();
-    const int SD = pd()->KSD();
-    const int SH = pd()->KSH();
-    const int SW = pd()->KSW();
-    const int OC = pd()->C();
-    const int padF = pd()->padFront();
-    const int padT = pd()->padT();
-    const int padL = pd()->padL();
-    const int OD = pd()->OD();
-    const int OH = pd()->OH();
-    const int OW = pd()->OW();
+    const dim_t MB = pd()->MB();
+    const dim_t OC = pd()->OC();
+    const dim_t OD = pd()->OD();
+    const dim_t OH = pd()->OH();
+    const dim_t OW = pd()->OW();
+    const dim_t ID = pd()->ID();
+    const dim_t IH = pd()->IH();
+    const dim_t IW = pd()->IW();
+    const dim_t KD = pd()->KD();
+    const dim_t KH = pd()->KH();
+    const dim_t KW = pd()->KW();
+    const dim_t SD = pd()->KSD();
+    const dim_t SH = pd()->KSH();
+    const dim_t SW = pd()->KSW();
+    const dim_t padF = pd()->padFront();
+    const dim_t padT = pd()->padT();
+    const dim_t padL = pd()->padL();
 
     const bool is_1d = pd()->desc()->diff_src_desc.ndims == 3;
     const bool is_3d = pd()->desc()->diff_src_desc.ndims == 5;
@@ -538,16 +531,16 @@ status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
     DECLARE_READ_STRIDES(diff_src);
     DECLARE_READ_STRIDES(diff_dst);
 
-    auto apply_offset = [=](int index, int offset) {
+    auto apply_offset = [=](dim_t index, dim_t offset) {
         return (index > offset) ? index - offset : 0;
     };
 
-    parallel_nd(MB, ID, IH, IW, [&](int mb, int id, int ih, int iw) {
+    parallel_nd(MB, ID, IH, IW, [&](dim_t mb, dim_t id, dim_t ih, dim_t iw) {
         size_t src_offset_init
                 = strided_offset(mb, diff_src_n_stride, id, diff_src_d_stride,
                         ih, diff_src_h_stride, iw, diff_src_w_stride);
 
-        for (int oc = 0; oc < OC; ++oc)
+        for (dim_t oc = 0; oc < OC; ++oc)
             diff_src[src_offset_init + oc] = data_type_t(0);
 
         // Find out which output cells may correspond to current
@@ -557,21 +550,21 @@ status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
         // Left-most output may be computed if we decrement input
         // by (kernel_size - 1) and then do the same division by
         // stride.
-        int od_left = max((id + padF - KD + 1) / SD, 0);
-        int oh_left = max((ih + padT - KH + 1) / SH, 0);
-        int ow_left = max((iw + padL - KW + 1) / SW, 0);
+        dim_t od_left = max((id + padF - KD + 1) / SD, dim_t(0));
+        dim_t oh_left = max((ih + padT - KH + 1) / SH, dim_t(0));
+        dim_t ow_left = max((iw + padL - KW + 1) / SW, dim_t(0));
         // Notice +1 here to preserve the C loop "less than"
         // condition for continuing the for loop.
-        int od_right = min((id + padF) / SD + 1, OD);
-        int oh_right = min((ih + padT) / SH + 1, OH);
-        int ow_right = min((iw + padL) / SW + 1, OW);
+        dim_t od_right = min((id + padF) / SD + 1, OD);
+        dim_t oh_right = min((ih + padT) / SH + 1, OH);
+        dim_t ow_right = min((iw + padL) / SW + 1, OW);
 
-        for_(int od = od_left; od < od_right; ++od)
-        for_(int oh = oh_left; oh < oh_right; ++oh)
-        for (int ow = ow_left; ow < ow_right; ++ow) {
-            const int kd = id - od * SD + padF;
-            const int kh = ih - oh * SH + padT;
-            const int kw = iw - ow * SW + padL;
+        for_(dim_t od = od_left; od < od_right; ++od)
+        for_(dim_t oh = oh_left; oh < oh_right; ++oh)
+        for (dim_t ow = ow_left; ow < ow_right; ++ow) {
+            const dim_t kd = id - od * SD + padF;
+            const dim_t kh = ih - oh * SH + padT;
+            const dim_t kw = iw - ow * SW + padL;
 
             if (kd < 0 || kd >= KD) continue;
             if (kh < 0 || kh >= KH) continue;
@@ -585,7 +578,7 @@ status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
                 DECLARE_READ_STRIDES(ws);
                 size_t ws_offset_init = strided_offset(mb, ws_n_stride, od,
                         ws_d_stride, oh, ws_h_stride, ow, ws_w_stride);
-                const int index = kd * KH * KW + kh * KW + kw;
+                const dim_t index = kd * KH * KW + kh * KW + kw;
                 const unsigned char *ws_ = ws + ws_offset_init;
                 const int *intws_ = (int *)ws + ws_offset_init;
                 const bool ws_is_u8 = MEM_D(ws).data_type() == data_type::u8;
@@ -593,7 +586,7 @@ status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
 #if SAFE_TO_USE_OMP_SIMD
                 ZENDNN_PRAGMA_OMP_SIMD()
 #endif
-                for (int oc = 0; oc < OC; ++oc) {
+                for (dim_t oc = 0; oc < OC; ++oc) {
                     const int index_from_ws = ws_is_u8 ? ws_[oc] : intws_[oc];
                     const data_t d = diff_dst[dst_offset_init + oc];
 
@@ -622,7 +615,7 @@ status_t nhwc_pooling_bwd_t<d_type>::execute_backward(
                                 * (id_end - id_start);
 
                 ZENDNN_PRAGMA_OMP_SIMD()
-                for (int oc = 0; oc < OC; ++oc) {
+                for (dim_t oc = 0; oc < OC; ++oc) {
                     const data_t d = diff_dst[dst_offset_init + oc];
                     // Check if kernel windows are disjoint, in this case
                     // there's no update needed and we just write there once
@@ -642,11 +635,9 @@ template <>
 status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
         const exec_ctx_t &ctx) const {
 
-    status_t status = status::success;
     auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
     auto ws = CTX_IN_MEM(const unsigned char *, ZENDNN_ARG_WORKSPACE);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DIFF_SRC);
 
     auto scratchpad = ctx.get_scratchpad_grantor();
     float *bf16cvt_dsrc = scratchpad.template get<float>(
@@ -658,23 +649,23 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
     const memory_desc_wrapper MEM_D(diff_dst)(pd()->diff_dst_md());
     const memory_desc_wrapper MEM_D(ws)(pd()->workspace_md());
 
-    const int MB = pd()->MB();
-    const int ID = pd()->ID();
-    const int IH = pd()->IH();
-    const int IW = pd()->IW();
-    const int KD = pd()->KD();
-    const int KH = pd()->KH();
-    const int KW = pd()->KW();
-    const int SD = pd()->KSD();
-    const int SH = pd()->KSH();
-    const int SW = pd()->KSW();
-    const int OC = pd()->C();
-    const int padF = pd()->padFront();
-    const int padT = pd()->padT();
-    const int padL = pd()->padL();
-    const int OD = pd()->OD();
-    const int OH = pd()->OH();
-    const int OW = pd()->OW();
+    const dim_t MB = pd()->MB();
+    const dim_t OC = pd()->OC();
+    const dim_t OD = pd()->OD();
+    const dim_t OH = pd()->OH();
+    const dim_t OW = pd()->OW();
+    const dim_t ID = pd()->ID();
+    const dim_t IH = pd()->IH();
+    const dim_t IW = pd()->IW();
+    const dim_t KD = pd()->KD();
+    const dim_t KH = pd()->KH();
+    const dim_t KW = pd()->KW();
+    const dim_t SD = pd()->KSD();
+    const dim_t SH = pd()->KSH();
+    const dim_t SW = pd()->KSW();
+    const dim_t padF = pd()->padFront();
+    const dim_t padT = pd()->padT();
+    const dim_t padL = pd()->padL();
 
     const bool is_1d = pd()->desc()->diff_src_desc.ndims == 3;
     const bool is_3d = pd()->desc()->diff_src_desc.ndims == 5;
@@ -684,12 +675,13 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
     DECLARE_READ_STRIDES(diff_src);
     DECLARE_READ_STRIDES(diff_dst);
 
-    auto apply_offset = [=](int index, int offset) {
+    auto apply_offset = [=](dim_t index, dim_t offset) {
         return (index > offset) ? index - offset : 0;
     };
+    const int nthr = pd()->nthr_;
 
-    parallel_nd_ext(0, MB, ID, IH, IW,
-            [&](int ithr, int, int mb, int id, int ih, int iw) {
+    parallel_nd_ext(nthr, MB, ID, IH, IW,
+            [&](int ithr, int, dim_t mb, dim_t id, dim_t ih, dim_t iw) {
                 size_t src_offset_init = strided_offset(mb, diff_src_n_stride,
                         id, diff_src_d_stride, ih, diff_src_h_stride, iw,
                         diff_src_w_stride);
@@ -697,7 +689,7 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
                 float *diff_dst_fp32 = &bf16cvt_ddst[ithr * OC];
                 float *diff_src_fp32 = &bf16cvt_dsrc[ithr * OC];
 
-                for (int oc = 0; oc < OC; ++oc) {
+                for (dim_t oc = 0; oc < OC; ++oc) {
                     diff_src_fp32[oc] = 0.f;
                     diff_src[src_offset_init + oc] = (bfloat16_t)0.f;
                 }
@@ -709,21 +701,21 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
                 // Left-most output may be computed if we decrement input
                 // by (kernel_size - 1) and then do the same division by
                 // stride.
-                int od_left = max((id + padF - KD + 1) / SD, 0);
-                int oh_left = max((ih + padT - KH + 1) / SH, 0);
-                int ow_left = max((iw + padL - KW + 1) / SW, 0);
+                dim_t od_left = max((id + padF - KD + 1) / SD, dim_t(0));
+                dim_t oh_left = max((ih + padT - KH + 1) / SH, dim_t(0));
+                dim_t ow_left = max((iw + padL - KW + 1) / SW, dim_t(0));
                 // Notice +1 here to preserve the C loop "less than"
                 // condition for continuing the for loop.
-                int od_right = min((id + padF) / SD + 1, OD);
-                int oh_right = min((ih + padT) / SH + 1, OH);
-                int ow_right = min((iw + padL) / SW + 1, OW);
+                dim_t od_right = min((id + padF) / SD + 1, OD);
+                dim_t oh_right = min((ih + padT) / SH + 1, OH);
+                dim_t ow_right = min((iw + padL) / SW + 1, OW);
 
-                for_(int od = od_left; od < od_right; ++od)
-                for_(int oh = oh_left; oh < oh_right; ++oh)
-                for (int ow = ow_left; ow < ow_right; ++ow) {
-                    const int kd = id - od * SD + padF;
-                    const int kh = ih - oh * SH + padT;
-                    const int kw = iw - ow * SW + padL;
+                for_(dim_t od = od_left; od < od_right; ++od)
+                for_(dim_t oh = oh_left; oh < oh_right; ++oh)
+                for (dim_t ow = ow_left; ow < ow_right; ++ow) {
+                    const dim_t kd = id - od * SD + padF;
+                    const dim_t kh = ih - oh * SH + padT;
+                    const dim_t kw = iw - ow * SW + padL;
 
                     if (kd < 0 || kd >= KD) continue;
                     if (kh < 0 || kh >= KH) continue;
@@ -740,7 +732,7 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
                         size_t ws_offset_init = strided_offset(mb, ws_n_stride,
                                 od, ws_d_stride, oh, ws_h_stride, ow,
                                 ws_w_stride);
-                        const int index = kd * KH * KW + kh * KW + kw;
+                        const dim_t index = kd * KH * KW + kh * KW + kw;
                         const unsigned char *ws_ = ws + ws_offset_init;
                         const int *intws_ = (int *)ws + ws_offset_init;
                         const bool ws_is_u8
@@ -749,7 +741,7 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
 #if SAFE_TO_USE_OMP_SIMD
                         ZENDNN_PRAGMA_OMP_SIMD()
 #endif
-                        for (int oc = 0; oc < OC; ++oc) {
+                        for (dim_t oc = 0; oc < OC; ++oc) {
                             const int index_from_ws
                                     = ws_is_u8 ? ws_[oc] : intws_[oc];
 
@@ -780,7 +772,7 @@ status_t nhwc_pooling_bwd_t<data_type::bf16>::execute_backward(
                                         * (id_end - id_start);
 
                         ZENDNN_PRAGMA_OMP_SIMD()
-                        for (int oc = 0; oc < OC; ++oc) {
+                        for (dim_t oc = 0; oc < OC; ++oc) {
                             // Check if kernel windows are disjoint, in this case
                             // there's no update needed and we just write there once
                             // otherwise we add value to the contents.

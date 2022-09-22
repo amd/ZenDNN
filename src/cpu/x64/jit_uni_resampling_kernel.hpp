@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,64 +29,79 @@
 #include "cpu/cpu_resampling_pd.hpp"
 
 #include "cpu/x64/cpu_isa_traits.hpp"
-#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
+#include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
+#include "cpu/x64/utils/jit_io_helper.hpp"
 
 namespace zendnn {
 namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <cpu_isa_t isa>
-struct jit_uni_resampling_kernel : public jit_generator {
-
+struct jit_uni_resampling_kernel_base_t : public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_resampling)
 
-    jit_uni_resampling_kernel(const jit_resampling_conf_t conf);
+    jit_uni_resampling_kernel_base_t(const jit_resampling_conf_t &conf)
+        : jit_generator(nullptr, MAX_CODE_SIZE, true, conf.isa)
+        , conf_(conf)
+        , sum_scales_(conf_.sum_scales) {}
 
-    virtual ~jit_uni_resampling_kernel() = default;
+    virtual ~jit_uni_resampling_kernel_base_t() = default;
+
+    virtual std::size_t get_simd_w() = 0;
 
 protected:
+    const jit_resampling_conf_t &conf_;
+    std::queue<float> sum_scales_;
+};
+
+template <cpu_isa_t isa, typename Vmm>
+struct jit_uni_resampling_kernel_t : public jit_uni_resampling_kernel_base_t {
+
+    jit_uni_resampling_kernel_t(
+            const jit_resampling_conf_t &conf, const memory_desc_t *dst_md);
+
+    virtual ~jit_uni_resampling_kernel_t() = default;
+
+    std::size_t get_simd_w() override { return simd_w_; }
+
+private:
     using Xmm = Xbyak::Xmm;
     using Ymm = Xbyak::Ymm;
     using Zmm = Xbyak::Zmm;
     using Opmask = Xbyak::Opmask;
     using Reg64 = Xbyak::Reg64;
-
-    using Vmm = typename cpu_isa_traits<isa>::Vmm;
+    using c_oriented_generation_fn_t = std::function<void(const bool)>;
 
     constexpr int vmm_idx(int idx) const {
         return (cpu_isa_traits<isa>::n_vregs - 1) - idx;
     }
 
-    /*
-     * Prepare the mask to be used during tail processing.
-     * vmm_tail_mask_ is filled if it is avx and
-     * if it is avx512_common at least then k_tail_mask_ is filled.
-     */
-    void prepare_mask();
+    bool can_movntps_be_used() const;
+    std::size_t calculate_tail_size() const;
+    int get_channels_to_compute_without_tail(
+            bool is_tail_in_blocked_format) const;
 
-    /*
-     * Emulates the behavior of vgatherdps for architectures
-     * that do not support this instruction.
-     */
-    void emu_gather_data(const Reg64 &reg_src_addr, const int indices_idx,
-            const int data_idx, const bool is_tail = false);
+    std::map<data_type_t, io::io_saturation_conf_t>
+    create_saturation_vmm_map() const;
 
-    void gather_data(const Reg64 &reg_src_addr, const int indices_idx,
-            const int data_idx, const bool is_tail = false);
+    void get_params_for_linear_in_c_oriented_format();
 
-    void store_data(const int data_idx, const Reg64 &reg_dst_addr,
-            const int offset = 0, const bool is_tail = false);
+    void preserve_zero_padding_in_post_ops(int data_idx);
+    void apply_sum(const int data_idx, const bool is_tail);
+    void apply_postops(const int data_idx, const bool is_tail,
+            const Reg64 *reg_c = nullptr);
 
-    void load_data(const Reg64 &reg_src_addr, const int offset,
-            const int data_idx, const bool is_tail = false);
+    void preserve_zero_padding(
+            int c_to_compute_without_tail, const bool is_tail);
 
+    void interpolate_c_oriented_format(
+            const c_oriented_generation_fn_t &generation_fn);
     void nearest_ncsp_format();
-    void nearest_c_oriented_format();
+    void nearest_c_oriented_format(const bool is_tail_in_blocked_format);
     void linear_ncsp_format();
-    void linear_c_oriented_format();
+    void linear_c_oriented_format(const bool is_tail_in_blocked_format);
 
     void generate() override;
 
@@ -100,24 +115,28 @@ protected:
     const Vmm vmm_src_ = Vmm(2);
     const Vmm vmm_weights_ = Vmm(3);
     const Vmm vmm_indices_ = Vmm(4);
-    const Vmm vmm_tmp_ = Vmm(5);
+    const Vmm vmm_tmp_gather_ = Vmm(5);
+    const Vmm vmm_sum_scale_ = Vmm(7);
+    const Vmm vmm_tmp_ = Vmm(8);
+    const Vmm vmm_post_op_helper_ = Vmm(9);
+    const Vmm vmm_zero_saturation_ = isa == avx512_core ? Vmm(18) : Vmm(10);
+    const Vmm vmm_saturation_ubound_ = isa == avx512_core ? Vmm(19) : Vmm(11);
 
-    const Opmask k_tail_mask_ = k1;
-    const Opmask k_full_mask_ = k2;
+    const Zmm vmm_bf16_emu_1_ = Zmm(20);
+    const Zmm vmm_bf16_emu_2_ = Zmm(21);
+    const Zmm vmm_bf16_emu_3_ = Zmm(22);
+    const Zmm vmm_bf16_emu_4_ = Zmm(23);
 
-    const Zmm bf16_emu_reserv_1 = Zmm(7);
-    const Zmm bf16_emu_reserv_2 = Zmm(8);
-    const Zmm bf16_emu_reserv_3 = Zmm(9);
-    const Reg64 bf16_emu_scratch = r15;
-    const Zmm bf16_emu_reserv_4 = Zmm(10);
+    const Opmask k_tail_mask_ = k3;
+    const Opmask k_full_mask_ = k4;
 
     const Reg64 reg_tmp_ = rax;
     const Reg64 reg_dst_ = rbx;
-    const Reg64 reg_indices_ = rcx;
     const Reg64 reg_work_ = rdx;
-    // Always mimic the Unix ABI
-    const Reg64 reg_param = rdi;
-    const Reg64 reg_weights = rsi;
+    const Reg64 reg_indices_ = rsi;
+    const Reg64 reg_c_offset = rbp;
+    const Reg64 reg_param = abi_param1;
+    const Reg64 reg_weights = abi_not_param1;
     const Reg64 reg_src_ = r8;
     const Reg64 reg_aux_src_0_ = r9;
     const Reg64 reg_aux_src_1_ = r10;
@@ -158,8 +177,19 @@ protected:
     const Reg64 reg_src_bbl_ = r14;
     const Reg64 reg_src_bbr_ = r15;
 
-    const jit_resampling_conf_t conf_;
-    std::unique_ptr<bf16_emulation_t> bf16_emulation_;
+    static constexpr bool is_zmm_ = std::is_same<Vmm, Xbyak::Zmm>::value;
+    static constexpr bool is_ymm_ = std::is_same<Vmm, Xbyak::Ymm>::value;
+    static constexpr bool is_xmm_ = std::is_same<Vmm, Xbyak::Xmm>::value;
+    static constexpr std::size_t vlen_ = is_zmm_ ? 64 : is_ymm_ ? 32 : 16;
+    static constexpr std::size_t simd_w_ = vlen_ / sizeof(float);
+    const std::size_t tail_size_;
+
+    bool any_binary_postop_is_per_oc_bcast_type_ = false;
+    bool any_binary_postop_is_per_oc_sp_bcast_type_ = false;
+
+    io::jit_io_multi_dt_helper_t<Vmm> io_;
+    std::unique_ptr<injector::jit_uni_postops_injector_t<isa, Vmm>>
+            postops_injector_;
 };
 } // namespace x64
 } // namespace cpu

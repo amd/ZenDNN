@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -24,6 +24,7 @@
 
 #include "common/engine.hpp"
 #include "common/primitive.hpp"
+#include "common/reorder.hpp"
 #include "common/reorder_pd.hpp"
 #include "common/stream.hpp"
 
@@ -39,7 +40,7 @@ struct ref_concat_t : public primitive_t {
                 int concat_dim, const memory_desc_t *src_mds)
             : cpu_concat_pd_t(attr, dst_md, n, concat_dim, src_mds)
             , tent_dst_md_(types::zero_md()) {}
-        pd_t(const pd_t &rhs) : cpu_concat_pd_t(rhs) { copy(rhs); }
+        pd_t(const pd_t &rhs) = default;
         ~pd_t() = default;
 
         DECLARE_CONCAT_PD_T("ref:any", ref_concat_t);
@@ -57,41 +58,17 @@ struct ref_concat_t : public primitive_t {
                 if (status != status::success) return status::unimplemented;
             }
 
+            reorder_pds_.resize(n_ + use_tent_dst());
             for (int i = 0; i < n_; ++i) {
-                auto r_impls = engine->get_reorder_implementation_list(
-                        src_md(i), src_image_md(i));
-                for (auto r = r_impls; *r; ++r) {
-                    primitive_attr_t r_attr; /* alpha == 1. */
-                    r_attr.set_scratchpad_mode(scratchpad_mode::user);
-                    reorder_pd_t *r_pd = nullptr;
-
-                    if ((*r)(&r_pd, engine, &r_attr, engine, src_md(i), engine,
-                                src_image_md(i))
-                            == status::success) {
-                        reorder_pds_.emplace_back(r_pd);
-                        break;
-                    }
-                }
+                CHECK(reorder_primitive_desc_create(
+                        reorder_pds_[i], engine, src_md(i), src_image_md(i)));
             }
-            if (reorder_pds_.size() != (size_t)n_) return status::unimplemented;
 
             if (use_tent_dst()) {
                 assert(tent_dst_md_.format_kind != format_kind::undef);
                 assert(dst_md_.format_kind != format_kind::undef);
-
-                auto r_impls = engine->get_reorder_implementation_list(
-                        &tent_dst_md_, &dst_md_);
-                for (auto r = r_impls; *r; ++r) {
-                    primitive_attr_t r_attr;
-                    r_attr.set_scratchpad_mode(scratchpad_mode::user);
-                    reorder_pd_t *r_pd = nullptr;
-                    if ((*r)(&r_pd, engine, &r_attr, engine, &tent_dst_md_,
-                                engine, &dst_md_)
-                            == status::success) {
-                        reorder_pds_.emplace_back(r_pd);
-                        break;
-                    }
-                }
+                CHECK(reorder_primitive_desc_create(
+                        reorder_pds_[n_], engine, &tent_dst_md_, &dst_md_));
             }
             init_scratchpad();
             return status;
@@ -100,16 +77,10 @@ struct ref_concat_t : public primitive_t {
         // if dst is forced and cannot be used directly.
         bool use_tent_dst() const { return !types::is_zero_md(&tent_dst_md_); }
 
-        std::vector<std::unique_ptr<primitive_desc_t>> reorder_pds_;
+        std::vector<std::shared_ptr<primitive_desc_t>> reorder_pds_;
         memory_desc_t tent_dst_md_;
 
     private:
-        void copy(const pd_t &rhs) {
-            tent_dst_md_ = rhs.tent_dst_md_;
-            for (size_t i = 0; i < rhs.reorder_pds_.size(); ++i)
-                reorder_pds_.emplace_back(rhs.reorder_pds_[i]->clone());
-        }
-
         void init_scratchpad() {
             using namespace memory_tracking::names;
             auto scratchpad = scratchpad_registry().registrar();

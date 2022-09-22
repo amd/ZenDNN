@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -36,13 +36,11 @@ static setting_t<int> itt_task_level {__itt_task_level_high};
 bool get_itt(__itt_task_level level) {
     if (!itt_task_level.initialized()) {
         // Assumes that all threads see the same environment
-        const int len = 2;
-        char val[len] = {2};
-        if (getenv("ZENDNN_ITT_TASK_LEVEL", val, len) == 1)
-            itt_task_level.set(atoi(val));
-        if (!itt_task_level.initialized()) itt_task_level.set(2);
+        static int val
+                = getenv_int_user("ITT_TASK_LEVEL", itt_task_level.get());
+        itt_task_level.set(val);
     }
-    return (level <= itt_task_level.get()) ? true : false;
+    return level <= itt_task_level.get();
 }
 
 #if defined(ZENDNN_ENABLE_ITT_TASKS)
@@ -87,6 +85,7 @@ void primitive_task_start(primitive_kind_t kind) {
             CASE(pooling_v2),
             CASE(reduction),
             CASE(prelu),
+            CASE(softmax_v2),
     };
 #undef CASE
     int kind_idx = (int)kind;

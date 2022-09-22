@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -61,17 +61,17 @@ struct jit_avx512_core_f32_wino_conv_2x3_src_trans_t : public jit_generator {
 
     void generate() override;
 
-    Zmm vreg_inp(int i) {
+    Zmm vreg_inp(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return Zmm(31 - i);
     }
 
-    Zmm vreg_tmp(int i) {
+    Zmm vreg_tmp(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return Zmm(15 - i);
     }
 
-    Zmm vreg_out(int i) {
+    Zmm vreg_out(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return Zmm(31 - i);
     }
@@ -187,24 +187,24 @@ struct jit_avx512_core_f32_wino_conv_2x3_dst_trans_t : public jit_generator {
     void generate() override;
     bool maybe_relu(int position);
 
-    Zmm vreg_inp(int i) { // 16
+    Zmm vreg_inp(int i) const { // 16
         assert(i < jcp.alpha * jcp.alpha);
         return Zmm(31 - i);
     }
 
-    Zmm vreg_stg(int id) { // 8
+    Zmm vreg_stg(int id) const { // 8
         const int id_reg_stg = jcp.alpha * jcp.alpha + id;
         assert(id_reg_stg < jcp.alpha * jcp.alpha + 8);
         return Zmm(31 - id_reg_stg);
     }
 
-    Zmm vreg_out(int id) { // 4
+    Zmm vreg_out(int id) const { // 4
         const int id_reg_out = jcp.alpha * jcp.alpha + 8 + id;
         assert(id_reg_out < jcp.alpha * jcp.alpha + 12);
         return Zmm(31 - id_reg_out);
     }
 
-    Zmm vreg_tmp(int id) { // 2
+    Zmm vreg_tmp(int id) const { // 2
         const int id_reg_tmp = jcp.alpha * jcp.alpha + 12 + id;
         assert(id_reg_tmp < jcp.alpha * jcp.alpha + 14);
         return Zmm(31 - id_reg_tmp);
@@ -393,12 +393,12 @@ struct jit_avx512_core_f32_wino_conv_2x3_fwd_ker_t : public jit_generator {
             memory_desc_t &bias_md, const primitive_attr_t &attr,
             memory_desc_t &expect_wei_md);
 
-    Zmm vreg_out(int n, int m) {
+    Zmm vreg_out(int n, int m) const {
         const int id_reg_out = n * jcp.m_block + m;
         assert(id_reg_out < jcp.n2_block * jcp.m_block);
         return Zmm(31 - id_reg_out);
     }
-    Zmm vreg_wei(int i) {
+    Zmm vreg_wei(int i) const {
         assert(31 - jcp.n2_block * jcp.m_block - i > 1);
         return Zmm(31 - jcp.n2_block * jcp.m_block - i);
     }
@@ -613,7 +613,6 @@ status_t jit_avx512_core_f32_wino_conv_2x3_fwd_ker_t ::init_conf(
         jcp.ic = rnd_up(jcp.ic, simdw);
     }
 
-    jcp.ver = ver_avx512_core;
     if (!(mayiuse(avx512_core))) return status::unimplemented;
 
     if (!IMPLICATION(cd.alg_kind == alg_kind::convolution_auto,
@@ -868,7 +867,8 @@ void jit_avx512_core_f32_wino_conv_2x3_fwd_t::execute_forward_mbN(
 
     parallel_nd_ext(jcp.nthr, jcp.mb, div_up(jcp.oh, jcp.yb),
             div_up(jcp.ow, jcp.xb),
-            [&](int ithr, int nthr, int mb, int tile_y_b, int tile_x_b) {
+            [&](dim_t ithr, dim_t nthr, dim_t mb, dim_t tile_y_b,
+                    dim_t tile_x_b) {
                 assert(nthr <= jcp.nthr);
                 MAYBE_UNUSED(nthr);
 
@@ -995,7 +995,7 @@ void jit_avx512_core_f32_wino_conv_2x3_fwd_t::execute_forward_small_mb(
     for (int tile_x = 0; tile_x < jcp.ow; tile_x += jcp.xb) {
         /* transformation of input tensor to winograd domain */
         parallel_nd(div_up(jcp.yb, 2), div_up(jcp.xb, 2),
-                [&](int y_in_block_b, int x_in_block_b) {
+                [&](dim_t y_in_block_b, dim_t x_in_block_b) {
                     int y_in_block = y_in_block_b * 2;
                     int x_in_block = x_in_block_b * 2;
 
@@ -1037,7 +1037,7 @@ void jit_avx512_core_f32_wino_conv_2x3_fwd_t::execute_forward_small_mb(
                 });
 
         /* gemms */
-        parallel_nd(16, jcp.n_chunks, [&](int tile_ij, int nnb) {
+        parallel_nd(16, jcp.n_chunks, [&](dim_t tile_ij, dim_t nnb) {
             auto gemm_p = jit_avx512_core_f32_wino_conv_2x3_fwd_ker_t ::
                     call_params_t();
 
@@ -1053,7 +1053,7 @@ void jit_avx512_core_f32_wino_conv_2x3_fwd_t::execute_forward_small_mb(
         /* transformation from winograd domain to output tensor */
 
         parallel_nd(div_up(jcp.yb, 2), div_up(jcp.xb, 2),
-                [&](int y_in_block_b, int x_in_block_b) {
+                [&](dim_t y_in_block_b, dim_t x_in_block_b) {
                     int y_in_block = y_in_block_b * 2;
                     int x_in_block = x_in_block_b * 2;
 

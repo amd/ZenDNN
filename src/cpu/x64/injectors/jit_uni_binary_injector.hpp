@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -52,15 +52,23 @@ bool binary_args_broadcast_supported(const post_ops_t &post_ops,
         const memory_desc_wrapper &dst_d,
         const bcast_set_t &supported_strategy_set);
 
-bool binary_args_tail_supported(
-        const post_ops_t &post_ops, const memory_desc_wrapper &dst_d, int vlen);
+bool binary_args_tail_supported(const post_ops_t &post_ops,
+        const memory_desc_wrapper &dst_d, int vlen,
+        const bcast_set_t &supported_strategy_set);
 
 bool any_binary_postop_rhs_per_oc_broadcast(
         const post_ops_t &post_ops, const memory_desc_wrapper &dst_d);
+bool any_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
+        const memory_desc_wrapper &dst_d,
+        const bcast_set_t &supported_strategy_set);
 
 bool all_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
         const memory_desc_wrapper &dst_d,
-        const std::function<bool(const memory_desc_wrapper &)> predicate);
+        const std::function<bool(const memory_desc_wrapper &)> &predicate);
+bool all_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
+        const memory_desc_wrapper &dst_d,
+        const bcast_set_t &supported_strategy_set,
+        const std::function<bool(const memory_desc_wrapper &)> &predicate);
 
 /*
  * Represents params related to all binary post-ops right-hand side arguments
@@ -83,16 +91,19 @@ bool all_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
  * above should be preserved between compute_vector_range calls.
  * @param abi_param_offset - offset to rhs tensor from first binary post-op operation
  * specified by user from runtime structure passed to kernel as abi param 1.
+ * @param dst_orig_offset - offset 0 to destination tensor
  * @param dst_d - descriptor of destination tensor (result after applying all post-ops
  * operations).
  * @param tail_opmask - register with loaded by user mask, used in avx512 for load with
  * tail handling.
- * @oaram tail_size - size of processed tail in elements.
+ * @param tail_size - size of processed tail in elements.
  * @param use_exact_tail_scalar_bcast - in case of scalar broadcast user can disable
  * loading data with tail, usually bcast through entire vector is faster (usually 1 instruction)
  * vs. broadcasting limited by tail size (potentially several instructions). In case
  * when user during storing ignores values from vmm above tail size, setting this option to
  * false can result in better performance.
+ * @param reg_tail_size - register with loaded size of tail, used in sse41/avx/avx2
+ * for load with tail in runtime.
  */
 struct rhs_arg_static_params_t {
     rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
@@ -105,10 +116,40 @@ struct rhs_arg_static_params_t {
             const Xbyak::Reg64 &rhs_addr_reg,
             const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
             bool preserve_vmm_helper, std::size_t abi_param_offset,
+            std::size_t dst_orig_offset, const memory_desc_wrapper &dst_d,
+            std::size_t tail_size = 0u,
+            bool use_exact_tail_scalar_bcast = false);
+    rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
+            const Xbyak::Reg64 &rhs_addr_reg,
+            const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
+            bool preserve_vmm_helper, std::size_t abi_param_offset,
             const memory_desc_wrapper &dst_d, std::size_t tail_size,
             const Xbyak::Opmask &tail_opmask, bool use_exact_tail_scalar_bcast);
+    rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
+            const Xbyak::Reg64 &rhs_addr_reg,
+            const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
+            bool preserve_vmm_helper, std::size_t abi_param_offset,
+            std::size_t dst_orig_offset, const memory_desc_wrapper &dst_d,
+            std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
+            bool use_exact_tail_scalar_bcast);
+    rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
+            const Xbyak::Reg64 &rhs_addr_reg,
+            const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
+            bool preserve_vmm_helper, std::size_t abi_param_offset,
+            const memory_desc_wrapper &dst_d, std::size_t tail_size,
+            const Xbyak::Opmask &tail_opmask, const Xbyak::Reg64 &reg_tail_size,
+            bool use_exact_tail_scalar_bcast);
+    rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
+            const Xbyak::Reg64 &rhs_addr_reg,
+            const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
+            bool preserve_vmm_helper, std::size_t abi_param_offset,
+            std::size_t dst_orig_offset, const memory_desc_wrapper &dst_d,
+            std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
+            const Xbyak::Reg64 &reg_tail_size,
+            bool use_exact_tail_scalar_bcast);
 
     bool is_opmask_set() const noexcept { return is_opmask_set_; }
+    bool is_dst_orig_set() const noexcept { return is_dst_orig_set_; }
 
     mutable std::size_t rhs_dt_helper_vmm_idx;
     Xbyak::Reg64 rhs_addr_reg;
@@ -116,21 +157,26 @@ struct rhs_arg_static_params_t {
     bool preserve_gpr_helpers;
     bool preserve_vmm_helper;
     std::size_t abi_param_offset;
+    std::size_t dst_orig_offset;
     memory_desc_wrapper dst_d;
     std::size_t tail_size;
     Xbyak::Opmask tail_opmask;
     bool use_exact_tail_scalar_bcast;
+    Xbyak::Reg64 reg_tail_size;
+    bool is_tail;
 
 private:
     rhs_arg_static_params_t(std::size_t rhs_dt_helper_vmm_idx,
             const Xbyak::Reg64 &rhs_addr_reg,
             const Xbyak::Reg64 &rhs_helper_reg, bool preserve_gpr_helpers,
             bool preserve_vmm_helper, std::size_t abi_param_offset,
-            const memory_desc_wrapper &dst_d, std::size_t tail_size,
-            const Xbyak::Opmask &tail_opmask, bool use_exact_tail_scalar_bcast,
-            bool is_opmask_set);
+            std::size_t dst_orig_offset, const memory_desc_wrapper &dst_d,
+            std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
+            bool use_exact_tail_scalar_bcast, const Xbyak::Reg64 &reg_tail_size,
+            bool is_opmask_set, bool is_dst_orig_set);
 
     bool is_opmask_set_;
+    bool is_dst_orig_set_;
 };
 
 /*
@@ -159,6 +205,15 @@ struct static_params_t {
 };
 
 /*
+ * Mode of data load with tail for rhs:
+ * STATIC - load based on given integer.
+ * DYNAMIC - load based on opmask or 64-bit register.
+ * DEFAULT - DYNAMIC for avx512, STATIC for others.
+ */
+
+enum class tail_lode_mode_t { STATIC, DYNAMIC, DEFAULT };
+
+/*
  * Represents params passed to compute_vector_range method of
  * jit_uni_binary_injector_t that can be different for each call.
  * Contains configurable std::maps where key is vmm index and value is
@@ -167,11 +222,19 @@ struct static_params_t {
  * implementation particular kernels, can be passed as value (usually during
  * unrolling), inside operand, under memory address.
  *
+ * @param vmm_idx_to_out_addr - vmm mapped to address of destination tensor with offset,
+ * used to calculate offset in no_broadcast strategy, but also in other strategies whose
+ * calculations are based on no_broadcast strategy.
+ * @param vmm_idx_to_out_reg - vmm mapped to register containing address of destination
+ * with offset, used to calculate offset in no_broadcast strategy, but also in other
+ * strategies whose calculations are based on no_broadcast strategy.
  * @param vmm_idx_to_out_elem_off_addr - vmm mapped to offset in elements stored under
  * memory address intended to use in no_broadcast strategy.
- * @param vmm_idx_to_out_elem_off_addr - vmm mapped to offset in elements passed as raw
+ * @param vmm_idx_to_out_elem_off_addr - vmm mapped to offset in elements stored under
+ * memory address intended to use in no_broadcast strategy.
+ * @param vmm_idx_to_out_elem_off_val - vmm mapped to offset in elements passed as raw
  * value intended to use in no_broadcast strategy
- * @param vmm_idx_to_out_elem_off_addr - vmm mapped to offset in elements inside operand
+ * @param vmm_idx_to_out_off_oprnd - vmm mapped to offset in elements inside operand
  * intended to use in no_broadcast strategy
  * @param vmm_idx_to_oc_elem_off_addr - vmm mapped to output channel offset in elements
  * stored under memory address intended to use in per_oc broadcast strategies.
@@ -179,18 +242,59 @@ struct static_params_t {
  * passed as raw value intended to use in per_oc broadcast strategies.
  * @param vmm_idx_to_oc_off_oprnd - vmm mapped to output channel offset in elements inside
  * operand intended to use in per_oc broadcast strategies.
- * @param vmm_tail_idx - vmm idxes that contains data don't fill the whole vector (tail).
+ * @param vmm_idx_to_sp_elem_off_addr - vmm mapped to proper output spatial offset in
+ * elements stored under memory address intended to use in per_mb_spatial strategies.
+ * @param vmm_idx_to_sp_elem_off_val - vmm mapped to proper output spatial offset in
+ * elements passed as raw value intended to use in per_mb_spatial strategies.
+ * @param vmm_idx_to_sp_off_oprnd - vmm mapped to proper output spatial offset in 
+ * elements inside operand intended to use in per_mb_spatial strategies.
+ * @param vmm_idx_to_mb_w_elem_off_addr - vmm mapped to proper output last dim
+ * per first dim offset in elements stored under memory address intended to use
+ * in per_mb_w strategies.
+ * @param vmm_idx_to_mb_w_elem_off_val - vmm mapped to proper output last dim
+ * per first dim offset in elements passed as raw value intended to use in
+ * per_mb_w strategies.
+ * @param vmm_idx_to_mb_w_off_oprnd - vmm mapped to proper output last dim
+ * per first dim offset in elements inside operand intended to use in per_mb_w
+ * strategies.
+ * @param vmm_idx_to_w_elem_off_addr - vmm mapped to proper output last dim
+ * offset in elements stored under memory address intended to use in per_w strategy.
+ * @param vmm_idx_to_w_elem_off_val - vmm mapped to proper output last dim
+ * offset in elements passed as raw value intended to use in per_w strategy.
+ * @param vmm_idx_to_w_off_oprnd - vmm mapped to proper output last dim offset
+ * in elements inside operand intended to use in per_w strategy.
+ * @param vmm_tail_idx - vmm indices that contains data don't fill the whole vector (tail).
+ * @param is_dynamic_tail_load - determines whether to load with tail in
+ * runtime (based on the value from reg_tail_size or opmask) or based on given
+ * integer.
  */
 
 struct rhs_arg_dynamic_params_t {
+    std::map<int, Xbyak::Address> vmm_idx_to_out_addr;
+    std::map<int, Xbyak::Reg64> vmm_idx_to_out_reg;
+
     std::map<int, Xbyak::Address> vmm_idx_to_out_elem_off_addr;
-    std::map<int, int> vmm_idx_to_out_elem_off_val;
+    std::map<int, size_t> vmm_idx_to_out_elem_off_val;
     std::map<int, Xbyak::Operand> vmm_idx_to_out_off_oprnd;
 
     std::map<int, Xbyak::Address> vmm_idx_to_oc_elem_off_addr;
-    std::map<int, int> vmm_idx_to_oc_elem_off_val;
+    std::map<int, size_t> vmm_idx_to_oc_elem_off_val;
     std::map<int, Xbyak::Operand> vmm_idx_to_oc_off_oprnd;
+
+    std::map<int, Xbyak::Address> vmm_idx_to_sp_elem_off_addr;
+    std::map<int, size_t> vmm_idx_to_sp_elem_off_val;
+    std::map<int, Xbyak::Operand> vmm_idx_to_sp_off_oprnd;
+
+    std::map<int, Xbyak::Address> vmm_idx_to_mb_w_elem_off_addr;
+    std::map<int, size_t> vmm_idx_to_mb_w_elem_off_val;
+    std::map<int, Xbyak::Operand> vmm_idx_to_mb_w_off_oprnd;
+
+    std::map<int, Xbyak::Address> vmm_idx_to_w_elem_off_addr;
+    std::map<int, size_t> vmm_idx_to_w_elem_off_val;
+    std::map<int, Xbyak::Operand> vmm_idx_to_w_off_oprnd;
+
     std::unordered_set<int> vmm_tail_idx_;
+    tail_lode_mode_t tail_load_mode = tail_lode_mode_t::DEFAULT;
 };
 
 /*
@@ -277,7 +381,8 @@ private:
      * Loads data and applies particular binary operation.
      */
     void inject_binary(const zendnn_post_ops::entry_t &post_op, Vmm dst,
-            const Xbyak::Address &rhs_addr, bool with_tail) const;
+            const Xbyak::Address &rhs_addr, bool with_tail,
+            const tail_lode_mode_t tail_load_mode) const;
 
     /*
      * Helper functions responsible for preparing rhs tensor slice address.
@@ -290,9 +395,78 @@ private:
             const std::map<int, Xbyak::Address> &vmm_idx_to_elem_addr_off,
             int vmm_idx, const Xbyak::Reg64 &addr_reg,
             const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
-    void append_value_offset(const std::map<int, int> &vmm_idx_to_elem_val_off,
+    void append_value_offset(
+            const std::map<int, size_t> &vmm_idx_to_elem_val_off, int vmm_idx,
+            const Xbyak::Reg64 &addr_reg, std::size_t elem_size_bytes) const;
+
+    void append_no_broadcast_offset(
+            const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
+            const std::map<int, Xbyak::Reg64> &vmm_idx_to_out_reg,
+            const std::map<int, size_t> &vmm_idx_to_out_elem_off_val,
             int vmm_idx, const Xbyak::Reg64 &addr_reg,
-            std::size_t elem_size_bytes) const;
+            const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
+    void calculate_no_broadcast(Xbyak::Address addr, std::size_t offset,
+            const Xbyak::Reg64 &out_reg) const;
+
+    void append_oc_offset(
+            const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
+            const std::map<int, Xbyak::Reg64> &vmm_idx_to_out_reg,
+            const std::map<int, size_t> &vmm_idx_to_out_elem_off_val,
+            int vmm_idx, const Xbyak::Reg64 &addr_reg,
+            const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
+    void calculate_oc_ncsp(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_oc_blocked(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_oc_nspc(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_oc_cspn(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+
+    void append_mb_sp_offset(
+            const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
+            const std::map<int, Xbyak::Reg64> &vmm_idx_to_out_reg,
+            const std::map<int, size_t> &vmm_idx_to_out_elem_off_val,
+            int vmm_idx, const Xbyak::Reg64 &addr_reg,
+            const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
+    void calculate_mb_sp_ncsp(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_sp_blocked(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_sp_nspc(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_sp_cspn(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+
+    void append_mb_w_offset(
+            const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
+            const std::map<int, Xbyak::Reg64> &vmm_idx_to_out_reg,
+            const std::map<int, size_t> &vmm_idx_to_out_elem_off_val,
+            int vmm_idx, const Xbyak::Reg64 &addr_reg,
+            const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
+    void calculate_mb_w_ncsp(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_w_blocked(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_w_nspc(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_mb_w_cspn(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+
+    void append_w_offset(
+            const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
+            const std::map<int, Xbyak::Reg64> &vmm_idx_to_out_reg,
+            const std::map<int, size_t> &vmm_idx_to_out_elem_off_val,
+            int vmm_idx, const Xbyak::Reg64 &addr_reg,
+            const Xbyak::Reg64 &tmp_reg, std::size_t elem_size_bytes) const;
+    void calculate_w_ncsp(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_w_blocked(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_w_nspc(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
+    void calculate_w_cspn(
+            const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
 
     template <typename T>
     typename std::enable_if<std::is_same<T, Xbyak::Zmm>::value
@@ -311,20 +485,34 @@ private:
      * Used in scalar broadcast strategy, broadcasting single value of given
      * data type over entire vector Vmm register.
      */
-    void execute_broadcast(const zendnn_data_type_t &data_type,
-            const Vmm &tmp_reg, const Xbyak::Address &rhs_addr,
+    void execute_broadcast(const data_type_t &data_type, const Vmm &tmp_reg,
+            const Xbyak::Address &rhs_addr,
+            const tail_lode_mode_t tail_load_mode,
             bool with_tail = false) const;
-    void load_rhs(const zendnn_data_type_t &data_type, const Vmm &tmp_reg,
-            const Xbyak::Address &rhs_addr, bool with_tail = false) const;
-    void execute_broadcast_tail(const zendnn_data_type_t &data_type,
+    void load_rhs(const data_type_t &data_type, const Vmm &tmp_reg,
+            const Xbyak::Address &rhs_addr,
+            const tail_lode_mode_t tail_load_mode,
+            bool with_tail = false) const;
+    void execute_broadcast_tail_with_opmask(const data_type_t &data_type,
             const Vmm &tmp_reg, const Xbyak::Address &rhs_addr) const;
-    void load_rhs_tail(const zendnn_data_type_t &data_type, const Vmm &tmp_reg,
-            const Xbyak::Address &rhs_addr) const;
-    void execute_broadcast_no_tail(const zendnn_data_type_t &data_type,
+    void execute_broadcast_tail_statically(const data_type_t &data_type,
+            const Vmm &tmp_reg, const Xbyak::Address &rhs_addr,
+            const std::size_t tail_size) const;
+    void execute_broadcast_tail_with_gpr(const data_type_t &data_type,
             const Vmm &tmp_reg, const Xbyak::Address &rhs_addr) const;
+    void load_rhs_tail_dynamically_with_opmask(const data_type_t &data_type,
+            const Vmm &tmp_vmm, const Xbyak::Address &rhs_addr) const;
+    void load_rhs_tail_dynamically_with_gpr(
+            const data_type_t &data_type, const Vmm &tmp_vmm) const;
+    void load_rhs_tail_statically(const data_type_t &data_type,
+            const Vmm &tmp_vmm, const Xbyak::Address &rhs_addr) const;
+    void execute_broadcast_no_tail(const data_type_t &data_type,
+            const Vmm &tmp_vmm, const Xbyak::Address &rhs_addr) const;
     void execute_broadcast_s8u8_no_tail(const data_type_t &data_type,
-            const Vmm &tmp_reg, const Xbyak::Address &rhs_addr) const;
-    void load_rhs_no_tail(const zendnn_data_type_t &data_type, const Vmm &tmp_reg,
+            const Vmm &tmp_vmm, const Xbyak::Address &rhs_addr) const;
+    void load_rhs_no_tail(const data_type_t &data_type, const Vmm &tmp_reg,
+            const Xbyak::Address &rhs_addr) const;
+    void load_rhs_i8_no_tail(const data_type_t &data_type, const Vmm &tmp_reg,
             const Xbyak::Address &rhs_addr) const;
     void cvt_to_f32(const Vmm &tmp_reg) const;
     /*
@@ -344,7 +532,7 @@ private:
     const rhs_arg_static_params_t rhs_arg_static_params_;
     const Xbyak::Reg64 param1_;
     const bcast_set_t supported_strategy_set_;
-    static constexpr bool is_avx512_ = std::is_same<Vmm, Xbyak::Zmm>::value;
+    const bool is_avx512_ = is_superset(isa, avx512_core);
 
     static constexpr int sizeof_reg64 = 8;
     /*

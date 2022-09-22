@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2021-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@
 #include "common/bfloat16.hpp"
 #include "common/c_types_map.hpp"
 
-#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/shuffle/jit_uni_shuffle_kernel.hpp"
 
@@ -37,24 +36,23 @@ using namespace Xbyak;
 
 #define GET_OFF(field) offsetof(jit_shuffle_call_s, field)
 
+static size_t get_padding_size(const jit_shuffle_conf_t &conf) {
+    const auto padding_tail_size = conf.c % conf.blk_size;
+    return (padding_tail_size) ? conf.blk_size - padding_tail_size : 0;
+}
+
 template <cpu_isa_t isa>
 jit_uni_shuffle_kernel_t<isa>::jit_uni_shuffle_kernel_t(
         const jit_shuffle_conf_t conf)
-    : jit_generator(nullptr, MAX_CODE_SIZE, true, isa), conf_(conf) {
-    const bool use_bf16_emulation = conf_.data_type == data_type::bf16
-            && conf_.isa != avx512_core_bf16;
-    bf16_emulation_ = use_bf16_emulation
-            ? utils::make_unique<bf16_emulation_t>(this, bf16_emu_reserv_1,
-                    bf16_emu_reserv_2, bf16_emu_reserv_3, bf16_emu_scratch,
-                    bf16_emu_reserv_4)
-            : nullptr;
-}
+    : jit_generator(nullptr, MAX_CODE_SIZE, true, isa)
+    , conf_(conf)
+    , padding_size_(get_padding_size(conf)) {}
 
 template <cpu_isa_t isa>
 void jit_uni_shuffle_kernel_t<isa>::prepare_mask() {}
 
 template <>
-void jit_uni_shuffle_kernel_t<avx512_common>::prepare_mask() {
+void jit_uni_shuffle_kernel_t<avx512_core>::prepare_mask() {
     const size_t tail_mask = (1ULL << conf_.simd_tail) - 1ULL;
     const Reg64 &reg_tail = reg_tmp_;
     mov(reg_tail.cvt32(), tail_mask);
@@ -71,7 +69,7 @@ void jit_uni_shuffle_kernel_t<avx>::prepare_mask() {
 }
 
 template <>
-void jit_uni_shuffle_kernel_t<avx512_common>::emu_gather_data(
+void jit_uni_shuffle_kernel_t<avx512_core>::emu_gather_data(
         const Reg64 &reg_src_addr, const int indices_idx, const int data_idx,
         const bool is_tail) {
     assert(conf_.data_type == data_type::bf16);
@@ -82,29 +80,38 @@ void jit_uni_shuffle_kernel_t<avx512_common>::emu_gather_data(
     xor_(reg_tmp_, reg_tmp_);
     mov(reg_tmp1_, reg_src_addr);
 
-    constexpr unsigned xmm_size_elem = 4;
+    constexpr unsigned xmm_size_elem = 8; //bf16
+    constexpr unsigned xmm_size_elem_half = xmm_size_elem / 2;
 
     const unsigned number_of_xmms = is_tail
             ? utils::div_up(conf_.simd_tail, xmm_size_elem)
             : utils::div_up(conf_.simd_w, xmm_size_elem);
+
     for (unsigned i = 0; i < number_of_xmms; i++) {
-        vextractf32x4(xmm_tmp, Zmm(indices_idx), i);
+        const unsigned number_of_xmm_halfs = is_tail && i == number_of_xmms - 1
+                ? utils::div_up(
+                        conf_.simd_tail, xmm_size_elem_half + i * xmm_size_elem)
+                : 2;
 
-        const unsigned number_of_values_to_load = i == number_of_xmms - 1
-                        && is_tail && conf_.simd_tail % xmm_size_elem != 0
-                ? conf_.simd_tail % xmm_size_elem
-                : xmm_size_elem;
-        for (unsigned j = 0; j < number_of_values_to_load; j++) {
-            vpextrd(reg_tmp_.cvt32(), xmm_tmp, j);
-            add(reg_src_addr, reg_tmp_);
-            vpinsrw(xmm_dst, xmm_dst, ptr[reg_src_addr], j * 2);
-            mov(reg_src_addr, reg_tmp1_);
+        for (unsigned j = 0; j < number_of_xmm_halfs; j++) {
+            const unsigned rem = conf_.simd_tail % xmm_size_elem_half;
+            const unsigned number_of_values_to_load = is_tail
+                            && i == number_of_xmms - 1
+                            && j == number_of_xmm_halfs - 1 && rem
+                    ? rem
+                    : xmm_size_elem_half;
+
+            vextractf32x4(xmm_tmp, Zmm(indices_idx), j + i * 2);
+            for (unsigned k = 0; k < number_of_values_to_load; k++) {
+                vpextrd(reg_tmp_.cvt32(), xmm_tmp, k + j * xmm_size_elem_half);
+                add(reg_src_addr, reg_tmp_);
+                vpinsrw(xmm_dst, xmm_dst, ptr[reg_src_addr],
+                        k + j * xmm_size_elem_half);
+                mov(reg_src_addr, reg_tmp1_);
+            }
         }
-
-        vinsertf32x4(Zmm(data_idx), Zmm(data_idx), xmm_dst, i);
+        vinsertf128(Ymm(data_idx), Ymm(data_idx), xmm_dst, i);
     }
-
-    uni_vpslld(Zmm(data_idx), Zmm(data_idx), 16);
 }
 
 template <>
@@ -131,18 +138,12 @@ void jit_uni_shuffle_kernel_t<avx>::emu_gather_data(const Reg64 &reg_src_addr,
         for (unsigned j = 0; j < number_of_values_to_load; j++) {
             vpextrd(reg_tmp_.cvt32(), xmm_tmp, j);
             add(reg_src_addr, reg_tmp_);
-            if (conf_.data_type == data_type::bf16)
-                vpinsrw(xmm_dst, xmm_dst, ptr[reg_src_addr], j * 2);
-            else
-                vpinsrd(xmm_dst, xmm_dst, ptr[reg_src_addr], j);
+            vpinsrd(xmm_dst, xmm_dst, ptr[reg_src_addr], j);
             mov(reg_src_addr, reg_tmp1_);
         }
 
         vinsertf128(Ymm(data_idx), Ymm(data_idx), xmm_dst, i);
     }
-
-    if (conf_.data_type == data_type::bf16)
-        uni_vpslld(Ymm(data_idx), Ymm(data_idx), 16);
 }
 
 template <>
@@ -158,16 +159,13 @@ void jit_uni_shuffle_kernel_t<sse41>::emu_gather_data(const Reg64 &reg_src_addr,
     for (unsigned j = 0; j < number_of_values_to_load; j++) {
         pextrd(reg_tmp_.cvt32(), Xmm(indices_idx), j);
         add(reg_src_addr, reg_tmp_);
-        if (conf_.data_type == data_type::bf16)
-            pinsrw(Xmm(data_idx), ptr[reg_src_addr], j);
-        else
-            pinsrd(Xmm(data_idx), ptr[reg_src_addr], j);
+        pinsrd(Xmm(data_idx), ptr[reg_src_addr], j);
         mov(reg_src_addr, reg_tmp1_);
     }
 }
 
 template <>
-void jit_uni_shuffle_kernel_t<avx512_common>::gather_data(
+void jit_uni_shuffle_kernel_t<avx512_core>::gather_data(
         const Reg64 &reg_src_addr, const int indices_idx, const int data_idx,
         const bool is_tail) {
     if (conf_.dt_size == sizeof(float)) {
@@ -224,46 +222,49 @@ void jit_uni_shuffle_kernel_t<sse41>::gather_data(const Reg64 &reg_src_addr,
 }
 
 template <>
-void jit_uni_shuffle_kernel_t<avx512_common>::store_data(const int data_idx,
+void jit_uni_shuffle_kernel_t<avx512_core>::store_data(const int data_idx,
         const Reg64 &reg_dst_addr, const int offset, const bool is_tail) {
+    const auto extend_for_padding
+            = is_tail && padding_size_ + conf_.simd_tail >= conf_.simd_w;
     if (conf_.data_type == data_type::bf16) {
         const Ymm to_store_data = Ymm(data_idx);
+        const Ymm ymm_tmp = Ymm(vmm_tmp_.getIdx());
 
-        if (bf16_emulation_)
-            bf16_emulation_->vcvtneps2bf16(to_store_data, Zmm(data_idx));
-        else
-            vcvtneps2bf16(to_store_data, Zmm(data_idx));
-
-        if (is_tail)
-            vmovdqu16(ptr[reg_dst_addr + offset] | k_tail_mask_, to_store_data);
-        else
-            vmovups(ptr[reg_dst_addr + offset], to_store_data);
+        if (extend_for_padding) {
+            vmovdqu16(ymm_tmp | k_tail_mask_ | T_z, to_store_data);
+            vmovups(ptr[reg_dst_addr + offset], ymm_tmp);
+        } else {
+            if (is_tail)
+                vmovdqu16(ptr[reg_dst_addr + offset] | k_tail_mask_,
+                        to_store_data);
+            else
+                vmovups(ptr[reg_dst_addr + offset], to_store_data);
+        }
     } else {
-        if (is_tail)
-            vmovups(ptr[reg_dst_addr + offset] | k_tail_mask_, Vmm(data_idx));
-        else
-            vmovups(ptr[reg_dst_addr + offset], Vmm(data_idx));
+        if (extend_for_padding) {
+            vmovups(vmm_tmp_ | k_tail_mask_ | T_z, Vmm(data_idx));
+            vmovups(ptr[reg_dst_addr + offset], vmm_tmp_);
+        } else {
+            if (is_tail)
+                vmovups(ptr[reg_dst_addr + offset] | k_tail_mask_,
+                        Vmm(data_idx));
+            else
+                vmovups(ptr[reg_dst_addr + offset], Vmm(data_idx));
+        }
     }
+    append_zero_padding(reg_dst_, extend_for_padding);
 }
 
 template <>
 void jit_uni_shuffle_kernel_t<avx>::store_data(const int data_idx,
         const Reg64 &reg_dst_addr, const int offset, const bool is_tail) {
-    if (conf_.data_type == data_type::bf16) {
-        const Xmm to_store_data = Xmm(data_idx);
+    const auto extend_for_padding
+            = is_tail && padding_size_ + conf_.simd_tail >= conf_.simd_w;
 
-        if (bf16_emulation_)
-            bf16_emulation_->vcvtneps2bf16(to_store_data, Ymm(data_idx));
-        else
-            vcvtneps2bf16(to_store_data, Ymm(data_idx));
-
-        if (is_tail) {
-            for (unsigned i = 0; i < conf_.simd_tail; i++)
-                pextrw(ptr[reg_dst_addr + offset + i * conf_.dt_size],
-                        to_store_data, i);
-        } else {
-            vmovups(ptr[reg_dst_addr + offset], to_store_data);
-        }
+    if (extend_for_padding) {
+        uni_vxorps(vmm_tmp_, vmm_tmp_, vmm_tmp_);
+        uni_vblendvps(vmm_tmp_, vmm_tmp_, Vmm(data_idx), vmm_tail_mask_);
+        vmovups(ptr[reg_dst_addr + offset], vmm_tmp_);
     } else {
         if (is_tail)
             vmaskmovps(
@@ -271,26 +272,21 @@ void jit_uni_shuffle_kernel_t<avx>::store_data(const int data_idx,
         else
             vmovups(ptr[reg_dst_addr + offset], Vmm(data_idx));
     }
+    append_zero_padding(reg_dst_, extend_for_padding);
 }
 
 template <>
 void jit_uni_shuffle_kernel_t<sse41>::store_data(const int data_idx,
         const Reg64 &reg_dst_addr, const int offset, const bool is_tail) {
-    if (is_tail) {
+    if (is_tail)
         for (unsigned i = 0; i < conf_.simd_tail; i++) {
-            if (conf_.data_type == data_type::bf16)
-                pextrw(ptr[reg_dst_addr + offset + i * conf_.dt_size],
-                        Xmm(data_idx), i);
-            else
-                pextrd(ptr[reg_dst_addr + offset + i * conf_.dt_size],
-                        Xmm(data_idx), i);
+            pextrd(ptr[reg_dst_addr + offset + i * conf_.dt_size],
+                    Xmm(data_idx), i);
         }
-    } else {
-        if (conf_.data_type == data_type::bf16)
-            vmovsd(ptr[reg_dst_addr + offset], Vmm(data_idx));
-        else
-            movups(ptr[reg_dst_addr + offset], Vmm(data_idx));
-    }
+    else
+        movups(ptr[reg_dst_addr + offset], Vmm(data_idx));
+
+    append_zero_padding(reg_dst_, false);
 }
 
 template <cpu_isa_t isa>
@@ -412,6 +408,48 @@ void jit_uni_shuffle_kernel_t<isa>::shuffle_blocked_format() {
 }
 
 template <cpu_isa_t isa>
+void jit_uni_shuffle_kernel_t<isa>::append_zero_padding(
+        const Reg64 &reg_dst_addr, const bool extend_for_padding) {
+
+    static constexpr size_t reg64_size = 8;
+    const size_t simd_w_byte = conf_.simd_w * sizeof(float);
+
+    if (!padding_size_) return;
+
+    const auto padding_start
+            = (extend_for_padding) ? conf_.simd_w : conf_.c % conf_.blk_size;
+    const auto padding_end = (extend_for_padding)
+            ? padding_size_ - (conf_.simd_w - conf_.simd_tail)
+            : padding_size_;
+    const auto off_start = padding_start * conf_.dt_size;
+    const auto padding_to_add = padding_end * conf_.dt_size;
+
+    if (!padding_to_add) return;
+
+    Label end;
+    unsigned int off = 0;
+
+    cmp(reg_padded_block, 0);
+    je(end, T_NEAR);
+
+    if (simd_w_byte <= padding_to_add) {
+        uni_vxorps(vmm_zero_, vmm_zero_, vmm_zero_);
+        for (; off + simd_w_byte < padding_to_add; off += simd_w_byte)
+            uni_vmovups(ptr[reg_dst_addr + off_start + off], vmm_zero_);
+    }
+
+    if (off != padding_to_add) {
+        xor_(reg_tmp_, reg_tmp_);
+        for (; off + reg64_size < padding_to_add; off += reg64_size)
+            mov(ptr[reg_dst_addr + off_start + off], reg_tmp_);
+        for (; off < padding_to_add; off++)
+            mov(ptr[reg_dst_addr + off_start + off], Reg8(reg_tmp_.getIdx()));
+    }
+
+    L(end);
+}
+
+template <cpu_isa_t isa>
 void jit_uni_shuffle_kernel_t<isa>::generate() {
     preamble();
 
@@ -421,8 +459,6 @@ void jit_uni_shuffle_kernel_t<isa>::generate() {
     xor_(rcx, rdi);
     xor_(rdi, rcx);
 #endif
-
-    if (bf16_emulation_) bf16_emulation_->init_vcvtneps2bf16();
 
     if (conf_.isa == avx2) {
         // Sometimes the values in the register can be nan at the
@@ -440,6 +476,7 @@ void jit_uni_shuffle_kernel_t<isa>::generate() {
 
     mov(reg_src_, ptr[reg_param + GET_OFF(src)]);
     mov(reg_dst_, ptr[reg_param + GET_OFF(dst)]);
+    mov(reg_padded_block, ptr[reg_param + GET_OFF(is_padded_block)]);
 
     shuffle_blocked_format();
 
@@ -448,7 +485,7 @@ void jit_uni_shuffle_kernel_t<isa>::generate() {
 
 template struct jit_uni_shuffle_kernel_t<sse41>;
 template struct jit_uni_shuffle_kernel_t<avx>;
-template struct jit_uni_shuffle_kernel_t<avx512_common>;
+template struct jit_uni_shuffle_kernel_t<avx512_core>;
 
 #undef GET_OFF
 

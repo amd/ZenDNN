@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -53,11 +53,11 @@ struct jit_avx512_common_1x1_conv_kernel : public jit_generator {
     const primitive_attr_t &attr_;
 
 private:
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_common>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
             postops_injector_;
 
     constexpr static int isa_simd_width_
-            = cpu_isa_traits<avx512_common>::vlen / sizeof(float);
+            = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
     using reg64_t = const Xbyak::Reg64;
     using zmm_t = const Xbyak::Zmm;
 
@@ -79,6 +79,7 @@ private:
     reg64_t reg_relu_ns = r13;
     reg64_t reg_bcast_loop_work = aux1_reg_bcast_data;
     reg64_t reg_load_dim_tail_mask = aux_reg_load_data;
+    reg64_t reg_long_offt = reg_bcast_data;
 
     Xbyak::Zmm vreg_bcast = Xbyak::Zmm(31);
     Xbyak::Opmask k_load_dim_mask = Xbyak::Opmask(2);
@@ -88,10 +89,21 @@ private:
     constexpr static int reg_bcast_loop_work_offt = 0;
     constexpr static int reg_binary_post_op_acc_off = 1 * reg64_size_;
     constexpr static int reg_abi_param1_backup = 2 * reg64_size_;
-    constexpr static int stack_space_needed = 3 * reg64_size_;
+    constexpr static int reg_bcast_data_off = 3 * reg64_size_;
+    constexpr static int stack_space_needed = 4 * reg64_size_;
 
     void bcast_loop(int load_loop_blk);
     void reduce_loop(int load_loop_blk, int ur, int substep, bool wraparound);
+
+    inline size_t get_output_offset(
+            const bool is_out_layout_nxc, const int i_load, const int i_ur) {
+        const size_t i_load_shift = is_out_layout_nxc
+                ? jcp.load_block
+                : (jcp.with_dw_conv ? jcp.ow : jcp.bcast_dim) * jcp.load_block;
+        const size_t i_ur_shift
+                = is_out_layout_nxc ? jcp.load_dim : jcp.load_block;
+        return jcp.typesize_out * (i_load * i_load_shift + i_ur * i_ur_shift);
+    }
 
     Xbyak::Address output_ptr(
             const bool out_layout_nxc, const int i_load, const int i_ur);

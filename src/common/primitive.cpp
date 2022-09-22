@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -25,16 +25,21 @@
 
 #include "c_types_map.hpp"
 #include "engine.hpp"
+
+#if defined(ZENDNN_ENABLE_ITT_TASKS)
 #include "ittnotify.hpp"
+#endif
+
 #include "primitive.hpp"
 #include "primitive_desc.hpp"
 #include "primitive_exec_types.hpp"
 #include "reorder_pd.hpp"
 #include "scratchpad_debug.hpp"
+#include "stack_checker.hpp"
 #include "stream.hpp"
 #include "utils.hpp"
 #include "zendnn_logging.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 
 using namespace zendnn;
 using namespace zendnn::impl;
@@ -88,9 +93,9 @@ nested_scratchpad_t::~nested_scratchpad_t() = default;
 #endif
 
 status_t primitive_create(primitive_iface_t **primitive_iface,
-        const primitive_desc_iface_t *primitive_desc_iface) {
+        const primitive_desc_iface_t *primitive_desc_iface,
+        const cache_blob_t &cache_blob = cache_blob_t()) {
 
-    status_t status = status::success;
     std::pair<primitive_iface_t *, bool> p_iface;
 
     // Default enabling of log and corresponding duration_ms calculation
@@ -99,20 +104,22 @@ status_t primitive_create(primitive_iface_t **primitive_iface,
     // primitive log.
     if(zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1) {
         double start_ms = get_msec();
-        status = primitive_desc_iface->create_primitive_iface(p_iface);
+        CHECK(primitive_desc_iface->create_primitive_iface(
+                p_iface, cache_blob));
         double duration_ms = get_msec() - start_ms;
 
-        const char *str = p_iface.second ? "cache_hit " : "cache_miss ";
+        const char *str = p_iface.second ? "cache_hit" : "cache_miss";
+        if (cache_blob) str = "from_cache_blob";
+
         std::string stamp;
         if (get_verbose_timestamp()) stamp = "," + std::to_string(start_ms);
-
         zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_create ", stamp.c_str(),
                 str, p_iface.first->pd()->info(), " ", duration_ms,  " ms");
     } else {
-        status = primitive_desc_iface->create_primitive_iface(p_iface);
+        CHECK(primitive_desc_iface->create_primitive_iface(
+                p_iface, cache_blob));
     }
-    if (status == status::success) (*primitive_iface) = p_iface.first;
-    return status;
+    return safe_ptr_assign((*primitive_iface), p_iface.first);
 }
 
 status_t primitive_execute(
@@ -122,8 +129,11 @@ status_t primitive_execute(
 
     stream->before_exec_hook();
 
-    if (itt::get_itt(itt::__itt_task_level_low))
+#if defined(ZENDNN_ENABLE_ITT_TASKS)
+    const bool enable_itt = itt::get_itt(itt::__itt_task_level_low);
+    if (enable_itt)
         itt::primitive_task_start(primitive_iface->pd()->impl()->kind());
+#endif
 
     // Default enabling of log and corresponding duration_ms calculation
     // amd stream wait leads to penaly for latency measurements. Environment
@@ -144,7 +154,9 @@ status_t primitive_execute(
         status = stream->enqueue_primitive(primitive_iface, ctx);
     }
 
-    if (itt::get_itt(itt::__itt_task_level_low)) itt::primitive_task_end();
+#if defined(ZENDNN_ENABLE_ITT_TASKS)
+    if (enable_itt) itt::primitive_task_end();
+#endif
 
     stream->after_exec_hook();
 
@@ -167,7 +179,40 @@ status_t zendnn_primitive_create(primitive_iface_t **primitive_iface,
         const primitive_desc_iface_t *primitive_desc_iface) {
     if (utils::any_null(primitive_iface, primitive_desc_iface))
         return invalid_arguments;
+
+#ifdef ZENDNN_ENABLE_STACK_CHECKER
+    stack_checker::stack_checker_t sc("zendnn_primitive_create");
+    bool is_wino = std::string(primitive_desc_iface->info()).find("wino")
+            != std::string::npos;
+
+    if (!is_wino) {
+        const cache_blob_t dummy;
+        return sc.check(zendnn::impl::primitive_create, primitive_iface,
+                primitive_desc_iface, std::ref(dummy));
+    }
+#endif
     return zendnn::impl::primitive_create(primitive_iface, primitive_desc_iface);
+}
+
+status_t zendnn_primitive_create_from_cache_blob(
+        primitive_iface_t **primitive_iface,
+        const primitive_desc_iface_t *primitive_desc_iface, size_t size,
+        const uint8_t *cache_blob) {
+    if (utils::any_null(primitive_iface, primitive_desc_iface, cache_blob)
+            || size == 0) {
+        return invalid_arguments;
+    }
+    const auto ekind = primitive_desc_iface->engine()->kind();
+    const auto runtime_kind = primitive_desc_iface->engine()->runtime_kind();
+    if (ekind != engine_kind::gpu
+            || (ekind == engine_kind::gpu
+                    && runtime_kind != runtime_kind::ocl)) {
+        return status::unimplemented;
+    }
+
+    cache_blob_t cb(const_cast<uint8_t *>(cache_blob), size);
+    return zendnn::impl::primitive_create(
+            primitive_iface, primitive_desc_iface, cb);
 }
 
 status_t zendnn_primitive_execute(const primitive_iface_t *primitive_iface,
@@ -183,9 +228,17 @@ status_t zendnn_primitive_execute(const primitive_iface_t *primitive_iface,
     if (status != status::success) return status;
 
     exec_ctx_t ctx(stream, std::move(args));
-    status = zendnn::impl::primitive_execute(primitive_iface, ctx);
-
-    return status;
+#ifdef ZENDNN_ENABLE_STACK_CHECKER
+    stack_checker::stack_checker_t sc("zendnn_primitive_execute");
+    const auto *pd_iface = primitive_iface->pd();
+    bool is_wino
+            = std::string(pd_iface->info()).find("wino") != std::string::npos;
+    if (!is_wino) {
+        return sc.check(
+                zendnn::impl::primitive_execute, primitive_iface, std::ref(ctx));
+    }
+#endif
+    return zendnn::impl::primitive_execute(primitive_iface, ctx);
 }
 
 status_t zendnn_primitive_get_primitive_desc(
@@ -194,6 +247,31 @@ status_t zendnn_primitive_get_primitive_desc(
     if (utils::any_null(primitive_iface, primitive_desc_iface))
         return invalid_arguments;
     return safe_ptr_assign(*primitive_desc_iface, primitive_iface->pd());
+}
+
+status_t zendnn_primitive_get_cache_blob(const primitive_iface_t *primitive_iface,
+        size_t *size, uint8_t *cache_blob) {
+    if (utils::any_null(primitive_iface, size)) {
+        return status::invalid_arguments;
+    }
+
+    const auto ekind = primitive_iface->engine()->kind();
+    const auto runtime_kind = primitive_iface->engine()->runtime_kind();
+    if (ekind != engine_kind::gpu
+            || (ekind == engine_kind::gpu
+                    && runtime_kind != runtime_kind::ocl)) {
+        return status::unimplemented;
+    }
+
+    if (!cache_blob) {
+        size_t sz = 0;
+        CHECK(primitive_iface->get_cache_blob_size(&sz));
+        (*size) = sz;
+        return status::success;
+    }
+
+    cache_blob_t cb(cache_blob, *size);
+    return primitive_iface->get_cache_blob(cb);
 }
 
 status_t zendnn_primitive_destroy(primitive_iface_t *primitive_iface) {
@@ -281,6 +359,15 @@ status_t zendnn_primitive::execute(exec_ctx_t &ctx) const {
     auto status = primitive_->execute(ctx);
     ctx.set_scratchpad_grantor(nullptr);
     return status;
+}
+
+status_t zendnn_primitive::get_cache_blob_size(size_t *size) const {
+    (*size) = 0;
+    return primitive_->get_cache_blob_size(size);
+}
+
+status_t zendnn_primitive::get_cache_blob(cache_blob_t cache_blob) const {
+    return primitive_->get_cache_blob(engine(), cache_blob);
 }
 
 // vim: et ts=4 sw=4 cindent cino^=l0,\:0,N-s

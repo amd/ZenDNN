@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2021 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -124,9 +124,11 @@ bool primitive_attr_t::has_default_values(zendnn_primitive_attr::skip_mask_t mas
         zendnn::impl::data_type_t dst_dt) const {
     using smask_t = skip_mask_t;
     // prepare mask for runtime-parameters check
-    smask_t defined_mask {};
+    smask_t defined_mask = smask_t::none;
     if ((mask & smask_t::oscale_runtime) == smask_t::oscale_runtime)
         defined_mask |= smask_t::oscale;
+    if ((mask & smask_t::scales_runtime) == smask_t::scales_runtime)
+        defined_mask |= smask_t::scales;
     if ((mask & smask_t::zero_points_runtime) == smask_t::zero_points_runtime)
         defined_mask |= smask_t::zero_points;
     bool ok = true;
@@ -158,6 +160,7 @@ bool primitive_attr_t::defined(zendnn_primitive_attr::skip_mask_t mask) const {
 #define CHECK_MASK(mask_name, mask_field) \
     CHECK_ARG(IMPLICATION((bool)(~mask & (mask_name)), (mask_field).defined()))
     CHECK_MASK(smask_t::oscale, output_scales_);
+    CHECK_MASK(smask_t::scales, scales_);
     CHECK_MASK(smask_t::zero_points, zero_points_);
     CHECK_MASK(smask_t::post_ops, post_ops_);
     CHECK_MASK(smask_t::rnn_data_qparams, rnn_data_qparams_);
@@ -169,12 +172,14 @@ bool primitive_attr_t::defined(zendnn_primitive_attr::skip_mask_t mask) const {
 #undef CHECK_ARG
 }
 
-status_t post_ops_t::append_sum(float scale, data_type_t dt) {
+status_t post_ops_t::append_sum(
+        float scale, int32_t zero_point, data_type_t dt) {
     if (len() == post_ops_limit) return out_of_memory;
     entry_.emplace_back();
     auto &e = entry_.back();
     e.kind = primitive_kind::sum;
     e.sum.scale = scale;
+    e.sum.zero_point = zero_point;
     e.sum.dt = dt;
     return success;
 }
@@ -221,18 +226,28 @@ zendnn::impl::status_t post_ops_t::entry_t::set_depthwise_scales(
     return zendnn::impl::status::success;
 }
 
-status_t post_ops_t::append_dw_k3s1p1(data_type_t wei_dt, data_type_t bias_dt,
-        data_type_t dst_dt, dim_t count, int mask, const float *scales) {
+status_t post_ops_t::append_dw(data_type_t wei_dt, data_type_t bias_dt,
+        data_type_t dst_dt, dim_t kernel_size, dim_t stride_size,
+        dim_t padding_l_size, dim_t count, int mask, const float *scales) {
     if (len() == post_ops_limit) return out_of_memory;
     bool ok = wei_dt != data_type::undef && dst_dt != data_type::undef
             && IMPLICATION(count > 0, scales) && mask >= 0;
+    if (!ok) return invalid_arguments;
+
+    ok = ok && kernel_size > 0 && stride_size > 0;
+    if (!ok) return invalid_arguments;
+
+    // Avoiding cases when kernel in pad area
+    ok = ok && (padding_l_size + 1) <= kernel_size;
     if (!ok) return invalid_arguments;
 
     entry_.emplace_back();
     auto &e = entry_.back();
     e.kind = primitive_kind::convolution;
     auto &d = e.depthwise_conv;
-    d.stride = 1;
+    d.kernel = kernel_size;
+    d.stride = stride_size;
+    d.padding = padding_l_size;
     d.wei_dt = wei_dt;
     d.bias_dt = bias_dt;
     d.dst_dt = dst_dt;
@@ -243,30 +258,19 @@ status_t post_ops_t::append_dw_k3s1p1(data_type_t wei_dt, data_type_t bias_dt,
     return e.set_depthwise_scales(scales);
 }
 
-status_t post_ops_t::append_dw_k3s2p1(data_type_t wei_dt, data_type_t bias_dt,
-        data_type_t dst_dt, dim_t count, int mask, const float *scales) {
-
-    auto status
-            = append_dw_k3s1p1(wei_dt, bias_dt, dst_dt, count, mask, scales);
-    if (status != success) return status;
-    entry_.back().depthwise_conv.stride = 2;
-
-    return success;
-}
-
 status_t post_ops_t::append_binary(
-        alg_kind_t alg, const memory_desc_t *src1_desc) {
+        alg_kind_t alg, const memory_desc_t *user_src1_desc) {
     if (len() == post_ops_limit) return out_of_memory;
     using namespace alg_kind;
     bool alg_ok = one_of(alg, binary_add, binary_mul, binary_max, binary_min,
             binary_div, binary_sub, binary_ge, binary_gt, binary_le, binary_lt,
             binary_eq, binary_ne);
     if (!alg_ok) return invalid_arguments;
-    if (!memory_desc_sanity_check(src1_desc)) return invalid_arguments;
+    if (!memory_desc_sanity_check(user_src1_desc)) return invalid_arguments;
 
     // Additional check to restrict run-time dimension usage until supported.
-    for (int d = 0; d < src1_desc->ndims; ++d) {
-        if (src1_desc->dims[d] == ZENDNN_RUNTIME_DIM_VAL)
+    for (int d = 0; d < user_src1_desc->ndims; ++d) {
+        if (user_src1_desc->dims[d] == ZENDNN_RUNTIME_DIM_VAL)
             return invalid_arguments;
     }
 
@@ -274,7 +278,18 @@ status_t post_ops_t::append_binary(
     auto &e = entry_.back();
     e.kind = primitive_kind::binary;
     e.binary.alg = alg;
-    e.binary.src1_desc = *src1_desc;
+    e.binary.user_src1_desc = *user_src1_desc;
+    e.binary.src1_desc = *user_src1_desc;
+    return success;
+}
+
+status_t post_ops_t::append_prelu(int mask) {
+    if (len() == post_ops_limit) return out_of_memory;
+
+    auto it_entry = entry_.emplace(entry_.end());
+    it_entry->kind = primitive_kind::prelu;
+    it_entry->prelu.mask = mask;
+
     return success;
 }
 
@@ -291,13 +306,61 @@ bool post_ops_t::defined() const {
         } else if (kind == primitive_kind::convolution) {
             const auto &c = entry_[idx].depthwise_conv;
             if (c.scales && is_runtime_value(*(c.scales))) return false;
-        } else if (kind == primitive_kind::binary) {
+        } else if (utils::one_of(kind, primitive_kind::binary,
+                           primitive_kind::prelu)) {
             // binary is always defined
         } else {
             assert(!"unreachable");
         }
     }
     return true;
+}
+
+status_t post_ops_t::set_default_formats(const memory_desc_t *dst_md) {
+    for (int idx = 0; idx < len(); ++idx) {
+        if (!contain(primitive_kind::binary, idx)) continue;
+
+        auto &src1_md = entry_[idx].binary.src1_desc;
+        const memory_desc_wrapper src1_mdw(src1_md);
+        if (!src1_mdw.format_any()) continue;
+
+        const memory_desc_wrapper dst_mdw(dst_md);
+        assert(!dst_mdw.format_any());
+
+        // 1D tensors should be plain abx.
+        if (src1_mdw.count_non_unit_dims(1))
+            CHECK(memory_desc_init_by_strides(src1_md, nullptr));
+        else
+            CHECK(memory_desc_init_by_blocking_desc(
+                    src1_md, dst_mdw.blocking_desc()));
+    }
+
+    return status::success;
+}
+
+bool post_ops_t::check_sum_consistent_dt(
+        const data_type_t dst_dt, const bool diverse_sum_dt_allowed) const {
+    int sum_ind = find(zendnn::impl::primitive_kind::sum);
+    if (sum_ind == -1) return true;
+    const auto sum_dt = entry_[sum_ind].sum.dt;
+
+    // sum dt and dst dt must have the same size
+    const bool compatible_dt_size = IMPLICATION(
+            !utils::one_of(zendnn_data_type_undef, sum_dt, dst_dt),
+            types::data_type_size(dst_dt) == types::data_type_size(sum_dt));
+    if (!compatible_dt_size) return false;
+    if (diverse_sum_dt_allowed) return true;
+
+    bool ok = true;
+    while ((sum_ind = find(zendnn::impl::primitive_kind::sum, sum_ind + 1)) != -1)
+        ok = ok && entry_[sum_ind].sum.dt == sum_dt;
+    return ok;
+}
+
+status_t primitive_attr_t::set_fpmath_mode(fpmath_mode_t fpmath_mode) {
+    auto st = check_fpmath_mode(fpmath_mode);
+    if (st == success) fpmath_mode_ = fpmath_mode;
+    return st;
 }
 
 status_t primitive_attr_t::set_scratchpad_mode(
@@ -313,6 +376,10 @@ status_t primitive_attr_t::set_scratchpad_mode(
 
 status_t primitive_attr_t::set_post_ops(const post_ops_t &post_ops) {
     return post_ops_.copy_from(post_ops);
+}
+
+status_t primitive_attr_t::set_default_formats(const memory_desc_t *dst_md) {
+    return post_ops_.set_default_formats(dst_md);
 }
 
 /* Public C API */
@@ -337,6 +404,19 @@ status_t zendnn_primitive_attr_destroy(primitive_attr_t *attr) {
     delete attr;
 
     return success;
+}
+
+status_t zendnn_primitive_attr_get_fpmath_mode(
+        const primitive_attr_t *attr, fpmath_mode_t *mode) {
+    if (any_null(attr, mode)) return invalid_arguments;
+    *mode = attr->fpmath_mode_;
+    return success;
+}
+
+status_t zendnn_primitive_attr_set_fpmath_mode(
+        primitive_attr_t *attr, fpmath_mode_t mode) {
+    if (any_null(attr)) return invalid_arguments;
+    return attr->set_fpmath_mode(mode);
 }
 
 status_t zendnn_primitive_attr_get_scratchpad_mode(
@@ -458,7 +538,14 @@ status_t zendnn_post_ops_append_sum_v2(
         post_ops_t *post_ops, float scale, data_type_t dt) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_sum(scale, dt);
+    return post_ops->append_sum(scale, 0, dt);
+}
+
+status_t zendnn_post_ops_append_sum_v3(
+        post_ops_t *post_ops, float scale, int32_t zero_point, data_type_t dt) {
+    if (post_ops == nullptr) return invalid_arguments;
+
+    return post_ops->append_sum(scale, zero_point, dt);
 }
 
 namespace {
@@ -484,12 +571,23 @@ status_t zendnn_post_ops_get_params_sum(
 status_t zendnn_post_ops_get_params_sum_v2(
         const post_ops_t *post_ops, int index, float *scale, data_type_t *dt) {
     bool ok = true
-            && simple_get_params_check(post_ops, index, primitive_kind::sum)
-            && !any_null(scale);
+            && simple_get_params_check(post_ops, index, primitive_kind::sum);
     if (!ok) return invalid_arguments;
 
-    *scale = post_ops->entry_[index].sum.scale;
-    *dt = post_ops->entry_[index].sum.dt;
+    if (scale) *scale = post_ops->entry_[index].sum.scale;
+    if (dt) *dt = post_ops->entry_[index].sum.dt;
+    return success;
+}
+
+status_t zendnn_post_ops_get_params_sum_v3(const post_ops_t *post_ops, int index,
+        float *scale, int32_t *zero_point, data_type_t *dt) {
+    bool ok = true
+            && simple_get_params_check(post_ops, index, primitive_kind::sum);
+    if (!ok) return invalid_arguments;
+
+    if (scale) *scale = post_ops->entry_[index].sum.scale;
+    if (zero_point) *zero_point = post_ops->entry_[index].sum.zero_point;
+    if (dt) *dt = post_ops->entry_[index].sum.dt;
     return success;
 }
 
@@ -516,13 +614,45 @@ status_t zendnn_post_ops_get_params_eltwise(const post_ops_t *post_ops, int inde
     return success;
 }
 
+status_t zendnn_post_ops_append_dw(post_ops_t *post_ops, data_type_t wei_dt,
+        data_type_t bias_dt, data_type_t dst_dt, dim_t kernel_size,
+        dim_t stride_size, dim_t padding_l_size, dim_t count, int mask,
+        const float *scales) {
+    if (post_ops == nullptr) return invalid_arguments;
+
+    return post_ops->append_dw(wei_dt, bias_dt, dst_dt, kernel_size,
+            stride_size, padding_l_size, count, mask, scales);
+}
+
+status_t zendnn_post_ops_get_params_dw(const post_ops_t *post_ops, int index,
+        data_type_t *wei_dt, data_type_t *bias_dt, data_type_t *dst_dt,
+        dim_t *kernel, dim_t *stride, dim_t *padding, dim_t *count, int *mask,
+        const float **scales) {
+
+    if (!simple_get_params_check(post_ops, index, primitive_kind::convolution))
+        return invalid_arguments;
+
+    const auto &d = post_ops->entry_[index].depthwise_conv;
+    if (wei_dt) *wei_dt = d.wei_dt;
+    if (bias_dt) *bias_dt = d.bias_dt;
+    if (dst_dt) *dst_dt = d.dst_dt;
+    if (kernel) *kernel = d.kernel;
+    if (stride) *stride = d.stride;
+    if (padding) *padding = d.padding;
+    if (count) *count = d.count;
+    if (mask) *mask = d.mask;
+    if (scales) *scales = d.scales;
+
+    return success;
+}
+
 status_t zendnn_post_ops_append_dw_k3s1p1(post_ops_t *post_ops,
         data_type_t wei_dt, data_type_t bias_dt, data_type_t dst_dt,
         dim_t count, int mask, const float *scales) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_dw_k3s1p1(
-            wei_dt, bias_dt, dst_dt, count, mask, scales);
+    return post_ops->append_dw(
+            wei_dt, bias_dt, dst_dt, 3, 1, 1, count, mask, scales);
 }
 
 status_t zendnn_post_ops_get_params_dw_k3s1p1(const post_ops_t *post_ops,
@@ -549,8 +679,8 @@ status_t zendnn_post_ops_append_dw_k3s2p1(post_ops_t *post_ops,
         dim_t count, int mask, const float *scales) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_dw_k3s2p1(
-            wei_dt, bias_dt, dst_dt, count, mask, scales);
+    return post_ops->append_dw(
+            wei_dt, bias_dt, dst_dt, 3, 2, 1, count, mask, scales);
 }
 
 status_t zendnn_post_ops_get_params_dw_k3s2p1(const post_ops_t *post_ops,
@@ -573,20 +703,37 @@ status_t zendnn_post_ops_get_params_dw_k3s2p1(const post_ops_t *post_ops,
 }
 
 status_t zendnn_post_ops_append_binary(post_ops_t *post_ops, alg_kind_t alg_kind,
-        const memory_desc_t *src1_desc) {
+        const memory_desc_t *user_src1_desc) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_binary(alg_kind, src1_desc);
+    return post_ops->append_binary(alg_kind, user_src1_desc);
 }
 
 status_t zendnn_post_ops_get_params_binary(const post_ops_t *post_ops, int index,
-        alg_kind_t *alg_kind, const zendnn_memory_desc_t **src1_desc) {
+        alg_kind_t *alg_kind, const zendnn_memory_desc_t **user_src1_desc) {
     if (!simple_get_params_check(post_ops, index, primitive_kind::binary))
         return invalid_arguments;
 
     const auto &b = post_ops->entry_[index].binary;
     if (alg_kind) *alg_kind = b.alg;
-    if (src1_desc) *src1_desc = &b.src1_desc;
+    if (user_src1_desc) *user_src1_desc = &b.user_src1_desc;
+
+    return success;
+}
+
+status_t zendnn_post_ops_append_prelu(post_ops_t *post_ops, int mask) {
+    if (post_ops == nullptr) return invalid_arguments;
+
+    return post_ops->append_prelu(mask);
+}
+
+status_t zendnn_post_ops_get_params_prelu(
+        const post_ops_t *post_ops, int index, int *mask) {
+    if (post_ops == nullptr || index >= post_ops->len())
+        return invalid_arguments;
+
+    const auto &prelu_entry = post_ops->entry_[index].prelu;
+    if (mask) *mask = prelu_entry.mask;
 
     return success;
 }

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -55,6 +55,11 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 namespace x64 {
+#ifndef ZENDNN_WITH_SYCL
+#define MAX_STACK_SZ (4 * PAGE_4K)
+#else
+#define MAX_STACK_SZ 0
+#endif
 
 template <typename c_type>
 struct alignas(64) gemm_per_thread_t {
@@ -213,7 +218,7 @@ static inline dim_t get_m_padd_parallel_a(int ithr, dim_t m,
     if (!arg->a_packed) {
         constexpr auto multiplier = 10;
 
-        m_padd *= nstl::max(nthrs, multiplier);
+        m_padd *= nstl::min(nthrs, multiplier);
         if (m_padd > m) m_padd = utils::rnd_up(m, arg->um);
     }
 
@@ -379,25 +384,8 @@ template <typename a_type, typename b_type, typename c_type>
 void gemm_kernel(dim_t m, dim_t n, const dim_t k, const float alpha,
         const a_type *a, const b_type *b, float beta, c_type *c,
         const dim_t ldc, const c_type *a_row_sum, const c_type *b_col_sum,
-        const c_type *co, offset_type offsetc,
-        const gemm_info_t<a_type, b_type, c_type> *arg) {
-
-#ifdef ZENDNN_WITH_SYCL
-    std::vector<c_type> col_offset_vec(m);
-    std::vector<c_type> row_offset_vec(n);
-    c_type *col_offset = col_offset_vec.data();
-    c_type *row_offset = row_offset_vec.data();
-#else
-    // Since m and n are limited by blocking, stack overflow may not happen;
-    // it's up to 32kB
-#if !defined(_MSC_VER)
-    c_type col_offset[m];
-    c_type row_offset[n];
-#else
-    c_type *col_offset = (c_type *)_alloca(sizeof(*col_offset) * m);
-    c_type *row_offset = (c_type *)_alloca(sizeof(*row_offset) * n);
-#endif
-#endif
+        c_type *row_offset_ws, c_type *col_offset_ws, const c_type *co,
+        offset_type offsetc, const gemm_info_t<a_type, b_type, c_type> *arg) {
 
     bool col_req = false;
     bool row_req = false;
@@ -406,6 +394,25 @@ void gemm_kernel(dim_t m, dim_t n, const dim_t k, const float alpha,
             data_traits<a_type>::data_type, data_type::s8, data_type::u8);
     constexpr bool is_f32 = data_traits<a_type>::data_type == data_type::f32;
     bool is_int8_amx = is_int8 && mayiuse(avx512_core_bf16_amx_int8);
+
+    dim_t m_stk = col_offset_ws ? 1 : m;
+    dim_t n_stk = row_offset_ws ? 1 : n;
+#if !defined(_MSC_VER)
+    c_type col_offset_stk[m_stk];
+    c_type row_offset_stk[n_stk];
+#else
+    c_type *col_offset_stk = nullptr;
+    if (!col_offset_ws)
+        col_offset_stk = (c_type *)_alloca(sizeof *col_offset_stk * m_stk);
+
+    c_type *row_offset_stk = nullptr;
+    if (!row_offset_ws)
+        row_offset_stk = (c_type *)_alloca(sizeof *row_offset_stk * n_stk);
+#endif
+
+    // Use the heap if already allocated and stack otherwise.
+    c_type *col_offset = col_offset_ws ? col_offset_ws : col_offset_stk;
+    c_type *row_offset = row_offset_ws ? row_offset_ws : row_offset_stk;
 
     if (is_int8) {
         c_type ao = arg->ao;
@@ -586,6 +593,15 @@ static zendnn_status_t gemm_kernel_driver(int ithr, dim_t m, dim_t n, dim_t k,
                 + b_col_sum_nelems * sizeof(*c) + PAGE_4K;
     }
 
+    size_t col_offset_ws_nelems = arg->um;
+    size_t row_offset_ws_nelems = n_padd;
+    size_t stk_sz = (col_offset_ws_nelems + row_offset_ws_nelems) * sizeof(*c);
+    const bool use_stack = is_int8 && stk_sz <= MAX_STACK_SZ;
+    if (!use_stack) {
+        mem_size += col_offset_ws_nelems * sizeof(*c) + PAGE_4K;
+        mem_size += row_offset_ws_nelems * sizeof(*c) + PAGE_4K;
+    }
+
     bool need_c_buffer
             = (is_int8 && (alpha != 1.0f || (beta != 1.0f && beta != 0.0f)))
             // AMX bfloat16 kernels don't support alpha scaling yet,
@@ -605,22 +621,33 @@ static zendnn_status_t gemm_kernel_driver(int ithr, dim_t m, dim_t n, dim_t k,
     }
 
     a_type *bufferA = (a_type *)align(mem, PAGE_4K);
-    b_type *bufferB = (b_type *)align(bufferA + a_buf_nelems, PAGE_4K);
+    void *p_next_buf = bufferA + a_buf_nelems;
+
+    b_type *bufferB = (b_type *)align(p_next_buf, PAGE_4K);
+    p_next_buf = bufferB + b_buf_nelems;
 
     c_type *a_row_sum = nullptr;
     c_type *b_col_sum = nullptr;
     if (is_int8) {
-        a_row_sum = (c_type *)align(bufferB + b_buf_nelems, PAGE_4K);
-        b_col_sum = (c_type *)align(a_row_sum + a_row_sum_nelems, PAGE_4K);
+        a_row_sum = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = a_row_sum + a_row_sum_nelems;
+
+        b_col_sum = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = b_col_sum + b_col_sum_nelems;
+    }
+
+    c_type *col_offset_ws = nullptr;
+    c_type *row_offset_ws = nullptr;
+    if (!use_stack) {
+        col_offset_ws = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = col_offset_ws + col_offset_ws_nelems;
+
+        row_offset_ws = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = row_offset_ws + row_offset_ws_nelems;
     }
 
     c_type *bufferC = nullptr;
-    if (need_c_buffer) {
-        if (is_int8)
-            bufferC = (c_type *)align(b_col_sum + b_col_sum_nelems, PAGE_4K);
-        else
-            bufferC = (c_type *)align(bufferB + b_buf_nelems, PAGE_4K);
-    }
+    if (need_c_buffer) bufferC = (c_type *)align(p_next_buf, PAGE_4K);
 
     int a_block_copied = 0;
     dim_t sizeM = 0;
@@ -731,7 +758,8 @@ static zendnn_status_t gemm_kernel_driver(int ithr, dim_t m, dim_t n, dim_t k,
                     if (need_c_buffer) {
                         gemm_kernel(sizeUM, sizeN, sizeK, 1.0f, bufferA_eff,
                                 bufferB, 0.0f, bufferC + Um, ldc_buf,
-                                a_row_sum_eff, b_col_sum, (c_type *)nullptr,
+                                a_row_sum_eff, b_col_sum, row_offset_ws,
+                                col_offset_ws, (c_type *)nullptr,
                                 offset_type::none, arg);
 
                         /* Finish the block adding the necessary alpha, beta
@@ -743,7 +771,8 @@ static zendnn_status_t gemm_kernel_driver(int ithr, dim_t m, dim_t n, dim_t k,
                     } else {
                         gemm_kernel(sizeUM, sizeN, sizeK, alpha, bufferA_eff,
                                 bufferB, beta_eff, c_block, ldc, a_row_sum_eff,
-                                b_col_sum, co + co_stride, offsetc_eff, arg);
+                                b_col_sum, row_offset_ws, col_offset_ws,
+                                co + co_stride, offsetc_eff, arg);
                     }
                 }
                 a_block_copied = 1;
@@ -783,7 +812,6 @@ static zendnn_status_t kernel_driver_parallel_acopiedbcopy(int ithr, dim_t m,
 
     size_t b_buf_nelems = k * n_padd;
     size_t b_col_sum_nelems = n_padd;
-
     constexpr bool is_int8 = utils::one_of(
             data_traits<a_type>::data_type, data_type::s8, data_type::u8);
     constexpr bool is_bf16 = data_traits<a_type>::data_type == data_type::bf16;
@@ -791,7 +819,7 @@ static zendnn_status_t kernel_driver_parallel_acopiedbcopy(int ithr, dim_t m,
     bool is_bf16_amx = is_bf16 && mayiuse(avx512_core_bf16_amx_bf16);
     bool is_amx = is_int8_amx || is_bf16_amx;
 
-    // B buffer needs to large due to zero-padding.
+    // B buffer needs to be large due to zero-padding.
     if (is_amx)
         b_buf_nelems
                 = utils::rnd_up(k, arg->uk) * utils::rnd_up(n_padd, arg->un);
@@ -801,6 +829,15 @@ static zendnn_status_t kernel_driver_parallel_acopiedbcopy(int ithr, dim_t m,
     size_t mem_size = b_buf_nelems * sizeof(*b) + PAGE_4K;
 
     if (is_int8) { mem_size += b_col_sum_nelems * sizeof(*c) + PAGE_4K; }
+
+    size_t col_offset_ws_nelems = m;
+    size_t row_offset_ws_nelems = n_padd;
+    size_t stk_sz = (col_offset_ws_nelems + row_offset_ws_nelems) * sizeof(*c);
+    const bool use_stack = is_int8 && stk_sz <= MAX_STACK_SZ;
+    if (!use_stack) {
+        mem_size += col_offset_ws_nelems * sizeof(*c) + PAGE_4K;
+        mem_size += row_offset_ws_nelems * sizeof(*c) + PAGE_4K;
+    }
 
     bool need_c_buffer
             = (is_int8 && (alpha != 1.0f || (beta != 1.0f && beta != 0.0f)))
@@ -821,19 +858,26 @@ static zendnn_status_t kernel_driver_parallel_acopiedbcopy(int ithr, dim_t m,
     }
 
     b_type *bufferB = (b_type *)align(mem, PAGE_4K);
+    void *p_next_buf = bufferB + b_buf_nelems;
 
     c_type *b_col_sum = nullptr;
     if (is_int8) {
-        b_col_sum = (c_type *)align(bufferB + b_buf_nelems, PAGE_4K);
+        b_col_sum = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = b_col_sum + b_col_sum_nelems;
+    }
+
+    c_type *col_offset_ws = nullptr;
+    c_type *row_offset_ws = nullptr;
+    if (!use_stack) {
+        col_offset_ws = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = col_offset_ws + col_offset_ws_nelems;
+
+        row_offset_ws = (c_type *)align(p_next_buf, PAGE_4K);
+        p_next_buf = row_offset_ws + row_offset_ws_nelems;
     }
 
     c_type *bufferC = nullptr;
-    if (need_c_buffer) {
-        if (is_int8)
-            bufferC = (c_type *)align(b_col_sum + b_col_sum_nelems, PAGE_4K);
-        else
-            bufferC = (c_type *)align(bufferB + b_buf_nelems, PAGE_4K);
-    }
+    if (need_c_buffer) bufferC = (c_type *)align(p_next_buf, PAGE_4K);
 
     dim_t sizeN = 0;
     for (dim_t Bn = 0; Bn < n; Bn += sizeN) {
@@ -867,15 +911,16 @@ static zendnn_status_t kernel_driver_parallel_acopiedbcopy(int ithr, dim_t m,
         c_type *c_block = c + Bn * ldc;
         if (need_c_buffer) {
             gemm_kernel(m, sizeN, k, 1.0f, bufferA, bufferB, 0.0f, bufferC,
-                    ldc_buf, a_row_sum, b_col_sum, (c_type *)nullptr,
-                    offset_type::none, arg);
+                    ldc_buf, a_row_sum, b_col_sum, row_offset_ws, col_offset_ws,
+                    (c_type *)nullptr, offset_type::none, arg);
 
             // Finish the block adding the necessary alpha, beta and offsets.
             add_results(m, sizeN, alpha, beta, bufferC, ldc_buf, c_block, ldc,
                     co + co_stride, offsetc);
         } else {
             gemm_kernel(m, sizeN, k, alpha, bufferA, bufferB, beta, c_block,
-                    ldc, a_row_sum, b_col_sum, co + co_stride, offsetc, arg);
+                    ldc, a_row_sum, b_col_sum, row_offset_ws, col_offset_ws,
+                    co + co_stride, offsetc, arg);
         }
     }
 
@@ -1336,9 +1381,12 @@ decompose_matrices(const gemm_slice_t &slice,
     dim_t stride_bn = (arg->transb != no_trans) ? 1 : arg->ldb;
     dim_t stride_bk = (arg->transb == no_trans) ? 1 : arg->ldb;
 
-    auto a = arg->a + slice.off_m * stride_am + slice.off_k * stride_ak;
-    auto b = arg->b + slice.off_n * stride_bn + slice.off_k * stride_bk;
-    auto c = arg->c + slice.off_m + slice.off_n * arg->ldc;
+    auto a = arg->a;
+    auto b = arg->b;
+    auto c = arg->c;
+    if (a) a += slice.off_m * stride_am + slice.off_k * stride_ak;
+    if (b) b += slice.off_n * stride_bn + slice.off_k * stride_bk;
+    if (c) c += slice.off_m + slice.off_n * arg->ldc;
 
     dim_t co_stride;
     switch (arg->offsetc) {
@@ -1346,7 +1394,8 @@ decompose_matrices(const gemm_slice_t &slice,
         case offset_type::column: co_stride = slice.off_m; break;
         default: co_stride = 0; break;
     }
-    auto co = arg->co + co_stride;
+    auto co = arg->co;
+    if (co) co += co_stride;
 
     return std::make_tuple(a, b, c, co);
 }
@@ -1529,12 +1578,9 @@ static inline void adjust_thread_count(dim_t m, dim_t n, dim_t k, int *nthrs) {
 
     const bool is_f32 = data_traits<T>::data_type == data_type::f32;
 
-    const bool is_avx512_mic = mayiuse(avx512_mic);
     const bool is_avx512 = mayiuse(avx512_core);
     const bool is_avx = mayiuse(avx);
     const bool is_only_avx2 = mayiuse(avx2) && !is_avx512;
-
-    if (is_avx512_mic) return;
 
     // Some sgemm cases still benefit from using all threads.
     const bool use_all_threads = is_f32 && n > 50
@@ -1548,6 +1594,29 @@ static inline void adjust_thread_count(dim_t m, dim_t n, dim_t k, int *nthrs) {
 
     double gemm_cycles = m * n * k / fp_per_cycle;
     gemm_cycles *= is_f32 ? 2.0 : 8.0;
+
+#if ZENDNN_CPU_RUNTIME == ZENDNN_RUNTIME_THREADPOOL
+    if (is_f32) {
+        static auto l2_cache_per_thread = platform::get_per_core_cache_size(2);
+        static int n_cores_per_socket
+                = static_cast<int>(platform::get_num_cores());
+        auto l2_cache_socket = l2_cache_per_thread * n_cores_per_socket;
+        auto problem_memory_footprint = (m * n + m * k + n * k) * sizeof(float);
+
+        if (is_only_avx2) {
+            // Somehow it seems beneficial to split the job into bigger pieces.
+            // Use L2 per-core cache size as a deal-breaker.
+            int use_n_threads = utils::div_up(
+                    problem_memory_footprint, l2_cache_per_thread);
+            *nthrs = nstl::min(*nthrs, use_n_threads);
+            return;
+        }
+        if (l2_cache_socket > problem_memory_footprint) {
+            *nthrs = nstl::min(*nthrs, n_cores_per_socket);
+            return;
+        }
+    }
+#endif
 
     int i = *nthrs;
 
@@ -1867,14 +1936,14 @@ static zendnn_status_t gemm_threading_driver(
                                     arg->transb == no_trans ? "N" : "T", m, n,
                                     k, &arg->alpha, (float *)a, arg->lda,
                                     (float *)b, arg->ldb, &beta_eff,
-                                    (float *)c_eff, ldc_eff, nullptr, nullptr);
+                                    (float *)c_eff, ldc_eff, nullptr);
                         } else {
                             avx_gemm_f32::sgemm_nocopy_driver(
                                     arg->transa == no_trans ? "N" : "T",
                                     arg->transb == no_trans ? "N" : "T", m, n,
                                     k, &arg->alpha, (float *)a, arg->lda,
                                     (float *)b, arg->ldb, &beta_eff,
-                                    (float *)c_eff, ldc_eff, nullptr, nullptr);
+                                    (float *)c_eff, ldc_eff, nullptr);
                         }
                         thread_arg[ithr].result = zendnn_success;
                         break;
@@ -1935,7 +2004,7 @@ zendnn_status_t gemm_driver(const char *transA, const char *transB,
 
     // gemm_driver supports 8-bit integer Intel AVX512, Intel AVX2, Intel AVX,
     // Intel SSE4.1 and Intel DL Boost.
-    assert(IMPLICATION(is_int8, mayiuse(sse41) && !mayiuse(avx512_mic)));
+    assert(IMPLICATION(is_int8, mayiuse(sse41)));
 
     // gemm_driver supports sgemm for Intel AVX512, Intel AVX2, Intel AVX,
     // and Intel SSE4.1
@@ -2002,6 +2071,7 @@ template // Instantiate sgemm
                 pack_type packing, gemm_pack_storage_t *pack_dst,
                 bool measure_only);
 
+#undef MAX_STACK_SZ
 } // namespace x64
 } // namespace cpu
 } // namespace impl

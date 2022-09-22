@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -87,7 +87,7 @@ static inline bool use_reference_igemm(void) {
             && data_traits<a_dt>::data_type == data_type::s8
             && data_traits<b_dt>::data_type == data_type::u8;
     if (is_s8u8)
-        return !mayiuse(sse41) || mayiuse(avx512_mic);
+        return !mayiuse(sse41);
     else
         return !mayiuse(avx512_core);
 }
@@ -324,7 +324,7 @@ zendnn_status_t sgemm_pack(const char *identifier, const char *transa,
             *K, *alpha, src, ld, dst);
     return zendnn_success;
 #else
-    gemm_pack_storage_t pack_dst {dst};
+    gemm_pack_storage_t pack_dst(dst, false);
 
     return gemm_pack_driver<float, float, float>(identifier, transa, transb, M,
             N, K, alpha, lda, ldb, src, &pack_dst, false);
@@ -343,7 +343,7 @@ zendnn_status_t gemm_bf16bf16f32_pack(const char *identifier, const char *transa
             identifier, transa, transb, M, N, K, alpha, lda, ldb, src, dst);
     if (result != zendnn_success) return result;
 
-    gemm_pack_storage_t pack_dst {dst};
+    gemm_pack_storage_t pack_dst(dst, false);
 
     return gemm_pack_driver<bfloat16_t, bfloat16_t, float>(identifier, transa,
             transb, M, N, K, alpha, lda, ldb, src, &pack_dst, false);
@@ -373,7 +373,7 @@ zendnn_status_t gemm_x8x8s32_pack(const char *identifier, const char *transa,
         return zendnn_success;
     }
 #endif
-    gemm_pack_storage_t pack_dst {dst};
+    gemm_pack_storage_t pack_dst(dst, false);
 
     if (!use_reference_igemm<a_dt, b_dt>()) {
         return gemm_pack_driver<a_dt, b_dt, int32_t>(identifier, transa, transb,

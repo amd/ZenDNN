@@ -4,6 +4,11 @@
 *******************************************************************************/
 
 /*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Copyright 2017-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,15 +24,15 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "c_types_map.hpp"
-#include "zendnn_thread.hpp"
-#include "type_helpers.hpp"
+#include "common/c_types_map.hpp"
+#include "common/zendnn_thread.hpp"
+#include "common/type_helpers.hpp"
 
 #include "cpu/binary_injector_utils.hpp"
 
 #include "zendnn_logging.hpp"
 #include "zendnn_inner_product.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 
 namespace zendnn {
 namespace impl {

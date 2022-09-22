@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-template <cpu_isa_t isa, impl::data_type_t src_type, impl::data_type_t dst_type>
+template <cpu_isa_t isa>
 struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         using dw_conv_pd_type = cpu_convolution_fwd_pd_t;
@@ -59,44 +59,43 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
 
         DECLARE_COMMON_PD_T(
                 JIT_IMPL_NAME_HELPER("jit_uni_int8_1x1:",
-                        isa == avx2 && jcp_.ver == ver_vnni ? avx2_vnni : isa,
-                        ""),
+                        isa == avx2 && jcp_.has_vnni ? avx2_vnni : isa, ""),
                 jit_uni_x8s8s32x_1x1_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
-            bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(src_type, data_type::s8,
-                            data_type::undef, dst_type, data_type::s32)
+                    && utils::one_of(src_md(0)->data_type, s8, u8)
+                    && weights_md(0)->data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
+                            utils::one_of(
+                                    weights_md(1)->data_type, f32, s32, s8, u8))
+                    && utils::one_of(dst_md(0)->data_type, f32, s32, s8, u8)
+                    && desc()->accum_data_type == s32
                     && attr()->has_default_values(smask_t::oscale
                                     | smask_t::zero_points_runtime
-                                    | smask_t::post_ops,
-                            dst_type)
+                                    | smask_t::post_ops | smask_t::sum_dt,
+                            dst_md(0)->data_type)
+                    && attr()->post_ops_.check_sum_consistent_dt(
+                            dst_md(0)->data_type)
                     && !has_zero_dim_memory() && zero_points_ok()
                     && set_default_formats_common(
                             dat_tag(), format_tag::any, dat_tag())
-                    && set_or_check_wei_format();
+                    && set_or_check_wei_format()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             const convolution_desc_t *conv_d = desc();
             const memory_desc_t *src_d = src_md();
             rtus_prepare(this, conv_d, src_d, dst_md(), weights_md());
 
-            status_t status = jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(
-                    jcp_, *conv_d, *src_d, *weights_md(), *dst_md(),
-                    with_bias() ? *weights_md(1) : types::zero_md(), *attr(),
-                    zendnn_get_max_threads(), rtus_.reduce_src_);
-            if (status != status::success) return status;
-
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
+            CHECK(jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_conf(jcp_,
+                    *conv_d, *src_d, *weights_md(), *dst_md(),
+                    with_bias() ? *weights_md(1) : types::zero_md(), attr_,
+                    zendnn_get_max_threads(), rtus_.reduce_src_));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_uni_x8s8s32x_1x1_conv_kernel<isa>::init_scratchpad(
@@ -139,21 +138,16 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
         reduce_to_unit_stride_t rtus_;
         jit_conv_conf_t *jcp_dw_; // doesn't own a resource
         std::unique_ptr<cpu_convolution_fwd_pd_t> dw_conv_pd_;
-        template <data_type_t sdt, data_type_t ddt>
-        using dw_pd_t = typename jit_uni_x8s8s32x_convolution_fwd_t<isa, sdt,
-                ddt>::pd_t;
+        using dw_pd_t = typename jit_uni_x8s8s32x_convolution_fwd_t<isa>::pd_t;
 
     protected:
         bool zero_points_ok() const {
-            using namespace data_type;
+            // Only common zero points are supported -> mask should only be 0
             int mask_src = 0, mask_dst = 0;
-            const int c_mask = 0x1,
-                      g_mask = 0x3; // mask for i/o-channel and ngroups
             attr()->zero_points_.get(ZENDNN_ARG_SRC, nullptr, &mask_src, nullptr);
             attr()->zero_points_.get(ZENDNN_ARG_DST, nullptr, &mask_dst, nullptr);
             return attr()->zero_points_.has_default_values(ZENDNN_ARG_WEIGHTS)
-                    && utils::one_of(mask_src, 0, c_mask, g_mask)
-                    && utils::one_of(mask_dst, 0, c_mask, g_mask);
+                    && mask_src == 0 && mask_dst == 0;
         }
 
         status_t copy(const pd_t &other) {
@@ -164,34 +158,8 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
                 dw_conv_pd_.reset(static_cast<cpu_convolution_fwd_pd_t *>(
                         other.dw_conv_pd_->clone()));
                 if (!dw_conv_pd_) return status::out_of_memory;
-#define CASE(sdt, ddt) \
-    case ddt: \
-        jcp_dw_ = &( \
-                static_cast<dw_pd_t<sdt, ddt> *>(dw_conv_pd_.get())->jcp_); \
-        break;
 
-                auto dw_dst_dt = dw_conv_pd_->dst_md()->data_type;
-                if (jcp_.dst_dt == data_type::u8) {
-                    switch (dw_dst_dt) {
-                        CASE(data_type::u8, data_type::u8);
-                        CASE(data_type::u8, data_type::s8);
-                        CASE(data_type::u8, data_type::s32);
-                        CASE(data_type::u8, data_type::f32);
-                        default: assert(!"unreachable");
-                    }
-                } else if (jcp_.dst_dt == data_type::s8) {
-                    switch (dw_dst_dt) {
-                        CASE(data_type::s8, data_type::u8);
-                        CASE(data_type::s8, data_type::s8);
-                        CASE(data_type::s8, data_type::s32);
-                        CASE(data_type::s8, data_type::f32);
-                        default: assert(!"unreachable");
-                    }
-                } else {
-                    assert(!"unreachable");
-                }
-
-#undef CASE
+                jcp_dw_ = &(static_cast<dw_pd_t *>(dw_conv_pd_.get())->jcp_);
             }
             return status::success;
         }
@@ -257,7 +225,6 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             auto &jcp_1x1 = jcp_;
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
 
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);
@@ -291,36 +258,11 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             CHECK(get_depthwise_conv_desc(
                     cd_dw, src_md, attr_1x1, attr_dw, dw_po_index));
 
-            auto dw_dst_dt = cd_dw.dst_desc.data_type;
-
-#define CASE(sdt, ddt) \
-    case ddt: { \
-        std::unique_ptr<dw_pd_t<sdt, ddt>> fusable_pd( \
-                new dw_pd_t<sdt, ddt>(&cd_dw, &attr_dw, nullptr)); \
-        CHECK(fusable_pd->init(engine)); \
-        jcp_dw_ = &(fusable_pd->jcp_); \
-        dw_conv_pd_ = std::move(fusable_pd); \
-        break; \
-    }
-            if (jcp_1x1.dst_dt == data_type::u8) {
-                switch (dw_dst_dt) {
-                    CASE(data_type::u8, data_type::u8);
-                    CASE(data_type::u8, data_type::s8);
-                    CASE(data_type::u8, data_type::s32);
-                    CASE(data_type::u8, data_type::f32);
-                    default: return status::unimplemented;
-                }
-            } else if (jcp_1x1.dst_dt == data_type::s8) {
-                switch (dw_dst_dt) {
-                    CASE(data_type::s8, data_type::u8);
-                    CASE(data_type::s8, data_type::s8);
-                    CASE(data_type::s8, data_type::s32);
-                    CASE(data_type::s8, data_type::f32);
-                    default: return status::unimplemented;
-                }
-            } else
-                return status::unimplemented;
-#undef CASE
+            std::unique_ptr<dw_pd_t> fusable_pd(
+                    new dw_pd_t(&cd_dw, &attr_dw, nullptr));
+            CHECK(fusable_pd->init(engine));
+            jcp_dw_ = &(fusable_pd->jcp_);
+            dw_conv_pd_ = std::move(fusable_pd);
 
             ok = true
                     && (zendnn_memory_desc_equal(&src_md, dw_conv_pd_->src_md(0)))
@@ -373,18 +315,14 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
     template <cpu_isa_t _isa, typename conv_t>
     friend status_t init_rtus_driver(conv_t *self);
 
-    template <impl::data_type_t _sdt, impl::data_type_t _ddt>
     using fusable_pd_type =
-            typename jit_uni_x8s8s32x_convolution_fwd_t<isa, _sdt, _ddt>::pd_t;
+            typename jit_uni_x8s8s32x_convolution_fwd_t<isa>::pd_t;
 
     jit_uni_x8s8s32x_1x1_convolution_fwd_t(const pd_t *apd)
         : primitive_t(apd) {}
 
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    // Note: In case of fused depthwise convolution, the final output datatype
-    // after fusion may not be dst_data_t.
+    // Note: In case of fused depthwise convolution, the final output data type
+    // after fusion may not be same as for dst.
     typedef typename prec_traits<data_type::s32>::type acc_data_t;
 
     status_t init(engine_t *engine) override {
@@ -411,10 +349,10 @@ struct jit_uni_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
 
 private:
     status_t execute_forward(const exec_ctx_t &ctx) const;
-    void execute_forward_thr(const int ithr, const int nthr,
-            const src_data_t *src, const wei_data_t *weights, const char *bias,
-            const wei_data_t *weights_dw, const char *bias_dw, dst_data_t *dst,
-            const int32_t *src_zero_point, const int32_t *dst_zero_point,
+    void execute_forward_thr(const int ithr, const int nthr, const char *src,
+            const char *weights, const char *bias, const char *weights_dw,
+            const char *bias_dw, char *dst, const int32_t *src_zero_point,
+            const int32_t *dst_zero_point,
             const memory_tracking::grantor_t &scratchpad,
             const void *post_ops_binary_rhs_arg_vec,
             const void *post_ops_binary_rhs_arg_vec_dw) const;

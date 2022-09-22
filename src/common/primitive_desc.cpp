@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,24 +24,38 @@
 #include "c_types_map.hpp"
 #include "nstl.hpp"
 
+#include "engine.hpp"
 #include "primitive.hpp"
 #include "primitive_desc.hpp"
 
 using namespace zendnn::impl;
 using namespace zendnn::impl::status;
 
-zendnn_primitive_desc::zendnn_primitive_desc(primitive_desc_t *pd, engine_t *engine)
-    : pd_(pd), engine_(engine) {}
-
 zendnn_primitive_desc::zendnn_primitive_desc(
         const std::shared_ptr<primitive_desc_t> &pd, engine_t *engine)
     : pd_(pd), engine_(engine) {}
 
+static int po_inputs(const post_ops_t &post_ops, const primitive_kind_t kind) {
+    int n_inputs = 0;
+    for (int idx = 0; idx < post_ops.len(); ++idx) {
+        if (post_ops.contain(kind, idx)) n_inputs++;
+    }
+    return n_inputs;
+}
+
+int primitive_desc_t::n_binary_po_inputs() const {
+    return po_inputs(attr()->post_ops_, primitive_kind::binary);
+}
+int primitive_desc_t::n_prelu_po_inputs() const {
+    return po_inputs(attr()->post_ops_, primitive_kind::prelu);
+}
+
 status_t zendnn_primitive_desc::create_primitive_iface(
-        std::pair<primitive_iface_t *, bool> &primitive_iface) const {
+        std::pair<primitive_iface_t *, bool> &primitive_iface,
+        const cache_blob_t &cache_blob) const {
     // Step 1: create impl::primitive_t or get it from primitive cache
     std::pair<std::shared_ptr<primitive_t>, bool> p;
-    auto status = pd_->create_primitive(p, engine());
+    auto status = pd_->create_primitive(p, engine(), cache_blob);
     if (status != status::success) return status;
     // Step 2: create primitive_iface_t, init and return it to user
     primitive_iface_t *p_iface = nullptr;
@@ -83,10 +97,18 @@ zendnn::impl::engine_t *zendnn_primitive_desc::scratchpad_engine() const {
 
 status_t zendnn_primitive_desc::query(query_t what, int idx, void *result) const {
     auto status = status::success;
-    if (what == query::engine) {
-        *(engine_t **)result = engine();
-    } else {
-        status = pd_->query(what, idx, result);
+    switch (what) {
+        case query::engine: *(engine_t **)result = engine(); break;
+        case query::cache_blob_id_size_s64:
+            *(dim_t *)result = (dim_t)pd_->get_cache_blob_id(engine()).size();
+            break;
+        case query::cache_blob_id:
+            *(const uint8_t **)result = pd_->get_cache_blob_id(engine()).empty()
+                    ? nullptr
+                    : pd_->get_cache_blob_id(engine()).data();
+            break;
+
+        default: status = pd_->query(what, idx, result);
     }
     return status;
 }

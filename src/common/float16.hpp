@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -91,12 +91,11 @@ inline float16_t &float16_t::operator=(float f) {
         ee = 0x1F;
         mm = 0;
     } else {
-        // Underflow. Scale the input float, converting it
-        // into an equivalent denormal.
-        float ff = f * utils::bit_cast<float, uint32_t>(0x01000000);
+        // Underflow.
+        float ff = fabsf(f) + 0.5;
         uint32_t ii = utils::bit_cast<uint32_t>(ff);
         ee = 0;
-        mm = ii;
+        mm = ii & 0x7FF;
     }
 
     this->raw = (ss << 15) | (ee << 10) | mm;

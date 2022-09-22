@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -29,7 +29,7 @@
 #include "common/type_helpers.hpp"
 
 #include "cpu/cpu_primitive.hpp"
-#include "cpu/simple_q10n.hpp"
+#include "cpu/ref_io_helper.hpp"
 
 #include "cpu/matmul/matmul_utils.hpp"
 #include "cpu/matmul/ref_matmul.hpp"
@@ -39,19 +39,15 @@ namespace impl {
 namespace cpu {
 namespace matmul {
 
-template <data_type_t src_type, data_type_t weights_type, data_type_t dst_type,
-        data_type_t acc_type>
-status_t ref_matmul_t<src_type, weights_type, dst_type, acc_type>::execute_ref(
-        const exec_ctx_t &ctx) const {
-    const auto src = CTX_IN_MEM(const src_data_t *, ZENDNN_ARG_SRC);
-    const auto weights = CTX_IN_MEM(const weights_data_t *, ZENDNN_ARG_WEIGHTS);
-    const auto bias = CTX_IN_MEM(const char *, ZENDNN_ARG_BIAS);
-    auto dst = CTX_OUT_MEM(dst_data_t *, ZENDNN_ARG_DST);
+status_t ref_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
+    status_t status = status::success;
+    const auto src = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC);
+    const auto weights = CTX_IN_MEM(const void *, ZENDNN_ARG_WEIGHTS);
+    const auto bias = CTX_IN_MEM(const void *, ZENDNN_ARG_BIAS);
+    auto dst = CTX_OUT_CLEAN_MEM(void *, ZENDNN_ARG_DST, status);
+    CHECK(status);
 
     DEFINE_SCALES_BUFFER(scales);
-    DEFINE_ZERO_POINTS_BUFFER(src_zero_point, ZENDNN_ARG_SRC);
-    DEFINE_ZERO_POINT_VALUE(weights_zero_point, ZENDNN_ARG_WEIGHTS);
-    DEFINE_ZERO_POINTS_BUFFER(dst_zero_point, ZENDNN_ARG_DST);
 
     const auto src_d = ctx.memory_mdw(ZENDNN_ARG_SRC, pd()->src_md());
     const auto weights_d = ctx.memory_mdw(ZENDNN_ARG_WEIGHTS, pd()->weights_md());
@@ -75,15 +71,9 @@ status_t ref_matmul_t<src_type, weights_type, dst_type, acc_type>::execute_ref(
     const int bia_mask
             = utils::get_dims_mask(dst_d.dims(), bia_d.dims(), ndims);
 
-    // zp_idx_mult = 1 for per_dim1 zero points and 0, otherwise
-    const int src_zp_idx_mult
-            = !pd()->attr()->zero_points_.common(ZENDNN_ARG_SRC);
-    const int dst_zp_idx_mult
-            = !pd()->attr()->zero_points_.common(ZENDNN_ARG_DST);
-
     // mm kernel
     auto ker = [&](const dims_t dst_dims_idx, dim_t m, dim_t n) {
-        acc_data_t acc = 0;
+        float acc = 0;
         dims_t src_dims_idx, weights_dims_idx;
         utils::copy_dims_with_mask(src_dims_idx, dst_dims_idx, ndims, src_mask);
         utils::copy_dims_with_mask(
@@ -95,30 +85,29 @@ status_t ref_matmul_t<src_type, weights_type, dst_type, acc_type>::execute_ref(
         for (dim_t k = 0; k < K; ++k) {
             src_k_dim = k;
             wei_k_dim = k;
-            acc_data_t s
-                    = static_cast<acc_data_t>(src[src_d.off_v(src_dims_idx)]);
-            if (src_zero_point)
-                s -= static_cast<acc_data_t>(
-                        src_zero_point[src_zp_idx_mult * k]);
-
-            acc += (acc_data_t)s
-                    * (weights[weights_d.off_v(weights_dims_idx)]
-                            - weights_zero_point);
+            const auto src_off = src_d.off_v(src_dims_idx);
+            const auto weights_off = weights_d.off_v(weights_dims_idx);
+            const float s
+                    = io::load_float_value(src_d.data_type(), src, src_off);
+            const float w = io::load_float_value(
+                    weights_d.data_type(), weights, weights_off);
+            acc += s * w;
         }
         return acc;
     };
 
     // bias section
-    const data_type_t bia_dt = pd()->desc()->bias_desc.data_type;
-    auto get_bias = [&](const dims_t &dst_dims_idx) -> float {
+    auto ker_bias = [&](const dims_t &dst_dims_idx) -> float {
         dims_t bia_dims_idx;
         utils::copy_dims_with_mask(bia_dims_idx, dst_dims_idx, ndims, bia_mask);
-        dim_t off = bia_d.off_v(bia_dims_idx);
-        return math::get_bias(bias, off, bia_dt);
+        const auto bias_off = bia_d.off_v(bia_dims_idx);
+        return io::load_float_value(bia_d.data_type(), bias, bias_off);
     };
 
     // output scale section
     const dim_t scale_stride = pd()->attr()->output_scales_.mask_ == 0 ? 0 : 1;
+
+    auto sum_dt = pd()->attr()->post_ops_.get_sum_dt(dst_d.data_type());
 
     // computations
     parallel_nd(batch, M, N, [&](dim_t mb, dim_t m, dim_t n) {
@@ -126,42 +115,26 @@ status_t ref_matmul_t<src_type, weights_type, dst_type, acc_type>::execute_ref(
         // account for M, N dims for index calculations
         const size_t l_offset = mb * M * N + m * N + n;
         utils::l_dims_by_l_offset(dst_dims_idx, l_offset, dst_d.dims(), ndims);
-        auto &dst_value = dst[dst_d.off_v(dst_dims_idx)];
-        acc_data_t acc = ker(dst_dims_idx, m, n);
-        float res = acc;
-        if (bias || non_default_attrs) {
-            if (bias) res += get_bias(dst_dims_idx);
-            res *= scales[scale_stride * n];
+        float d = ker(dst_dims_idx, m, n);
+        if (bias) d += ker_bias(dst_dims_idx);
+
+        const auto dst_off = dst_d.off_v(dst_dims_idx);
+        if (non_default_attrs) {
+            d *= scales[scale_stride * n];
 
             ref_post_ops_t::args_t args;
-            args.dst_val = dst_value;
+            args.dst_val = io::load_float_value(sum_dt, dst, dst_off);
             args.ctx = &ctx;
             args.l_offset = l_offset;
             args.dst_md = pd()->dst_md();
-            ref_post_ops->execute(res, args);
-
-            if (dst_zero_point)
-                res += (float)dst_zero_point[dst_zp_idx_mult * n];
+            ref_post_ops->execute(d, args);
         }
-        dst_value = cpu::saturate_and_round<dst_data_t>(res);
+        io::store_float_value(dst_d.data_type(), d, dst, dst_off);
         utils::dim_iterator(dst_d.dims(), dst_dims_idx, batch_ndims);
     });
 
     return status::success;
 }
-
-using namespace data_type;
-template struct ref_matmul_t<f32, f32, f32, f32>;
-template struct ref_matmul_t<bf16, bf16, f32, f32>;
-template struct ref_matmul_t<bf16, bf16, bf16, f32>;
-template struct ref_matmul_t<s8, s8, f32, s32>;
-template struct ref_matmul_t<s8, s8, s32, s32>;
-template struct ref_matmul_t<s8, s8, s8, s32>;
-template struct ref_matmul_t<s8, s8, u8, s32>;
-template struct ref_matmul_t<u8, s8, f32, s32>;
-template struct ref_matmul_t<u8, s8, s32, s32>;
-template struct ref_matmul_t<u8, s8, s8, s32>;
-template struct ref_matmul_t<u8, s8, u8, s32>;
 
 } // namespace matmul
 } // namespace cpu

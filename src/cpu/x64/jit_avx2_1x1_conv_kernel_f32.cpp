@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 * Copyright 2018 YANDEX LLC
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +21,7 @@
 *******************************************************************************/
 
 #include <assert.h>
+#include <limits>
 
 #include "common/c_types_map.hpp"
 #include "common/memory.hpp"
@@ -64,7 +65,7 @@ jit_avx2_1x1_conv_kernel_f32::jit_avx2_1x1_conv_kernel_f32(
 
         rhs_arg_static_params_t rhs_arg_static_params {helper_vmm_idx, r13, r14,
                 preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md), tail_size,
                 use_exact_tail_scalar_bcast};
         static_params_t static_params {this->param1, rhs_arg_static_params};
@@ -163,27 +164,21 @@ void jit_avx2_1x1_conv_kernel_f32::apply_postops(
         if (jcp.with_binary) {
             binary_injector::rhs_arg_dynamic_params_t rhs_arg_params,
                     rhs_arg_params_tail;
-            const auto oc_off_oprnd = r12;
 
             iterate(load_loop_blk, ur, load_dim_tail,
                     [&](const bool mask_flag, const int i, const int j) {
-                        const int aux_output_offset
+                        const size_t aux_output_offset
                                 = (i * get_output_i_offset(jcp)
-                                        + j * get_output_j_offset(jcp));
+                                          + j * get_output_j_offset(jcp))
+                                * sizeof(float);
                         const auto vmm_idx
                                 = vreg_accum_idx(load_loop_blk, i, j);
                         vmm_idxs.emplace(vmm_idx);
 
-                        rhs_arg_params_tail.vmm_idx_to_oc_elem_off_addr.emplace(
-                                vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-                        rhs_arg_params_tail.vmm_idx_to_oc_elem_off_val.emplace(
-                                vmm_idx, i * jcp.oc_block);
-                        rhs_arg_params_tail.vmm_idx_to_oc_off_oprnd.emplace(
-                                vmm_idx, oc_off_oprnd);
+                        rhs_arg_params_tail.vmm_idx_to_out_reg.emplace(
+                                vmm_idx, aux_reg_output_data);
                         rhs_arg_params_tail.vmm_idx_to_out_elem_off_val.emplace(
                                 vmm_idx, aux_output_offset);
-                        rhs_arg_params_tail.vmm_idx_to_out_off_oprnd.emplace(
-                                vmm_idx, oc_off_oprnd);
                         if (mask_flag)
                             rhs_arg_params_tail.vmm_tail_idx_.emplace(vmm_idx);
                     });
@@ -191,14 +186,11 @@ void jit_avx2_1x1_conv_kernel_f32::apply_postops(
             rhs_arg_params.vmm_tail_idx_.clear();
 
             const injector_utils::register_preserve_guard_t register_guard(
-                    this, {abi_param1, oc_off_oprnd});
+                    this, {abi_param1});
             const size_t reg_guard_stack_occupied
                     = register_guard.stack_space_occupied();
             mov(abi_param1,
                     ptr[rsp + reg_abi_param1_backup
-                            + reg_guard_stack_occupied]);
-            mov(oc_off_oprnd,
-                    ptr[rsp + reg_binary_post_op_acc_off
                             + reg_guard_stack_occupied]);
 
             Label postops_done;
@@ -350,6 +342,7 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                 jmp(load_init_done);
 
                 L(load_init_tail);
+                vxorps(vreg_load(i), vreg_load(i), vreg_load(i));
                 load_bytes(vreg_load(i), aux_reg_load_data,
                         get_load_offset_bwd_w(0, i),
                         load_dim_tail * sizeof(float));
@@ -401,6 +394,8 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
             push(aux_reg_bcast_data);
         }
 
+        const auto is_padding = jcp.oc_without_padding != jcp.oc;
+        if (is_padding) uni_vxorps(vtmp, vtmp, vtmp);
         for (int j = 0; j < ur; ++j)
             for (int i = 0; i < load_loop_blk; ++i) {
                 if (load_dim_tail > 0 && i == load_loop_blk - 1) {
@@ -425,10 +420,14 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                         lea(reg_tmp,
                                 ptr[aux_reg_output_data
                                         + reg_tmp_output_stride]);
-                        store_bytes(vreg_accum(load_loop_blk, i, j), reg_tmp,
-                                get_output_offset(i, j),
-                                load_dim_tail * sizeof(float));
+                        vmovups(output_ptr(i, j),
+                                vreg_accum(load_loop_blk, i, j));
                     } else {
+                        if (is_padding && jcp.with_binary) {
+                            vmovups(ptr[aux_reg_output_data
+                                            + get_output_offset(i, j)],
+                                    vtmp);
+                        }
                         store_bytes(vreg_accum(load_loop_blk, i, j),
                                 aux_reg_output_data, get_output_offset(i, j),
                                 load_dim_tail * sizeof(float));
@@ -471,6 +470,7 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                             jmp(fma_load_done);
 
                             L(fma_load_tail);
+                            vxorps(vreg_load(i), vreg_load(i), vreg_load(i));
                             load_bytes(vreg_load(i), aux_reg_load_data,
                                     get_load_offset_bwd_w(u + 1, i),
                                     load_dim_tail * sizeof(float));
@@ -731,8 +731,8 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
                             format_kind::undef, cd.diff_bias_desc.format_kind)
             != format_kind::undef;
 
-    jcp.os = jcp.od * jcp.oh * jcp.ow;
-    jcp.is = jcp.id * jcp.ih * jcp.iw;
+    jcp.os = static_cast<dim_t>(jcp.od) * jcp.oh * jcp.ow;
+    jcp.is = static_cast<dim_t>(jcp.id) * jcp.ih * jcp.iw;
 
     jcp.typesize_in = sizeof(prec_traits<data_type::f32>::type);
     jcp.typesize_out = sizeof(prec_traits<data_type::f32>::type);
@@ -796,8 +796,10 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({avx2, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero});
     if (!post_ops_ok_) return status::unimplemented;
 
     bool args_ok = true && jcp.ngroups == 1 && jcp.src_tag == dat_tag
@@ -998,6 +1000,14 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     jcp.nb_bcast = div_up(jcp.bcast_dim, jcp.bcast_block);
     jcp.nb_load = div_up(jcp.load_dim, jcp.load_block);
     jcp.nb_reduce = div_up(jcp.reduce_dim, jcp.reduce_block);
+
+    if (jcp.prop_kind == backward_weights) {
+        const auto mb_with_nb_reduce
+                = static_cast<dim_t>(jcp.mb) * jcp.nb_reduce;
+        // prevent too large argument to cpu reducer
+        if (mb_with_nb_reduce > std::numeric_limits<int>::max())
+            return status::unimplemented;
+    }
 
     return status::success;
 }

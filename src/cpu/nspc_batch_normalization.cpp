@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -49,17 +49,27 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
     const bool is_training = pd()->is_training();
     const bool fuse_norm_relu = pd()->fuse_norm_relu();
     const bool calculate_stats = !pd()->stats_is_src();
-    const bool with_relu = pd()->with_relu_post_op();
+    const bool with_relu = pd()->with_relu_post_op(is_training);
+
+    const memory_desc_wrapper ss_d(pd()->weights_md());
+
+    const auto use_ss = pd()->use_scaleshift();
+    const auto use_scale = pd()->use_scale();
+    const auto use_shift = pd()->use_shift();
+
+    const size_t shift_off
+            = use_ss && !ss_d.has_zero_dim() ? ss_d.off(1, 0) : 0;
 
     auto scratchpad = ctx.get_scratchpad_grantor();
     auto tmp_mean = scratchpad.template get<acc_data_t>(key_bnorm_tmp_mean);
     auto tmp_var = scratchpad.template get<acc_data_t>(key_bnorm_tmp_var);
     auto *ws_reduce = scratchpad.template get<acc_data_t>(key_bnorm_reduction);
 
-    status_t status = status::success;
-
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
-    auto scaleshift = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SCALE_SHIFT);
+    auto scale = CTX_IN_MEM(const acc_data_t *,
+            use_scale ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
+    auto shift = use_shift ? CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SHIFT)
+                           : use_ss ? &scale[shift_off] : nullptr;
 
     acc_data_t *mean, *variance;
     if (!calculate_stats) {
@@ -69,21 +79,16 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
                 CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_VARIANCE));
     } else {
         if (save_stats) {
-            mean = CTX_OUT_CLEAN_MEM(acc_data_t *, ZENDNN_ARG_MEAN, status);
-            CHECK(status);
-            variance = CTX_OUT_CLEAN_MEM(
-                    acc_data_t *, ZENDNN_ARG_VARIANCE, status);
-            CHECK(status);
+            mean = CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_MEAN);
+            variance = CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_VARIANCE);
         } else {
             mean = tmp_mean;
             variance = tmp_var;
         }
     }
 
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
-    auto ws = CTX_OUT_CLEAN_MEM(uint8_t *, ZENDNN_ARG_WORKSPACE, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(uint8_t *, ZENDNN_ARG_WORKSPACE);
     acc_data_t *tmp_data_ = d_type == bf16
             ? scratchpad.template get<acc_data_t>(key_bnorm_bf16cvt)
             : nullptr;
@@ -95,10 +100,11 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
     const dim_t SP = pd()->H() * pd()->W() * pd()->D();
 
     const float eps = pd()->desc()->batch_norm_epsilon;
-    const bool use_scaleshift = pd()->use_scaleshift();
-    auto maybe_post_op
-            = [&](acc_data_t res) { return (with_relu && res < 0) ? 0 : res; };
-    int nthr = zendnn_get_max_threads();
+    auto maybe_post_op = [&](acc_data_t res) {
+        if (with_relu) return math::relu_fwd(res, pd()->alpha());
+        return res;
+    };
+    const int nthr = pd()->nthr_;
 
     if (calculate_stats) {
         parallel(nthr, [&](const int ithr, const int nthr) {
@@ -141,10 +147,13 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
 
             acc_data_t *mean_loc = tmp_mean + nstl::max(C, (dim_t)16) * ithr;
 
-            for (dim_t c = 0; c < C; c++) {
-                mean_loc[c] = mean[c];
-                ws_reduce[C * ithr + c] = 0.;
+            if (ithr > 0 || save_stats) {
+                for (dim_t c = 0; c < C; c++)
+                    mean_loc[c] = mean[c];
             }
+
+            for (dim_t c = 0; c < C; c++)
+                ws_reduce[C * ithr + c] = 0.;
 
             for (dim_t n = N_s; n < N_e; n++) {
                 for (dim_t sp = 0; sp < SP; sp++) {
@@ -176,8 +185,10 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
         });
         parallel(nthr, [&](const int ithr, const int nthr) {
             acc_data_t *variance_loc = tmp_var + nstl::max(C, (dim_t)16) * ithr;
-            for (dim_t c = 0; c < C; c++)
-                variance_loc[c] = variance[c];
+            if (ithr > 0 || save_stats) {
+                for (dim_t c = 0; c < C; c++)
+                    variance_loc[c] = variance[c];
+            }
         });
     }
 
@@ -218,12 +229,11 @@ status_t nspc_batch_normalization_fwd_t<d_type>::execute_forward(
                     const size_t c_off = s_off + c;
                     acc_data_t sqrt_variance = static_cast<acc_data_t>(
                             sqrtf(variance_loc[c] + eps));
-                    acc_data_t sm = (use_scaleshift ? (acc_data_t)scaleshift[c]
-                                                    : (acc_data_t)1.0f)
+                    acc_data_t sm = (use_ss || use_scale ? (acc_data_t)scale[c]
+                                                         : (acc_data_t)1.0f)
                             / sqrt_variance;
-                    acc_data_t sv = use_scaleshift
-                            ? (acc_data_t)scaleshift[C + c]
-                            : (acc_data_t)0;
+                    acc_data_t sv = use_ss || use_shift ? (acc_data_t)shift[c]
+                                                        : (acc_data_t)0;
                     acc_data_t bn_res = sm * (_src[c] - mean_loc[c]) + sv;
                     if (fuse_norm_relu) {
                         if (bn_res <= 0) {
@@ -251,32 +261,46 @@ template struct nspc_batch_normalization_fwd_t<bf16>;
 template <data_type_t d_type>
 status_t nspc_batch_normalization_bwd_t<d_type>::execute_backward(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
+
+    const memory_desc_wrapper diff_ss_d(pd()->diff_weights_md());
+
+    const auto use_ss = pd()->use_scaleshift();
+    const auto use_scale = pd()->use_scale();
+    const auto use_shift = pd()->use_shift();
+
+    const size_t diff_shift_off
+            = use_ss && !diff_ss_d.has_zero_dim() ? diff_ss_d.off(1, 0) : 0;
+
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto mean = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_MEAN);
     auto variance = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_VARIANCE);
+    auto scale = CTX_IN_MEM(
+            acc_data_t *, use_scale ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
     auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
-    auto scaleshift = CTX_IN_MEM(const acc_data_t *, ZENDNN_ARG_SCALE_SHIFT);
     auto ws = CTX_IN_MEM(const uint8_t *, ZENDNN_ARG_WORKSPACE);
 
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
-    CHECK(status);
-    auto diff_scaleshift = CTX_OUT_CLEAN_MEM(
-            acc_data_t *, ZENDNN_ARG_DIFF_SCALE_SHIFT, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DIFF_SRC);
+    auto diff_scale = CTX_OUT_MEM(acc_data_t *,
+            use_scale ? ZENDNN_ARG_DIFF_SCALE : ZENDNN_ARG_DIFF_SCALE_SHIFT);
+    auto diff_shift = use_shift
+            ? CTX_OUT_MEM(acc_data_t *, ZENDNN_ARG_DIFF_SHIFT)
+            : use_ss ? &diff_scale[diff_shift_off] : nullptr;
 
     auto scratchpad = ctx.get_scratchpad_grantor();
     auto tmp_diff_ss
             = scratchpad.template get<acc_data_t>(key_bnorm_tmp_diff_ss);
 
-    if (diff_scaleshift == nullptr) diff_scaleshift = tmp_diff_ss;
+    const size_t scratch_diff_shift_off = diff_scale ? 0 : pd()->C();
+    if (diff_scale == nullptr) diff_scale = tmp_diff_ss;
+    if (diff_shift == nullptr)
+        diff_shift = &tmp_diff_ss[scratch_diff_shift_off];
 
     const dim_t N = pd()->MB();
     const dim_t C = pd()->C();
     const int simd_w = 16;
     const dim_t C_align = utils::rnd_up(C, simd_w);
     const dim_t SP = pd()->D() * pd()->H() * pd()->W();
-    acc_data_t *diff_gamma = diff_scaleshift, *diff_beta = diff_scaleshift + C;
+    acc_data_t *diff_gamma = diff_scale, *diff_beta = diff_shift;
     acc_data_t *ws_reduce
             = scratchpad.template get<acc_data_t>(key_bnorm_reduction);
     acc_data_t *tmp_data_ = d_type == bf16
@@ -284,7 +308,6 @@ status_t nspc_batch_normalization_bwd_t<d_type>::execute_backward(
             : nullptr;
 
     const float eps = pd()->desc()->batch_norm_epsilon;
-    const bool use_scaleshift = pd()->use_scaleshift();
     const bool calculate_diff_stats = !pd()->use_global_stats();
     const bool fuse_norm_relu = pd()->fuse_norm_relu();
 
@@ -294,7 +317,7 @@ status_t nspc_batch_normalization_bwd_t<d_type>::execute_backward(
             platform::get_vector_register_size() / (int)sizeof(float), 8);
     const dim_t tail = C % c_blk;
     const dim_t nb_c_blk = (size_t)C / c_blk;
-    int nthr = zendnn_get_max_threads();
+    const int nthr = pd()->nthr_;
 
     parallel(nthr, [&](const int ithr, const int nthr) {
         dim_t N_s = 0, N_e = 0;
@@ -403,7 +426,7 @@ status_t nspc_batch_normalization_bwd_t<d_type>::execute_backward(
 #endif
                 for (dim_t c = 0; c < nb_c_blk * c_blk; c++) {
                     const size_t c_off = s_off + c;
-                    acc_data_t gamma = use_scaleshift ? scaleshift[c] : 1;
+                    acc_data_t gamma = use_ss || use_scale ? scale[c] : 1;
                     acc_data_t sqrt_variance = static_cast<acc_data_t>(
                             1.0f / sqrtf(variance[c] + eps));
                     acc_data_t v_diff_src;
@@ -421,8 +444,8 @@ status_t nspc_batch_normalization_bwd_t<d_type>::execute_backward(
                 }
                 for (dim_t c = 0; c < tail; c++) {
                     const size_t c_off = s_off + nb_c_blk * c_blk + c;
-                    acc_data_t gamma = use_scaleshift
-                            ? scaleshift[nb_c_blk * c_blk + c]
+                    acc_data_t gamma = use_ss || use_scale
+                            ? scale[nb_c_blk * c_blk + c]
                             : 1;
                     acc_data_t sqrt_variance = static_cast<acc_data_t>(
                             1.0f / sqrtf(variance[nb_c_blk * c_blk + c] + eps));

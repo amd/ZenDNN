@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -73,7 +73,6 @@ const memory_desc_t *conv_prop_invariant_bia_d(const convolution_desc_t *desc) {
 const memory_desc_t *conv_prop_invariant_dst_d(const convolution_desc_t *desc) {
     return conv_prop_invariant_dst_d(const_cast<convolution_desc_t *>(desc));
 }
-
 const memory_desc_t *conv_prop_invariant_batchNormScale_d(const convolution_desc_t *desc) {
     return conv_prop_invariant_batchNormScale_d(const_cast<convolution_desc_t *>(desc));
 }

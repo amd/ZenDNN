@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -55,11 +55,6 @@ void generate(
     code.mov(reg_tmp, code.ptr[reg_ctx + BAR_SENSE_OFF]);
     code.push(reg_tmp);
     code.mov(reg_tmp, 1);
-
-    if (mayiuse(avx512_mic)) {
-        code.prefetchwt1(code.ptr[reg_ctx + BAR_CTR_OFF]);
-        code.prefetchwt1(code.ptr[reg_ctx + BAR_CTR_OFF]);
-    }
 
     code.lock();
     code.xadd(code.ptr[reg_ctx + BAR_CTR_OFF], reg_tmp);

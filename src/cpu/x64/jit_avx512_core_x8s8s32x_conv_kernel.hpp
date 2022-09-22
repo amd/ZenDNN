@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include "common/memory_tracking.hpp"
 
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
+#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
 
@@ -49,8 +50,11 @@ struct _jit_avx512_core_x8s8s32x_fwd_kernel : public jit_generator {
 private:
     constexpr static int isa_simd_width_
             = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
+    using Vmm_down_t =
+            typename utils::conditional<std::is_same<Vmm, Xbyak::Zmm>::value,
+                    Xbyak::Ymm, Xbyak::Xmm>::type;
     const int ic_sub_step = 4;
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
 
     enum {
@@ -73,6 +77,7 @@ private:
     const Xbyak::Reg64 reg_out = r10;
     const Xbyak::Reg64 aux_reg_inp = r11;
     const Xbyak::Reg64 reg_ptr_sum_scale = r11;
+    const Xbyak::Reg64 reg_ptr_sum_zp = abi_not_param1;
     const Xbyak::Reg64 aux_reg_ker = r12;
     const Xbyak::Reg64 reg_compensation = r14;
     const Xbyak::Reg64 aux_reg_inp_d = r13;
@@ -99,9 +104,13 @@ private:
     const Xbyak::Reg64 reg_icb = reg_bias;
     const Xbyak::Reg64 reg_jmp_tbl_base = reg_kj;
 
+    /* binary post-op operand */
+    const Xbyak::Reg64 temp_offset_reg = r12;
+
     const Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
     const Xbyak::Opmask kblend_mask = Xbyak::Opmask(3);
     const Xbyak::Opmask postops_mask = Xbyak::Opmask(4);
+    const Xbyak::Opmask ktail_mask_extended = Xbyak::Opmask(5);
 
     const Vmm vmm_wei = Vmm(31);
     /* used during bias section of store_output */
@@ -111,6 +120,7 @@ private:
     const Vmm vmm_prev_dst = Vmm(31);
     /* used during write-out section of store_output */
     const Vmm vmm_saturation = Vmm(30);
+    const Vmm vmm_sum_zp = Vmm(30);
     const Vmm vmm_zero = Vmm(31);
 
     /* used in compute_ker (but set during prepare_output) */
@@ -123,6 +133,15 @@ private:
     const Vmm vmm_zp = Vmm(25);
     const Vmm vmm_zp_one = Vmm(26);
     const Vmm vmm_zp_tmp = vmm_zp;
+
+    /* bf16 emulation */
+    Xbyak::Zmm bf16_emu_reserv_1 = Xbyak::Zmm(26);
+    Xbyak::Zmm bf16_emu_reserv_2 = Xbyak::Zmm(27);
+    Xbyak::Zmm bf16_emu_reserv_3 = Xbyak::Zmm(28);
+    Xbyak::Zmm bf16_emu_reserv_4 = Xbyak::Zmm(30);
+    // bf16_emu_reserv_5 not required when only computing vcvtneps2bf16()
+    const Xbyak::Reg64 bf16_emu_scratch = aux_reg_ker;
+    std::unique_ptr<bf16_emulation_t> bf16_emu_;
 
     /* registers use only for depthwise
        groups are always blocked by 16(padded if needed),
@@ -187,11 +206,37 @@ private:
                                 jcp.stride_w));
     }
 
+    // bf16 utils
+    int get_src_down_idx(int nb_x_blocking) {
+        int idx = nb_x_blocking * jcp.ur_w;
+        assert(idx < 31);
+        return idx;
+    }
+    inline Vmm maybe_mask_vmm(Vmm vmm, bool mask_flag) {
+        return mask_flag ? vmm | ktail_mask_extended : vmm;
+    }
+    inline Vmm_down_t maybe_mask_vmm_down(Vmm_down_t vmm, bool mask_flag) {
+        return (mask_flag) ? vmm | ktail_mask : vmm;
+    }
+    inline void store_bf16(Xbyak::Address addr, int vmm_dst_idx,
+            int vmm_down_idx, bool mask_flag) {
+        auto vmm_down = Vmm_down_t(vmm_down_idx);
+        bf16_emu_->vcvtneps2bf16(
+                Xbyak::Ymm(vmm_down_idx), Xbyak::Zmm(vmm_dst_idx));
+
+        // for xmm, upper half is zero after conversion to
+        // bf16, so mask always & mask for tails
+        vmovdqu16(addr,
+                maybe_mask_vmm_down(vmm_down, mask_flag || jcp.simd_w == 4));
+    }
+
     void prepare_output(int ur_w);
     void apply_sum(int ur_w, bool last_oc_block_flag, const int nb_oc_block,
-            const int oc_block, const float *p_sum_scale);
+            const int oc_block, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void apply_postops(int ur_w, bool last_oc_block_flag, const int nb_oc_block,
-            const int oc_block, const float *p_sum_scale);
+            const int oc_block, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void store_output(int ur_w, bool last_oc_block_flag);
     void compute_ker_dw(int ur_w, int pad_l, int pad_r,
             ic_block_t last_ic_block_flag, bool h_padded);
@@ -235,7 +280,7 @@ struct jit_avx512_core_x8s8s32x_fwd_kernel {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
     void operator()(const jit_conv_call_s *p) const { (*kernel_)(p); }

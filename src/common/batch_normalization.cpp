@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,10 +37,13 @@ namespace {
 status_t bnrm_desc_init(batch_normalization_desc_t *bnrm_desc,
         prop_kind_t prop_kind, const memory_desc_t *data_desc,
         const memory_desc_t *diff_data_desc, float epsilon, unsigned flags) {
-    bool args_ok = true && !any_null(bnrm_desc, data_desc)
+    bool args_ok = !any_null(bnrm_desc, data_desc)
             && one_of(prop_kind, forward_training, forward_inference,
                     backward_data, backward)
-            && IMPLICATION(prop_kind & backward, diff_data_desc != nullptr);
+            && IMPLICATION(prop_kind & backward, diff_data_desc != nullptr)
+            && IMPLICATION(
+                    one_of(prop_kind, forward_training, forward_inference),
+                    !memory_desc_wrapper(data_desc).format_any());
     if (!args_ok) return invalid_arguments;
 
     auto bd = batch_normalization_desc_t();
@@ -60,12 +63,22 @@ status_t bnrm_desc_init(batch_normalization_desc_t *bnrm_desc,
     if (one_of(bd.prop_kind, backward_data, backward))
         bd.diff_data_desc = *diff_data_desc;
 
-    dims_t scaleshift_dims = {2, data_desc->dims[1]};
-    zendnn_memory_desc_init_by_tag(&bd.data_scaleshift_desc, 2, scaleshift_dims,
-            data_type::f32, zendnn_nc);
-    bd.diff_data_scaleshift_desc = zero_md();
+    bd.data_scaleshift_desc = zero_md();
+    if (flags & (zendnn_use_scale | zendnn_use_shift)) {
+        dims_t scaleshift_dims = {data_desc->dims[1]};
+        zendnn_memory_desc_init_by_tag(&bd.data_scaleshift_desc, 1,
+                scaleshift_dims, data_type::f32, zendnn_x);
+    } else {
+        dims_t scaleshift_dims = {2, data_desc->dims[1]};
+        zendnn_memory_desc_init_by_tag(&bd.data_scaleshift_desc, 2,
+                scaleshift_dims, data_type::f32, zendnn_nc);
+    }
 
-    if (bd.prop_kind == backward && (flags & zendnn_use_scaleshift)) {
+    bd.diff_data_scaleshift_desc = zero_md();
+    if (bd.prop_kind == backward
+            && (flags
+                    & (zendnn_use_scaleshift | zendnn_use_scale
+                            | zendnn_use_shift))) {
         bd.diff_data_scaleshift_desc = bd.data_scaleshift_desc;
     }
 
@@ -74,9 +87,13 @@ status_t bnrm_desc_init(batch_normalization_desc_t *bnrm_desc,
             &bd.stat_desc, 1, stats_dims, data_type::f32, zendnn_x);
     bd.batch_norm_epsilon = epsilon;
 
-    unsigned bnorm_flags
-            = zendnn_use_global_stats | zendnn_use_scaleshift | zendnn_fuse_norm_relu;
+    unsigned bnorm_flags = zendnn_use_global_stats | zendnn_use_scaleshift
+            | zendnn_fuse_norm_relu | zendnn_use_scale | zendnn_use_shift;
     if ((~bnorm_flags & flags) != 0) return invalid_arguments;
+    // zendnn_use_scaleshift can't be mixed with zendnn_use_scale or zendnn_use_shift
+    if ((flags & zendnn_use_scaleshift)
+            && (flags & (zendnn_use_scale | zendnn_use_shift)))
+        return invalid_arguments;
 
     bd.flags = flags;
 

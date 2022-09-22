@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -74,7 +74,7 @@ void jit_avx2_1x1_convolution_fwd_t::execute_forward(
         bias = padded_bias;
     }
 
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(jcp.nthr, [&](const int ithr, const int nthr) {
         execute_forward_thr(ithr, nthr, src, weights, bias, weights_dw, bias_dw,
                 dst, scratchpad, post_ops_binary_rhs_arg_vec.data(),
                 post_ops_binary_rhs_arg_vec_dw.data());
@@ -661,6 +661,29 @@ void jit_avx2_1x1_convolution_bwd_weights_t::execute_backward_weights(
         }
     };
 
+    auto maybe_zero_icpad = [&](const int g_start, const int g_end,
+                                    const int ocb_start, const int ocb_end) {
+        // write zeros to IC padded region.
+        const int ic_tail = jcp.ic_without_padding % jcp.ic_block;
+        if (is_ddst_layout_nxc && ic_tail != 0) {
+            for_(int g = g_start; g < g_end; ++g)
+            for (int z_ocb = ocb_start; z_ocb < ocb_end; ++z_ocb) {
+                const int z_icb = nb_ic - 1;
+                const size_t off = pd()->with_groups()
+                        ? diff_weights_d.blk_off(g, z_ocb, z_icb)
+                        : diff_weights_d.blk_off(z_ocb, z_icb);
+                data_t *z_wei = diff_weights + off + ic_tail * jcp.oc_block;
+                const int zero_work
+                        = (nb_ic * jcp.ic_block - jcp.ic_without_padding)
+                        * jcp.oc_block;
+                ZENDNN_PRAGMA_OMP_SIMD()
+                for (int o = 0; o < zero_work; ++o) {
+                    z_wei[o] = 0;
+                }
+            }
+        }
+    };
+
     auto ker = [&](const int ithr, const int nthr) {
         assert(nthr == rw->balancer().nthr_);
 
@@ -733,6 +756,11 @@ void jit_avx2_1x1_convolution_bwd_weights_t::execute_backward_weights(
                 sp = 0;
                 img += 1;
             }
+
+            if (rw->balancer().nthr_per_group_ == 1
+                    && bcast_i + 1 >= bcast_work)
+                maybe_zero_icpad(g, g + 1, oc_b,
+                        nstl::min(nb_oc, oc_b + nb_oc_blocking));
 
             nd_iterator_step(
                     g, jcp.ngroups, load_i, load_work, bcast_i, bcast_work);

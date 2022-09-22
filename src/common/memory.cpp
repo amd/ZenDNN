@@ -1,4 +1,9 @@
-﻿/*******************************************************************************
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -97,19 +102,15 @@ zendnn_memory::zendnn_memory(zendnn::impl::engine_t *engine,
 }
 
 status_t zendnn_memory::set_data_handle(void *handle, stream_t *stream) {
-    //using namespace zendnn::impl;
+    using namespace zendnn::impl;
 
     void *old_handle;
-    status_t status = memory_storage()->get_data_handle(&old_handle);
-    if (status != success) return status;
-    //CHECK(memory_storage()->get_data_handle(&old_handle));
+    CHECK(memory_storage()->get_data_handle(&old_handle));
 
     if (handle != old_handle) {
-        status_t status = memory_storage()->set_data_handle(handle);
-        if (status != success) return status;
-        //CHECK(memory_storage()->set_data_handle(handle));
+        CHECK(memory_storage_->set_data_handle(handle));
     }
-    return success;
+    return status::success;
 }
 
 status_t zendnn_memory::reset_memory_storage(
@@ -120,12 +121,12 @@ status_t zendnn_memory::reset_memory_storage(
         memory_storage_t *memory_storage_ptr;
         status_t status = engine_->create_memory_storage(
                 &memory_storage_ptr, use_runtime_ptr, 0, nullptr);
-        if (status != success) return status;
+        if (status != status::success) return status;
 
         memory_storage_.reset(memory_storage_ptr);
     }
 
-    return success;
+    return status::success;
 }
 
 status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
@@ -203,9 +204,8 @@ status_t zendnn_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndim
                     : default_strides[d + 1] * md.padded_dims[d + 1];
         }
         strides = default_strides;
-    } else {
-        /* TODO: add sanity check for the provided strides */
     }
+    if (!memory_desc_strides_check(md, strides)) return invalid_arguments;
 
     array_copy(md.format_desc.blocking.strides, strides, md.ndims);
     zendnnInfo(ZENDNN_CORELOG, "Memory desc init by Stride [memory]");
@@ -242,13 +242,14 @@ status_t zendnn_memory_desc_init_submemory(memory_desc_t *md,
 
     /* TODO: put this into memory_desc_wrapper */
     for (int d = 0; d < src_d.ndims(); ++d) {
-        /* very limited functionality for now */
-        const bool ok = true && offsets[d] % blocks[d] == 0 /* [r1] */
-                && src_d.padded_offsets()[d] == 0
-                && (false || dims[d] % blocks[d] == 0 || dims[d] < blocks[d]);
-        if (!ok) return unimplemented;
-
         const bool is_right_border = offsets[d] + dims[d] == src_d.dims()[d];
+
+        /* very limited functionality for now */
+        const bool ok = offsets[d] % blocks[d] == 0 /* [r1] */
+                && src_d.padded_offsets()[d] == 0
+                && IMPLICATION(!is_right_border,
+                        (dims[d] % blocks[d] == 0 || dims[d] < blocks[d]));
+        if (!ok) return unimplemented;
 
         dst_d.dims[d] = dims[d];
         dst_d.padded_dims[d] = is_right_border
@@ -517,9 +518,12 @@ size_t zendnn_data_type_size(zendnn_data_type_t data_type) {
 status_t zendnn_memory_create(memory_t **memory, const memory_desc_t *md,
         engine_t *engine, void *handle) {
 #ifdef ZENDNN_WITH_SYCL
-    return zendnn_sycl_interop_memory_create(
-            memory, md, engine, zendnn_sycl_interop_usm, handle);
-#else
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_SYCL
+    if (engine->kind() == engine_kind::gpu)
+#endif
+        return zendnn_sycl_interop_memory_create(
+                memory, md, engine, zendnn_sycl_interop_usm, handle);
+#endif
     if (any_null(memory, engine)) return invalid_arguments;
 
     memory_desc_t z_md = types::zero_md();
@@ -542,7 +546,6 @@ status_t zendnn_memory_create(memory_t **memory, const memory_desc_t *md,
     zendnnInfo(ZENDNN_CORELOG, "Memory created [memory]");
     *memory = _memory;
     return success;
-#endif
 }
 
 status_t zendnn_memory_get_memory_desc(

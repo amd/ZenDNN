@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -64,11 +64,13 @@ private:
     const reg64_t reg_src_zero_point = r9;
     const reg64_t reg_filt = r10;
     const reg64_t aux_reg_filt = r11;
+    const reg64_t aux_reg_filt_d = r15;
 
     const reg64_t reg_oc_blocks = r12;
     const reg64_t reg_icb = r13;
     const reg64_t reg_oi = r14;
     const reg64_t reg_kj = rax;
+    const reg64_t reg_ki = rbx;
     const reg64_t reg_overflow = reg_kj;
     const reg64_t reg_scratch = rsi;
 
@@ -81,8 +83,10 @@ private:
     void prepare_output(int ur_w);
     void store_output(int ur_w, bool last_oc_block_flag);
     void compute_ker(int ur_w, int pad_l, int pad_r,
-            ic_block_t last_ic_block_flag, bool h_padded);
+            ic_block_t last_ic_block_flag, bool padded);
     void kh_loop(int ur_w, int pad_l, int pad_r, ic_block_t last_ic_block_flag,
+            bool handle_h_pad);
+    void kd_loop(int ur_w, int pad_l, int pad_r, ic_block_t last_ic_block_flag,
             bool handle_h_pad);
     void icb_loop(int ur_w, int pad_l, int pad_r, bool handle_h_pad);
     void unroll_width(const bool h_padding);
@@ -116,16 +120,16 @@ struct jit_avx512_core_amx_copy_to_wbuffer_t : public jit_generator {
 private:
     jit_conv_conf_t jcp;
 
-    const reg64_t &reg_src = rax;
-    const reg64_t &reg_dst = rbx;
-    const reg64_t &reg_tmp = rdx;
+    const reg64_t reg_src = rax;
+    const reg64_t reg_dst = rbx;
+    const reg64_t reg_tmp = rdx;
 
-    const Xbyak::Opmask &kmask_load = k2;
+    const Xbyak::Opmask kmask_load = k2;
 
-    const Xbyak::Zmm &zmm_src = zmm0;
-    const Xbyak::Zmm &zmm_dst = zmm1;
-    const Xbyak::Zmm &zmm_idx = zmm2;
-    const Xbyak::Zmm &zmm_zero = zmm3;
+    const Xbyak::Zmm zmm_src = zmm0;
+    const Xbyak::Zmm zmm_dst = zmm1;
+    const Xbyak::Zmm zmm_idx = zmm2;
+    const Xbyak::Zmm zmm_zero = zmm3;
 
     void generate() override;
 };
@@ -142,38 +146,38 @@ struct jit_avx512_core_amx_copy_to_pbuffer_t : public jit_generator {
 private:
     jit_conv_conf_t jcp;
 
-    const reg64_t &reg_inp_ptr = r15;
-    const reg64_t &reg_out_ptr = r14;
+    const reg64_t reg_inp_ptr = r15;
+    const reg64_t reg_out_ptr = r14;
 
-    const reg64_t &reg_aux_inp_ptr = r13;
-    const reg64_t &reg_aux_out_ptr = r12;
+    const reg64_t reg_aux_inp_ptr = r13;
+    const reg64_t reg_aux_out_ptr = r12;
 
-    const reg64_t &reg_khp = r10;
+    const reg64_t reg_khp = r10;
 
     /* relow stuff */
-    const reg64_t &reg_kht = r11;
-    const reg64_t &reg_tov = r9;
-    const reg64_t &reg_bov = r8;
-    const reg64_t &reg_kwp = rax;
-    const reg64_t &reg_lov = reg_aux_inp_ptr;
-    const reg64_t &reg_rov = rbx;
-    const reg64_t &reg_save_out_ptr = rdx;
-    const reg64_t &reg_cnt = rbp;
+    const reg64_t reg_kht = r11;
+    const reg64_t reg_tov = r9;
+    const reg64_t reg_bov = r8;
+    const reg64_t reg_kwp = rax;
+    const reg64_t reg_lov = reg_aux_inp_ptr;
+    const reg64_t reg_rov = rbx;
+    const reg64_t reg_save_out_ptr = rdx;
+    const reg64_t reg_cnt = rbp;
     /* relow stuff */
 
     /* non-relow stuff */
-    const reg64_t &reg_kdp = abi_not_param1;
-    const reg64_t &reg_kdc = rbp;
-    const reg64_t &reg_khc = r11;
+    const reg64_t reg_kdp = abi_not_param1;
+    const reg64_t reg_kdc = rbp;
+    const reg64_t reg_khc = r11;
 
-    const reg64_t &reg_kh_over = r8;
-    const reg64_t &reg_tover = rax;
-    const reg64_t &reg_bover = rbx;
+    const reg64_t reg_kh_over = r8;
+    const reg64_t reg_tover = rax;
+    const reg64_t reg_bover = rbx;
 
-    const reg64_t &reg_owb = rdx;
+    const reg64_t reg_owb = rdx;
     /* non-relow stuff */
 
-    const reg64_t &reg_tmp = rsi;
+    const reg64_t reg_tmp = rsi;
 
     const Xbyak::Opmask &ktail_mask = k2;
 
@@ -198,7 +202,7 @@ struct jit_avx512_core_amx_fwd_kernel_t : public jit_generator {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static status_t init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
 
@@ -271,7 +275,7 @@ struct jit_avx512_core_amx_fwd_kernel_t : public jit_generator {
 
 private:
     constexpr static int isa_simd_width_
-            = cpu_isa_traits<avx512_common>::vlen / sizeof(float);
+            = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
     std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
             postops_injector_;
     std::unique_ptr<jit_avx512_core_amx_copy_to_pbuffer_t> copy_to_pbuffer_;
@@ -296,33 +300,34 @@ private:
     std::queue<w_pad_output> w_padding;
 
     /* data regs */
-    const Xbyak::Reg64 &reg_inp_ptr = r15;
-    const Xbyak::Reg64 &reg_wei_ptr = r14;
-    const Xbyak::Reg64 &reg_out_ptr = r13;
-    const Xbyak::Reg64 &reg_wsp_ptr = r12;
+    const Xbyak::Reg64 reg_inp_ptr = r15;
+    const Xbyak::Reg64 reg_wei_ptr = r14;
+    const Xbyak::Reg64 reg_out_ptr = r13;
+    const Xbyak::Reg64 reg_wsp_ptr = r12;
 
-    const Xbyak::Reg64 &reg_kd = rsi;
+    const Xbyak::Reg64 reg_kd = r9;
 
-    const Xbyak::Reg64 &reg_bias = r11;
-    const Xbyak::Reg64 &reg_ptr_scales = r10;
-    const Xbyak::Reg64 &reg_ptr_sum_scale = r9;
-    const Xbyak::Reg64 &reg_aux_saturation = reg_ptr_sum_scale;
+    const Xbyak::Reg64 reg_bias = r11;
+    const Xbyak::Reg64 reg_ptr_scales = r10;
+    const Xbyak::Reg64 reg_ptr_sum_scale = r9;
+    const Xbyak::Reg64 reg_ptr_sum_zp = abi_not_param1;
+    const Xbyak::Reg64 reg_aux_saturation = reg_ptr_sum_scale;
 
-    const Xbyak::Reg64 &reg_inp_stride = rbx;
-    const Xbyak::Reg64 &reg_wei_stride = rdx;
+    const Xbyak::Reg64 reg_inp_stride = rbx;
+    const Xbyak::Reg64 reg_wei_stride = rdx;
     // zero-point computation
-    const Xbyak::Reg64 &reg_zp_compensation = rax;
-    const Xbyak::Reg64 &reg_src_zero_point = r8;
-    const Xbyak::Reg64 &reg_zero_point_pbuff = rsi;
-    const Xbyak::Reg64 &reg_dst_zero_point = abi_not_param1;
+    const Xbyak::Reg64 reg_zp_compensation = rax;
+    const Xbyak::Reg64 reg_src_zero_point = r8;
+    const Xbyak::Reg64 reg_zero_point_pbuff = rsi;
+    const Xbyak::Reg64 reg_dst_zero_point = abi_not_param1;
 
     // rbp - reserved for EVEX compression
-    const Xbyak::Reg64 &reg_last_h = abi_not_param1;
-    const Xbyak::Reg64 &reg_jmp_blk = reg_last_h;
+    const Xbyak::Reg64 reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 reg_jmp_blk = reg_last_h;
 
     // temporary, used in generate() function only
-    const Xbyak::Reg64 &reg_oc_blocks = rax;
-    const Xbyak::Reg64 &reg_tmp = r8;
+    const Xbyak::Reg64 reg_oc_blocks = rax;
+    const Xbyak::Reg64 reg_tmp = r8;
 
     const Xbyak::Opmask &ktail_mask = k2;
 
@@ -330,13 +335,14 @@ private:
     const Xbyak::Zmm &zmm_saturation = zmm_bias;
     const Xbyak::Zmm &zmm_zero = zmm30;
     const Xbyak::Zmm &zmm_prev_dst = zmm29;
+    const Xbyak::Zmm &zmm_sum_zp = zmm26;
     /* zero-point */
     const Xbyak::Zmm &zmm_zp = zmm29;
     const Xbyak::Zmm &zmm_src_zp = zmm28;
     const Xbyak::Zmm &zmm_dst_zp = zmm27;
 
-    const Xbyak::Reg64 &bin_injector_helper_reg_1 = r14;
-    const Xbyak::Reg64 &bin_injector_helper_reg_2 = r15;
+    const Xbyak::Reg64 bin_injector_helper_reg_1 = r14;
+    const Xbyak::Reg64 bin_injector_helper_reg_2 = r15;
 
     // AUX: Steps, shifts and offsets
     size_t get_inp_icb_step() const;
@@ -382,10 +388,13 @@ private:
     Xbyak::Zmm zmm_mask(
             const Xbyak::Zmm &zmm_in, bool mask_flag, bool store = false);
     void apply_sum(const Xbyak::Zmm &zmm_out, const float *p_sum_scale,
-            const Xbyak::Address &addr, const bool mask_flag);
+            const int32_t *p_sum_zp, const Xbyak::Address &addr,
+            const bool mask_flag);
     void apply_postops(const Xbyak::Zmm &zmm_out, const float *p_sum_scale,
-            const Xbyak::Address &addr, const bool mask_flag, const size_t off,
-            const int ocb);
+            const int32_t *p_sum_zp, const Xbyak::Address &addr,
+            const size_t off, const bool mask_flag);
+    inline void store_output_ymm_bf16(
+            const int idx, const Xbyak::Address &addr, const bool mask_flag);
     void store_output_vector_bf16(
             const Xbyak::Zmm &zmm_out, int ocb, int h, int w);
     void store_output_vector_int8(const Xbyak::Zmm &zmm_out, int ocb, int h,
@@ -396,15 +405,18 @@ private:
     void store_output(int width, int tail, bool do_store,
             const bool handle_h_block, const int t_pad_output,
             const int b_pad_output, const int l_pad_output,
-            const int r_pad_output, const bool is_last_oh_block);
-    void interleave_store(
-            int width, int const t_pad_output, int const b_pad_output);
+            const int r_pad_output, const bool is_last_oh_block,
+            const bool zp_3d_pad = false);
+    void interleave_store(int width, int const t_pad_output,
+            int const b_pad_output, const bool zp_3d_pad = false);
     void compute_icb_loop(int width, bool do_store, const bool handle_h_block,
             const int t_pad_output, const int b_pad_output,
             const int l_pad_output, const int r_pad_output,
-            const bool is_last_oh_block = false);
+            const bool zp_3d_pad, const bool is_last_oh_block = false);
     void dispatch_icb_loop(int width, bool do_store, const int l_pad_output,
-            const int r_pad_output);
+            const int r_pad_output, const bool zp_3d_pad);
+    void dispatch_zp_3d_compute(int width, bool do_store,
+            const int l_pad_output, const int r_pad_output);
     void compute_ow_loop();
 
     void generate() override;
@@ -423,36 +435,38 @@ private:
     jit_conv_conf_t jcp;
 
     // pointers
-    const reg64_t &reg_ptr_inp = r15;
-    const reg64_t &reg_ptr_out = r14;
+    const reg64_t reg_ptr_inp = r15;
+    const reg64_t reg_ptr_out = r14;
 
     // auxiliary pointers
-    const reg64_t &reg_ptr_aux_inp_h = r13;
-    const reg64_t &reg_ptr_aux_inp_w = r12;
-    const reg64_t &reg_ptr_aux_out = r11;
+    const reg64_t reg_ptr_aux_inp_h = r13;
+    const reg64_t reg_ptr_aux_inp_w = r12;
+    const reg64_t reg_ptr_aux_out = r11;
 
     // variables
-    const reg64_t &reg_khp = r10; // kh padding
-    const reg64_t &reg_tov = r9; // top overflow
-    const reg64_t &reg_bov = r8; // bottom overflow
-    const reg64_t &reg_kwp = rax; // kw padding
-    const reg64_t &reg_lov = rbx; // left overflow
-    const reg64_t &reg_rov = abi_not_param1; // right overflow
+    const reg64_t reg_khp = r10; // kh padding
+    const reg64_t reg_tov = r9; // top overflow
+    const reg64_t reg_bov = reg_tov; // bottom overflow
+    const reg64_t reg_kwp = rax; // kw padding
+    const reg64_t reg_lov = rbx; // left overflow
+    const reg64_t reg_rov = abi_not_param1; // right overflow
+    const reg64_t reg_kd = r8; // 3d filter
 
     // counters
-    const reg64_t &reg_cnt_khp = rdx;
-    const reg64_t &reg_cnt_tmp = rbp;
-    const reg64_t &reg_cnt_ocb = rsi;
+    const reg64_t reg_cnt_khp = rdx;
+    const reg64_t reg_cnt_tmp = rbp;
+    const reg64_t reg_cnt_ocb = rsi;
 
-    const reg64_t &reg_tmp = reg_cnt_tmp;
+    const reg64_t reg_tmp = reg_cnt_tmp;
 
-    const Xbyak::Opmask &ktail_mask = k2;
+    const Xbyak::Opmask ktail_mask = k2;
 
-    const Xbyak::Zmm &zmm_tmp = zmm1;
-    const Xbyak::Zmm &zmm_zero = zmm0;
+    const Xbyak::Zmm zmm_tmp = zmm1;
+    const Xbyak::Zmm zmm_zero = zmm0;
 
     void generate() override;
     void copy_row(bool is_masked);
+    void kd_loop(bool is_masked);
 };
 
 struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
@@ -465,7 +479,7 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
         , attr_(attr)
         , eltwise_injector_(nullptr) {
         if (jcp.with_eltwise)
-            eltwise_injector_ = new jit_uni_eltwise_injector_f32<avx512_common>(
+            eltwise_injector_ = new jit_uni_eltwise_injector_f32<avx512_core>(
                     this, jcp.eltwise);
         bwd_data_copy_kernel_
                 = new jit_avx512_core_amx_bwd_data_copy_kernel_t(jcp);
@@ -480,13 +494,12 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
         delete bwd_data_copy_kernel_;
     }
 
-    static bool post_ops_ok(
-            const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
+    static bool post_ops_ok(const jit_conv_conf_t &jcp, primitive_attr_t &attr);
 
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &diff_src_pd,
             memory_desc_t &weights_pd, memory_desc_t &diff_dst_pd,
-            memory_desc_t *bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t *bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
 
@@ -501,7 +514,7 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
     }
 
 private:
-    jit_uni_eltwise_injector_f32<avx512_common> *eltwise_injector_;
+    jit_uni_eltwise_injector_f32<avx512_core> *eltwise_injector_;
     jit_avx512_core_amx_bwd_data_copy_kernel_t *bwd_data_copy_kernel_;
 
     int prv_width_ = 0;
@@ -509,47 +522,53 @@ private:
     bool is_store_done_ = false;
     bool is_buffer_empty_ = true;
 
+    bool is_store_done_save_ = false;
+    int prv_width_save_ = 0;
+
     /* data regs */
-    const Xbyak::Reg64 &reg_inp_ptr = r15;
-    const Xbyak::Reg64 &reg_wei_ptr = r14;
-    const Xbyak::Reg64 &reg_out_ptr = r13;
-    const Xbyak::Reg64 &reg_wsp_ptr = r12;
+    const Xbyak::Reg64 reg_inp_ptr = r15;
+    const Xbyak::Reg64 reg_wei_ptr = r14;
+    const Xbyak::Reg64 reg_out_ptr = r13;
+    const Xbyak::Reg64 reg_wsp_ptr = r12;
 
-    const Xbyak::Reg64 &reg_bias = r11;
-    const Xbyak::Reg64 &reg_ptr_scales = r10;
-    const Xbyak::Reg64 &reg_ptr_sum_scale = r9;
-    const Xbyak::Reg64 &reg_aux_saturation = reg_ptr_sum_scale;
+    const Xbyak::Reg64 reg_bias = r11;
+    const Xbyak::Reg64 reg_ptr_scales = r10;
+    const Xbyak::Reg64 reg_ptr_sum_scale = r9;
+    const Xbyak::Reg64 reg_ptr_sum_zp = abi_not_param1;
+    const Xbyak::Reg64 reg_aux_saturation = reg_ptr_sum_scale;
 
-    const Xbyak::Reg64 &reg_aux_inp_ptr = r8;
-    const Xbyak::Reg64 &reg_inp_stride = rbx;
-    const Xbyak::Reg64 &reg_wei_stride = rdx;
+    const Xbyak::Reg64 reg_aux_inp_ptr = r8;
+    const Xbyak::Reg64 reg_inp_stride = rbx;
+    const Xbyak::Reg64 reg_wei_stride = rdx;
 
-    // rsi - free and available
     // rbp - reserved for EVEX compression
-    const Xbyak::Reg64 &reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 reg_kd = rsi;
 
     // temporary, used in generate() function only
-    const Xbyak::Reg64 &reg_ic_blocks = rax;
-    const Xbyak::Reg64 &reg_tmp = reg_aux_inp_ptr;
+    const Xbyak::Reg64 reg_ic_blocks = rax;
+    const Xbyak::Reg64 reg_tmp = reg_aux_inp_ptr;
 
-    const Xbyak::Opmask &ktail_mask = k2;
+    const Xbyak::Opmask ktail_mask = k2;
 
-    const Xbyak::Zmm &zmm_bias = zmm31;
-    const Xbyak::Zmm &zmm_saturation = zmm_bias;
-    const Xbyak::Zmm &zmm_zero = zmm30;
-    const Xbyak::Zmm &zmm_prev_dst = zmm29;
+    const Xbyak::Zmm zmm_bias = zmm31;
+    const Xbyak::Zmm zmm_saturation = zmm_bias;
+    const Xbyak::Zmm zmm_zero = zmm30;
+    const Xbyak::Zmm zmm_prev_dst = zmm29;
+    const Xbyak::Zmm zmm_sum_zp = zmm28;
 
     // AUX: Steps, shifts and offsets
-    size_t get_inp_kh_step() const;
     size_t get_inp_ocb_step() const;
     size_t get_inp_offset(int ihb, int kh, int kw) const;
     size_t get_inp_shift() const;
+    size_t get_inp_d_step() const;
     size_t get_out_icb_offset(int ihb, int icb) const;
     size_t get_out_row_offset(int ihb, int icb, int j) const;
     size_t get_out_shift(int width) const;
     size_t get_wei_kh_step() const;
     size_t get_wei_ocb_step() const;
     size_t get_wei_offset(int icb, int kh, int kw) const;
+    size_t get_wei_d_step() const;
     size_t get_wsp_icb_offset(int ihb, int icb) const;
     size_t get_wsp_row_offset(int ihb, int icb, int j) const;
     size_t get_wsp_shift() const;
@@ -557,6 +576,11 @@ private:
     int get_out_tensor(int h, int i) const;
     int get_inp_tensor(int h) const;
     int get_wei_tensor(int i) const;
+
+    inline bool gaps_in_store() {
+        const int gen_kd = (jcp.kd - 1) * (jcp.dilate_d + 1) + 1;
+        return gen_kd < jcp.stride_d || jcp.dilate_d > 0;
+    }
 
     void prepare_output();
     void init_runtime_counters(bool start_with_last_tile_block);
@@ -576,8 +600,10 @@ private:
     void store_output_vector(
             const Xbyak::Zmm &zmm_out, int icb, int ih, int iw);
     void store_output(int width, bool do_store);
+    void skipped_interleave_store();
     void interleave_store(int width);
-    void compute_ocb_loop(int width, bool do_store);
+    void compute_ocb_loop(int width, bool do_interleave_store);
+    void compute_kd_loop(int width, bool do_store, bool handle_skipped_stores);
     void compute_iw_loop();
 
     void generate() override;
@@ -716,23 +742,6 @@ private:
     int ih_dilate_offset = 0;
     int src_save_offset = 0;
     int ddst_save_offset = 0;
-};
-
-struct jit_diff_wei_trans_to_vnni_t : public jit_generator {
-    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_diff_wei_trans_to_vnni_t)
-
-    jit_diff_wei_trans_to_vnni_t(const jit_conv_conf_t &ajcp)
-        : jit_generator(nullptr, MAX_CODE_SIZE, true, avx512_core_bf16)
-        , jcp(ajcp) {}
-
-    ~jit_diff_wei_trans_to_vnni_t() {}
-
-    status_t create_kernel() override { return jit_generator::create_kernel(); }
-
-    const jit_conv_conf_t jcp;
-
-private:
-    void generate() override;
 };
 
 } // namespace x64

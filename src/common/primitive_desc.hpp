@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,7 +27,8 @@
 #include "zendnn.h"
 
 #include "c_types_map.hpp"
-#include "zendnn_thread.hpp"
+#include "cache_blob.hpp"
+#include "cache_blob_id.hpp"
 #include "memory_tracking.hpp"
 #include "nstl.hpp"
 #include "primitive_attr.hpp"
@@ -38,11 +39,12 @@
 namespace zendnn {
 namespace impl {
 
+struct impl_list_item_t;
 struct primitive_t;
 // Primitive descriptor implementation
 struct primitive_desc_t : public c_compatible {
     primitive_desc_t(const primitive_attr_t *attr, primitive_kind_t kind)
-        : attr_(*attr), kind_(kind) {
+        : attr_(*attr), kind_(kind), pd_iterator_offset_(0) {
         is_initialized_ = is_initialized_ && attr_.is_initialized();
     }
 
@@ -70,6 +72,17 @@ struct primitive_desc_t : public c_compatible {
 
     virtual const op_desc_t *op_desc() const { return nullptr; }
 
+    const std::vector<uint8_t> &get_cache_blob_id(engine_t *engine) const {
+        return cache_blob_id_.get(engine, this);
+    }
+
+    static bool post_op_has_proper_input(const primitive_attr_t *attr,
+            const primitive_kind_t prim, const int idx, const int arg,
+            const int src_mnemonic) {
+        return (attr->post_ops_.contain(prim, idx)
+                && arg == (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | src_mnemonic));
+    }
+
     enum class arg_usage_t { unused, input, output };
     virtual arg_usage_t arg_usage(int arg) const {
         using types::is_zero_md;
@@ -79,13 +92,20 @@ struct primitive_desc_t : public c_compatible {
         if ((arg & ZENDNN_ARG_ATTR_ZERO_POINTS)
                 && !attr()->zero_points_.defined(arg))
             return arg_usage_t::input;
+        if ((arg == (ZENDNN_ARG_ATTR_INPUT_SCALES | ZENDNN_ARG_SRC_0))
+                && !attr()->scales_.get(ZENDNN_ARG_SRC_0).defined())
+            return arg_usage_t::input;
+        if ((arg == (ZENDNN_ARG_ATTR_INPUT_SCALES | ZENDNN_ARG_SRC_1))
+                && !attr()->scales_.get(ZENDNN_ARG_SRC_1).defined())
+            return arg_usage_t::input;
         if (arg == ZENDNN_ARG_SCRATCHPAD && !is_zero_md(scratchpad_md()))
             return arg_usage_t::output;
         for (int idx = 0; idx < attr()->post_ops_.len(); ++idx) {
-            if (attr()->post_ops_.contain(primitive_kind::binary, idx)
-                    && arg
-                            == (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx)
-                                    | ZENDNN_ARG_SRC_1))
+            using namespace primitive_kind;
+            if (post_op_has_proper_input(
+                        attr(), binary, idx, arg, ZENDNN_ARG_SRC_1)
+                    || post_op_has_proper_input(
+                            attr(), prelu, idx, arg, ZENDNN_ARG_WEIGHTS))
                 return arg_usage_t::input;
         }
 
@@ -93,6 +113,22 @@ struct primitive_desc_t : public c_compatible {
     }
 
     virtual const memory_desc_t *arg_md(int arg) const {
+        // Separate binary post-ops sections due to inability to express inside
+        // switch statement.
+        if (arg >= ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0)
+                && arg < ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(
+                           post_ops_t::post_ops_limit)) {
+            const auto &po = attr()->post_ops_;
+            for (int idx = 0; idx < po.len(); ++idx) {
+                if (arg
+                        != (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx)
+                                | ZENDNN_ARG_SRC_1))
+                    continue;
+
+                return &po.entry_[idx].binary.src1_desc;
+            }
+        }
+
         switch (arg) {
             case ZENDNN_ARG_WORKSPACE: return workspace_md(0);
             case ZENDNN_ARG_SCRATCHPAD: return scratchpad_md(0);
@@ -125,11 +161,6 @@ struct primitive_desc_t : public c_compatible {
         dims_t dims = {size};
         zendnn_memory_desc_init_by_tag(
                 &scratchpad_md_, size ? 1 : 0, dims, data_type::u8, zendnn_x);
-    }
-
-    virtual std::type_index impl_id() const {
-        assert(!"primitive_desc_t doesn't have impl_id");
-        return typeid(primitive_desc_t);
     }
 
     /** returns the scratchpad size for the given scratchpad mode. */
@@ -188,31 +219,82 @@ struct primitive_desc_t : public c_compatible {
 
     virtual int n_inputs() const { return 0; }
     virtual int n_outputs() const { return 0; }
-    virtual int n_binary_po_inputs() const {
-        int n_inputs = 0;
-        for (int idx = 0; idx < attr()->post_ops_.len(); ++idx) {
-            if (attr()->post_ops_.contain(primitive_kind::binary, idx))
-                n_inputs++;
-        }
-        return n_inputs;
+    int n_binary_po_inputs() const;
+    int n_prelu_po_inputs() const;
+    // The `hint_mds(bool is_hint)` returns a vector of memory descriptors
+    // that might affect the equality of primitive descriptors for backward pass.
+    //
+    // This function is used for creating a key to fetch primitive or primitive
+    // descriptor from cache.
+    //
+    // 1. When creating a primitive descriptor for backward pass there may be
+    //    a forward primitive descriptor hint that can be used to obtain the
+    //    memory descriptors. In this case the `is_hint` argument must be `true`.
+    // 2. When creating a primitive this function is called for a primitive
+    //    descriptor that can be either forward or backward. In this case
+    //    the `is_hint` argument must be `false`.
+    //       - For forward it will return an empty vector.
+    //       - For backward it will return a vector of memory descriptors if
+    //         the implementation depends on a forward primitive descriptor.
+    //
+    // The current cases are:
+    // - pooling
+    // - shuffle
+    //
+    // Later the list of primitives can be extended. For instance, currently
+    // there is no convolution on the list because nthrs + op_desc
+    // (even with format=`any`) + attributes fully define a particular
+    // implementation.
+    virtual std::vector<memory_desc_t> hint_mds(bool is_hint) const {
+        UNUSED(is_hint);
+        return {};
     }
 
     virtual status_t create_primitive(
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive,
-            engine_t *engine) const = 0;
+            engine_t *engine, const cache_blob_t &cache_blob) const = 0;
 
     // This is a proxy interface that is used for creating nested primitives.
     // It ignores the bool value that indicates whether the requested primitive
     // was taken from cache.
-    status_t create_primitive(
-            std::shared_ptr<primitive_t> &primitive, engine_t *engine) const {
+    status_t create_primitive(std::shared_ptr<primitive_t> &primitive,
+            engine_t *engine,
+            const cache_blob_t &cache_blob = cache_blob_t()) const {
         std::pair<std::shared_ptr<primitive_t>, bool> p;
-        CHECK(create_primitive(p, engine));
+        CHECK(create_primitive(p, engine, cache_blob));
         primitive = p.first;
         return status::success;
     }
 
     virtual const char *name() const = 0;
+
+    int pd_iterator_offset() const { return pd_iterator_offset_; }
+
+protected:
+    primitive_attr_t attr_;
+    primitive_kind_t kind_;
+    int pd_iterator_offset_;
+
+    memory_desc_t scratchpad_md_;
+
+    mutable pd_info_t info_;
+    mutable cache_blob_id_t cache_blob_id_;
+
+    memory_tracking::registry_t scratchpad_registry_;
+
+protected:
+    void init_pd_iterator_offset(int offset) { pd_iterator_offset_ = offset; }
+
+    /** compares ws between fwd_pd and this (make sense to use for bwd_pd)
+     * Expectation: this already set workspace, and this workspace should
+     *              exactly match the one from fwd_pd */
+    bool compare_ws(const primitive_desc_t *fwd_pd) const {
+        if (!workspace_md()) return true; // the impl lives fine w/o workspace
+        return fwd_pd && fwd_pd->workspace_md()
+                && *fwd_pd->workspace_md() == *workspace_md();
+    }
+
+    primitive_desc_t &operator=(const primitive_desc_t &other) = delete;
 
     /* static magic */
 
@@ -224,8 +306,9 @@ struct primitive_desc_t : public c_compatible {
         using pd_op_desc_t = typename pkind_traits<pd_t::base_pkind>::desc_type;
         // A hack to reuse softmax code using logsoftmax primitive.
         // TODO: consider removing it in v2.0 by introducing alg_kind in softmax
-        bool valid_logsoftmax = pd_t::base_pkind == primitive_kind::softmax
-                && adesc->kind == primitive_kind::logsoftmax;
+        bool valid_logsoftmax = pd_t::base_pkind == primitive_kind::softmax_v2
+                && utils::one_of(adesc->kind, primitive_kind::softmax,
+                        primitive_kind::logsoftmax);
         bool valid_pooling = pd_t::base_pkind == primitive_kind::pooling_v2
                 && adesc->kind == primitive_kind::pooling;
         if (adesc->kind != pd_t::base_pkind && !valid_logsoftmax
@@ -250,27 +333,7 @@ struct primitive_desc_t : public c_compatible {
         return success;
     }
 
-protected:
-    primitive_attr_t attr_;
-    primitive_kind_t kind_;
-
-    memory_desc_t scratchpad_md_;
-
-    mutable pd_info_t info_;
-
-    memory_tracking::registry_t scratchpad_registry_;
-
-protected:
-    /** compares ws between fwd_pd and this (make sense to use for bwd_pd)
-     * Expectation: this already set workspace, and this workspace should
-     *              exactly match the one from fwd_pd */
-    bool compare_ws(const primitive_desc_t *fwd_pd) const {
-        if (!workspace_md()) return true; // the impl lives fine w/o workspace
-        return fwd_pd && fwd_pd->workspace_md()
-                && *fwd_pd->workspace_md() == *workspace_md();
-    }
-
-    primitive_desc_t &operator=(const primitive_desc_t &other) = delete;
+    friend struct zendnn::impl::impl_list_item_t;
 };
 
 } // namespace impl
@@ -284,11 +347,6 @@ protected:
 // to which it belongs
 // 2. engine_t - a zendnn engine
 struct zendnn_primitive_desc : public zendnn::impl::c_compatible {
-    // This ctor is used to create a standalone pd
-    zendnn_primitive_desc(
-            zendnn::impl::primitive_desc_t *pd, zendnn::impl::engine_t *engine);
-
-    // This ctor is used to create pd inside primitive_iface_t
     zendnn_primitive_desc(const std::shared_ptr<zendnn::impl::primitive_desc_t> &pd,
             zendnn::impl::engine_t *engine);
 
@@ -306,7 +364,8 @@ struct zendnn_primitive_desc : public zendnn::impl::c_compatible {
             zendnn::impl::query_t what, int idx, void *result) const;
 
     virtual zendnn::impl::status_t create_primitive_iface(
-            std::pair<primitive_iface_t *, bool> &primitive_iface) const;
+            std::pair<primitive_iface_t *, bool> &primitive_iface,
+            const zendnn::impl::cache_blob_t &cache_blob) const;
 
     const std::shared_ptr<zendnn::impl::primitive_desc_t> &impl() const;
 
@@ -323,12 +382,15 @@ protected:
     } \
     status_t create_primitive( \
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive, \
-            engine_t *engine) const override { \
+            engine_t *engine, const cache_blob_t &cache_blob) const override { \
         return primitive_t::create_primitive_common<impl_type, pd_t>( \
-                primitive, this, engine, use_global_scratchpad); \
+                primitive, this, engine, use_global_scratchpad, cache_blob); \
     } \
     const char *name() const override { return impl_name; } \
-    std::type_index impl_id() const override { return typeid(pd_t); }
+    template <typename pd_t> \
+    friend status_t primitive_desc_t::create(primitive_desc_t **pd, \
+            const op_desc_t *adesc, const primitive_attr_t *attr, \
+            engine_t *engine, const primitive_desc_t *hint_fwd);
 
 #define DECLARE_COMMON_PD_T_USE_GLOBAL_SCRATCHPAD(impl_name, impl_type) \
     DECLARE_COMMON_PD_t(impl_name, impl_type, true)

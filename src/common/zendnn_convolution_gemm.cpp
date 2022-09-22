@@ -8,7 +8,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include "zendnn_convolution_winograd.hpp"
-#include "zendnn_private.hpp"
+#include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
 #include "zendnn_helper.hpp"
 

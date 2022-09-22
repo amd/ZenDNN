@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -58,15 +58,18 @@ struct nspc_batch_normalization_fwd_t : public primitive_t {
                     && check_scale_shift_data_type()
                     && memory_desc_matches_tag(*src_md(), format_tag::nhwc)
                     && (attr()->has_default_values()
-                            || this->with_relu_post_op());
+                            || this->with_relu_post_op(is_training()));
             if (!ok) return status::unimplemented;
 
             if (is_training() && fuse_norm_relu()) init_default_ws(8);
 
+            nthr_ = zendnn_get_max_threads();
             init_scratchpad();
 
             return status::success;
         }
+
+        int nthr_; // To not exceed the limit in execute used for set up.
 
     private:
         void init_scratchpad() {
@@ -75,8 +78,7 @@ struct nspc_batch_normalization_fwd_t : public primitive_t {
 
             auto scratchpad = scratchpad_registry().registrar();
             if (!stats_is_src()) {
-                const size_t stats_buf_sz
-                        = nstl::max(C(), dim_t(16)) * zendnn_get_max_threads();
+                const size_t stats_buf_sz = nstl::max(C(), dim_t(16)) * nthr_;
                 scratchpad.template book<acc_data_t>(
                         key_bnorm_reduction, stats_buf_sz);
                 scratchpad.template book<acc_data_t>(
@@ -87,8 +89,8 @@ struct nspc_batch_normalization_fwd_t : public primitive_t {
             if (d_type == bf16) {
                 const int simd_w = 16;
                 const int nbufs = 2;
-                const size_t bf16cvt_buf_sz = nbufs * zendnn_get_max_threads()
-                        * utils::rnd_up(C(), simd_w);
+                const size_t bf16cvt_buf_sz
+                        = nbufs * nthr_ * utils::rnd_up(C(), simd_w);
                 scratchpad.template book<acc_data_t>(
                         key_bnorm_bf16cvt, bf16cvt_buf_sz);
             }
@@ -140,10 +142,13 @@ struct nspc_batch_normalization_bwd_t : public primitive_t {
                 if (!compare_ws(hint_fwd_pd_)) return status::unimplemented;
             }
 
+            nthr_ = zendnn_get_max_threads();
             init_scratchpad();
 
             return status::success;
         }
+
+        int nthr_; // To not exceed the limit in execute used for set up.
 
     private:
         void init_scratchpad() {
@@ -152,14 +157,14 @@ struct nspc_batch_normalization_bwd_t : public primitive_t {
 
             auto scratchpad = scratchpad_registry().registrar();
             scratchpad.template book<acc_data_t>(
-                    key_bnorm_reduction, 2 * C() * zendnn_get_max_threads());
-            scratchpad.template book<acc_data_t>(key_bnorm_tmp_diff_ss,
-                    2 * C() * (zendnn_get_max_threads() + 1));
+                    key_bnorm_reduction, 2 * C() * nthr_);
+            scratchpad.template book<acc_data_t>(
+                    key_bnorm_tmp_diff_ss, 2 * C() * (nthr_ + 1));
             if (d_type == bf16) {
                 const int simd_w = 16;
                 const int nbufs = 2 + !use_global_stats();
-                const size_t bf16cvt_buf_sz = nbufs * zendnn_get_max_threads()
-                        * utils::rnd_up(C(), simd_w);
+                const size_t bf16cvt_buf_sz
+                        = nbufs * nthr_ * utils::rnd_up(C(), simd_w);
                 scratchpad.template book<acc_data_t>(
                         key_bnorm_bf16cvt, bf16cvt_buf_sz);
             }

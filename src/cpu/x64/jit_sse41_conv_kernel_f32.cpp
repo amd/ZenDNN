@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ jit_sse41_conv_fwd_kernel_f32::jit_sse41_conv_fwd_kernel_f32(
 
         const binary_injector::rhs_arg_static_params_t rhs_arg_static_params {
                 helper_vmm_idx, r14, r15, preserve_gpr, preserve_vmm,
-                GET_OFF(post_ops_binary_rhs_arg_vec),
+                GET_OFF(post_ops_binary_rhs_arg_vec), GET_OFF(dst_orig),
                 memory_desc_wrapper(dst_md), tail_size,
                 use_exact_tail_scalar_bcast};
         const binary_injector::static_params_t static_params {
@@ -164,27 +164,20 @@ void jit_sse41_conv_fwd_kernel_f32::apply_postops(
     injector_utils::vmm_index_set_t vmm_idxs;
     if (jcp.with_binary) {
         binary_injector::rhs_arg_dynamic_params_t rhs_arg_params;
-        const auto temp_offset_reg = this->r13;
         iterate(oc_blocks, ur_w,
                 [&](const bool mask_flag, const int i, const int j) {
-                    const int o_off = get_output_offset(i, j) * sizeof(float);
+                    const size_t o_off = get_output_offset(i, j);
                     const auto vmm_idx = get_xmm_idx(ur_w, i, j);
                     vmm_idxs.emplace(vmm_idx);
 
-                    rhs_arg_params.vmm_idx_to_oc_elem_off_addr.emplace(
-                            vmm_idx, ptr[param1 + GET_OFF(oc_l_off)]);
-                    rhs_arg_params.vmm_idx_to_oc_elem_off_val.emplace(
-                            vmm_idx, i * jcp.oc_block);
+                    rhs_arg_params.vmm_idx_to_out_reg.emplace(
+                            vmm_idx, reg_output);
                     rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
                             vmm_idx, o_off);
-                    rhs_arg_params.vmm_idx_to_oc_off_oprnd.emplace(
-                            vmm_idx, temp_offset_reg);
                     if (mask_flag)
                         rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
                 });
-        const injector_utils::register_preserve_guard_t register_guard(
-                this, {temp_offset_reg});
-        imul(temp_offset_reg, simd_iter, simd_w_);
+
         postops_injector_->compute_vector_range(vmm_idxs, rhs_arg_params);
     } else {
         iterate(oc_blocks, ur_w, [&](const bool, const int i, const int j) {
@@ -469,8 +462,10 @@ status_t jit_sse41_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({sse41, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero});
     if (!post_ops_ok_) return status::unimplemented;
 
     const bool flat = jcp.ic == 3;

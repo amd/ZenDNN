@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -23,8 +23,8 @@
 #define COMMON_PRIMITIVE_CACHE_HPP
 
 #include <future>
-#include <list>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 
 #include "c_types_map.hpp"
@@ -56,6 +56,8 @@ struct primitive_cache_t : public c_compatible {
 
     virtual int get_size() const = 0;
 
+    virtual std::shared_ptr<primitive_desc_t> get_pd(const key_t &key) = 0;
+
 protected:
     static utils::rw_mutex_t &rw_mutex() {
         static utils::rw_mutex_t mutex;
@@ -70,9 +72,12 @@ protected:
 
 // The cache uses LRU replacement policy
 struct lru_primitive_cache_t : public primitive_cache_t {
-    lru_primitive_cache_t(int capacity) : capacity_(capacity) {}
+    lru_primitive_cache_t(int capacity) : capacity_(capacity) {
+        cache_mapper_ = utils::make_unique<
+                std::unordered_map<key_t, timed_entry_t>>();
+    }
 
-    ~lru_primitive_cache_t() override = default;
+    ~lru_primitive_cache_t() override;
 
     status_t set_capacity(int capacity) override;
     int get_capacity() const override;
@@ -83,20 +88,47 @@ struct lru_primitive_cache_t : public primitive_cache_t {
 
     int get_size() const override;
 
+    std::shared_ptr<primitive_desc_t> get_pd(const key_t &key) override;
+
 private:
     void evict(size_t n);
     void add(const key_t &key, const value_t &value);
     value_t get(const key_t &key);
 
     size_t capacity_;
-    using cache_list_t = std::list<std::pair<key_t, value_t>>;
-    cache_list_t cache_list_;
-    std::unordered_map<key_t, cache_list_t::iterator> cache_mapper_;
+    struct timed_entry_t {
+        value_t value_;
+        std::atomic<size_t> timestamp_;
+        timed_entry_t(const value_t &value, size_t timestamp)
+            : value_(value), timestamp_(timestamp) {}
+    };
+
+    std::unordered_map<key_t, timed_entry_t> &cache_mapper() {
+        return *cache_mapper_;
+    }
+
+    const std::unordered_map<key_t, timed_entry_t> &cache_mapper() const {
+        return *cache_mapper_;
+    }
+
+    // Each entry in the cache has a corresponding key and timestamp.
+    // NOTE: pairs that contain atomics cannot be stored in an unordered_map *as
+    // an element*, since it invokes the copy constructor of std::atomic, which
+    // is deleted.
+    std::unique_ptr<std::unordered_map<key_t, timed_entry_t>> cache_mapper_;
+
+    // Used for testing.
+    friend size_t ZENDNN_API set_primitive_cache_capacity_without_clearing(
+            size_t capacity);
 };
 
 primitive_cache_t &primitive_cache();
 
+// Undocumented API for testing.
 status_t ZENDNN_API get_primitive_cache_size(int *size);
+bool ZENDNN_API is_primitive_in_cache(const primitive_iface_t *p_iface);
+bool ZENDNN_API is_pd_in_cache(const primitive_desc_iface_t *pd_iface);
+size_t ZENDNN_API set_primitive_cache_capacity_without_clearing(size_t capacity);
 
 } // namespace impl
 } // namespace zendnn

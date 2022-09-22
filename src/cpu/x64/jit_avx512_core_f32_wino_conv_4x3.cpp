@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -329,7 +329,7 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_S_G_D(
     }
 
     parallel_nd(jcp.mb, jcp.dimK_nb_block, jcp.dimK_block,
-            [&](int img, int K_blk1, int K_blk2) {
+            [&](dim_t img, dim_t K_blk1, dim_t K_blk2) {
                 input_transform_data(img, jcp,
                         &(input(img, K_blk1 * jcp.dimK_block + K_blk2, 0, 0,
                                 0)),
@@ -339,7 +339,7 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_S_G_D(
     if (jcp.prop_kind != prop_kind::forward_inference) {
         parallel_nd(jcp.nb_oc, jcp.nb_ic, (jcp.oc_block * jcp.oc_reg_block),
                 (jcp.ic_block * jcp.ic_reg_block),
-                [&](int ofm1, int ifm1, int ofm2, int ifm2) {
+                [&](dim_t ofm1, dim_t ifm1, dim_t ofm2, dim_t ifm2) {
                     float *U_base_ptr = is_fwd
                             ? &(U(ofm1, 0, 0, ifm1, ofm2, ifm2, 0, 0))
                             : &(U(ifm1, 0, 0, ofm1, ifm2, ofm2, 0, 0));
@@ -354,7 +354,7 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_S_G_D(
     }
 
     parallel_nd(jcp.dimN_nb_block, alpha, alpha, jcp.dimM_nb_block,
-            [&](int N_blk1, int oj, int oi, int M_blk1) {
+            [&](dim_t N_blk1, dim_t oj, dim_t oi, dim_t M_blk1) {
                 for (int K_blk1 = 0; K_blk1 < jcp.dimK_nb_block; K_blk1++)
                     for (int N_blk2 = 0; N_blk2 < jcp.dimN_block; N_blk2++)
                         kernel_->gemm_loop_ker((float *)&(M(N_blk1, M_blk1, oj,
@@ -368,14 +368,14 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_S_G_D(
 
     parallel_nd(jcp.mb, jcp.dimM_nb_block,
             (jcp.dimM_block * jcp.dimM_reg_block),
-            [&](int img, int M_blk1, int M_blk2) {
+            [&](dim_t img, dim_t M_blk1, dim_t M_blk2) {
                 const int M_blk
                         = M_blk1 * jcp.dimM_block * jcp.dimM_reg_block + M_blk2;
 
                 float *bias_ptr = wants_padded_bias
                                 && M_blk == jcp.dimM / jcp.dimM_simd_block - 1
                         ? last_slice_bias
-                        : &bias(M_blk, 0);
+                        : jcp.with_bias ? &bias(M_blk, 0) : nullptr;
                 output_transform_data(img, jcp, p_ops,
                         &(M(0, M_blk1, 0, 0, 0, M_blk2, 0, 0)),
                         &(output(img, M_blk, 0, 0, 0)), bias_ptr);
@@ -436,7 +436,7 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_SGD(
 
         parallel_nd(jcp.nb_oc, jcp.nb_ic, (jcp.oc_block * jcp.oc_reg_block),
                 (jcp.ic_block * jcp.ic_reg_block),
-                [&](int ofm1, int ifm1, int ofm2, int ifm2) {
+                [&](dim_t ofm1, dim_t ifm1, dim_t ofm2, dim_t ifm2) {
                     float *U_base_ptr = is_fwd
                             ? &(U(ofm1, 0, 0, ifm1, ofm2, ifm2, 0, 0))
                             : &(U(ifm1, 0, 0, ofm1, ifm2, ofm2, 0, 0));
@@ -450,8 +450,8 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_SGD(
                 });
     }
 
-    parallel_nd_ext(
-            jcp.nthr, jcp.tile_block, [&](int ithr, int nthr, int tile_block) {
+    parallel_nd_ext(jcp.nthr, jcp.tile_block,
+            [&](int ithr, int nthr, dim_t tile_block) {
                 assert(nthr <= jcp.nthr);
                 MAYBE_UNUSED(nthr);
 
@@ -496,7 +496,7 @@ void _jit_avx512_core_f32_wino_conv_4x3_t<is_fwd>::_execute_data_W_SGD(
                                                 == jcp.dimM / jcp.dimM_simd_block
                                                         - 1
                                 ? last_slice_bias
-                                : &bias(M_blk, 0);
+                                : jcp.with_bias ? &bias(M_blk, 0) : nullptr;
 
                         output_transform_tileblock_data(tile_block, jcp, p_ops,
                                 &(M(ithr, M_blk1, 0, 0, 0, M_blk2, 0, 0)),
@@ -694,7 +694,7 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
     {
         if (jcp.with_bias) {
             parallel_nd_in_omp(
-                    nthreads, jcp.oc / simd_w, [&](int ithr, int ofm) {
+                    nthreads, jcp.oc / simd_w, [&](dim_t ithr, dim_t ofm) {
                         float *pdbias = &(diff_bias_prv(ithr, ofm * simd_w));
                         ZENDNN_PRAGMA_OMP_SIMD()
                         for (int v = 0; v < simd_w; v++) {
@@ -852,10 +852,11 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
     float I[alpha][alpha][simd_w];
     float T[alpha][alpha][simd_w];
 
-    PRAGMA_OMP(parallel firstprivate(first_tblk, trans_ker_p, I, T))
+    PRAGMA_OMP(parallel num_threads(nthreads)
+                    firstprivate(first_tblk, trans_ker_p, I, T))
     {
         if (jcp.with_bias) {
-            parallel_nd_in_omp(nthreads, jcp.oc, [&](int ithr, int ofm) {
+            parallel_nd_in_omp(nthreads, jcp.oc, [&](dim_t ithr, dim_t ofm) {
                 diff_bias_prv(ithr, ofm) = 0.0f;
             });
         }
@@ -865,7 +866,7 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
         trans_ker_p.T = T;
 
         parallel_nd_in_omp(jcp.nb_ic, jcp.ic_block, jcp.mb,
-                [&](int ifm1, int ifm2, int img) {
+                [&](dim_t ifm1, dim_t ifm2, dim_t img) {
                     size_t ifm = ifm1 * jcp.ic_block + ifm2;
                     size_t tile_base_index = img * (jcp.itiles * jcp.jtiles);
                     size_t tblk3 = tile_base_index % jcp.tile_block_ur;
@@ -883,7 +884,7 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
         int ithr = OMP_GET_THREAD_NUM();
         trans_ker_p.G = G_W_3x3_4x4;
         parallel_nd_in_omp(jcp.nb_oc, jcp.oc_block, jcp.mb,
-                [&](int ofm1, int ofm2, int img) {
+                [&](dim_t ofm1, dim_t ofm2, dim_t img) {
                     int ofm = (ofm1 * jcp.oc_block + ofm2) * jcp.oc_reg_block;
                     size_t tile_base_index = img * (jcp.itiles * jcp.jtiles);
                     size_t tblk3 = tile_base_index % jcp.tile_block_ur;
@@ -907,7 +908,7 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
         PRAGMA_OMP(barrier)
 
         parallel_nd_in_omp(jcp.nb_ic, jcp.nb_oc, alpha, alpha, jcp.tile_block,
-                [&](int ifm1, int ofm1, int oj, int oi, int tblk1) {
+                [&](dim_t ifm1, dim_t ofm1, dim_t oj, dim_t oi, dim_t tblk1) {
                     if (first_tblk == 0) {
                         input_starts[ithr] = (float *)&(Us(ithr, ifm1, ofm1, oj,
                                                      oi, 0, 0, 0, 0, 0))
@@ -950,11 +951,12 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
     }
 
     trans_ker_p.G = G_O_3x3_4x4;
-    PRAGMA_OMP(parallel firstprivate(trans_ker_p))
+    PRAGMA_OMP(parallel num_threads(nthreads) firstprivate(trans_ker_p))
     {
         parallel_nd_in_omp(jcp.nb_ic, jcp.nb_oc, jcp.oc_block, jcp.ic_block,
                 jcp.oc_reg_block,
-                [&](int ifm1, int ofm1, int ofm2, int ifm2, int ofm3) {
+                [&](dim_t ifm1, dim_t ofm1, dim_t ofm2, dim_t ifm2,
+                        dim_t ofm3) {
                     int ofm = (ofm1 * jcp.oc_block + ofm2) * jcp.oc_reg_block
                             + ofm3;
                     int ifm = ifm1 * jcp.ic_block + ifm2;
@@ -967,7 +969,7 @@ void jit_avx512_core_f32_wino_conv_4x3_bwd_weights_t::
     }
 
     if (jcp.with_bias) {
-        parallel_nd(jcp.oc / simd_w, [&](int ofm1) {
+        parallel_nd(jcp.oc / simd_w, [&](dim_t ofm1) {
             float *pbias = &(diff_bias(ofm1 * simd_w));
             float *pbias_prv = &(diff_bias_prv(0, ofm1 * simd_w));
 

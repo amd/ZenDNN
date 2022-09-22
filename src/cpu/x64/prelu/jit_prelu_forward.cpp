@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ status_t jit_prelu_fwd_t::pd_t::init(engine_t *engine) {
             && !has_zero_dim_memory() && src_d.is_dense(true)
             && weights_d.is_dense(true) && attr()->has_default_values()
             && utils::one_of(prelu::get_supported_isa(), avx512_core_bf16,
-                    avx512_core, avx512_common, avx2, avx, sse41);
+                    avx512_core, avx2, avx, sse41);
 
     return ok ? status::success : status::unimplemented;
 }
@@ -102,11 +102,9 @@ status_t jit_prelu_fwd_t::init(engine_t *engine) {
 
 status_t jit_prelu_fwd_t::execute(const exec_ctx_t &ctx) const {
     using byte = unsigned char;
-    status_t status = status::success;
     const byte *const src = CTX_IN_MEM(const byte *, ZENDNN_ARG_SRC);
     const byte *const weights = CTX_IN_MEM(const byte *, ZENDNN_ARG_WEIGHTS);
-    byte *const dst = CTX_OUT_CLEAN_MEM(byte *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+    byte *const dst = CTX_OUT_MEM(byte *, ZENDNN_ARG_DST);
     const memory_desc_wrapper src_d {pd()->src_md(0)};
 
     const auto src_dt_size = types::data_type_size(src_d.data_type());

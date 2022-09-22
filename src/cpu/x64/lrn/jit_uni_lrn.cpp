@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -126,10 +126,10 @@ status_t jit_uni_lrn_fwd_t<isa, d_type>::execute_forward(
     const auto ker_last = ker_last_.get();
 
     if (dat_tag == nChw8c && ls == 5 && ak == lrn_across_channels) {
-        parallel_nd(N, C / VECTOR_LENGTH, [&](int n, int c8) {
+        parallel_nd(N, C / VECTOR_LENGTH, [&](dim_t n, dim_t c8) {
             const auto offset = n * HW * C + c8 * HW * VECTOR_LENGTH;
-            jit_args_fwd_t args {
-                    &src[offset], &dst[offset], &ws[offset], nullptr};
+            auto ws_ptr = ws ? &ws[offset] : nullptr;
+            jit_args_fwd_t args {&src[offset], &dst[offset], ws_ptr, nullptr};
             if (c8 == 0)
                 (*ker_first)(&args);
             else if (c8 == C / VECTOR_LENGTH - 1)
@@ -139,20 +139,22 @@ status_t jit_uni_lrn_fwd_t<isa, d_type>::execute_forward(
         });
     } else if (one_of(dat_tag, nhwc, nChw8c, nChw16c)
             && ak == lrn_within_channel) {
-        parallel_nd(N, C / VECTOR_LENGTH, [&](int n, int c) {
+        parallel_nd(N, C / VECTOR_LENGTH, [&](dim_t n, dim_t c) {
             const std::size_t offset = dat_tag == nhwc
                     ? n * HW * C + c * VECTOR_LENGTH
                     : n * HW * C + c * HW * VECTOR_LENGTH;
-            jit_args_fwd_t args {&src[offset], &dst[offset], &ws[offset],
-                    &ws[offset + N * C * HW]};
+            auto ws0_ptr = ws ? &ws[offset] : nullptr;
+            auto ws1_ptr = ws ? &ws[offset + N * C * HW] : nullptr;
+            jit_args_fwd_t args {&src[offset], &dst[offset], ws0_ptr, ws1_ptr};
             (*ker)(&args);
         });
     } else if (dat_tag == nchw && ls == 5 && ak == lrn_across_channels) {
         parallel_nd(N, (HW + VECTOR_LENGTH - 1) / VECTOR_LENGTH,
-                [&](int n, int hw8) {
+                [&](dim_t n, dim_t hw8) {
                     const auto offset = n * HW * C + hw8 * VECTOR_LENGTH;
+                    auto ws0_ptr = ws ? &ws[offset] : nullptr;
                     jit_args_fwd_t args {
-                            &src[offset], &dst[offset], &ws[offset], nullptr};
+                            &src[offset], &dst[offset], ws0_ptr, nullptr};
 
                     if ((hw8 + 1) * VECTOR_LENGTH > HW)
                         (*ker_last)(&args);
@@ -160,10 +162,10 @@ status_t jit_uni_lrn_fwd_t<isa, d_type>::execute_forward(
                         (*ker)(&args);
                 });
     } else { // nhwc
-        parallel_nd(N, HW, [&](int n, int hw) {
+        parallel_nd(N, HW, [&](dim_t n, dim_t hw) {
             const auto offset = n * HW * C + hw * C;
-            jit_args_fwd_t args {
-                    &src[offset], &dst[offset], &ws[offset], nullptr};
+            auto ws_ptr = ws ? &ws[offset] : nullptr;
+            jit_args_fwd_t args {&src[offset], &dst[offset], ws_ptr, nullptr};
             (*ker)(&args);
         });
     }
@@ -195,7 +197,7 @@ status_t jit_uni_lrn_fwd_t<isa, d_type>::pd_t::init(engine_t *engine) {
          * otherwise it will result in an illegal memory read (seg-fault)
          * due to protected memory. */
             && IMPLICATION(isa == sse41 && dat_tag_ == nchw, HW >= 4)
-            && isa != avx512_common;
+            && isa != avx512_core;
 
     const int jit_max_local_size = 5; // bigger size triggers too big code size
     const bool args_ok_within = true && desc()->alg_kind == lrn_within_channel
@@ -205,8 +207,8 @@ status_t jit_uni_lrn_fwd_t<isa, d_type>::pd_t::init(engine_t *engine) {
             && data_d.dims()[2] >= desc()->local_size
             && data_d.dims()[3] >= desc()->local_size
             && IMPLICATION(d_type == data_type::bf16, mayiuse(avx512_core))
-            && (isa == avx512_common ? one_of(dat_tag_, nhwc, nChw16c)
-                                     : one_of(dat_tag_, nhwc, nChw8c));
+            && (isa == avx512_core ? one_of(dat_tag_, nhwc, nChw16c)
+                                   : one_of(dat_tag_, nhwc, nChw8c));
 
     const auto status
             = args_ok_across || args_ok_within ? success : unimplemented;
@@ -293,7 +295,7 @@ status_t jit_uni_lrn_bwd_t<isa, d_type>::execute_backward(
 
     if (one_of(dat_tag, nhwc, nChw8c, nChw16c)
             && ak == alg_kind::lrn_within_channel) {
-        parallel_nd(N, C / VECTOR_LENGTH, [&](int n, int c) {
+        parallel_nd(N, C / VECTOR_LENGTH, [&](dim_t n, dim_t c) {
             const std::size_t offset = dat_tag == nhwc
                     ? n * H * W * C + c * VECTOR_LENGTH
                     : n * H * W * C + c * H * W * VECTOR_LENGTH;
@@ -302,7 +304,7 @@ status_t jit_uni_lrn_bwd_t<isa, d_type>::execute_backward(
             (*ker)(&args);
         });
     } else if (use_h_parallelism) {
-        parallel_nd(N, C / VECTOR_LENGTH, H, [&](int n, int c8, int h) {
+        parallel_nd(N, C / VECTOR_LENGTH, H, [&](dim_t n, dim_t c8, dim_t h) {
             const std::size_t offset = n * C * H * W
                     + c8 * H * W * VECTOR_LENGTH + h * W * VECTOR_LENGTH;
             jit_args_bwd_t args {&src[offset], &diff_dst[offset], &ws[offset],
@@ -317,7 +319,7 @@ status_t jit_uni_lrn_bwd_t<isa, d_type>::execute_backward(
                 (*ker)(&args);
         });
     } else {
-        parallel_nd(N, C / VECTOR_LENGTH, [&](int n, int c8) {
+        parallel_nd(N, C / VECTOR_LENGTH, [&](dim_t n, dim_t c8) {
             const std::size_t offset
                     = n * C * H * W + c8 * H * W * VECTOR_LENGTH;
             jit_args_bwd_t args {&src[offset], &diff_dst[offset], &ws[offset],
@@ -360,7 +362,7 @@ status_t jit_uni_lrn_bwd_t<isa, d_type>::pd_t::init(engine_t *engine) {
     const bool args_ok_across = true && desc()->alg_kind == lrn_across_channels
             && desc()->local_size == 5 && utils::one_of(dat_tag_, nChw8c)
             && everyone_is(data_type::f32, data_d.data_type())
-            && isa != avx512_common;
+            && isa != avx512_core;
 
     const int jit_max_local_size = 5; // bigger size triggers too big code size
     const bool args_ok_within = true && desc()->alg_kind == lrn_within_channel
@@ -370,18 +372,18 @@ status_t jit_uni_lrn_bwd_t<isa, d_type>::pd_t::init(engine_t *engine) {
             && data_d.dims()[2] >= desc()->local_size
             && data_d.dims()[3] >= desc()->local_size
             && IMPLICATION(d_type == data_type::bf16, mayiuse(avx512_core))
-            && (isa == avx512_common ? one_of(dat_tag_, nhwc, nChw16c)
-                                     : one_of(dat_tag_, nhwc, nChw8c));
+            && (isa == avx512_core ? one_of(dat_tag_, nhwc, nChw16c)
+                                   : one_of(dat_tag_, nhwc, nChw8c));
 
     return args_ok_across || args_ok_within ? success : unimplemented;
 }
 
-template struct jit_uni_lrn_fwd_t<avx512_common, zendnn::impl::data_type::f32>;
-template struct jit_uni_lrn_fwd_t<avx512_common, zendnn::impl::data_type::bf16>;
+template struct jit_uni_lrn_fwd_t<avx512_core, zendnn::impl::data_type::f32>;
+template struct jit_uni_lrn_fwd_t<avx512_core, zendnn::impl::data_type::bf16>;
 template struct jit_uni_lrn_fwd_t<avx2, zendnn::impl::data_type::f32>;
 template struct jit_uni_lrn_fwd_t<sse41, zendnn::impl::data_type::f32>;
-template struct jit_uni_lrn_bwd_t<avx512_common, zendnn::impl::data_type::f32>;
-template struct jit_uni_lrn_bwd_t<avx512_common, zendnn::impl::data_type::bf16>;
+template struct jit_uni_lrn_bwd_t<avx512_core, zendnn::impl::data_type::f32>;
+template struct jit_uni_lrn_bwd_t<avx512_core, zendnn::impl::data_type::bf16>;
 template struct jit_uni_lrn_bwd_t<avx2, zendnn::impl::data_type::f32>;
 
 } // namespace x64

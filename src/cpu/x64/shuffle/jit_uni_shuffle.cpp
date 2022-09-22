@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -47,13 +47,12 @@ status_t jit_uni_shuffle_t<isa>::pd_t::init(engine_t *engine) {
             && attr()->has_default_values() && axis() == 1
             && IMPLICATION(!is_fwd(), set_default_formats_common());
 
-    if (!ok || (conf_.data_type == bf16 && isa != sse41))
-        return status::unimplemented;
+    if (!ok) return status::unimplemented;
 
-    if (isa != avx512_common)
-        conf_.isa = mayiuse(avx2) ? avx2 : isa;
-    else
-        conf_.isa = isa;
+    conf_.isa = isa;
+    if (isa == avx) conf_.isa = mayiuse(avx2) ? avx2 : avx;
+    if (conf_.data_type == bf16)
+        conf_.isa = mayiuse(avx512_core_bf16) ? avx512_core_bf16 : avx512_core;
 
     const format_tag_t blocked_format
             = memory_desc_matches_one_of_tag(*data_md(), nCw16c, nChw16c,
@@ -110,7 +109,7 @@ status_t jit_uni_shuffle_t<isa>::precompute_offsets() {
     std::vector<int> rev_transposed_(axis_size);
 
     // Precompute transposed axis helper array
-    parallel_nd(transpose_col, transpose_row, [&](int i, int j) {
+    parallel_nd(transpose_col, transpose_row, [&](dim_t i, dim_t j) {
         rev_transposed_[j * transpose_col + i] = i * transpose_row + j;
     });
 
@@ -125,7 +124,7 @@ status_t jit_uni_shuffle_t<isa>::precompute_offsets() {
         const dim_t SP = conf.sp;
 
         // Precompute input offsets using transposed axis
-        parallel_nd(CB, [&](int cb) {
+        parallel_nd(CB, [&](dim_t cb) {
             const int blk_end = nstl::min(blk_size, C - cb * blk_size);
             ZENDNN_PRAGMA_OMP_SIMD()
             for (int cc = 0; cc < blk_end; ++cc) {
@@ -167,13 +166,10 @@ status_t jit_uni_shuffle_t<isa>::execute(const exec_ctx_t &ctx) const {
     using namespace prop_kind;
     using namespace utils;
 
-    status_t status = status::success;
-
     const auto i_arg = pd()->is_fwd() ? ZENDNN_ARG_SRC : ZENDNN_ARG_DIFF_DST;
     const auto o_arg = pd()->is_fwd() ? ZENDNN_ARG_DST : ZENDNN_ARG_DIFF_SRC;
     auto input = CTX_IN_MEM(const uint8_t *, i_arg);
-    auto output = CTX_OUT_CLEAN_MEM(uint8_t *, o_arg, status);
-    CHECK(status);
+    auto output = CTX_OUT_MEM(uint8_t *, o_arg);
 
     const auto conf = pd()->get_conf();
 
@@ -199,6 +195,7 @@ status_t jit_uni_shuffle_t<isa>::execute(const exec_ctx_t &ctx) const {
             args.dst = output + (off + SP * c_curr) * data_type_size;
 
             args.cb_loop_size = c_work;
+            args.is_padded_block = cb + 1 == CB;
 
             args.input_off_ptr = this->input_off_ + c_curr;
             (*kernel_)(&args);
@@ -213,7 +210,7 @@ status_t jit_uni_shuffle_t<isa>::execute(const exec_ctx_t &ctx) const {
 
 template struct jit_uni_shuffle_t<sse41>;
 template struct jit_uni_shuffle_t<avx>;
-template struct jit_uni_shuffle_t<avx512_common>;
+template struct jit_uni_shuffle_t<avx512_core>;
 
 } // namespace x64
 } // namespace cpu

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -32,7 +32,6 @@ namespace x64 {
 
 struct jit_brgemm_primitive_conf_t {
     prop_kind_t prop_kind;
-    conv_version_t ver;
     conv_loop_order_t loop_order;
     conv_harness_t harness;
     int simd_w;
@@ -46,14 +45,15 @@ struct jit_brgemm_primitive_conf_t {
     int stride_d, stride_h, stride_w;
     int dilate_d, dilate_h, dilate_w;
     format_tag_t src_tag, wei_tag, dst_tag; // temporary workaround
+    bool is_wei_layout_any;
     bool with_bias;
     bool with_sum;
     bool with_eltwise;
+    bool with_binary;
     bool with_scales;
     bool signed_input;
-    post_ops_t::entry_t::eltwise_t eltwise;
-    int nb_ic, ic_block;
-    int nb_oc, oc_block;
+    int nb_ic, ic_block, ic_block_ext;
+    int nb_oc, oc_block, oc_block_ext;
     int nb_iw, iw_block;
     int nb_ow, ow_block;
     int nb_os, os_block;
@@ -82,6 +82,11 @@ struct jit_brgemm_primitive_conf_t {
 
     cpu_isa_t isa;
     bool ip_bwd_d_global_b_transpose;
+    bool use_uker;
+    bool use_interleave_stores;
+    static constexpr int tile_wsp_per_thread = 4096;
+    brgemm_kernel_prefetching_t hint_prefetching
+            = brgemm_kernel_prefetching_t::brgemm_prf_default;
 };
 
 } // namespace x64

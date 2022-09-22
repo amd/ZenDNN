@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,11 +24,10 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
-#include "cpu/x64/jit_generator.hpp"
-
-#include "cpu/x64/jit_uni_x8s8s32x_1x1_convolution.hpp"
-
 #include "cpu/cpu_primitive.hpp"
+
+#include "cpu/x64/jit_generator.hpp"
+#include "cpu/x64/jit_uni_x8s8s32x_1x1_convolution.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -45,15 +44,15 @@ using namespace zendnn::impl::utils;
                                   : (f).blk_off(n, c, d, h, w)))
 
 /* convolution forward */
-template <cpu_isa_t isa, data_type_t src_type, data_type_t dst_type>
-status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
-        dst_type>::execute_forward(const exec_ctx_t &ctx) const {
-    auto src = CTX_IN_MEM(const src_data_t *, ZENDNN_ARG_SRC);
-    auto weights = CTX_IN_MEM(const wei_data_t *, ZENDNN_ARG_WEIGHTS);
-    auto bias = CTX_IN_MEM(const char *, ZENDNN_ARG_BIAS);
-    auto dst = CTX_OUT_MEM(dst_data_t *, ZENDNN_ARG_DST);
+template <cpu_isa_t isa>
+status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa>::execute_forward(
+        const exec_ctx_t &ctx) const {
+    const auto src = CTX_IN_MEM(const char *, ZENDNN_ARG_SRC);
+    const auto weights = CTX_IN_MEM(const char *, ZENDNN_ARG_WEIGHTS);
+    const auto bias = CTX_IN_MEM(const char *, ZENDNN_ARG_BIAS);
+    auto dst = CTX_OUT_MEM(char *, ZENDNN_ARG_DST);
     auto weights_dw = CTX_IN_MEM(
-            const wei_data_t *, ZENDNN_ARG_ATTR_POST_OP_DW | ZENDNN_ARG_WEIGHTS);
+            const char *, ZENDNN_ARG_ATTR_POST_OP_DW | ZENDNN_ARG_WEIGHTS);
     auto bias_dw = CTX_IN_MEM(
             const char *, ZENDNN_ARG_ATTR_POST_OP_DW | ZENDNN_ARG_BIAS);
     const auto post_ops_binary_rhs_arg_vec
@@ -68,7 +67,7 @@ status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
 
     auto scratchpad = ctx.get_scratchpad_grantor();
 
-    if (pd()->jcp_.signed_input && pd()->jcp_.ver != ver_vnni) {
+    if (pd()->jcp_.signed_input && (!pd()->jcp_.has_vnni)) {
         auto local_scales
                 = scratchpad.template get<float>(key_conv_adjusted_scales);
         auto scales = pd()->attr()->output_scales_.scales_;
@@ -84,7 +83,7 @@ status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
 
     if (pd()->jcp_.with_dw_conv) {
         auto jcp_dw = pd()->jcp_dw_;
-        if (jcp_dw->signed_input && jcp_dw->ver != ver_vnni) {
+        if (jcp_dw->signed_input && (!jcp_dw->has_vnni)) {
             memory_tracking::grantor_t dw_scratchpad(
                     scratchpad, memory_tracking::names::prefix_fusion);
             auto attr_dw = pd()->dw_conv_pd_->attr();
@@ -103,7 +102,7 @@ status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
             }
         }
     }
-    parallel(0, [&](const int ithr, const int nthr) {
+    parallel(pd()->jcp_.nthr, [&](const int ithr, const int nthr) {
         execute_forward_thr(ithr, nthr, src, weights, bias, weights_dw, bias_dw,
                 dst, src_zero_point, dst_zero_point, scratchpad,
                 post_ops_binary_rhs_arg_vec.data(),
@@ -112,12 +111,11 @@ status_t jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
     return status::success;
 }
 
-template <cpu_isa_t isa, data_type_t src_type, data_type_t dst_type>
-void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
-        dst_type>::execute_forward_thr(const int ithr, const int nthr,
-        const src_data_t *src, const wei_data_t *weights, const char *bias,
-        const wei_data_t *weights_dw, const char *bias_dw, dst_data_t *dst,
-        const int32_t *src_zero_point, const int32_t *dst_zero_point,
+template <cpu_isa_t isa>
+void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa>::execute_forward_thr(
+        const int ithr, const int nthr, const char *src, const char *weights,
+        const char *bias, const char *weights_dw, const char *bias_dw,
+        char *dst, const int32_t *src_zero_point, const int32_t *dst_zero_point,
         const memory_tracking::grantor_t &scratchpad,
         const void *post_ops_binary_rhs_arg_vec,
         const void *post_ops_binary_rhs_arg_vec_dw) const {
@@ -129,12 +127,14 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
 
     const auto &jcp = pd()->jcp_;
 
+    const size_t src_dt_size = types::data_type_size(src_d.data_type());
+    const size_t dst_dt_size = types::data_type_size(dst_d.data_type());
     const size_t bia_dt_size = pd()->with_bias()
             ? types::data_type_size(pd()->desc()->bias_desc.data_type)
             : 0;
 
     auto rtus_space = pd()->rtus_.reduce_src_
-            ? scratchpad.get<src_data_t>(key_conv_rtus_space)
+            ? scratchpad.get<char>(key_conv_rtus_space)
             : nullptr;
 
     auto local_scales = scratchpad.get<float>(key_conv_adjusted_scales);
@@ -147,13 +147,13 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
     const int stride_w = pd()->desc()->strides[ndims - 3];
 
     float *oscales {nullptr};
-    if (jcp.signed_input && jcp.ver != ver_vnni)
+    if (jcp.signed_input && (!jcp.has_vnni))
         oscales = scratchpad.get<float>(key_conv_adjusted_scales);
     else
         oscales = pd()->attr()->output_scales_.scales_;
 
     auto offset = weights_d.size() - weights_d.additional_buffer_size();
-    wei_data_t *w = const_cast<wei_data_t *>(weights);
+    char *w = const_cast<char *>(weights);
     const int32_t *compensation = (jcp.signed_input)
             ? reinterpret_cast<int32_t *>(w + offset)
             : nullptr;
@@ -191,20 +191,20 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
     float *dw_oscales {nullptr};
     if (jcp.with_dw_conv) {
         offset = dw_weights_d.size() - dw_weights_d.additional_buffer_size();
-        w = const_cast<wei_data_t *>(weights_dw);
+        w = const_cast<char *>(weights_dw);
         compensation_dw = (jcp_dw->signed_input)
                 ? reinterpret_cast<int32_t *>(w + offset)
                 : nullptr;
-        if (jcp_dw->signed_input && jcp_dw->ver != ver_vnni)
+        if (jcp_dw->signed_input && (!jcp_dw->has_vnni))
             dw_oscales = dw_scratchpad.get<float>(key_conv_adjusted_scales);
         else
             dw_oscales = dw_pd->attr()->output_scales_.scales_;
     }
 
-    dst_data_t *pbuf {nullptr};
+    char *pbuf {nullptr};
     size_t row_offset {};
     const int nb_buffer = jcp.nb_load_blocking;
-    std::vector<dst_data_t *> addrs;
+    std::vector<char *> addrs;
     // End
 
     auto step = [](int default_step, int remaining, int tail_step) {
@@ -259,12 +259,17 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
         const int _ocb = g * nb_oc + ocb;
         const int _icb = g;
 
-        p.output_data = jcp.with_dw_conv
-                ? pbuf + (oh % jcp_dw->kh) * row_offset
-                : &dst[data_blk_off(dst_d, n, _ocb * jcp.oc_block, od, oh, ow)];
-        p.load_data
-                = &weights[pd()->with_groups() ? weights_d.blk_off(g, ocb, icb)
-                                               : weights_d.blk_off(ocb, icb)];
+        const auto src_offset
+                = data_blk_off(src_d, n, _icb * jcp.ic_block, id, ih, iw);
+        const auto dst_offset
+                = data_blk_off(dst_d, n, _ocb * jcp.oc_block, od, oh, ow);
+        p.output_data = jcp.with_dw_conv ? pbuf + (oh % jcp_dw->kh) * row_offset
+                                         : dst + dst_dt_size * dst_offset;
+
+        const auto wei_offset = pd()->with_groups()
+                ? weights_d.blk_off(g, ocb, icb)
+                : weights_d.blk_off(ocb, icb);
+        p.load_data = weights + wei_offset;
         p.bias_data = &bias[_ocb * jcp.oc_block * bia_dt_size];
         p.compensation = (jcp.signed_input) ? &compensation[_ocb * jcp.oc_block]
                                             : nullptr;
@@ -273,26 +278,25 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
                 : nullptr;
         p.src_zero_point = jcp.src_zero_point ? src_zero_point : nullptr;
         p.dst_zero_point = jcp.dst_zero_point ? dst_zero_point : nullptr;
-        p.scales = (jcp.signed_input && jcp.ver != ver_vnni)
+        p.scales = (jcp.signed_input && (!jcp.has_vnni))
                 ? &local_scales[jcp.is_oc_scale * _ocb * jcp.oc_block]
                 : &oscales[jcp.is_oc_scale * _ocb * jcp.oc_block];
         if (pd()->rtus_.reduce_src_) {
-            rp.ws = rtus_space + ithr * pd()->rtus_.space_per_thread_
-                    + _icb * jcp.is * jcp.ic_block;
+            rp.ws = rtus_space
+                    + src_dt_size
+                            * (ithr * pd()->rtus_.space_per_thread_
+                                    + _icb * jcp.is * jcp.ic_block);
             if (ocb == ocb_start) {
-                rp.src = src
-                        + data_blk_off(
-                                src_d, n, _icb * jcp.ic_block, id, ih, iw);
+                rp.src = src + src_dt_size * src_offset;
                 (*rtus_driver_)(&rp);
             }
             p.bcast_data = rp.ws;
         } else
-            p.bcast_data = src
-                    + data_blk_off(src_d, n, _icb * jcp.ic_block, id, ih, iw);
+            p.bcast_data = src + src_dt_size * src_offset;
 
         p.oc_l_off = g * nb_oc + ocb * jcp.oc_block;
         p.post_ops_binary_rhs_arg_vec = post_ops_binary_rhs_arg_vec;
-        p.dst_orig = dst;
+        p.dst_orig = jcp.with_dw_conv ? pbuf : dst;
 
         (*kernel_)(&p);
     };
@@ -400,8 +404,9 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
                 ocb += jcp_dw->nb_ch_blocking) {
 
             par_conv_dw.src = addrs.data();
-            par_conv_dw.dst = &dst[(dst_offset + jcp_dw->ch_block * ocb)
-                    * jcp_dw->typesize_out];
+            par_conv_dw.dst = dst
+                    + (dst_offset + jcp_dw->ch_block * ocb)
+                            * jcp_dw->typesize_out;
 
             par_conv_dw.filt
                     = weights_dw + dw_weights_d.blk_off(ocb, 0) + wei_stride;
@@ -431,8 +436,7 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
 
     auto conv_dw = [&]() {
         auto &jcp_dw = pd()->jcp_dw_;
-        auto dw_conv_buffer
-                = dw_scratchpad.get<dst_data_t>(key_fusion_inout_buffer);
+        auto dw_conv_buffer = dw_scratchpad.get<char>(key_fusion_inout_buffer);
 
         const auto dw_conv_buffer_size_
                 = (size_t)jcp_dw->kh * jcp.ow * nb_buffer * jcp.oc_block;
@@ -494,24 +498,8 @@ void jit_uni_x8s8s32x_1x1_convolution_fwd_t<isa, src_type,
     }
 }
 
-using namespace data_type;
-
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, u8, u8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, s8, u8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, u8, s8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, s8, s8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, u8, s32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, s8, s32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, u8, f32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2, s8, f32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, u8, u8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, s8, u8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, u8, s8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, s8, s8>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, u8, s32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, s8, s32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, u8, f32>;
-template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41, s8, f32>;
+template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<avx2>;
+template struct jit_uni_x8s8s32x_1x1_convolution_fwd_t<sse41>;
 
 } // namespace x64
 } // namespace cpu

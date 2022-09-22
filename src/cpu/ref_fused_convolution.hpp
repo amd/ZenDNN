@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -24,6 +24,7 @@
 
 #include "common/primitive.hpp"
 #include "common/primitive_iterator.hpp"
+#include "common/reorder.hpp"
 #include "common/stream.hpp"
 
 #include "cpu/cpu_convolution_pd.hpp"
@@ -83,9 +84,7 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
             name_ = "ref_fused_convolution:any";
         }
 
-        pd_t(const pd_t &other) : cpu_convolution_fwd_pd_t(other) {
-            copy_from(other);
-        }
+        pd_t(const pd_t &other) = default;
 
         DECLARE_COMMON_PD_T(name_.c_str(), ref_fused_convolution_fwd_t);
 
@@ -134,34 +133,24 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
         }
 
         size_t user_scratchpad_size_;
-        std::vector<std::unique_ptr<primitive_desc_t>> op_pds_;
+        std::vector<std::shared_ptr<primitive_desc_t>> op_pds_;
         std::vector<arg_cache_t> args_;
 
     private:
         std::string name_;
         const unsigned int max_fusions_ = 1;
 
-        status_t append_op(primitive_desc_t *op_pd, size_t &sp_begin,
-                size_t &sp_end, engine_t *engine) {
+        status_t append_op(std::shared_ptr<primitive_desc_t> &op_pd,
+                size_t &sp_begin, size_t &sp_end, engine_t *engine) {
             auto from_md = op_pds_.back()->dst_md();
             auto to_md = op_pd->src_md();
 
             if (*from_md != *to_md) {
                 //TODO: Find a test-case for this
-                reorder_pd_t *r_pd = nullptr;
-                auto r_impls = engine->get_reorder_implementation_list(
-                        from_md, to_md);
-                for (auto r = r_impls; *r; ++r) {
-                    primitive_attr_t attr;
-                    attr.set_scratchpad_mode(scratchpad_mode::user);
-                    if ((*r)(&r_pd, engine, &attr, engine, from_md, engine,
-                                to_md)
-                            == status::success) {
-                        op_pds_.emplace_back((primitive_desc_t *)r_pd);
-                        break;
-                    }
-                }
-                if (!r_pd) return status::unimplemented;
+                std::shared_ptr<primitive_desc_t> pd;
+                CHECK(reorder_primitive_desc_create(
+                        pd, engine, from_md, to_md));
+                op_pds_.emplace_back(std::move(pd));
 
                 arg_cache_t arg_cache;
                 arg_cache.append_inout_arg(
@@ -174,12 +163,13 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
                 sp_end += memory_desc_wrapper(to_md).size();
 
                 user_scratchpad_size_ = nstl::max<size_t>(user_scratchpad_size_,
-                        op_pds_.back()->scratchpad_size(scratchpad_mode::user));
+                        op_pds_.back()->scratchpad_size(
+                                attr()->scratchpad_mode_));
             }
 
-            op_pds_.emplace_back(op_pd);
+            op_pds_.emplace_back(std::move(op_pd));
             user_scratchpad_size_ = nstl::max<size_t>(user_scratchpad_size_,
-                    op_pds_.back()->scratchpad_size(scratchpad_mode::user));
+                    op_pds_.back()->scratchpad_size(attr()->scratchpad_mode_));
             return status::success;
         }
 
@@ -187,7 +177,6 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
             using namespace data_type;
             primitive_attr_t root_attr(*attr());
             if (!root_attr.is_initialized()) return status::out_of_memory;
-            root_attr.set_scratchpad_mode(scratchpad_mode::user);
             auto po_op_iter
                     = attr()->post_ops_.find(primitive_kind::convolution);
             if (po_op_iter == -1) return status::unimplemented;
@@ -197,13 +186,10 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
             auto &e = attr_1x1.post_ops_.entry_;
             e.erase(e.begin() + po_op_iter, e.end());
 
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
-
             zendnn_primitive_desc_iterator it(
                     engine, op_desc(), &attr_1x1, nullptr);
             if (!it.is_initialized()) return status::out_of_memory;
-            ++it;
-            primitive_desc_t *root_pd = it.fetch_once();
+            std::shared_ptr<primitive_desc_t> root_pd = *(++it);
             if (!root_pd) return status::unimplemented;
             op_pds_.emplace_back(root_pd);
             // Scratchpad offsets. Simulate offset computation so that offset
@@ -211,7 +197,7 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
             size_t inout_sp_offset_begin = 0;
             size_t inout_sp_offset_end = 0;
             user_scratchpad_size_
-                    = root_pd->scratchpad_size(scratchpad_mode::user);
+                    = root_pd->scratchpad_size(attr()->scratchpad_mode_);
 
             // Create arg cache for the root pd
             arg_cache_t arg_cache;
@@ -265,15 +251,11 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
                         engine, (op_desc_t *)&cd_dw, &attr_dw, nullptr);
                 if (!it.is_initialized()) return status::out_of_memory;
 
-                primitive_desc_t *append_conv_pd = (++it).fetch_once();
+                std::shared_ptr<primitive_desc_t> append_conv_pd = *(++it);
                 if (!append_conv_pd) return status::unimplemented;
 
-                auto status = append_op(append_conv_pd, inout_sp_offset_begin,
-                        inout_sp_offset_end, engine);
-                if (status != status::success) {
-                    delete append_conv_pd;
-                    return status;
-                }
+                CHECK(append_op(append_conv_pd, inout_sp_offset_begin,
+                        inout_sp_offset_end, engine));
 
                 const auto &op = op_pds_.back();
                 arg_cache_t arg_cache;
@@ -328,16 +310,6 @@ struct ref_fused_convolution_fwd_t : public primitive_t {
                 name_.append(":");
                 name_.append(op_pd->name());
             }
-            return;
-        }
-
-        void copy_from(const pd_t &other) {
-            user_scratchpad_size_ = other.user_scratchpad_size_;
-            op_pds_.clear();
-            for (const auto &other_op_pd : other.op_pds_)
-                op_pds_.emplace_back(other_op_pd->clone());
-            args_ = other.args_;
-            name_ = other.name_;
             return;
         }
     };

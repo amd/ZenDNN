@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -60,7 +60,7 @@ public:
         CHECK(status);
 
         const auto ker = ker_.get();
-        parallel_nd(N_, H_ * W_, [&](int n, int pixel_id) {
+        parallel_nd(N_, H_ * W_, [&](dim_t n, dim_t pixel_id) {
             typename lrn::jit_avx512_common_lrn_kernel_fwd_t<
                     d_type>::jit_args_fwd_t args;
             const auto offset = n * C_ * H_ * W_ + pixel_id * C_;
@@ -69,8 +69,8 @@ public:
 
             args.src = &src[offset];
             args.dst = &dst[offset];
-            args.ws0 = &ws[ws_offset0];
-            args.ws1 = &ws[ws_offset1];
+            args.ws0 = ws ? &ws[ws_offset0] : nullptr;
+            args.ws1 = ws ? &ws[ws_offset1] : nullptr;
 
             (*ker)(&args);
         });
@@ -112,7 +112,7 @@ public:
         auto ws = CTX_IN_MEM(data_t *, ZENDNN_ARG_WORKSPACE);
 
         const auto ker = ker_.get();
-        parallel_nd(N_, H_ * W_, [&](int n, int pixel_id) {
+        parallel_nd(N_, H_ * W_, [&](dim_t n, dim_t pixel_id) {
             typename lrn::jit_avx512_common_lrn_kernel_bwd_nhwc_t<
                     d_type>::jit_args_bwd_t args;
             const auto offset = n * C_ * H_ * W_ + pixel_id * C_;

@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -25,6 +25,7 @@
 #include "common/engine.hpp"
 #include "common/memory_tracking.hpp"
 #include "common/primitive.hpp"
+#include "common/reorder.hpp"
 #include "common/reorder_pd.hpp"
 
 #include "cpu/cpu_sum_pd.hpp"
@@ -37,7 +38,7 @@ struct ref_sum_t : public primitive_t {
     struct pd_t : public cpu_sum_pd_t {
         using cpu_sum_pd_t::cpu_sum_pd_t;
 
-        pd_t(const pd_t &rhs) : cpu_sum_pd_t(rhs) { clone_reorder_pds(rhs); }
+        pd_t(const pd_t &rhs) = default;
 
         DECLARE_SUM_PD_T("ref:any", ref_sum_t);
 
@@ -47,55 +48,25 @@ struct ref_sum_t : public primitive_t {
 
             if (has_zero_dim_memory()) return status::success;
 
+            reorder_pds_.resize(n_ + need_output_reorder());
             for (int i = 0; i < n_; ++i) {
-                auto r_impls = engine->get_reorder_implementation_list(
-                        src_md(i), dst_acc_md());
-                for (auto r = r_impls; *r; ++r) {
-                    primitive_attr_t attr;
-                    attr.set_scratchpad_mode(scratchpad_mode::user);
-                    attr.output_scales_.set(scales_[i]);
-                    if (i != 0) attr.post_ops_.append_sum(1.0);
-
-                    reorder_pd_t *r_pd = nullptr;
-                    if ((*r)(&r_pd, engine, &attr, engine, src_md(i), engine,
-                                dst_acc_md())
-                            == status::success) {
-                        reorder_pds_.emplace_back(r_pd);
-                        break;
-                    }
-                }
+                primitive_attr_t r_attr;
+                r_attr.output_scales_.set(scales_[i]);
+                if (i != 0) r_attr.post_ops_.append_sum(1.0);
+                CHECK(reorder_primitive_desc_create(reorder_pds_[i], engine,
+                        src_md(i), dst_acc_md(), &r_attr));
             }
 
             if (need_output_reorder()) {
-                auto r_impls = engine->get_reorder_implementation_list(
-                        dst_acc_md(), dst_md());
-                for (auto r = r_impls; *r; ++r) {
-                    primitive_attr_t r_attr;
-                    r_attr.set_scratchpad_mode(scratchpad_mode::user);
-                    reorder_pd_t *r_pd = nullptr;
-                    if ((*r)(&r_pd, engine, &r_attr, engine, dst_acc_md(),
-                                engine, dst_md())
-                            == status::success) {
-                        reorder_pds_.emplace_back(r_pd);
-                        break;
-                    }
-                }
+                CHECK(reorder_primitive_desc_create(
+                        reorder_pds_[n_], engine, dst_acc_md(), dst_md()));
             }
-
-            ok = reorder_pds_.size() == (size_t)n_ + need_output_reorder();
-            if (!ok) return status::unimplemented;
 
             init_scratchpad();
             return status::success;
         }
 
-        void clone_reorder_pds(const pd_t &rhs) {
-            reorder_pds_.clear();
-            for (size_t i = 0; i < rhs.reorder_pds_.size(); ++i)
-                reorder_pds_.emplace_back(rhs.reorder_pds_[i]->clone());
-        }
-
-        std::vector<std::unique_ptr<primitive_desc_t>> reorder_pds_;
+        std::vector<std::shared_ptr<primitive_desc_t>> reorder_pds_;
 
     private:
         void init_scratchpad() {
@@ -140,6 +111,12 @@ struct ref_sum_t : public primitive_t {
         memory_t acc(
                 dst.mem->engine(), pd()->dst_acc_md(), std::move(sum_reduce));
         memory_arg_t dst_acc = {&acc, false};
+
+        /* fix: clang MemorySanitizer: use-of-uninitialized-value */
+        if (pd()->need_output_reorder()) {
+            const memory_desc_wrapper acc_d(acc.md());
+            std::memset(acc.memory_storage()->data_handle(), 0, acc_d.size());
+        }
 
         for (int i = 0; i < n; ++i) {
             r_args[ZENDNN_ARG_SRC] = ctx.args().at(ZENDNN_ARG_MULTIPLE_SRC + i);

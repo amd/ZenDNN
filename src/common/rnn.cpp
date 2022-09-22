@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -34,8 +34,10 @@ namespace rnn {
 int get_gates_count(zendnn_alg_kind_t cell_kind) {
     switch (cell_kind) {
         case zendnn::impl::alg_kind::vanilla_rnn: return 1;
-        case zendnn::impl::alg_kind::vanilla_gru: return 3;
-        case zendnn::impl::alg_kind::lbr_gru: return 3;
+        case zendnn::impl::alg_kind::vanilla_gru:
+        case zendnn::impl::alg_kind::vanilla_augru: return 3;
+        case zendnn::impl::alg_kind::lbr_gru:
+        case zendnn::impl::alg_kind::lbr_augru: return 3;
         case zendnn::impl::alg_kind::vanilla_lstm: return 4;
         default: assert(!"unknown cell kind"); return 0;
     }
@@ -96,28 +98,35 @@ status_t check_data_type_consistency_fwd(const rnn_desc_t &r) {
     data_type_t weights_layer_dt = r.weights_layer_desc.data_type;
     data_type_t weights_projection_dt = r.weights_projection_desc.data_type;
 
-    bool is_forward = !(r.prop_kind == prop_kind::backward);
-    bool is_inference = r.prop_kind == prop_kind::forward_inference;
-    bool is_int8_ok = one_of(r.cell_kind, zendnn_vanilla_lstm, zendnn_vanilla_gru);
+    const bool is_forward = !(r.prop_kind == prop_kind::backward);
+    const bool is_inference = r.prop_kind == prop_kind::forward_inference;
+    const bool is_int8_ok
+            = one_of(r.cell_kind, zendnn_vanilla_lstm, zendnn_vanilla_gru);
 
-    bool cell_state_check = expect_dt(r.src_iter_c_desc, f32, f16)
-            && expect_dt(r.dst_iter_c_desc, f32, f16);
+    const bool cell_state_check = expect_dt(r.src_iter_c_desc, f32, bf16, f16)
+            && expect_dt(r.dst_iter_c_desc, f32, bf16, f16);
 
-    bool is_f32 = everyone_is(f32, src_layer_dt, dst_layer_dt, weights_iter_dt,
-                          weights_layer_dt)
+    const bool is_f32 = everyone_is(f32, src_layer_dt, dst_layer_dt,
+                                weights_iter_dt, weights_layer_dt)
             && expect_dt(r.src_iter_desc, f32)
             && expect_dt(r.weights_peephole_desc, f32)
             && expect_dt(r.weights_projection_desc, f32)
             && expect_dt(r.dst_iter_desc, f32) && expect_dt(r.bias_desc, f32);
 
-    bool is_bf16 = everyone_is(bf16, src_layer_dt, dst_layer_dt,
-                           weights_iter_dt, weights_layer_dt)
+    const bool is_bf16 = everyone_is(bf16, src_layer_dt, dst_layer_dt,
+                                 weights_iter_dt, weights_layer_dt)
             && expect_dt(r.src_iter_desc, bf16)
-            && expect_dt(r.weights_peephole_desc, f32)
+            && IMPLICATION(r.cell_kind == zendnn_vanilla_lstm,
+                    expect_dt(r.weights_peephole_desc, f32))
+            /* weights_peephole_desc is reused as attention_desc */
+            && IMPLICATION(
+                    one_of(r.cell_kind, zendnn_vanilla_augru, zendnn_lbr_augru),
+                    expect_dt(r.weights_peephole_desc, bf16))
             && one_of(weights_projection_dt, bf16, data_type::undef)
-            && expect_dt(r.dst_iter_desc, bf16) && expect_dt(r.bias_desc, f32);
+            && expect_dt(r.dst_iter_desc, bf16)
+            && one_of(r.bias_desc.data_type, bf16, f32);
 
-    bool is_f16 = is_forward
+    const bool is_f16 = is_forward
             && everyone_is(f16, src_layer_dt, dst_layer_dt, weights_iter_dt,
                     weights_layer_dt)
             && expect_dt(r.src_iter_desc, f16)
@@ -125,7 +134,7 @@ status_t check_data_type_consistency_fwd(const rnn_desc_t &r) {
             && r.weights_peephole_desc.data_type == data_type::undef
             && expect_dt(r.dst_iter_desc, f16) && expect_dt(r.bias_desc, f16);
 
-    bool is_u8u8u8 = is_inference && is_int8_ok && src_layer_dt == u8
+    const bool is_u8u8u8 = is_inference && is_int8_ok && src_layer_dt == u8
             && one_of(dst_layer_dt, u8, f32)
             && everyone_is(s8, weights_iter_dt, weights_layer_dt)
             && expect_dt(r.src_iter_desc, u8)
@@ -135,15 +144,33 @@ status_t check_data_type_consistency_fwd(const rnn_desc_t &r) {
             && expect_dt(r.dst_iter_desc, u8)
             && expect_dt(r.dst_iter_c_desc, f32) && expect_dt(r.bias_desc, f32);
 
-    bool is_f32u8f32 = is_inference && is_int8_ok && src_layer_dt == u8
+    const bool is_f32u8f32 = is_inference && is_int8_ok && src_layer_dt == u8
             && everyone_is(s8, weights_iter_dt, weights_layer_dt)
             && r.weights_peephole_desc.data_type == data_type::undef
             && one_of(weights_projection_dt, s8, data_type::undef)
             && one_of(dst_layer_dt, u8, f32) && expect_dt(r.src_iter_desc, f32)
             && expect_dt(r.dst_iter_desc, f32) && expect_dt(r.bias_desc, f32);
 
+    const bool is_s8s8s8 = is_inference && is_int8_ok && src_layer_dt == s8
+            && one_of(dst_layer_dt, s8, f32)
+            && everyone_is(s8, weights_iter_dt, weights_layer_dt)
+            && expect_dt(r.src_iter_desc, s8)
+            && expect_dt(r.src_iter_c_desc, f32)
+            && r.weights_peephole_desc.data_type == data_type::undef
+            && one_of(weights_projection_dt, s8, data_type::undef)
+            && expect_dt(r.dst_iter_desc, s8)
+            && expect_dt(r.dst_iter_c_desc, f32) && expect_dt(r.bias_desc, f32);
+
+    const bool is_f32s8f32 = is_inference && is_int8_ok && src_layer_dt == s8
+            && everyone_is(s8, weights_iter_dt, weights_layer_dt)
+            && r.weights_peephole_desc.data_type == data_type::undef
+            && one_of(weights_projection_dt, s8, data_type::undef)
+            && one_of(dst_layer_dt, s8, f32) && expect_dt(r.src_iter_desc, f32)
+            && expect_dt(r.dst_iter_desc, f32) && expect_dt(r.bias_desc, f32);
+
     return cell_state_check
-                    && (is_f32 || is_bf16 || is_f16 || is_u8u8u8 || is_f32u8f32)
+                    && (is_f32 || is_bf16 || is_f16 || is_u8u8u8 || is_f32u8f32
+                            || is_s8s8s8 || is_f32s8f32)
             ? success
             : unimplemented;
 }
@@ -186,24 +213,32 @@ status_t check_dim_consistency(const rnn_desc_t &r) {
     const dim_t DIC
             = is_lstm_projection ? r.weights_projection_desc.dims[3] : DHC;
 
-    const bool extra_bias = r.cell_kind == alg_kind::lbr_gru;
+    const bool extra_bias = utils::one_of(
+            r.cell_kind, alg_kind::lbr_gru, alg_kind::lbr_augru);
     const dim_t dlc_multiplier
             = (r.direction == zendnn_bidirectional_concat) ? 2 : 1;
 
-    bool args_ok = IMPLICATION(utils::one_of(r.cell_kind, alg_kind::vanilla_gru,
-                                       alg_kind::lbr_gru),
-                           SIC == DHC)
+    bool args_ok
+            = IMPLICATION(utils::one_of(r.cell_kind, alg_kind::vanilla_gru,
+                                  alg_kind::lbr_gru, alg_kind::vanilla_augru,
+                                  alg_kind::lbr_augru),
+                      SIC == DHC)
             && dlc_multiplier * DIC == DLC
             && IMPLICATION(L > 1, dlc_multiplier * SLC == DLC)
             && IMPLICATION(T > 1, SIC == DIC);
     if (!args_ok) return invalid_arguments;
 
+    const bool is_augru = utils::one_of(
+            r.cell_kind, alg_kind::vanilla_augru, alg_kind::lbr_augru);
     CHECK(expect_dims(r.src_layer_desc, {T, N, SLC}, false));
     CHECK(expect_dims(r.src_iter_desc, {L, D, N, SIC}));
     CHECK(expect_dims(r.src_iter_c_desc, {L, D, N, DHC}));
     CHECK(expect_dims(r.weights_layer_desc, {L, D, SLC, G, DHC}, false));
     CHECK(expect_dims(r.weights_iter_desc, {L, D, SIC, G, DHC}, false));
-    CHECK(expect_dims(r.weights_peephole_desc, {L, D, 3, DHC}));
+    if (is_augru)
+        CHECK(expect_dims(r.weights_peephole_desc, {T, N, 1}));
+    else
+        CHECK(expect_dims(r.weights_peephole_desc, {L, D, 3, DHC}));
     CHECK(expect_dims(r.weights_projection_desc, {L, D, DHC, DIC}));
     CHECK(expect_dims(r.bias_desc, {L, D, G + extra_bias, DHC}));
     CHECK(expect_dims(r.dst_layer_desc, {T, N, DLC}, false));
@@ -218,7 +253,10 @@ status_t check_dim_consistency(const rnn_desc_t &r) {
                 r.diff_weights_layer_desc, {L, D, SLC, G, DHC}, false));
         CHECK(expect_dims(
                 r.diff_weights_iter_desc, {L, D, SIC, G, DHC}, false));
-        CHECK(expect_dims(r.diff_weights_peephole_desc, {L, D, 3, DHC}));
+        if (is_augru)
+            CHECK(expect_dims(r.diff_weights_peephole_desc, {T, N, 1}));
+        else
+            CHECK(expect_dims(r.diff_weights_peephole_desc, {L, D, 3, DHC}));
         CHECK(expect_dims(r.diff_weights_projection_desc, {L, D, DHC, DIC}));
         CHECK(expect_dims(r.diff_bias_desc, {L, D, G + extra_bias, DHC}));
         CHECK(expect_dims(r.diff_dst_layer_desc, {T, N, DLC}, false));
@@ -234,6 +272,7 @@ status_t rnn_common_fwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const rnn_direction_t direction, const memory_desc_t *src_layer_desc,
         const memory_desc_t *src_iter_desc,
         const memory_desc_t *src_iter_c_desc,
+        const memory_desc_t *attention_desc,
         const memory_desc_t *weights_layer_desc,
         const memory_desc_t *weights_iter_desc,
         const memory_desc_t *weights_peephole_desc,
@@ -246,7 +285,7 @@ status_t rnn_common_fwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
 
     // check that a supported cell kind has been passed
     bool args_ok = one_of(cell_kind, zendnn_vanilla_rnn, zendnn_vanilla_lstm,
-            zendnn_vanilla_gru, zendnn_lbr_gru);
+            zendnn_vanilla_gru, zendnn_lbr_gru, zendnn_vanilla_augru, zendnn_lbr_augru);
     if (!args_ok) return invalid_arguments;
 
     // check that all mandatory parameters are non-null
@@ -270,6 +309,15 @@ status_t rnn_common_fwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
         if (!args_ok) return invalid_arguments;
     }
 
+    // check augru-specific restrictions
+    const bool is_augru = one_of(cell_kind, zendnn_vanilla_augru, zendnn_lbr_augru);
+    if (is_augru) {
+        const dim_t L = weights_layer_desc->dims[0];
+        args_ok = args_ok && direction == zendnn_unidirectional_left2right
+                && L == 1;
+        if (!args_ok) return invalid_arguments;
+    }
+
     CHECK(check_runtime_dims_or_strides({src_layer_desc, src_iter_desc,
             src_iter_c_desc, weights_layer_desc, weights_iter_desc,
             weights_peephole_desc, weights_projection_desc, bias_desc,
@@ -288,6 +336,7 @@ status_t rnn_common_fwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
     maybe_init_md(rd.weights_layer_desc, weights_layer_desc);
     maybe_init_md(rd.weights_iter_desc, weights_iter_desc);
     maybe_init_md(rd.weights_peephole_desc, weights_peephole_desc);
+    if (is_augru) maybe_init_md(rd.weights_peephole_desc, attention_desc);
     maybe_init_md(rd.weights_projection_desc, weights_projection_desc);
     maybe_init_md(rd.bias_desc, bias_desc);
     maybe_init_md(rd.dst_layer_desc, dst_layer_desc);
@@ -313,6 +362,7 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *src_layer_desc,
         const zendnn_memory_desc_t *src_iter_desc,
         const zendnn_memory_desc_t *src_iter_c_desc,
+        const zendnn_memory_desc_t *attention_desc,
         const zendnn_memory_desc_t *weights_layer_desc,
         const zendnn_memory_desc_t *weights_iter_desc,
         const zendnn_memory_desc_t *weights_peephole_desc,
@@ -324,6 +374,7 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *diff_src_layer_desc,
         const zendnn_memory_desc_t *diff_src_iter_desc,
         const zendnn_memory_desc_t *diff_src_iter_c_desc,
+        const zendnn_memory_desc_t *diff_attention_desc,
         const zendnn_memory_desc_t *diff_weights_layer_desc,
         const zendnn_memory_desc_t *diff_weights_iter_desc,
         const zendnn_memory_desc_t *diff_weights_peephole_desc,
@@ -337,7 +388,7 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
 
     // check that a supported cell kind has been passed
     bool args_ok = one_of(cell_kind, zendnn_vanilla_rnn, zendnn_vanilla_lstm,
-            zendnn_vanilla_gru, zendnn_lbr_gru);
+            zendnn_vanilla_gru, zendnn_lbr_gru, zendnn_vanilla_augru, zendnn_lbr_augru);
     if (!args_ok) return invalid_arguments;
 
     // check that all mandatory parameters are non-null
@@ -363,6 +414,17 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
         if (!args_ok) return invalid_arguments;
     }
 
+    const bool is_augru = one_of(cell_kind, zendnn_vanilla_augru, zendnn_lbr_augru);
+    // check augru-specific restrictions
+    if (is_augru) {
+        const dim_t L = weights_layer_desc->dims[0];
+        const bool dims_ok = args_ok
+                && direction == zendnn_unidirectional_left2right && L == 1;
+        const bool descs_ok = !any_null(attention_desc, diff_attention_desc);
+        const bool args_ok = dims_ok && descs_ok;
+        if (!args_ok) return invalid_arguments;
+    }
+
     // check if optional md is provided then diff_md is provided too
     args_ok = args_ok && xnor_md(bias_desc, diff_bias_desc)
             && xnor_md(weights_peephole_desc, diff_weights_peephole_desc)
@@ -374,10 +436,11 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
     if (!args_ok) return invalid_arguments;
 
     CHECK(check_runtime_dims_or_strides({src_layer_desc, src_iter_desc,
-            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
-            weights_peephole_desc, weights_projection_desc, bias_desc,
-            dst_layer_desc, dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
-            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
+            src_iter_c_desc, attention_desc, weights_layer_desc,
+            weights_iter_desc, weights_peephole_desc, weights_projection_desc,
+            bias_desc, dst_layer_desc, dst_iter_desc, dst_iter_c_desc,
+            diff_src_layer_desc, diff_src_iter_desc, diff_src_iter_c_desc,
+            diff_attention_desc, diff_weights_layer_desc,
             diff_weights_iter_desc, diff_weights_peephole_desc,
             diff_weights_projection_desc, diff_bias_desc, diff_dst_layer_desc,
             diff_dst_iter_desc, diff_dst_iter_c_desc}));
@@ -395,6 +458,7 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
     maybe_init_md(rd.weights_layer_desc, weights_layer_desc);
     maybe_init_md(rd.weights_iter_desc, weights_iter_desc);
     maybe_init_md(rd.weights_peephole_desc, weights_peephole_desc);
+    if (is_augru) maybe_init_md(rd.weights_peephole_desc, attention_desc);
     maybe_init_md(rd.weights_projection_desc, weights_projection_desc);
     maybe_init_md(rd.bias_desc, bias_desc);
     maybe_init_md(rd.dst_layer_desc, dst_layer_desc);
@@ -406,6 +470,8 @@ status_t rnn_common_bwd_desc_init(zendnn_rnn_desc_t *rnn_desc,
     maybe_init_md(rd.diff_weights_layer_desc, diff_weights_layer_desc);
     maybe_init_md(rd.diff_weights_iter_desc, diff_weights_iter_desc);
     maybe_init_md(rd.diff_weights_peephole_desc, diff_weights_peephole_desc);
+    if (is_augru)
+        maybe_init_md(rd.diff_weights_peephole_desc, diff_attention_desc);
     maybe_init_md(
             rd.diff_weights_projection_desc, diff_weights_projection_desc);
     maybe_init_md(rd.diff_bias_desc, diff_bias_desc);
@@ -445,9 +511,9 @@ status_t zendnn_vanilla_rnn_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         float beta) {
     status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_rnn, direction, src_layer_desc, src_iter_desc, nullptr,
-            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
-            dst_layer_desc, dst_iter_desc, nullptr, flags, activation, alpha,
-            beta);
+            nullptr, weights_layer_desc, weights_iter_desc, nullptr, nullptr,
+            bias_desc, dst_layer_desc, dst_iter_desc, nullptr, flags,
+            activation, alpha, beta);
     return st;
 }
 
@@ -501,7 +567,7 @@ status_t zendnn_lstm_forward_desc_init_v3(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *dst_iter_c_desc, unsigned flags) {
     status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_lstm, direction, src_layer_desc, src_iter_desc,
-            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            src_iter_c_desc, nullptr, weights_layer_desc, weights_iter_desc,
             weights_peephole_desc, weights_projection_desc, bias_desc,
             dst_layer_desc, dst_iter_desc, dst_iter_c_desc, flags);
     return st;
@@ -518,8 +584,8 @@ status_t zendnn_gru_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *dst_iter_desc, unsigned flags) {
     status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_gru, direction, src_layer_desc, src_iter_desc, nullptr,
-            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
-            dst_layer_desc, dst_iter_desc, nullptr, flags);
+            nullptr, weights_layer_desc, weights_iter_desc, nullptr, nullptr,
+            bias_desc, dst_layer_desc, dst_iter_desc, nullptr, flags);
     return st;
 }
 
@@ -533,7 +599,42 @@ status_t zendnn_lbr_gru_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *dst_layer_desc,
         const zendnn_memory_desc_t *dst_iter_desc, unsigned flags) {
     status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind, zendnn_lbr_gru,
-            direction, src_layer_desc, src_iter_desc, nullptr,
+            direction, src_layer_desc, src_iter_desc, nullptr, nullptr,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t zendnn_augru_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind,
+            zendnn_vanilla_augru, direction, src_layer_desc, src_iter_desc,
+            nullptr, attention_desc, weights_layer_desc, weights_iter_desc,
+            nullptr, nullptr, bias_desc, dst_layer_desc, dst_iter_desc, nullptr,
+            flags);
+    return st;
+}
+
+status_t zendnn_lbr_augru_forward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_fwd_desc_init(rnn_desc, prop_kind, zendnn_lbr_augru,
+            direction, src_layer_desc, src_iter_desc, nullptr, attention_desc,
             weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
             dst_layer_desc, dst_iter_desc, nullptr, flags);
     return st;
@@ -559,12 +660,12 @@ status_t zendnn_vanilla_rnn_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         float alpha, float beta) {
     status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_rnn, direction, src_layer_desc, src_iter_desc, nullptr,
-            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
-            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
-            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
-            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
-            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags, activation,
-            alpha, beta);
+            nullptr, weights_layer_desc, weights_iter_desc, nullptr, nullptr,
+            bias_desc, dst_layer_desc, dst_iter_desc, nullptr,
+            diff_src_layer_desc, diff_src_iter_desc, nullptr, nullptr,
+            diff_weights_layer_desc, diff_weights_iter_desc, nullptr, nullptr,
+            diff_bias_desc, diff_dst_layer_desc, diff_dst_iter_desc, nullptr,
+            flags, activation, alpha, beta);
     return st;
 }
 
@@ -656,13 +757,14 @@ status_t zendnn_lstm_backward_desc_init_v3(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *diff_dst_iter_c_desc, unsigned flags) {
     status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_lstm, direction, src_layer_desc, src_iter_desc,
-            src_iter_c_desc, weights_layer_desc, weights_iter_desc,
+            src_iter_c_desc, nullptr, weights_layer_desc, weights_iter_desc,
             weights_peephole_desc, weights_projection_desc, bias_desc,
             dst_layer_desc, dst_iter_desc, dst_iter_c_desc, diff_src_layer_desc,
-            diff_src_iter_desc, diff_src_iter_c_desc, diff_weights_layer_desc,
-            diff_weights_iter_desc, diff_weights_peephole_desc,
-            diff_weights_projection_desc, diff_bias_desc, diff_dst_layer_desc,
-            diff_dst_iter_desc, diff_dst_iter_c_desc, flags);
+            diff_src_iter_desc, diff_src_iter_c_desc, nullptr,
+            diff_weights_layer_desc, diff_weights_iter_desc,
+            diff_weights_peephole_desc, diff_weights_projection_desc,
+            diff_bias_desc, diff_dst_layer_desc, diff_dst_iter_desc,
+            diff_dst_iter_c_desc, flags);
     return st;
 }
 
@@ -684,11 +786,12 @@ status_t zendnn_gru_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
     status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
             zendnn_vanilla_gru, direction, src_layer_desc, src_iter_desc, nullptr,
-            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
-            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
-            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
-            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
-            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags);
+            nullptr, weights_layer_desc, weights_iter_desc, nullptr, nullptr,
+            bias_desc, dst_layer_desc, dst_iter_desc, nullptr,
+            diff_src_layer_desc, diff_src_iter_desc, nullptr, nullptr,
+            diff_weights_layer_desc, diff_weights_iter_desc, nullptr, nullptr,
+            diff_bias_desc, diff_dst_layer_desc, diff_dst_iter_desc, nullptr,
+            flags);
     return st;
 }
 
@@ -709,11 +812,69 @@ status_t zendnn_lbr_gru_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
         const zendnn_memory_desc_t *diff_dst_layer_desc,
         const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
     status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind, zendnn_lbr_gru,
-            direction, src_layer_desc, src_iter_desc, nullptr,
+            direction, src_layer_desc, src_iter_desc, nullptr, nullptr,
             weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
             dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
-            diff_src_iter_desc, nullptr, diff_weights_layer_desc,
+            diff_src_iter_desc, nullptr, nullptr, diff_weights_layer_desc,
             diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
             diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t zendnn_augru_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc,
+        const zendnn_memory_desc_t *diff_src_layer_desc,
+        const zendnn_memory_desc_t *diff_src_iter_desc,
+        const zendnn_memory_desc_t *diff_attention_desc,
+        const zendnn_memory_desc_t *diff_weights_layer_desc,
+        const zendnn_memory_desc_t *diff_weights_iter_desc,
+        const zendnn_memory_desc_t *diff_bias_desc,
+        const zendnn_memory_desc_t *diff_dst_layer_desc,
+        const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind,
+            zendnn_vanilla_augru, direction, src_layer_desc, src_iter_desc,
+            nullptr, attention_desc, weights_layer_desc, weights_iter_desc,
+            nullptr, nullptr, bias_desc, dst_layer_desc, dst_iter_desc, nullptr,
+            diff_src_layer_desc, diff_src_iter_desc, nullptr,
+            diff_attention_desc, diff_weights_layer_desc,
+            diff_weights_iter_desc, nullptr, nullptr, diff_bias_desc,
+            diff_dst_layer_desc, diff_dst_iter_desc, nullptr, flags);
+    return st;
+}
+
+status_t zendnn_lbr_augru_backward_desc_init(zendnn_rnn_desc_t *rnn_desc,
+        zendnn_prop_kind_t prop_kind, zendnn_rnn_direction_t direction,
+        const zendnn_memory_desc_t *src_layer_desc,
+        const zendnn_memory_desc_t *src_iter_desc,
+        const zendnn_memory_desc_t *attention_desc,
+        const zendnn_memory_desc_t *weights_layer_desc,
+        const zendnn_memory_desc_t *weights_iter_desc,
+        const zendnn_memory_desc_t *bias_desc,
+        const zendnn_memory_desc_t *dst_layer_desc,
+        const zendnn_memory_desc_t *dst_iter_desc,
+        const zendnn_memory_desc_t *diff_src_layer_desc,
+        const zendnn_memory_desc_t *diff_src_iter_desc,
+        const zendnn_memory_desc_t *diff_attention_desc,
+        const zendnn_memory_desc_t *diff_weights_layer_desc,
+        const zendnn_memory_desc_t *diff_weights_iter_desc,
+        const zendnn_memory_desc_t *diff_bias_desc,
+        const zendnn_memory_desc_t *diff_dst_layer_desc,
+        const zendnn_memory_desc_t *diff_dst_iter_desc, unsigned flags) {
+    status_t st = rnn_common_bwd_desc_init(rnn_desc, prop_kind, zendnn_lbr_augru,
+            direction, src_layer_desc, src_iter_desc, nullptr, attention_desc,
+            weights_layer_desc, weights_iter_desc, nullptr, nullptr, bias_desc,
+            dst_layer_desc, dst_iter_desc, nullptr, diff_src_layer_desc,
+            diff_src_iter_desc, nullptr, diff_attention_desc,
+            diff_weights_layer_desc, diff_weights_iter_desc, nullptr, nullptr,
+            diff_bias_desc, diff_dst_layer_desc, diff_dst_iter_desc, nullptr,
+            flags);
     return st;
 }

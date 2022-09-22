@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -25,6 +25,7 @@
 #include <assert.h>
 
 #include "common/c_types_map.hpp"
+#include "common/zendnn_thread.hpp"
 #include "common/memory_tracking.hpp"
 #include "common/primitive.hpp"
 #include "common/type_helpers.hpp"
@@ -38,11 +39,12 @@
 namespace zendnn {
 namespace impl {
 namespace cpu {
-
+namespace prelu {
 void set_reduction_buffers(
         const dim_t work_amount, dim_t &group_size, dim_t &buf_size);
 dim_t get_scalar_scratchpad_offset(const std::size_t ithr,
         const std::size_t nthr, const dim_t work_amount);
+} // namespace prelu
 
 static constexpr int max_supported_ndims = 5;
 using byte = unsigned char;
@@ -101,6 +103,8 @@ struct ref_prelu_bwd_t : public primitive_t {
             return status::success;
         }
 
+        int nthr_; // To not exceed the limit in execute used for set up.
+
     private:
         void init_scratchpad() {
             auto scratchpad = this->scratchpad_registry().registrar();
@@ -109,6 +113,8 @@ struct ref_prelu_bwd_t : public primitive_t {
             const memory_desc_wrapper weights_md_d(weights_md_);
             auto broadcast_strategy
                     = get_rhs_arg_broadcasting_strategy(weights_md_, data_md_d);
+            // Assign `nthr_` here since the amount needed maybe reduced.
+            nthr_ = zendnn_get_max_threads();
             // Scratchpad is needed to correctly reduce calculated diff_weights
             // in cases where broadcast is used.
             //
@@ -123,17 +129,17 @@ struct ref_prelu_bwd_t : public primitive_t {
             if (broadcast_strategy == broadcasting_strategy_t::no_broadcast) {
                 return;
             } else if (broadcast_strategy == broadcasting_strategy_t::scalar) {
-                size_t thread_count = nstl::min(zendnn_get_max_threads(),
-                        static_cast<int>(data_md_d.nelems()));
-                scratchpad_size = get_scalar_scratchpad_offset(
-                        thread_count, thread_count, data_md_d.nelems());
+                int work_amount = static_cast<int>(data_md_d.nelems());
+                nthr_ = nstl::min(nthr_, work_amount);
+                scratchpad_size = prelu::get_scalar_scratchpad_offset(
+                        nthr_, nthr_, data_md_d.nelems());
             } else {
                 dim_t group_size, buf_size;
-                size_t thread_count = nstl::min(zendnn_get_max_threads(),
-                        static_cast<int>(weights_md_d.nelems()));
+                nthr_ = nstl::min(
+                        nthr_, static_cast<int>(weights_md_d.nelems()));
                 dim_t work_amount = data_md_d.nelems() / weights_md_d.nelems();
-                set_reduction_buffers(work_amount, group_size, buf_size);
-                scratchpad_size = thread_count * (group_size + buf_size);
+                prelu::set_reduction_buffers(work_amount, group_size, buf_size);
+                scratchpad_size = nthr_ * (group_size + buf_size);
             }
             scratchpad.book(memory_tracking::names::key_prelu_reduction,
                     scratchpad_size, types::data_type_size(zendnn_f32));
@@ -151,8 +157,7 @@ private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     float ker(const byte *src, const byte *weights, const byte *diff_dst,
-            byte *diff_src, dim_t data_off, dim_t weight_off,
-            dim_t diff_data_off) const;
+            byte *diff_src, dim_t data_off, dim_t weight_off) const;
     void calculate_scalar(const byte *src, const byte *weights,
             byte *diff_weights, const byte *diff_dst, byte *diff_src,
             float *scratchpad_buf) const;

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2021 Intel Corporation
+* Copyright 2021-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@
 #include "cpu/matmul/cpu_matmul_pd.hpp"
 
 #include "cpu/x64/brgemm/brgemm.hpp"
+#include "cpu/x64/cpu_reducer.hpp"
 #include "cpu/x64/matmul/brgemm_matmul_copy_utils.hpp"
 #include "cpu/x64/matmul/brgemm_matmul_utils.hpp"
 
@@ -39,25 +40,32 @@ namespace x64 {
 namespace matmul {
 
 namespace {
-constexpr int max_num_brg_kernels_matmul = 2 * 2 * 2 * 2;
+constexpr int max_num_brg_kernels_matmul = 2 * 2 * 2 * 2 * 2;
 
 inline int get_brg_kernel_index(const brgemm_matmul_conf_t &bgmmc,
-        bool do_initialization, bool is_M_tail, bool is_N_tail,
-        bool is_K_tail) {
+        bool is_bs_tail, bool do_initialization, bool is_M_tail, bool is_N_tail,
+        bool is_K_tail, int bs) {
     auto vM = (is_M_tail) ? bgmmc.M_tail : bgmmc.M_blk;
     auto vN = (is_N_tail) ? bgmmc.N_tail : bgmmc.N_blk;
     auto vK = (is_K_tail) ? bgmmc.K_tail : bgmmc.K_blk;
-    if (vM == 0 || vN == 0 || vK == 0 || bgmmc.LDA < vK || bgmmc.LDB < vN
-            || bgmmc.LDC < vN)
+    if (vM == 0 || vN == 0 || vK == 0 || bs == 0 || bgmmc.LDA < vK
+            || bgmmc.LDB < vN || bgmmc.LDC < vN)
         return -1;
 
-    int idx = 8 * (int)do_initialization + 4 * (int)is_M_tail
-            + 2 * (int)is_N_tail + (int)is_K_tail;
+    int idx = 16 * (int)is_bs_tail + 8 * (int)do_initialization
+            + 4 * (int)is_M_tail + 2 * (int)is_N_tail + (int)is_K_tail;
 
     assert(idx < max_num_brg_kernels_matmul);
     return idx;
 }
 
+inline int get_brg_batchsize(
+        const brgemm_matmul_conf_t &bgmmc, bool is_bs_tail, bool is_K_tail) {
+    auto bs = (is_K_tail) ? 1
+                          : ((is_bs_tail) ? bgmmc.brgemm_batch_tail_size
+                                          : bgmmc.brgemm_batch_size);
+    return bs;
+}
 } // namespace
 
 template <cpu_isa_t isa>
@@ -69,10 +77,11 @@ struct brgemm_matmul_t : public primitive_t {
                 JIT_IMPL_NAME_HELPER("brg:", isa, ""), brgemm_matmul_t);
 
         status_t init(engine_t *engine);
-        int get_brg_kernel_idx(bool do_initialization, bool is_M_tail,
-                bool is_N_tail, bool is_K_tail) const {
-            return get_brg_kernel_index(
-                    bgmmc_, do_initialization, is_M_tail, is_N_tail, is_K_tail);
+        int get_brg_kernel_idx(bool is_bs_tail, bool do_initialization,
+                bool is_M_tail, bool is_N_tail, bool is_K_tail) const {
+            int bs = get_brg_batchsize(bgmmc_, is_bs_tail, is_K_tail);
+            return get_brg_kernel_index(bgmmc_, is_bs_tail, do_initialization,
+                    is_M_tail, is_N_tail, is_K_tail, bs);
         }
         const brgemm_t &get_brg_desc(int idx) const { return brg_descs_[idx]; }
         const brgemm_matmul_conf_t &get_brgemm_matmul_conf() const {
@@ -90,18 +99,33 @@ struct brgemm_matmul_t : public primitive_t {
     static constexpr data_type_t acc_type = data_type::s32;
 
     status_t execute(const exec_ctx_t &ctx) const override {
-        execute_body(ctx);
+        return execute_body(ctx);
         return status::success;
     }
 
 private:
+    struct brg_matmul_exec_ctx_t;
+
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
-    void execute_body(const exec_ctx_t &ctx) const;
+    status_t execute_body(const exec_ctx_t &ctx) const;
+    void compute_kernel(const brg_matmul_exec_ctx_t &brgmm_ctx, int ithr,
+            int b_idx, int m_blk_idx, int n_blk_idx, int k_blk_idx,
+            bool do_init) const;
+    void copy_a_chunk_in_buffer(const brg_matmul_exec_ctx_t &brgmm_ctx,
+            int ithr, int b_idx, int m_blk_idx, int k_blk_idx) const;
+    void copy_b_chunk_in_buffer(const brg_matmul_exec_ctx_t &brgmm_ctx,
+            int ithr, int b_idx, int n_blk_idx, int k_blk_idx) const;
+    void maybe_reduce_partial_results_and_apply_postops(
+            const brg_matmul_exec_ctx_t &brgmm_ctx) const;
+    void accumulate(
+            char *result_ptr, const char *reduce_ptr, size_t size) const;
 
     std::unique_ptr<brgemm_kernel_t> brg_kernels_[max_num_brg_kernels_matmul];
     char brg_kernel_palettes_[max_num_brg_kernels_matmul][64];
-    std::unique_ptr<jit_brgemm_matmul_copy_B_t> copy_B_kernel_;
-    std::unique_ptr<jit_brgemm_matmul_copy_A_t> copy_A_kernel_;
+    std::unique_ptr<jit_brgemm_matmul_copy_b_t> copy_B_kernel_;
+    std::unique_ptr<jit_brgemm_matmul_copy_a_t> copy_A_kernel_;
+    std::unique_ptr<cpu_accumulator_1d_t<data_type::f32>> acc_ker_f32_;
+    std::unique_ptr<cpu_accumulator_1d_t<data_type::s32>> acc_ker_s32_;
 };
 
 } // namespace matmul

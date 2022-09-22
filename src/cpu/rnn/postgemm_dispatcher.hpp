@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -75,9 +75,10 @@ struct rnn_postgemm_dispatcher {
         : pd_(pd) {
         // add check if in testing mode
         if (pd->attr()->rnn_tparams_.test_mode_) {
-            auto ngates = utils::map(pd->cell_kind(), 0, alg_kind::vanilla_rnn,
-                    1, alg_kind::vanilla_lstm, 4, alg_kind::vanilla_gru, 3,
-                    alg_kind::lbr_gru, 3);
+            const auto ngates = utils::map(pd->cell_kind(), 0,
+                    alg_kind::vanilla_rnn, 1, alg_kind::vanilla_lstm, 4,
+                    alg_kind::vanilla_gru, 3, alg_kind::lbr_gru, 3,
+                    alg_kind::vanilla_augru, 3, alg_kind::lbr_augru, 3);
             assert(pd->attr()->rnn_tparams_.ngates_ == ngates);
             MAYBE_UNUSED(ngates);
         }
@@ -110,10 +111,12 @@ struct rnn_postgemm_dispatcher {
                 }
                 break;
             case alg_kind::vanilla_gru:
+            case alg_kind::vanilla_augru:
                 postgemm_func = &class_name::gru_part1_postgemm;
                 postgemm_part2_func = &class_name::gru_part2_postgemm;
                 break;
             case alg_kind::lbr_gru:
+            case alg_kind::lbr_augru:
                 postgemm_func = &class_name::gru_lbr_postgemm;
                 break;
             default: assert(!"Unsupported algorithm kind"); break;
@@ -130,8 +133,10 @@ struct rnn_postgemm_dispatcher {
         // versions of unpoisoning code. This must be removed alongside with
         // the big unpoison_outputs() hammer in common/primitive.cpp.
 
-        size_t states_nelems = rnn.ws_states_layer_nld * rnn.ws_states_layer_ld;
-        size_t gates_nelems = rnn.scratch_gates_nld * rnn.scratch_gates_ld;
+        const size_t states_nelems
+                = rnn.ws_states_layer_nld * rnn.ws_states_layer_ld;
+        const size_t gates_nelems
+                = rnn.scratch_gates_nld * rnn.scratch_gates_ld;
 
         if (pd_->is_fwd()) {
             msan_unpoison(dst_layer_, sizeof(*dst_layer_) * states_nelems);
@@ -143,6 +148,9 @@ struct rnn_postgemm_dispatcher {
                     sizeof(*diff_src_layer_) * (rnn.n_iter + 1)
                             * rnn.ws_diff_states_layer_nld
                             * rnn.ws_diff_states_layer_ld);
+            msan_unpoison(diff_augru_attention_,
+                    sizeof(*diff_augru_attention_) * rnn.n_iter * rnn.mb
+                            * rnn.dhc);
             msan_unpoison(diff_src_iter_,
                     sizeof(*diff_src_iter_) * (rnn.n_iter + 1)
                             * rnn.ws_diff_states_iter_nld
@@ -160,16 +168,39 @@ struct rnn_postgemm_dispatcher {
 
     // template <typename src_data_t, typename acc_data_t>
     rnn_postgemm_sig(execute) {
+        /* This block has an impact on performance in case it is executed
+         * multiple times. Be careful when changing it.
+         * XXX: The code is compiler sensitive, jit might help with that.
+         */
 #if ZENDNN_X64
         if (rnn_postgemm_) {
             rnn_postgemm_->execute(rnn, cell_position, ws_gates_,
-                    scratch_gates_, dst_layer_, dst_iter_c_, src_iter_,
-                    src_iter_c_, diff_src_layer_, diff_src_iter_,
-                    diff_src_iter_c_, diff_dst_layer_, diff_dst_iter_,
-                    diff_dst_iter_c_, weights_peephole_, bias_, ws_grid_,
-                    scratch_cell_, dst_iter_, weights_scales_, block_step);
-            unpoison(rnn, cell_position, ws_gates_, scratch_gates_, dst_layer_,
-                    dst_iter_c_, src_iter_, src_iter_c_, diff_src_layer_,
+                    scratch_gates_, augru_attention_, dst_layer_, dst_iter_c_,
+                    src_iter_, src_iter_c_, diff_src_layer_,
+                    diff_augru_attention_, diff_src_iter_, diff_src_iter_c_,
+                    diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
+                    weights_peephole_, bias_, ws_grid_, scratch_cell_,
+                    dst_iter_, weights_scales_, block_step);
+            unpoison(rnn, cell_position, ws_gates_, scratch_gates_,
+                    augru_attention_, dst_layer_, dst_iter_c_, src_iter_,
+                    src_iter_c_, diff_src_layer_, diff_augru_attention_,
+                    diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
+                    diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
+                    ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
+                    block_step);
+            return;
+        }
+        if (this->postgemm_func) {
+            (this->*postgemm_func)(rnn, cell_position, ws_gates_,
+                    scratch_gates_, augru_attention_, dst_layer_, dst_iter_c_,
+                    src_iter_, src_iter_c_, diff_src_layer_,
+                    diff_augru_attention_, diff_src_iter_, diff_src_iter_c_,
+                    diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
+                    weights_peephole_, bias_, ws_grid_, scratch_cell_,
+                    dst_iter_, weights_scales_, block_step);
+            unpoison(rnn, cell_position, ws_gates_, scratch_gates_,
+                    augru_attention_, dst_layer_, dst_iter_c_, src_iter_,
+                    src_iter_c_, diff_src_layer_, diff_augru_attention_,
                     diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
                     diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
                     ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
@@ -178,25 +209,49 @@ struct rnn_postgemm_dispatcher {
         }
 #endif
         (this->*postgemm_func)(rnn, cell_position, ws_gates_, scratch_gates_,
-                dst_layer_, dst_iter_c_, src_iter_, src_iter_c_,
-                diff_src_layer_, diff_src_iter_, diff_src_iter_c_,
-                diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
-                weights_peephole_, bias_, ws_grid_, scratch_cell_, dst_iter_,
-                weights_scales_, block_step);
+                augru_attention_, dst_layer_, dst_iter_c_, src_iter_,
+                src_iter_c_, diff_src_layer_, diff_augru_attention_,
+                diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
+                diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
+                ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
+                block_step);
     }
 
     // template <typename src_data_t, typename acc_data_t>
     rnn_postgemm_sig(execute_part2) {
+        /* This block has an impact on performance in case it is executed
+         * multiple times. Be careful when changing it.
+         * XXX: The code is compiler sensitive, jit might help with that.
+         */
 #if ZENDNN_X64
         if (rnn_postgemm_part2_) {
             rnn_postgemm_part2_->execute(rnn, cell_position, ws_gates_,
-                    scratch_gates_, dst_layer_, dst_iter_c_, src_iter_,
-                    src_iter_c_, diff_src_layer_, diff_src_iter_,
-                    diff_src_iter_c_, diff_dst_layer_, diff_dst_iter_,
-                    diff_dst_iter_c_, weights_peephole_, bias_, ws_grid_,
-                    scratch_cell_, dst_iter_, weights_scales_, block_step);
-            unpoison(rnn, cell_position, ws_gates_, scratch_gates_, dst_layer_,
-                    dst_iter_c_, src_iter_, src_iter_c_, diff_src_layer_,
+                    scratch_gates_, augru_attention_, dst_layer_, dst_iter_c_,
+                    src_iter_, src_iter_c_, diff_src_layer_,
+                    diff_augru_attention_, diff_src_iter_, diff_src_iter_c_,
+                    diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
+                    weights_peephole_, bias_, ws_grid_, scratch_cell_,
+                    dst_iter_, weights_scales_, block_step);
+            unpoison(rnn, cell_position, ws_gates_, scratch_gates_,
+                    augru_attention_, dst_layer_, dst_iter_c_, src_iter_,
+                    src_iter_c_, diff_src_layer_, diff_augru_attention_,
+                    diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
+                    diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
+                    ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
+                    block_step);
+            return;
+        }
+        if (this->postgemm_part2_func) {
+            (this->*postgemm_part2_func)(rnn, cell_position, ws_gates_,
+                    scratch_gates_, augru_attention_, dst_layer_, dst_iter_c_,
+                    src_iter_, src_iter_c_, diff_src_layer_,
+                    diff_augru_attention_, diff_src_iter_, diff_src_iter_c_,
+                    diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
+                    weights_peephole_, bias_, ws_grid_, scratch_cell_,
+                    dst_iter_, weights_scales_, block_step);
+            unpoison(rnn, cell_position, ws_gates_, scratch_gates_,
+                    augru_attention_, dst_layer_, dst_iter_c_, src_iter_,
+                    src_iter_c_, diff_src_layer_, diff_augru_attention_,
                     diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
                     diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
                     ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
@@ -205,11 +260,12 @@ struct rnn_postgemm_dispatcher {
         }
 #endif
         (this->*postgemm_part2_func)(rnn, cell_position, ws_gates_,
-                scratch_gates_, dst_layer_, dst_iter_c_, src_iter_, src_iter_c_,
-                diff_src_layer_, diff_src_iter_, diff_src_iter_c_,
-                diff_dst_layer_, diff_dst_iter_, diff_dst_iter_c_,
-                weights_peephole_, bias_, ws_grid_, scratch_cell_, dst_iter_,
-                weights_scales_, block_step);
+                scratch_gates_, augru_attention_, dst_layer_, dst_iter_c_,
+                src_iter_, src_iter_c_, diff_src_layer_, diff_augru_attention_,
+                diff_src_iter_, diff_src_iter_c_, diff_dst_layer_,
+                diff_dst_iter_, diff_dst_iter_c_, weights_peephole_, bias_,
+                ws_grid_, scratch_cell_, dst_iter_, weights_scales_,
+                block_step);
     }
 
 private:
@@ -239,7 +295,7 @@ private:
 
         const bool jit_fwd = pd_->is_fwd()
                 && utils::one_of(src_type, data_type::f32, data_type::u8,
-                        data_type::bf16);
+                        data_type::s8, data_type::bf16);
         const bool jit_bwd = !pd_->is_fwd()
                 && utils::one_of(src_type, data_type::f32, data_type::bf16);
 
@@ -267,8 +323,7 @@ private:
             CREATE(rnn_postgemm_part2_, jit_uni_gru_cell_postgemm_part2);
         } else if (pd_->cell_kind() == alg_kind::lbr_gru) {
             CREATE(rnn_postgemm_, jit_uni_gru_lbr_cell_postgemm);
-        } else
-            assert(!"Unsupported algorithm kind");
+        }
 
 #undef CREATE
 #undef CREATE_WITH_DIR
@@ -291,6 +346,8 @@ using rnn_postgemm_bwd_bf16_t = rnn_postgemm_dispatcher<prop_kind::backward,
 
 using rnn_postgemm_fwd_u8_t = rnn_postgemm_dispatcher<prop_kind::forward,
         data_type::u8, data_type::s32, data_type::s32>;
+using rnn_postgemm_fwd_s8_t = rnn_postgemm_dispatcher<prop_kind::forward,
+        data_type::s8, data_type::s32, data_type::s32>;
 
 } // namespace cpu
 } // namespace impl

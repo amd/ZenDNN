@@ -1,8 +1,7 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
-
 
 /*******************************************************************************
 * Copyright 2020-2021 Intel Corporation
@@ -23,22 +22,18 @@
 #ifndef CPU_X64_PRELU_JIT_PRELU_UTILS_HPP
 #define CPU_X64_PRELU_JIT_PRELU_UTILS_HPP
 
-#include <map>
-#include <memory>
 #include <set>
-#include <utility>
-#include <unordered_set>
 
 #include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/jit_generator.hpp"
 
 namespace zendnn {
 namespace impl {
+
+struct memory_desc_wrapper;
+
 namespace cpu {
 namespace x64 {
-
-struct bf16_emulation_t;
-
 namespace prelu {
 
 enum class bcast {
@@ -56,6 +51,11 @@ int get_n_vregs(const cpu_isa_t &isa) noexcept;
 bool dt_supported(const std::set<data_type_t> &tensor_data_types) noexcept;
 bool is_s8u8(const std::set<data_type_t> &tensor_data_types) noexcept;
 int get_simd_w(const std::set<data_type_t> &tensor_data_types) noexcept;
+size_t c_blk_nelems(const memory_desc_t *mem, bool padding) noexcept;
+size_t get_block_tail_size(const memory_desc_t *mem) noexcept;
+void apply_zero_padding(jit_generator *host, const size_t tail_size,
+        const data_type_t dt, const size_t block_tail_size,
+        const Xbyak::Reg64 &reg_dst, const Xbyak::Reg64 *reg_offset) noexcept;
 
 template <typename Vmm>
 struct vmm_traits_t {};
@@ -73,64 +73,6 @@ struct vmm_traits_t<Xbyak::Ymm> {
 template <>
 struct vmm_traits_t<Xbyak::Xmm> {
     static constexpr int vlen = 16;
-};
-
-template <typename Vmm>
-class jit_prelu_io_helper_t {
-public:
-    jit_prelu_io_helper_t(jit_generator *host, const cpu_isa_t &isa,
-            const data_type_t &data_type, std::size_t tail_size,
-            const Xbyak::Opmask &tail_opmask, const Vmm &tail_vmm_mask,
-            const Vmm &vreg_zero_saturation, const Vmm &vreg_saturation_ubound,
-            const Xbyak::Reg64 &reg_tmp);
-    jit_prelu_io_helper_t(jit_generator *host, const cpu_isa_t &isa,
-            const data_type_t &data_type, std::size_t tail_size,
-            const Xbyak::Opmask &tail_opmask, const Vmm &tail_vmm_mask,
-            const Xbyak::Reg64 &reg_tmp);
-    jit_prelu_io_helper_t(jit_prelu_io_helper_t &&) = default;
-    jit_prelu_io_helper_t &operator=(jit_prelu_io_helper_t &&) = default;
-
-    ~jit_prelu_io_helper_t();
-    void prepare_tail_mask();
-    void init_saturate_f32();
-    void broadcast(const Xbyak::Address &src_addr, const Vmm &dst_vmm);
-    void load(const Xbyak::Address &src_addr, const Vmm &dst_vmm, bool tail);
-    void store(const Vmm &src_vmm, const Xbyak::Address &dst_addr, bool tail);
-
-private:
-    jit_generator *host_;
-    const cpu_isa_t isa_;
-    const data_type_t data_type_;
-    const std::size_t tail_size_;
-    const Xbyak::Opmask tail_opmask_;
-    const Vmm vreg_zero_saturation_;
-    const Vmm vreg_saturation_ubound_;
-    const Vmm tail_vmm_mask_;
-    const Xbyak::Reg64 reg_tmp_;
-    const bool bf16_supported_;
-    std::unique_ptr<bf16_emulation_t> bf16_emu_;
-};
-
-template <typename Vmm>
-class jit_prelu_io_multi_dt_helper_t {
-public:
-    jit_prelu_io_multi_dt_helper_t(jit_generator *host, const cpu_isa_t &isa,
-            const std::unordered_set<data_type_t, std::hash<int>> &data_type,
-            std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
-            const Vmm &tail_vmm_mask, const Xbyak::Reg64 &reg_tmp,
-            const std::map<data_type_t, std::pair<Vmm, Vmm>> &saturation_vmms
-            = {});
-    ~jit_prelu_io_multi_dt_helper_t();
-    void prepare_tail_mask();
-    void init_saturate_f32(const std::unordered_set<data_type_t, std::hash<int>>
-                    &store_data_types);
-
-    std::shared_ptr<jit_prelu_io_helper_t<Vmm>> at(const data_type_t dt) const;
-
-private:
-    std::unordered_map<data_type_t, std::shared_ptr<jit_prelu_io_helper_t<Vmm>>,
-            std::hash<int>>
-            storage_;
 };
 
 } // namespace prelu

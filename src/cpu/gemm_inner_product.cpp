@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -51,14 +51,18 @@ status_t gemm_inner_product_fwd_t<data_type>::execute_forward(
     const dim_t IC = pd()->IC_total_padded();
 
     const auto &wmd = *pd()->weights_md();
+    const auto &smd = *pd()->src_md();
     // check if OC is NOT the leading dimension
     bool wei_tr = wmd.format_desc.blocking.strides[0] != 1;
+    // check if MB is the leading dimension
+    bool src_tr = smd.format_desc.blocking.strides[0] == 1 && IC > 1;
 
     const float *scales = pd()->attr()->output_scales_.scales_;
 
     float alpha = 1.;
-    status_t st = extended_sgemm(wei_tr ? "T" : "N", "N", &OC, &MB, &IC, &alpha,
-            weights, wei_tr ? &IC : &OC, src, &IC, &beta_, dst, &OC,
+    status_t st = extended_sgemm(wei_tr ? "T" : "N", src_tr ? "T" : "N", &OC,
+            &MB, &IC, &alpha, weights, wei_tr ? &IC : &OC, src,
+            src_tr ? &MB : &IC, &beta_, dst, &OC,
             postops_in_ip_ ? nullptr : bias);
 
     if (st != status::success) return st;
@@ -68,9 +72,11 @@ status_t gemm_inner_product_fwd_t<data_type>::execute_forward(
         parallel(force_sequential ? 1 : 0, [&](int ithr, int nthr) {
             size_t start, end;
             balance211((size_t)(OC * MB), nthr, ithr, start, end);
-            (*pp_kernel_)(dst, dst, (char *)bias, scales, start, end, 0,
+            const size_t dim1_off = start % OC;
+            (*pp_kernel_)(dst, dst, (char *)bias, scales, start, start,
+                    dim1_off, end, 0,
                     pd()->OC() * pd()->OD() * pd()->OH() * pd()->OW(), nullptr,
-                    post_ops_binary_rhs_arg_vec.data(), dst, ctx,
+                    post_ops_binary_rhs_arg_vec.data(), dst, 0, ctx,
                     *pd()->dst_md());
         });
     }
@@ -90,11 +96,21 @@ status_t gemm_inner_product_bwd_data_t<data_type>::execute_backward_data(
     const dim_t IC = pd()->IC_total_padded();
 
     const auto &wmd = *pd()->weights_md();
+    const auto &smd = *pd()->diff_src_md();
     bool wei_tr = wmd.format_desc.blocking.strides[0] == 1;
+    // check if MB is the leading dimension
+    bool dsrc_tr = smd.format_desc.blocking.strides[0] == 1 && IC > 1;
 
     float alpha = 1.0, beta = 0.0;
-    status_t st = extended_sgemm(wei_tr ? "T" : "N", "N", &IC, &MB, &OC, &alpha,
-            weights, wei_tr ? &OC : &IC, diff_dst, &OC, &beta, diff_src, &IC);
+    status_t st = status::success;
+    if (dsrc_tr)
+        st = extended_sgemm(wei_tr ? "T" : "N", "N", &OC, &IC, &MB, &alpha,
+                diff_dst, &OC, weights, wei_tr ? &OC : &IC, &beta, diff_src,
+                &MB);
+    else
+        st = extended_sgemm(wei_tr ? "T" : "N", "N", &IC, &MB, &OC, &alpha,
+                weights, wei_tr ? &OC : &IC, diff_dst, &OC, &beta, diff_src,
+                &IC);
 
     return st;
 }
@@ -117,16 +133,20 @@ status_t gemm_inner_product_bwd_weights_t<data_type>::execute_backward_weights(
     const dim_t IC = pd()->IC_total_padded();
 
     const auto &wmd = *pd()->diff_weights_md();
+    const auto &smd = *pd()->src_md();
     bool wei_tr = wmd.format_desc.blocking.strides[0] == 1;
+    // check if MB is the leading dimension
+    bool src_tr = smd.format_desc.blocking.strides[0] == 1 && IC > 1;
 
     float alpha = 1.0, beta = 0.0;
-    status_t st;
+    status_t st = status::success;
     if (wei_tr)
-        st = extended_sgemm("N", "T", &OC, &IC, &MB, &alpha, diff_dst, &OC, src,
-                &IC, &beta, diff_weights, &OC);
+        st = extended_sgemm("N", src_tr ? "N" : "T", &OC, &IC, &MB, &alpha,
+                diff_dst, &OC, src, src_tr ? &MB : &IC, &beta, diff_weights,
+                &OC);
     else
-        st = extended_sgemm("N", "T", &IC, &OC, &MB, &alpha, src, &IC, diff_dst,
-                &OC, &beta, diff_weights, &IC);
+        st = extended_sgemm("N", src_tr ? "N" : "T", &IC, &OC, &MB, &alpha, src,
+                src_tr ? &MB : &IC, diff_dst, &OC, &beta, diff_weights, &IC);
 
     if (st != status::success) return st;
 

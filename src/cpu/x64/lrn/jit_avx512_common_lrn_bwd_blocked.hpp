@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ public:
 
 private:
     void generate() override;
-    void compute_loop(int loop_size_param, int prefetchL1, int prefetchL2);
+    void compute_loop(int loop_size_param);
 
     int xmm_size_, zmm_size_, buffer_block_, buffer_nest_offset_,
             src_prev_offset_;

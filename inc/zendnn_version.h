@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -25,16 +25,16 @@
 // clang-format off
 
 /// Major version
-#define ZENDNN_VERSION_MAJOR 2
+#define ZENDNN_VERSION_MAJOR 3
 
 /// Minor version
-#define ZENDNN_VERSION_MINOR 2
+#define ZENDNN_VERSION_MINOR 3
 
 /// Patch version
 #define ZENDNN_VERSION_PATCH 0
 
 /// Git commit hash
-#define ZENDNN_VERSION_HASH  "4a129541fd4e67e6897072186ea2817a3154eddd"
+#define ZENDNN_VERSION_HASH  "N/A"
 
 // clang-format on
 

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -69,21 +69,17 @@ struct jit_avx2_1x1_convolution_fwd_t : public primitive_t {
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops,
                             data_type::f32)
-                    && !has_zero_dim_memory() && set_default_formats();
+                    && !has_zero_dim_memory() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             const convolution_desc_t *conv_d = desc();
             const memory_desc_t *src_d = src_md();
             rtus_prepare(this, conv_d, src_d, dst_md(), weights_md());
 
-            status_t status = jit_avx2_1x1_conv_kernel_f32::init_conf(
-                    jcp_, *conv_d, *src_d, *weights_md(), *dst_md(), *attr());
-            if (status != status::success) return status;
-
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
+            CHECK(jit_avx2_1x1_conv_kernel_f32::init_conf(
+                    jcp_, *conv_d, *src_d, *weights_md(), *dst_md(), *attr()));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx2_1x1_conv_kernel_f32::init_scratchpad(scratchpad, jcp_);
@@ -169,7 +165,6 @@ struct jit_avx2_1x1_convolution_fwd_t : public primitive_t {
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
             jit_conv_conf_t *jcp_dw = nullptr;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
 
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);
@@ -185,7 +180,7 @@ struct jit_avx2_1x1_convolution_fwd_t : public primitive_t {
             // for dw: Always fuse with same ISA.
             // Caveat: May be a better dw conv exists.
 
-            bool ok = true && (!mayiuse(avx512_common))
+            bool ok = true && (!mayiuse(avx512_core))
                     && (attr_1x1.post_ops_.find(primitive_kind::sum) == -1)
                     // TODO: Below may be further tuned.
                     && (l2_cache * 2 < src_d.size())

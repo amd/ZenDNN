@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ struct jit_avx512_core_bf16_1x1_conv_kernel : public jit_generator {
     static status_t init_conf(jit_1x1_conv_conf_t &jcp,
             const convolution_desc_t &cd, const memory_desc_wrapper &src_d,
             const memory_desc_wrapper &weights_d,
-            const memory_desc_wrapper &dst_d, const primitive_attr_t &attr,
+            const memory_desc_wrapper &dst_d, primitive_attr_t &attr,
             int nthreads, bool reduce_src);
 
     static status_t init_scratchpad(memory_tracking::registrar_t &scratchpad,
@@ -87,6 +87,7 @@ private:
     reg64_t reg_store_buf
             = reg_output_stride; // reg_output_stride used only in BWD/WU
     reg64_t aux_reg_store_buf = reg_load_loop_work;
+    reg64_t reg_tmp = r12;
 
     mask_t vmask = k7;
     // Used for axb tail handling.
@@ -188,6 +189,16 @@ private:
             if (zero_mask) ymm = ymm | T_z;
         }
         return ymm;
+    }
+
+    inline size_t get_output_offset(const int i_load, const int i_ur) {
+        const bool is_output_layout_nxc = is_out_layout_nxc();
+        const size_t i_load_shift = is_output_layout_nxc
+                ? jcp.load_block
+                : (jcp.with_dw_conv ? jcp.ow : jcp.bcast_dim) * jcp.load_block;
+        const size_t i_ur_shift
+                = is_output_layout_nxc ? jcp.load_dim : jcp.load_block;
+        return jcp.typesize_out * (i_load * i_load_shift + i_ur * i_ur_shift);
     }
 
     std::unique_ptr<bf16_emulation_t> bf16_emu_;

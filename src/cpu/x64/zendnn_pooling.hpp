@@ -1,4 +1,9 @@
 ﻿/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -70,7 +75,7 @@ struct zendnn_pooling_fwd_t : public primitive_t {
 
         format_tag_t desired_fmt_tag() {
             using namespace format_tag;
-            return utils::one_of(isa, avx512_common, avx512_core)
+            return utils::one_of(isa, avx512_core)
                    ? (ndims() == 4 ? nChw16c : nCdhw16c)
                    : (ndims() == 4 ? nChw8c : nCdhw8c);
         }

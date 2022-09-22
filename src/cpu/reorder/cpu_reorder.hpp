@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 
 #include "cpu/reorder/simple_reorder.hpp"
 
+#include "common/impl_list_item.hpp"
 #include "common/memory.hpp"
 #include "common/type_helpers.hpp"
 
@@ -45,8 +46,6 @@
 namespace zendnn {
 namespace impl {
 namespace cpu {
-
-using rpd_create_f = zendnn::impl::engine_t::reorder_primitive_desc_create_f;
 
 using namespace zendnn::impl::data_type;
 using namespace zendnn::impl::format_tag;
@@ -68,37 +67,42 @@ private:
     }
 };
 
-using impl_list_map_t = std::map<reorder_impl_key_t, std::vector<rpd_create_f>>;
+using impl_list_map_t
+        = std::map<reorder_impl_key_t, std::vector<impl_list_item_t>>;
 
 /* regular reorders */
-extern const impl_list_map_t regular_f32_bf16_impl_list_map;
-extern const impl_list_map_t regular_f32_f16_impl_list_map;
-extern const impl_list_map_t regular_f32_f32_impl_list_map;
-extern const impl_list_map_t regular_f32_s32_impl_list_map;
-extern const impl_list_map_t regular_f32_s8_impl_list_map;
-extern const impl_list_map_t regular_f32_u8_impl_list_map;
-extern const impl_list_map_t regular_bf16_impl_list_map;
-extern const impl_list_map_t regular_f16_impl_list_map;
-extern const impl_list_map_t regular_s32_impl_list_map;
-extern const impl_list_map_t regular_s8_impl_list_map;
-extern const impl_list_map_t regular_u8_impl_list_map;
+extern const impl_list_map_t &regular_f32_bf16_impl_list_map();
+extern const impl_list_map_t &regular_f32_f16_impl_list_map();
+extern const impl_list_map_t &regular_f32_f32_impl_list_map();
+extern const impl_list_map_t &regular_f32_s32_impl_list_map();
+extern const impl_list_map_t &regular_f32_s8_impl_list_map();
+extern const impl_list_map_t &regular_f32_u8_impl_list_map();
+extern const impl_list_map_t &regular_bf16_impl_list_map();
+extern const impl_list_map_t &regular_f16_impl_list_map();
+extern const impl_list_map_t &regular_s32_impl_list_map();
+extern const impl_list_map_t &regular_s8_impl_list_map();
+extern const impl_list_map_t &regular_u8_impl_list_map();
 
 /* conv reorders w/ compensation */
-extern const impl_list_map_t comp_f32_s8_impl_list_map;
-extern const impl_list_map_t comp_bf16_s8_impl_list_map;
-extern const impl_list_map_t comp_s8_s8_impl_list_map;
+extern const impl_list_map_t &comp_f32_s8_impl_list_map();
+extern const impl_list_map_t &comp_bf16_s8_impl_list_map();
+extern const impl_list_map_t &comp_s8_s8_impl_list_map();
+
+// clang-format off
 
 #define REG_SR(idt, ifmt, odt, ofmt, ...) \
-    simple_reorder_t<idt, ifmt, odt, ofmt, __VA_ARGS__>::pd_t::create
+    impl_list_item_t(impl_list_item_t::reorder_type_deduction_helper_t< \
+            simple_reorder_t<idt, ifmt, odt, ofmt, __VA_ARGS__>::pd_t>()),
 
 #define REG_SR_BIDIR(idt, ifmt, odt, ofmt) \
-    REG_SR(idt, ifmt, odt, ofmt, fmt_order::keep), \
-            REG_SR(idt, ifmt, odt, ofmt, fmt_order::reverse)
+    REG_SR(idt, ifmt, odt, ofmt, fmt_order::keep) \
+    REG_SR(idt, ifmt, odt, ofmt, fmt_order::reverse)
 
-#define REG_SR_DIRECT_COPY(idt, odt) \
-    REG_SR(idt, any, odt, any, fmt_order::any, spec::direct_copy), \
-            REG_SR(idt, any, odt, any, fmt_order::any, \
-                    spec::direct_copy_except_dim_0)
+#define REG_SR_DIRECT_COPY(idt, odt)				  \
+    REG_SR(idt, any, odt, any, fmt_order::any, spec::direct_copy) \
+    REG_SR(idt, any, odt, any, fmt_order::any, spec::direct_copy_except_dim_0)
+
+// clang-format on
 
 #if defined(__INTEL_COMPILER) || (defined(__GNUC__) && !defined(__clang__))
 /* Direct copy for icc which is faster than jitted code;
@@ -106,17 +110,21 @@ extern const impl_list_map_t comp_s8_s8_impl_list_map;
  * code, but still worth it because doesn't require jitting, i.e. much
  * faster creation time. This is tentative solution and should be
  * removed later (when we will cache jitted code?...). */
-#define REG_FAST_DIRECT_COPY_F32_F32_COMMA REG_SR_DIRECT_COPY(f32, f32),
+#define REG_FAST_DIRECT_COPY_F32_F32 REG_SR_DIRECT_COPY(f32, f32)
 #else
-#define REG_FAST_DIRECT_COPY_F32_F32_COMMA
+#define REG_FAST_DIRECT_COPY_F32_F32
 #endif
 
 #ifdef __INTEL_COMPILER
 /* direct copy for icc, which is faster than jitted code */
-#define REG_FAST_DIRECT_COPY_COMMA(sdt, ddt) REG_SR_DIRECT_COPY(sdt, ddt),
+#define REG_FAST_DIRECT_COPY(sdt, ddt) REG_SR_DIRECT_COPY(sdt, ddt)
 #else
-#define REG_FAST_DIRECT_COPY_COMMA(sdt, ddt)
+#define REG_FAST_DIRECT_COPY(sdt, ddt)
 #endif
+
+#define CPU_REORDER_INSTANCE(...) \
+    impl_list_item_t(impl_list_item_t::reorder_type_deduction_helper_t< \
+            __VA_ARGS__::pd_t>()),
 
 } // namespace cpu
 } // namespace impl

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -78,6 +78,9 @@ private:
 
     reg64_t reg_long_offt = r14;
 
+    /* binary post-ops operand */
+    reg64_t temp_offset_reg = r12;
+
     int vmm_dst_idx(const int i_ur, const int i_oc) const;
     Vmm vmm_dst(const int i_ur, const int i_oc) const;
 
@@ -129,7 +132,7 @@ private:
     constexpr static int off_reg_ker_ = 8;
     constexpr static int stack_space_needed_ = 16;
 
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
     std::unique_ptr<bf16_emulation_t> bf16_emu_;
 
@@ -239,7 +242,7 @@ struct jit_avx512_core_bf16_fwd_kernel {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp);
 
@@ -699,7 +702,7 @@ private:
     }
     std::unique_ptr<bf16_emulation_t> bf16_emu_;
 
-    inline int interleave_w_reorder_size(int ur_w);
+    inline int interleave_w_reorder_size(int ur_w) const;
     inline int interleave_w_reorder_bytes(int ur_w);
     inline int interleave_stack_size(int ur_w, int ic_block_step);
     inline int permw_stack_size(int ur_w) {

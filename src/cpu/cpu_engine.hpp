@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -29,13 +29,21 @@
 
 #include "common/c_types_map.hpp"
 #include "common/engine.hpp"
+#include "common/engine_id.hpp"
+#include "common/impl_list_item.hpp"
 
 #include "cpu/platform.hpp"
 #include "zendnn_logging.hpp"
 #include "common/zendnn_hw_os_kernel_bios_info.hpp"
 
-#define CPU_INSTANCE(...) &primitive_desc_t::create<__VA_ARGS__::pd_t>,
+#define CPU_INSTANCE(...) \
+    impl_list_item_t( \
+            impl_list_item_t::type_deduction_helper_t<__VA_ARGS__::pd_t>()),
 #define CPU_INSTANCE_X64(...) ZENDNN_X64_ONLY(CPU_INSTANCE(__VA_ARGS__))
+#define CPU_INSTANCE_SSE41(...) REG_SSE41_ISA(CPU_INSTANCE(__VA_ARGS__))
+#define CPU_INSTANCE_AVX2(...) REG_AVX2_ISA(CPU_INSTANCE(__VA_ARGS__))
+#define CPU_INSTANCE_AVX512(...) REG_AVX512_ISA(CPU_INSTANCE(__VA_ARGS__))
+#define CPU_INSTANCE_AMX(...) REG_AMX_ISA(CPU_INSTANCE(__VA_ARGS__))
 #define CPU_INSTANCE_AARCH64(...) ZENDNN_AARCH64_ONLY(CPU_INSTANCE(__VA_ARGS__))
 #define CPU_INSTANCE_AARCH64_ACL(...) \
     ZENDNN_AARCH64_ACL_ONLY(CPU_INSTANCE(__VA_ARGS__))
@@ -45,8 +53,7 @@ namespace impl {
 namespace cpu {
 
 #define DECLARE_IMPL_LIST(kind) \
-    const engine_t::primitive_desc_create_f *get_##kind##_impl_list( \
-            const kind##_desc_t *desc);
+    const impl_list_item_t *get_##kind##_impl_list(const kind##_desc_t *desc);
 
 DECLARE_IMPL_LIST(batch_normalization);
 DECLARE_IMPL_LIST(binary);
@@ -64,23 +71,22 @@ DECLARE_IMPL_LIST(reduction);
 DECLARE_IMPL_LIST(resampling);
 DECLARE_IMPL_LIST(rnn);
 DECLARE_IMPL_LIST(shuffle);
-DECLARE_IMPL_LIST(softmax);
+DECLARE_IMPL_LIST(softmax_v2);
 /* add new primitive */
 DECLARE_IMPL_LIST(embedding_bag);
+
 #undef DECLARE_IMPL_LIST
 
 class cpu_engine_impl_list_t {
 public:
-    static const engine_t::concat_primitive_desc_create_f *
-    get_concat_implementation_list();
-    static const engine_t::reorder_primitive_desc_create_f *
-    get_reorder_implementation_list(
+    static const impl_list_item_t *get_concat_implementation_list();
+    static const impl_list_item_t *get_reorder_implementation_list(
             const memory_desc_t *src_md, const memory_desc_t *dst_md);
-    static const engine_t::sum_primitive_desc_create_f *
-    get_sum_implementation_list();
-    static const engine_t::primitive_desc_create_f *get_implementation_list(
+    static const impl_list_item_t *get_sum_implementation_list();
+
+    static const impl_list_item_t *get_implementation_list(
             const op_desc_t *desc) {
-        static const engine_t::primitive_desc_create_f empty_list[] = {nullptr};
+        static const impl_list_item_t empty_list[] = {nullptr};
 
 // clang-format off
 #define CASE(kind) \
@@ -104,7 +110,8 @@ public:
             CASE(resampling);
             CASE(rnn);
             CASE(shuffle);
-            CASE(softmax);
+            case primitive_kind::softmax:
+            CASE(softmax_v2);
             /* add new primitive */
             CASE(embedding_bag);
             default: assert(!"unknown primitive kind"); return empty_list;
@@ -130,27 +137,35 @@ public:
             zendnn::threadpool_interop::threadpool_iface *threadpool) override;
 #endif
 
-    const concat_primitive_desc_create_f *
-    get_concat_implementation_list() const override {
+    const impl_list_item_t *get_concat_implementation_list() const override {
         return cpu_engine_impl_list_t::get_concat_implementation_list();
     }
 
-    const reorder_primitive_desc_create_f *get_reorder_implementation_list(
+    const impl_list_item_t *get_reorder_implementation_list(
             const memory_desc_t *src_md,
             const memory_desc_t *dst_md) const override {
         return cpu_engine_impl_list_t::get_reorder_implementation_list(
                 src_md, dst_md);
     }
-    const sum_primitive_desc_create_f *
-    get_sum_implementation_list() const override {
+    const impl_list_item_t *get_sum_implementation_list() const override {
         return cpu_engine_impl_list_t::get_sum_implementation_list();
     }
-    const primitive_desc_create_f *get_implementation_list(
+    const impl_list_item_t *get_implementation_list(
             const op_desc_t *desc) const override {
         return cpu_engine_impl_list_t::get_implementation_list(desc);
     }
 
     device_id_t device_id() const override { return std::make_tuple(0, 0, 0); }
+
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    engine_id_t engine_id() const override {
+        // Non-sycl CPU engine doesn't have device and context.
+        return {};
+    }
+
+protected:
+    ~cpu_engine_t() override = default;
+#endif
 };
 
 class cpu_engine_factory_t : public engine_factory_t {

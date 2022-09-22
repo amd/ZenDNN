@@ -1,4 +1,9 @@
-﻿/*******************************************************************************
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -30,7 +35,9 @@
 #include "primitive.hpp"
 #include "utils.hpp"
 
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
 #include "cpu/cpu_engine.hpp"
+#endif
 #include "zendnn_logging.hpp"
 
 #if ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_OCL
@@ -46,10 +53,14 @@ namespace impl {
 
 static inline std::unique_ptr<engine_factory_t> get_engine_factory(
         engine_kind_t kind, runtime_kind_t runtime_kind) {
+
+#if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
     if (kind == engine_kind::cpu && is_native_runtime(runtime_kind)) {
         return std::unique_ptr<engine_factory_t>(
                 new cpu::cpu_engine_factory_t());
     }
+#endif
+
 #if ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_OCL
     if (kind == engine_kind::gpu && runtime_kind == runtime_kind::ocl) {
         return std::unique_ptr<engine_factory_t>(
@@ -94,10 +105,13 @@ status_t zendnn_engine_get_kind(engine_t *engine, engine_kind_t *kind) {
 }
 
 status_t zendnn_engine_destroy(engine_t *engine) {
-    /* TODO: engine->dec_ref_count(); */
-    zendnnInfo(ZENDNN_CORELOG, "CPU Engine deleted [engine]");
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    if (engine != nullptr) engine->release();
+#else
     delete engine;
-    return success;
+#endif
+    zendnnInfo(ZENDNN_CORELOG, "CPU Engine deleted [engine]");
+	return success;
 }
 
 // vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s

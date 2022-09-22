@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2021 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #ifndef COMMON_TYPE_HELPERS_HPP
 #define COMMON_TYPE_HELPERS_HPP
 
+#include <algorithm>
 #include <assert.h>
 #include <math.h>
 
@@ -148,26 +149,6 @@ inline float max_value(data_type_t data_type) {
 #undef CASE
 }
 
-inline float get_float_value(data_type_t dt, const void *ptr, dim_t idx) {
-#define CASE(dt) \
-    case dt: \
-        return static_cast<float>(((typename prec_traits<dt>::type *)ptr)[idx]);
-
-    using namespace data_type;
-    switch (dt) {
-        CASE(bf16);
-        CASE(f16);
-        CASE(f32);
-        CASE(s32);
-        CASE(s8);
-        CASE(u8);
-        default: assert(!"bad data_type");
-    }
-
-#undef CASE
-    return NAN;
-}
-
 inline format_kind_t format_tag_to_kind(format_tag_t tag) {
     switch (tag) {
         case format_tag::undef: return format_kind::undef;
@@ -255,6 +236,8 @@ inline data_type_t default_accum_data_type(
     using namespace utils;
     using namespace data_type;
 
+    if (one_of(src_dt, s8, u8) && dst_dt != f32) return s32;
+
     if (one_of(f16, src_dt, dst_dt)) return f16;
     if (one_of(bf16, src_dt, dst_dt)) return f32;
     if (one_of(f32, src_dt, dst_dt)) return f32;
@@ -272,20 +255,23 @@ inline data_type_t default_accum_data_type(data_type_t src_dt,
     using namespace prop_kind;
 
     /* prop_kind doesn't matter */
-    if (everyone_is(f16, src_dt, wei_dt) && one_of(dst_dt, f16, f32, s8))
+    if (everyone_is(f16, src_dt, wei_dt) && one_of(dst_dt, f16, f32, s8, u8))
         return f16;
-    if (one_of(bf16, src_dt, wei_dt, dst_dt)) return f32;
     if (everyone_is(f32, src_dt, wei_dt)) return f32;
 
     if (one_of(prop_kind, forward_training, forward_inference)) {
-        if ((src_dt == u8 || src_dt == s8) && wei_dt == s8
-                && one_of(dst_dt, f32, s32, s8, u8))
-            return s32;
+        if ((src_dt == u8 || src_dt == s8) && wei_dt == s8) return s32;
     } else if (prop_kind == backward_data) {
         if (one_of(src_dt, f32, s32, s8, u8) && wei_dt == s8
-                && one_of(dst_dt, s8, u8))
+                && one_of(dst_dt, s8, u8, s32))
             return s32;
+        if (everyone_is(f16, dst_dt, wei_dt) && one_of(src_dt, s8, u8))
+            return f16;
+        if (everyone_is(f32, dst_dt, wei_dt) && one_of(src_dt, s8, u8))
+            return f32;
     }
+
+    if (one_of(bf16, src_dt, wei_dt, dst_dt)) return f32;
 
     return data_type::undef;
 }
@@ -323,6 +309,10 @@ inline bool operator!=(const memory_desc_t &lhs, const memory_desc_t &rhs) {
 // Comparison operators for descriptors
 #define COMPARE_DESC_MEMBERS(m) lhs.m == rhs.m
 #define COMPARE_DESC_ARRAY_MEMBERS(m, s) utils::array_cmp(lhs.m, rhs.m, s)
+#define DEREF_AND_COMPARE_DESC_MEMBERS(m) *lhs.m == *rhs.m
+#define COMPARE_FLOAT_DESC_MEMBERS(m) utils::equal_with_nan(lhs.m, rhs.m)
+#define COMPARE_FLOAT_DESC_ARRAY_MEMBERS(m, s) \
+    !std::memcmp(lhs.m, rhs.m, sizeof(float) * s)
 
 // clang-format off
 inline bool operator==(const batch_normalization_desc_t &lhs,
@@ -334,7 +324,7 @@ inline bool operator==(const batch_normalization_desc_t &lhs,
             && COMPARE_DESC_MEMBERS(data_scaleshift_desc)
             && COMPARE_DESC_MEMBERS(diff_data_scaleshift_desc)
             && COMPARE_DESC_MEMBERS(stat_desc)
-            && COMPARE_DESC_MEMBERS(batch_norm_epsilon)
+            && COMPARE_FLOAT_DESC_MEMBERS(batch_norm_epsilon)
             && COMPARE_DESC_MEMBERS(flags);
     return ret;
 }
@@ -350,7 +340,7 @@ inline bool operator==(const binary_desc_t &lhs, const binary_desc_t &rhs) {
 
 inline bool operator==(const concat_desc_t &lhs, const concat_desc_t &rhs) {
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
-            && COMPARE_DESC_MEMBERS(dst_md)
+            && DEREF_AND_COMPARE_DESC_MEMBERS(dst_md)
             && COMPARE_DESC_MEMBERS(n)
             && COMPARE_DESC_MEMBERS(concat_dimension);
 
@@ -390,8 +380,8 @@ inline bool operator==(const eltwise_desc_t &lhs, const eltwise_desc_t &rhs) {
             && COMPARE_DESC_MEMBERS(alg_kind)
             && COMPARE_DESC_MEMBERS(data_desc)
             && COMPARE_DESC_MEMBERS(diff_data_desc)
-            && COMPARE_DESC_MEMBERS(alpha)
-            && COMPARE_DESC_MEMBERS(beta);
+            && COMPARE_FLOAT_DESC_MEMBERS(alpha)
+            && COMPARE_FLOAT_DESC_MEMBERS(beta);
     return ret;
 }
 
@@ -430,7 +420,7 @@ inline bool operator==(const layer_normalization_desc_t &lhs,
             && COMPARE_DESC_MEMBERS(data_scaleshift_desc)
             && COMPARE_DESC_MEMBERS(diff_data_scaleshift_desc)
             && COMPARE_DESC_MEMBERS(stat_desc)
-            && COMPARE_DESC_MEMBERS(layer_norm_epsilon)
+            && COMPARE_FLOAT_DESC_MEMBERS(layer_norm_epsilon)
             && COMPARE_DESC_MEMBERS(flags);
     return ret;
 }
@@ -442,9 +432,9 @@ inline bool operator==(const lrn_desc_t &lhs, const lrn_desc_t &rhs) {
             && COMPARE_DESC_MEMBERS(data_desc)
             && COMPARE_DESC_MEMBERS(diff_data_desc)
             && COMPARE_DESC_MEMBERS(local_size)
-            && COMPARE_DESC_MEMBERS(lrn_alpha)
-            && COMPARE_DESC_MEMBERS(lrn_beta)
-            && COMPARE_DESC_MEMBERS(lrn_k);
+            && COMPARE_FLOAT_DESC_MEMBERS(lrn_alpha)
+            && COMPARE_FLOAT_DESC_MEMBERS(lrn_beta)
+            && COMPARE_FLOAT_DESC_MEMBERS(lrn_k);
     return ret;
 }
 
@@ -458,7 +448,7 @@ inline bool operator==(const matmul_desc_t &lhs, const matmul_desc_t &rhs) {
     return ret;
 }
 
-inline bool operator==(const pooling_v2_desc_t &lhs, const pooling_v2_desc_t &rhs) {
+inline bool operator==(const pooling_desc_t &lhs, const pooling_desc_t &rhs) {
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
             && COMPARE_DESC_MEMBERS(prop_kind)
             && COMPARE_DESC_MEMBERS(alg_kind)
@@ -470,9 +460,18 @@ inline bool operator==(const pooling_v2_desc_t &lhs, const pooling_v2_desc_t &rh
             && COMPARE_DESC_ARRAY_MEMBERS(kernel, ZENDNN_MAX_NDIMS)
             && COMPARE_DESC_ARRAY_MEMBERS(padding[0], ZENDNN_MAX_NDIMS)
             && COMPARE_DESC_ARRAY_MEMBERS(padding[1], ZENDNN_MAX_NDIMS)
-            && COMPARE_DESC_ARRAY_MEMBERS(dilation, ZENDNN_MAX_NDIMS)
             && COMPARE_DESC_MEMBERS(accum_data_type);
     return ret;
+}
+
+inline bool operator==(
+        const pooling_v2_desc_t &lhs, const pooling_v2_desc_t &rhs) {
+    const auto &v1_desc_lhs = *reinterpret_cast<const pooling_desc_t *>(&lhs);
+    const auto &v1_desc_rhs = *reinterpret_cast<const pooling_desc_t *>(&rhs);
+
+    bool ret = v1_desc_lhs == v1_desc_rhs
+            && COMPARE_DESC_ARRAY_MEMBERS(dilation, ZENDNN_MAX_NDIMS);
+     return ret;
 }
 
 inline bool operator==(const prelu_desc_t &lhs, const prelu_desc_t &rhs) {
@@ -491,17 +490,18 @@ inline bool operator==(
             && COMPARE_DESC_MEMBERS(alg_kind)
             && COMPARE_DESC_MEMBERS(src_desc)
             && COMPARE_DESC_MEMBERS(dst_desc)
-            && COMPARE_DESC_MEMBERS(p)
-            && COMPARE_DESC_MEMBERS(eps);
+            && COMPARE_FLOAT_DESC_MEMBERS(p)
+            && COMPARE_FLOAT_DESC_MEMBERS(eps);
     return ret;
 }
 
 inline bool operator==(const reorder_desc_t &lhs, const reorder_desc_t &rhs) {
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
-            && COMPARE_DESC_MEMBERS(src_md)
-            && COMPARE_DESC_MEMBERS(dst_md)
+            && DEREF_AND_COMPARE_DESC_MEMBERS(src_md)
+            && DEREF_AND_COMPARE_DESC_MEMBERS(dst_md)
             && COMPARE_DESC_MEMBERS(src_engine_kind)
-            && COMPARE_DESC_MEMBERS(dst_engine_kind);
+            && COMPARE_DESC_MEMBERS(dst_engine_kind)
+            && COMPARE_DESC_MEMBERS(is_cross_engine);
     return ret;
 }
 
@@ -513,7 +513,7 @@ inline bool operator==(
             && COMPARE_DESC_MEMBERS(diff_src_desc)
             && COMPARE_DESC_MEMBERS(dst_desc)
             && COMPARE_DESC_MEMBERS(diff_dst_desc)
-            && COMPARE_DESC_ARRAY_MEMBERS(factors, ZENDNN_MAX_NDIMS);
+            && COMPARE_FLOAT_DESC_ARRAY_MEMBERS(factors, ZENDNN_MAX_NDIMS);
     return ret;
 }
 
@@ -546,8 +546,8 @@ inline bool operator==(const rnn_desc_t &lhs, const rnn_desc_t &rhs) {
             && COMPARE_DESC_MEMBERS(diff_weights_projection_desc)
             && COMPARE_DESC_MEMBERS(flags)
             && COMPARE_DESC_MEMBERS(activation_kind)
-            && COMPARE_DESC_MEMBERS(alpha)
-            && COMPARE_DESC_MEMBERS(beta);
+            && COMPARE_FLOAT_DESC_MEMBERS(alpha)
+            && COMPARE_FLOAT_DESC_MEMBERS(beta);
     return ret;
 }
 
@@ -569,19 +569,38 @@ inline bool operator==(const softmax_desc_t &lhs, const softmax_desc_t &rhs) {
     return ret;
 }
 
+inline bool operator==(
+        const softmax_v2_desc_t &lhs, const softmax_v2_desc_t &rhs) {
+    const auto &v1_desc_lhs = *reinterpret_cast<const softmax_desc_t *>(&lhs);
+    const auto &v1_desc_rhs = *reinterpret_cast<const softmax_desc_t *>(&rhs);
+
+    bool ret = v1_desc_lhs == v1_desc_rhs
+            && COMPARE_DESC_MEMBERS(alg_kind)
+            && COMPARE_DESC_MEMBERS(dst_desc)
+            && COMPARE_DESC_MEMBERS(diff_dst_desc);
+     return ret;
+}
+
 inline bool operator==(const sum_desc_t &lhs, const sum_desc_t &rhs) {
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
-            && COMPARE_DESC_MEMBERS(dst_md)
-            && COMPARE_DESC_MEMBERS(n)
-            && COMPARE_DESC_MEMBERS(scales);
+            && DEREF_AND_COMPARE_DESC_MEMBERS(dst_md)
+            && COMPARE_DESC_MEMBERS(n);
     if (!ret) return ret;
 
     for (int i = 0; i < lhs.n; i++) {
         ret = COMPARE_DESC_MEMBERS(src_mds[i]);
         if (!ret) break;
     }
+    if (!ret) return ret;
+
+    for (int i = 0; i < lhs.n; i++) {
+        ret = ret && COMPARE_FLOAT_DESC_MEMBERS(scales[i]);
+        if (!ret) break;
+    }
+
     return ret;
 }
+
 /* add for new primitive */
 inline bool operator==(const embedding_bag_desc_t &lhs, const embedding_bag_desc_t &rhs){
     bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
@@ -604,8 +623,75 @@ inline bool operator==(const zero_pad_desc_t &lhs, const zero_pad_desc_t &rhs) {
     return ret;
 }
 // clang-format on
+
 #undef COMPARE_DESC_MEMBERS
 #undef COMPARE_DESC_ARRAY_MEMBERS
+#undef DEREF_AND_COMPARE_DESC_MEMBERS
+#undef COMPARE_FLOAT_DESC_MEMBERS
+#undef COMPARE_FLOAT_DESC_ARRAY_MEMBERS
+
+/** returns true if strides are compatible with memory_desc_t */
+inline bool memory_desc_strides_check(
+        const memory_desc_t &md, const dims_t strides) {
+    if (strides == nullptr || md.ndims == 0
+            || md.format_kind != format_kind::blocked)
+        return true;
+
+    dims_t blocks = {0};
+    int perm[ZENDNN_MAX_NDIMS] = {0};
+    for (int d = 0; d < md.ndims; ++d) {
+        // no strides check needed for empty tensor
+        if (md.padded_dims[d] == 0) return true;
+
+        // no strides verification for runtime dims
+        const bool has_runtime_dim = utils::one_of(
+                ZENDNN_RUNTIME_DIM_VAL, strides[d], md.padded_dims[d]);
+        if (has_runtime_dim) return true;
+
+        perm[d] = d;
+        blocks[d] = 1;
+    }
+
+    dim_t block_size = 1;
+    const auto &blk = md.format_desc.blocking;
+    for (int iblk = 0; iblk < blk.inner_nblks; ++iblk) {
+        blocks[blk.inner_idxs[iblk]] *= blk.inner_blks[iblk];
+        block_size *= blk.inner_blks[iblk];
+    }
+
+    // A custom comparator to yield linear order on perm
+    auto idx_sorter = [&](const int a, const int b) -> bool {
+        if (strides[a] == strides[b] && md.padded_dims[a] == md.padded_dims[b])
+            return a < b;
+        else if (strides[a] == strides[b])
+            return md.padded_dims[a] < md.padded_dims[b];
+        else
+            return strides[a] < strides[b];
+    };
+    std::sort(perm, perm + md.ndims, idx_sorter);
+
+    dim_t min_stride = block_size;
+    for (int idx = 0; idx < md.ndims; ++idx) {
+        const int d = perm[idx];
+
+        // Make an exception for strides[d] == 0 as it has broadcast semantics
+        // Note: owing to being sorted, these are the initial strides
+
+        // FIXME: make an exception for dims[d] == 1 with the
+        // assumption that no code applies that stride when the only
+        // index accessed for that dimenstion is 0. This is because PT
+        // can use "dummy" padding in those situations
+        if ((strides[d] == 0) || (md.padded_dims[d] == 1))
+            continue;
+        else if (strides[d] < min_stride)
+            return false;
+
+        // update min_stride for next iteration
+        const auto padded_dim = md.padded_dims[d];
+        min_stride = block_size * strides[d] * (padded_dim / blocks[d]);
+    }
+    return true;
+}
 
 inline status_t memory_desc_init_by_strides(
         memory_desc_t &md, const dims_t strides) {
@@ -619,7 +705,8 @@ inline status_t memory_desc_init_by_tag(
             &md, md.ndims, md.dims, md.data_type, tag);
     if (status != status::success || strides == nullptr) return status;
 
-    /* TODO: add consistency check */
+    if (!memory_desc_strides_check(md, strides))
+        return status::invalid_arguments;
 
     for (int d = 0; d < md.ndims; ++d)
         md.format_desc.blocking.strides[d] = strides[d];
@@ -666,8 +753,12 @@ inline status_t memory_desc_init_by_blocking_desc(
         ou_blocks[d] /= blocks[d];
     }
 
-    utils::simultaneous_sort(mblk.strides, ou_blocks, perm, ndims,
-            [](stride_t a, stride_t b) { return b - a; });
+    utils::simultaneous_sort(
+            mblk.strides, ou_blocks, perm, ndims, [](stride_t a, stride_t b) {
+                if (utils::one_of(ZENDNN_RUNTIME_DIM_VAL, a, b))
+                    return ZENDNN_RUNTIME_DIM_VAL;
+                return b - a;
+            });
 
     dim_t stride = block_size;
     for (int _d = ndims - 1; _d >= 0; --_d) {

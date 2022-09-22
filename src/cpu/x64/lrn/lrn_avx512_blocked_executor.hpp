@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -114,8 +114,8 @@ public:
                             d_type>::jit_args_fwd_t args;
                     args.src = &src[offset];
                     args.dst = &dst[offset];
-                    args.ws0 = &ws[ws_offset0];
-                    args.ws1 = &ws[ws_offset1];
+                    args.ws0 = ws ? &ws[ws_offset0] : nullptr;
+                    args.ws1 = ws ? &ws[ws_offset1] : nullptr;
 
                     if (C16 == 1)
                         (*ker)(&args);
@@ -141,8 +141,8 @@ public:
                             d_type>::jit_args_fwd_t args;
                     args.src = &src[offset];
                     args.dst = &dst[offset];
-                    args.ws0 = &ws[ws_offset0];
-                    args.ws1 = &ws[ws_offset1];
+                    args.ws0 = ws ? &ws[ws_offset0] : nullptr;
+                    args.ws1 = ws ? &ws[ws_offset1] : nullptr;
 
                     if (C16 == 1)
                         (*ker)(&args);
@@ -253,8 +253,8 @@ public:
                             d_type>::jit_args_bwd_t args;
                     args.src = &src[offset];
                     args.diff_dst = &diff_dst[offset];
-                    args.ws0 = &ws[ws_offset0];
-                    args.ws1 = &ws[ws_offset1];
+                    args.ws0 = ws ? &ws[ws_offset0] : nullptr;
+                    args.ws1 = ws ? &ws[ws_offset1] : nullptr;
                     args.diff_src = &diff_src[offset];
 
                     if (C16 == 1)
@@ -281,8 +281,8 @@ public:
                             d_type>::jit_args_bwd_t args;
                     args.src = &src[offset];
                     args.diff_dst = &diff_dst[offset];
-                    args.ws0 = &ws[ws_offset0];
-                    args.ws1 = &ws[ws_offset1];
+                    args.ws0 = ws ? &ws[ws_offset0] : nullptr;
+                    args.ws1 = ws ? &ws[ws_offset1] : nullptr;
                     args.diff_src = &diff_src[offset];
 
                     if (C16 == 1)

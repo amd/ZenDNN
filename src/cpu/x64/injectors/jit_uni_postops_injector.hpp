@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020-2021 Intel Corporation
+* Copyright 2020-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -131,7 +131,7 @@ public:
 private:
     post_ops_t post_ops_;
     jit_generator *host_;
-    std::map<zendnn::impl::alg_kind_t, jit_uni_eltwise_injector_f32<isa>>
+    std::map<zendnn::impl::alg_kind_t, jit_uni_eltwise_injector_f32<isa, Vmm>>
             alg_to_eltwise_injector_;
     std::unique_ptr<binary_injector::jit_uni_binary_injector_t<isa, Vmm>>
             binary_injector_;
@@ -143,33 +143,21 @@ enum post_op_type { sum = 0, eltwise, binary };
 struct post_ops_ok_args_t {
     post_ops_ok_args_t(const cpu_isa_t isa,
             const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops);
-
-    post_ops_ok_args_t(const cpu_isa_t isa,
-            const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
-            const bool sum_at_pos_0_only, const bool sum_requires_scale_one);
-
-    post_ops_ok_args_t(const cpu_isa_t isa,
-            const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
-            const bool sum_at_pos_0_only, const bool sum_requires_scale_one,
-            const bcast_set_t &enabled_bcast_strategy);
-
-    post_ops_ok_args_t(const cpu_isa_t isa,
-            const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops, const memory_desc_wrapper *dst_d);
+            const post_ops_t &post_ops,
+            const memory_desc_wrapper *dst_d = nullptr,
+            const bool sum_at_pos_0_only = false,
+            const bool sum_requires_scale_one = false,
+            const bool sum_requires_zp_zero = true,
+            const bcast_set_t &enabled_bcast_strategy = default_strategies());
 
     const cpu_isa_t isa;
     const std::vector<post_op_type> &accepted_post_op_types;
     const post_ops_t &post_ops;
-    const memory_desc_wrapper *dst_d = nullptr;
-    const bool sum_at_pos_0_only = false;
-    const bool sum_requires_scale_one = false;
-    const bcast_set_t enabled_bcast_strategy
-            = {broadcasting_strategy_t::scalar, broadcasting_strategy_t::per_oc,
-                    broadcasting_strategy_t::per_oc_spatial,
-                    broadcasting_strategy_t::no_broadcast};
+    const memory_desc_wrapper *dst_d;
+    const bool sum_at_pos_0_only;
+    const bool sum_requires_scale_one;
+    const bool sum_requires_zp_zero;
+    const bcast_set_t enabled_bcast_strategy;
 };
 
 bool post_ops_ok(const post_ops_ok_args_t &args);

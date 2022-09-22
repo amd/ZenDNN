@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,27 +57,22 @@ struct jit_sse41_1x1_convolution_fwd_t : public primitive_t {
                 jit_sse41_1x1_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            using namespace data_type;
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(data_type::f32, data_type::f32,
-                            data_type::f32, data_type::f32, data_type::f32)
+                    && expect_data_types(f32, f32, f32, f32, f32)
                     && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::post_ops,
-                            data_type::f32)
-                    && !has_zero_dim_memory() && set_default_formats();
+                            primitive_attr_t::skip_mask_t::post_ops, f32)
+                    && !has_zero_dim_memory() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
-            status_t status = jit_sse41_1x1_conv_kernel_f32::init_conf(jcp_,
-                    *desc(), *src_md(), *weights_md(), *dst_md(), *attr(),
-                    zendnn_get_max_threads());
-            if (status != status::success) return status;
+            CHECK(jit_sse41_1x1_conv_kernel_f32::init_conf(jcp_, *desc(),
+                    *src_md(), *weights_md(), *dst_md(), *attr(),
+                    zendnn_get_max_threads()));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
-
-            return status;
+            return status::success;
         }
 
         const memory_desc_t *dst_md(int index = 0) const override {
@@ -139,7 +134,6 @@ struct jit_sse41_1x1_convolution_fwd_t : public primitive_t {
             auto &jcp_1x1 = jcp_;
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);
             const auto nthr = zendnn_get_max_threads();

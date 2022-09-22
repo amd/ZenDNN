@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -28,6 +28,10 @@
 #include "zendnn_threadpool_iface.hpp"
 #endif
 
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+#include "engine_id.hpp"
+#endif
+
 #include "c_types_map.hpp"
 #include "memory.hpp"
 #include "memory_storage.hpp"
@@ -44,8 +48,14 @@
 struct zendnn_engine : public zendnn::impl::c_compatible {
     zendnn_engine(zendnn::impl::engine_kind_t kind,
             zendnn::impl::runtime_kind_t runtime_kind, size_t index)
-        : kind_(kind), runtime_kind_(runtime_kind), index_(index) {}
-    virtual ~zendnn_engine() = default;
+        : kind_(kind)
+        , runtime_kind_(runtime_kind)
+        , index_(index)
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+        , counter_(1)
+#endif
+    {
+    }
 
     /** get kind of the current engine */
     zendnn::impl::engine_kind_t kind() const { return kind_; }
@@ -57,6 +67,10 @@ struct zendnn_engine : public zendnn::impl::c_compatible {
     size_t index() const { return index_; }
 
     virtual zendnn::impl::device_id_t device_id() const = 0;
+
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    virtual zendnn::impl::engine_id_t engine_id() const = 0;
+#endif
 
     /** create memory storage */
     virtual zendnn::impl::status_t create_memory_storage(
@@ -86,61 +100,58 @@ struct zendnn_engine : public zendnn::impl::c_compatible {
         stream = nullptr;
         return zendnn::impl::status::success;
     }
-    /** implementation section (typedefs) */
-
-    // TODO: remove engine?
-    typedef zendnn::impl::status_t (*reorder_primitive_desc_create_f)(
-            zendnn::impl::reorder_pd_t **, zendnn::impl::engine_t *engine,
-            const zendnn::impl::primitive_attr_t *attr,
-            zendnn::impl::engine_t *src_engine,
-            const zendnn::impl::memory_desc_t *src_md,
-            zendnn::impl::engine_t *dst_engine,
-            const zendnn::impl::memory_desc_t *dst_md);
-
-    typedef zendnn::impl::status_t (*concat_primitive_desc_create_f)(
-            zendnn::impl::concat_pd_t **, zendnn::impl::engine_t *engine,
-            const zendnn::impl::primitive_attr_t *attr,
-            const zendnn::impl::memory_desc_t *dst_md, int n, int concat_dim,
-            const zendnn::impl::memory_desc_t *src_mds);
-
-    typedef zendnn::impl::status_t (*sum_primitive_desc_create_f)(
-            zendnn::impl::sum_pd_t **, zendnn::impl::engine_t *engine,
-            const zendnn::impl::primitive_attr_t *attr,
-            const zendnn::impl::memory_desc_t *dst_md, int n, const float *scales,
-            const zendnn::impl::memory_desc_t *src_mds);
-
-    typedef zendnn::impl::status_t (*primitive_desc_create_f)(
-            zendnn::impl::primitive_desc_t **, const zendnn::impl::op_desc_t *,
-            const zendnn::impl::primitive_attr_t *attr, zendnn::impl::engine_t *,
-            const zendnn::impl::primitive_desc_t *);
 
     /* implementation section */
 
     /** return the list of reorder implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const reorder_primitive_desc_create_f *
-    get_reorder_implementation_list(const zendnn::impl::memory_desc_t *src_md,
+    virtual const zendnn::impl::impl_list_item_t *get_reorder_implementation_list(
+            const zendnn::impl::memory_desc_t *src_md,
             const zendnn::impl::memory_desc_t *dst_md) const = 0;
 
     /** return the list of concat implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const concat_primitive_desc_create_f *
+    virtual const zendnn::impl::impl_list_item_t *
     get_concat_implementation_list() const = 0;
 
     /** return the list of sum implementations. engine guarantees to return
      * a NULL-terminated list */
-    virtual const sum_primitive_desc_create_f *
+    virtual const zendnn::impl::impl_list_item_t *
     get_sum_implementation_list() const = 0;
 
     /** return the list of implementations for a given descriptor.
      * engine guarantees to return a NULL-terminated list */
-    virtual const primitive_desc_create_f *get_implementation_list(
+
+    virtual const zendnn::impl::impl_list_item_t *get_implementation_list(
             const zendnn::impl::op_desc_t *desc) const = 0;
+
+    virtual zendnn::impl::status_t serialize_device(
+            zendnn::impl::serialization_stream_t &sstream) const {
+        assert(!"unexpected");
+        return zendnn::impl::status::runtime_error;
+    }
+
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    void retain() { counter_++; }
+
+    void release() {
+        if (--counter_ == 0) { delete this; }
+    }
+#else
+    virtual ~zendnn_engine() = default;
+#endif
 
 protected:
     zendnn::impl::engine_kind_t kind_;
     zendnn::impl::runtime_kind_t runtime_kind_;
     size_t index_;
+
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    virtual ~zendnn_engine() = default;
+
+private:
+    std::atomic<int> counter_;
+#endif
 };
 
 namespace zendnn {
@@ -181,15 +192,20 @@ inline runtime_kind_t get_cpu_native_runtime() {
 #endif
 }
 
-inline bool is_native_runtime(runtime_kind_t kind) {
-    return utils::one_of(kind, runtime_kind::seq, runtime_kind::omp,
-            runtime_kind::tbb, runtime_kind::threadpool);
-}
-
 struct engine_factory_t : public c_compatible {
     virtual size_t count() const = 0;
     virtual status_t engine_create(engine_t **engine, size_t index) const = 0;
     virtual ~engine_factory_t() = default;
+};
+
+struct engine_deleter_t {
+    void operator()(engine_t *e) const {
+#ifdef ZENDNN_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+        e->release();
+#else
+        delete e;
+#endif
+    }
 };
 
 } // namespace impl

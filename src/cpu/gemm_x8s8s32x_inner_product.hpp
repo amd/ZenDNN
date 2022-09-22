@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -44,39 +44,41 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <impl::data_type_t src_type, impl::data_type_t dst_type>
 struct gemm_x8s8s32x_inner_product_fwd_t : public primitive_t {
     struct pd_t : public cpu_inner_product_fwd_pd_t {
         using cpu_inner_product_fwd_pd_t::cpu_inner_product_fwd_pd_t;
 
-        DECLARE_COMMON_PD_T(src_type == data_type::u8 ? IGEMM_S8U8S32_IMPL_STR
-                                                      : IGEMM_S8S8S32_IMPL_STR,
+        DECLARE_COMMON_PD_T(src_md()->data_type == data_type::u8
+                        ? IGEMM_S8U8S32_IMPL_STR
+                        : IGEMM_S8S8S32_IMPL_STR,
                 gemm_x8s8s32x_inner_product_fwd_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
             using namespace data_type;
 
-            const bool ok = true && is_fwd() && !has_zero_dim_memory()
-                    && src_md()->data_type == src_type
-                    && dst_md()->data_type == dst_type
+            const bool ok = is_fwd() && !has_zero_dim_memory()
+                    && utils::one_of(src_md()->data_type, s8, u8)
                     && weights_md()->data_type == s8
+                    && utils::one_of(dst_md()->data_type, f32, s32, s8, u8)
                     && IMPLICATION(with_bias(),
                             utils::one_of(
                                     weights_md(1)->data_type, f32, s32, s8, u8))
                     && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::oscale
+                            primitive_attr_t::skip_mask_t::oscale_runtime
                             | primitive_attr_t::skip_mask_t::post_ops)
                     && output_scales_mask_ok()
                     && set_default_params() == status::success
                     && dense_gemm_consitency_check(
                             src_md(), weights_md(), dst_md())
+                    && attr_.set_default_formats(dst_md(0)) == status::success
                     && inner_product_utils::post_ops_ok(
                             attr()->post_ops_, &dst_md_);
 
             if (!ok) return status::unimplemented;
 
             bool do_sum = attr()->post_ops_.find(primitive_kind::sum) >= 0;
-            dst_is_acc_ = utils::one_of(dst_type, s32, f32) && !do_sum;
+            dst_is_acc_
+                    = utils::one_of(dst_md()->data_type, s32, f32) && !do_sum;
 
             init_scratchpad();
 
@@ -95,7 +97,7 @@ struct gemm_x8s8s32x_inner_product_fwd_t : public primitive_t {
         void init_scratchpad() {
             if (!dst_is_acc_) {
                 auto scratchpad = scratchpad_registry().registrar();
-                scratchpad.template book<acc_data_t>(
+                scratchpad.template book<int32_t>(
                         memory_tracking::names::key_iprod_int_dat_in_acc_dt,
                         MB() * OC());
             }
@@ -104,15 +106,9 @@ struct gemm_x8s8s32x_inner_product_fwd_t : public primitive_t {
 
     gemm_x8s8s32x_inner_product_fwd_t(const pd_t *apd) : primitive_t(apd) {}
 
-    typedef typename prec_traits<dst_type>::type data_t;
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<data_type::s8>::type wei_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    typedef typename prec_traits<data_type::s32>::type acc_data_t;
-
     status_t init(engine_t *engine) override {
-        CHECK(safe_ptr_assign(pp_kernel_, pp_kernel_t::create(pd(), false)));
+        CHECK(safe_ptr_assign(pp_kernel_,
+                inner_product_utils::pp_kernel_t::create(pd(), false)));
         return pp_kernel_->create_kernel();
     }
 
@@ -124,9 +120,7 @@ private:
     status_t execute_forward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
-    using pp_kernel_t
-            = inner_product_utils::pp_kernel_t<data_type::s32, dst_type>;
-    std::unique_ptr<pp_kernel_t> pp_kernel_;
+    std::unique_ptr<inner_product_utils::pp_kernel_t> pp_kernel_;
 };
 
 } // namespace cpu

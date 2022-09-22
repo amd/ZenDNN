@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -31,26 +31,27 @@ namespace impl {
 // The types are not exposed
 struct zendnn_reorder_desc_t {
     zendnn_primitive_kind_t primitive_kind;
-    zendnn_memory_desc_t src_md;
-    zendnn_memory_desc_t dst_md;
+    const zendnn_memory_desc_t *src_md;
+    const zendnn_memory_desc_t *dst_md;
     zendnn_engine_kind_t src_engine_kind;
     zendnn_engine_kind_t dst_engine_kind;
+    bool is_cross_engine;
 };
 
 struct zendnn_concat_desc_t {
     zendnn_primitive_kind_t primitive_kind;
-    zendnn_memory_desc_t dst_md;
+    const zendnn_memory_desc_t *dst_md;
     zendnn_dim_t n;
     zendnn_dim_t concat_dimension;
-    std::vector<zendnn_memory_desc_t> src_mds;
+    const zendnn_memory_desc_t *src_mds;
 };
 
 struct zendnn_sum_desc_t {
     zendnn_primitive_kind_t primitive_kind;
-    zendnn_memory_desc_t dst_md;
+    const zendnn_memory_desc_t *dst_md;
     zendnn_dim_t n;
-    std::vector<float> scales;
-    std::vector<zendnn_memory_desc_t> src_mds;
+    const float *scales;
+    const zendnn_memory_desc_t *src_mds;
 };
 
 struct zendnn_zero_pad_desc_t {

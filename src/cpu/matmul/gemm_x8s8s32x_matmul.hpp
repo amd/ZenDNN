@@ -1,5 +1,5 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -40,7 +40,6 @@ namespace impl {
 namespace cpu {
 namespace matmul {
 
-template <data_type_t src_type, data_type_t weights_type, data_type_t dst_type>
 struct gemm_x8s8s32x_matmul_t : public primitive_t {
     struct pd_t : public cpu_matmul_pd_t {
         using cpu_matmul_pd_t::cpu_matmul_pd_t;
@@ -49,6 +48,8 @@ struct gemm_x8s8s32x_matmul_t : public primitive_t {
 
         status_t init(engine_t *engine);
         const gemm_based::params_t &params() const { return params_; }
+
+        int nthr_; // To not exceed the limit in execute used for set up.
 
     private:
         gemm_based::params_t params_;
@@ -60,7 +61,7 @@ struct gemm_x8s8s32x_matmul_t : public primitive_t {
         if (pd()->params().has_pp_kernel_) {
             const bool has_runtime_dims
                     = memory_desc_wrapper(pd()->dst_md()).has_runtime_dims();
-            const int nthr = zendnn_get_max_threads();
+            const int nthr = pd()->nthr_;
             const dim_t batch = pd()->batch();
             const dim_t M = pd()->M();
 
@@ -76,20 +77,16 @@ struct gemm_x8s8s32x_matmul_t : public primitive_t {
                 }
             }
 
-            pp_kernel_.reset(pp_kernel_t::create(pd()->N(), mb, pd()->ldc(),
-                    &pd()->params().pp_attr_, pd()->desc()->bias_desc.data_type,
-                    pd()->dst_md(), false));
+            CHECK(safe_ptr_assign(pp_kernel_,
+                    inner_product_utils::pp_kernel_t::create(pd()->N(), mb,
+                            pd()->ldc(), &pd()->params().pp_attr_,
+                            pd()->desc()->bias_desc.data_type,
+                            pd()->desc()->accum_data_type, pd()->dst_md(),
+                            false)));
             return pp_kernel_->create_kernel();
         }
         return status::success;
     }
-
-    static constexpr data_type_t acc_type = data_type::s32;
-
-    typedef typename prec_traits<src_type>::type src_data_t;
-    typedef typename prec_traits<weights_type>::type weights_data_t;
-    typedef typename prec_traits<dst_type>::type dst_data_t;
-    typedef typename prec_traits<acc_type>::type acc_data_t;
 
     status_t execute(const exec_ctx_t &ctx) const override {
         return execute_ref(ctx);
@@ -99,15 +96,13 @@ private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     status_t execute_ref(const exec_ctx_t &ctx) const;
     void post_process_src_and_weights_zero_points(
-            std::vector<acc_data_t> &src_comp,
-            std::vector<acc_data_t> &wei_comp, dim_t M, dim_t N, dim_t K,
-            const src_data_t *src, dim_t src_s0, dim_t src_s1,
-            const weights_data_t *wei, dim_t wei_s0, dim_t wei_s1,
-            acc_data_t *acc, int ldc, acc_data_t src_zero_point,
-            acc_data_t wei_zero_point) const;
+            std::vector<int32_t> &src_comp, std::vector<int32_t> &wei_comp,
+            dim_t M, dim_t N, dim_t K, const char *src, dim_t src_s0,
+            dim_t src_s1, const int8_t *wei, dim_t wei_s0, dim_t wei_s1,
+            int32_t *acc, int ldc, int32_t src_zero_point,
+            int32_t wei_zero_point) const;
 
-    using pp_kernel_t = inner_product_utils::pp_kernel_t<acc_type, dst_type>;
-    std::unique_ptr<pp_kernel_t> pp_kernel_;
+    std::unique_ptr<inner_product_utils::pp_kernel_t> pp_kernel_;
 };
 
 } // namespace matmul

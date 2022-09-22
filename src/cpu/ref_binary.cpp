@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -28,6 +28,9 @@
 #include "common/math_utils.hpp"
 #include "common/nstl.hpp"
 #include "common/type_helpers.hpp"
+
+#include "cpu/cpu_primitive.hpp"
+#include "cpu/ref_io_helper.hpp"
 #include "cpu/simple_q10n.hpp"
 
 #include "cpu/ref_binary.hpp"
@@ -36,34 +39,55 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <data_type_t src0_type, data_type_t src1_type, data_type_t dst_type>
-status_t ref_binary_t<src0_type, src1_type, dst_type>::execute_ref(
-        const exec_ctx_t &ctx) const {
-    status_t status = status::success;
-    const auto src0 = CTX_IN_MEM(const src0_data_t *, ZENDNN_ARG_SRC_0);
-    const auto src1 = CTX_IN_MEM(const src1_data_t *, ZENDNN_ARG_SRC_1);
-    auto dst = CTX_OUT_CLEAN_MEM(dst_data_t *, ZENDNN_ARG_DST, status);
-    CHECK(status);
+status_t ref_binary_t::execute_ref(const exec_ctx_t &ctx) const {
+    const auto src0 = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC_0);
+    const auto src1 = CTX_IN_MEM(const void *, ZENDNN_ARG_SRC_1);
+    auto dst = CTX_OUT_MEM(void *, ZENDNN_ARG_DST);
+
+    const float *scales[2];
+    ASSIGN_INPUT_SCALE_VALUE(scales[0], ZENDNN_ARG_SRC_0);
+    ASSIGN_INPUT_SCALE_VALUE(scales[1], ZENDNN_ARG_SRC_1);
 
     const memory_desc_wrapper src0_d(pd()->src_md(0));
     const memory_desc_wrapper src1_d(pd()->src_md(1));
     const memory_desc_wrapper dst_d(pd()->dst_md());
 
+    const auto src0_dt = src0_d.data_type();
+    const auto src1_dt = src1_d.data_type();
+    const auto dst_dt = dst_d.data_type();
+
     const auto alg = pd()->desc()->alg_kind;
-
-    // 0:src0 1:src1
-    constexpr int nargs = 2;
-    scales_t scales[nargs];
-    int args[nargs] = {ZENDNN_ARG_SRC_0, ZENDNN_ARG_SRC_1};
-
-    CHECK(scales[0].copy_from(pd()->attr()->scales_.get(args[0])));
-    CHECK(scales[1].copy_from(pd()->attr()->scales_.get(args[1])));
-
-    bool do_scale_src0 = !scales[0].has_default_values();
-    bool do_scale_src1 = !scales[1].has_default_values();
 
     const auto nelems = dst_d.nelems();
     const auto ndims = pd()->ndims();
+    const auto has_postops = pd()->attr()->post_ops_.len() != 0;
+    const auto is_inplace
+            = static_cast<const void *>(src0) == static_cast<void *>(dst);
+    bool has_padding = false;
+    for (int i = 0; i < dst_d.ndims(); i++)
+        if (dst_d.dims()[i] != dst_d.padded_dims()[i]) {
+            has_padding = true;
+            break;
+        }
+
+    if (has_padding && !is_inplace) {
+        if (has_postops || !dst_d.is_dense(true)) {
+            // Use zero-padding implementation as we cannot memset over
+            // populated dst memory or submemories.
+            ctx.zero_pad_output(ZENDNN_ARG_TO);
+        } else {
+            const auto res = std::div(static_cast<int>(dst_d.size()), PAGE_4K);
+            if (!res.quot)
+                std::memset(dst, 0, res.rem);
+            else
+                parallel_nd(res.quot, [&](dim_t i) {
+                    const auto tail = (i + 1 == res.quot) ? res.rem : 0;
+                    const auto ptr = reinterpret_cast<unsigned char *>(dst)
+                            + i * PAGE_4K;
+                    std::memset(ptr, 0, PAGE_4K + tail);
+                });
+        }
+    }
 
     parallel_nd(nelems, [&](dim_t i) {
         dims_t dims_src0, dims_src1; // decomposition for physical offsets
@@ -80,50 +104,29 @@ status_t ref_binary_t<src0_type, src1_type, dst_type>::execute_ref(
         utils::apply_mask_on_dims(dims_src1, ndims, mask_src1);
         const auto off_B = src1_d.off_v(dims_src1);
 
-        float x_f = (float)src0[off_A];
-        float y_f = (float)src1[off_B];
-        float dst_f = (float)dst[off_C];
+        float x_f = io::load_float_value(src0_dt, src0, off_A);
+        float y_f = io::load_float_value(src1_dt, src1, off_B);
+        float dst_f = io::load_float_value(dst_dt, dst, off_C);
 
-        if (do_scale_src0) x_f *= scales[0].scales_[0];
-        if (do_scale_src1) y_f *= scales[1].scales_[0];
+        x_f *= scales[0][0];
+        y_f *= scales[1][0];
 
         float acc = compute_binary_scalar(alg, x_f, y_f);
 
-        ref_post_ops_t::args_t args;
-        args.dst_val = dst_f;
-        args.ctx = &ctx;
-        args.l_offset = i;
-        args.dst_md = pd()->dst_md();
-        ref_post_ops->execute(acc, args);
+        if (has_postops) {
+            ref_post_ops_t::args_t args;
+            args.dst_val = dst_f;
+            args.ctx = &ctx;
+            args.l_offset = i;
+            args.dst_md = pd()->dst_md();
+            ref_post_ops->execute(acc, args);
+        }
 
-        dst[off_C] = cpu::saturate_and_round<dst_data_t>(acc);
+        io::store_float_value(dst_dt, acc, dst, off_C);
     });
 
     return status::success;
 }
-
-using namespace data_type;
-
-template struct ref_binary_t<f32>;
-template struct ref_binary_t<bf16>;
-template struct ref_binary_t<s8, s8, s8>;
-template struct ref_binary_t<s8, u8, s8>;
-template struct ref_binary_t<u8, s8, s8>;
-template struct ref_binary_t<u8, u8, s8>;
-template struct ref_binary_t<s8, s8, u8>;
-template struct ref_binary_t<s8, u8, u8>;
-template struct ref_binary_t<u8, s8, u8>;
-template struct ref_binary_t<u8, u8, u8>;
-template struct ref_binary_t<s8, f32, s8>;
-template struct ref_binary_t<s8, f32, u8>;
-template struct ref_binary_t<u8, f32, s8>;
-template struct ref_binary_t<u8, f32, u8>;
-template struct ref_binary_t<f32, s8, s8>;
-template struct ref_binary_t<f32, s8, u8>;
-template struct ref_binary_t<f32, u8, s8>;
-template struct ref_binary_t<f32, u8, u8>;
-template struct ref_binary_t<f32, f32, s8>;
-template struct ref_binary_t<f32, f32, u8>;
 
 } // namespace cpu
 } // namespace impl

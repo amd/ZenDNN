@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -496,21 +496,21 @@ jit_avx512_core_gemm_bf16bf16f32_kern::jit_avx512_core_gemm_bf16bf16f32_kern(
     arg_coffset_c_ = ptr[rsp + (args_offset + 16)];
     arg_coffset_r_ = ptr[rsp + (args_offset + 24)];
 
+    // Those register are only used if we use bf16 convert instructions
+    // emulation.
+    scratch_ = rax;
+    one_ = zmm6;
+    even_ = zmm6;
+    selector_ = zmm6;
+
+    // Temp registers for r_vdpbf16ps.
+    zmm_tmp0_ = zmm6;
+    zmm_tmp1_ = zmm3;
+
     bf16_emu_ = nullptr;
-    if (!bfloat16_ && use_zmm) {
-
-        // Those register will not be used by bf16 emulation since we only use
-        // r_vdpbf16ps.
-        scratch_ = rax;
-        one_ = zmm6;
-        even_ = zmm6;
-        selector_ = zmm6;
-
-        zmm_tmp0_ = zmm6;
-        zmm_tmp1_ = zmm3;
+    if (!bfloat16_ && use_zmm)
         bf16_emu_ = new bf16_emulation_t(
                 this, one_, even_, selector_, scratch_, zmm_tmp0_, zmm_tmp1_);
-    }
 }
 
 jit_avx512_core_gemm_bf16bf16f32_kern::

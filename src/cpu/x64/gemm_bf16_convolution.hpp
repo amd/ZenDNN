@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -65,16 +65,17 @@ struct gemm_bf16_convolution_fwd_t : public primitive_t {
                 using namespace x64::injector;
                 static constexpr bool sum_at_pos_0_only = true;
                 static constexpr bool sum_requires_scale_one = true;
+                static constexpr bool sum_requires_zp_zero = true;
                 const auto dst_md = memory_desc_wrapper(dst_md_);
                 ok &= post_ops_ok({avx512_core, {binary, eltwise, sum},
                         attr()->post_ops_, &dst_md, sum_at_pos_0_only,
-                        sum_requires_scale_one});
+                        sum_requires_scale_one, sum_requires_zp_zero});
             }
             if (!ok) return status::unimplemented;
 
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
-                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, *attr(),
+                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, attr_,
                     zendnn_get_max_threads());
         }
 
@@ -165,7 +166,7 @@ private:
 
         enum { default_unroll_2_pow_ = 2 };
 
-        Xbyak::Reg64 reg_param = abi_param1;
+        Xbyak::Reg64 reg_param = rdi;
         Xbyak::Reg64 reg_dst_base = rdx;
         Xbyak::Reg64 reg_acc_base = rax;
         Xbyak::Reg64 reg_dst = rsi;
@@ -207,7 +208,8 @@ private:
         std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
                 postops_injector_;
 
-        void apply_postops(const bool apply_mask, const int vmm_idx);
+        void apply_postops(const bool apply_mask, const size_t out_offset,
+                const int vmm_idx);
         void generate() override;
         int vreg_dst_idx(int iter) {
             int idx = data_reg_base_idx_ + iter * compute_reg_step_ + 0;
@@ -262,7 +264,7 @@ struct gemm_bf16_convolution_bwd_data_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
                     *desc(), diff_src_md_, weights_md_, diff_dst_md_, bias_md_,
-                    *attr(), zendnn_get_max_threads());
+                    attr_, zendnn_get_max_threads());
         }
 
         conv_gemm_conf_t jcp_;
@@ -317,7 +319,7 @@ struct gemm_bf16_convolution_bwd_weights_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             return jit_gemm_convolution_utils::init_conf(jcp_, scratchpad,
                     *desc(), src_md_, diff_weights_md_, diff_dst_md_,
-                    diff_bias_md_, *attr(), zendnn_get_max_threads());
+                    diff_bias_md_, attr_, zendnn_get_max_threads());
         }
 
         conv_gemm_conf_t jcp_;

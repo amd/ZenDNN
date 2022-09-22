@@ -1,10 +1,11 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
+* Copyright 2022 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -25,70 +26,31 @@
 
 #if ZENDNN_X64
 #include "cpu/x64/jit_uni_binary.hpp"
-#include "cpu/x64/jit_uni_i8i8_binary.hpp"
 using namespace zendnn::impl::cpu::x64;
+#elif ZENDNN_AARCH64 && ZENDNN_AARCH64_USE_ACL
+#include "cpu/aarch64/acl_binary.hpp"
+using namespace zendnn::impl::cpu::aarch64;
 #endif
 
 namespace zendnn {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace zendnn::impl::data_type;
 
 // clang-format off
-const pd_create_f impl_list[] = {
-        /* fp */
-        CPU_INSTANCE_X64(jit_uni_binary_t<f32>)
-        CPU_INSTANCE_X64(jit_uni_binary_t<bf16>)
-        CPU_INSTANCE(ref_binary_t<f32>)
-        CPU_INSTANCE(ref_binary_t<bf16>)
-        /* int */
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, s8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, u8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, s8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, u8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, s8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, u8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, s8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, u8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, f32, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<s8, f32, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, f32, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<u8, f32, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, s8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, s8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, u8, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, u8, u8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, f32, s8>)
-        CPU_INSTANCE_X64(jit_uni_i8i8_binary_t<f32, f32, u8>)
-        CPU_INSTANCE(ref_binary_t<s8, s8, s8>)
-        CPU_INSTANCE(ref_binary_t<s8, u8, s8>)
-        CPU_INSTANCE(ref_binary_t<u8, s8, s8>)
-        CPU_INSTANCE(ref_binary_t<u8, u8, s8>)
-        CPU_INSTANCE(ref_binary_t<s8, s8, u8>)
-        CPU_INSTANCE(ref_binary_t<s8, u8, u8>)
-        CPU_INSTANCE(ref_binary_t<u8, s8, u8>)
-        CPU_INSTANCE(ref_binary_t<u8, u8, u8>)
-        CPU_INSTANCE(ref_binary_t<s8, f32, s8>)
-        CPU_INSTANCE(ref_binary_t<s8, f32, u8>)
-        CPU_INSTANCE(ref_binary_t<u8, f32, s8>)
-        CPU_INSTANCE(ref_binary_t<u8, f32, u8>)
-        CPU_INSTANCE(ref_binary_t<f32, s8, s8>)
-        CPU_INSTANCE(ref_binary_t<f32, s8, u8>)
-        CPU_INSTANCE(ref_binary_t<f32, u8, s8>)
-        CPU_INSTANCE(ref_binary_t<f32, u8, u8>)
-        CPU_INSTANCE(ref_binary_t<f32, f32, s8>)
-        CPU_INSTANCE(ref_binary_t<f32, f32, u8>)
+constexpr impl_list_item_t impl_list[] = REG_BINARY_P({
+        CPU_INSTANCE_X64(jit_uni_binary_t)
+        CPU_INSTANCE_AARCH64_ACL(acl_binary_t)
+        CPU_INSTANCE(ref_binary_t)
         /* eol */
         nullptr,
-};
+});
 // clang-format on
 } // namespace
 
-const pd_create_f *get_binary_impl_list(const binary_desc_t *desc) {
+const impl_list_item_t *get_binary_impl_list(const binary_desc_t *desc) {
     UNUSED(desc);
     return impl_list;
 }

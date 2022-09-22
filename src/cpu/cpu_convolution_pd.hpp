@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -50,12 +50,18 @@ struct cpu_convolution_fwd_pd_t : public convolution_fwd_pd_t {
 
     bool wants_zero_pad_dst() const {
         if (!has_padded_dst()) return false;
+        bool is_zero_preserved = true;
         const auto &po = attr()->post_ops_;
-        int idx = po.find(primitive_kind::eltwise);
-        if (idx == -1) return false;
-        const auto &ee = po.entry_[idx].eltwise;
-        return !cpu_eltwise_fwd_pd_t::eltwise_preserves_zero(
-                ee.alg, ee.alpha, ee.beta);
+        for (int i = 0; i < po.len(); i++) {
+            const auto &entry = po.entry_[i];
+            if (entry.is_eltwise()) {
+                const auto &ee = entry.eltwise;
+                is_zero_preserved = is_zero_preserved
+                        && cpu_eltwise_fwd_pd_t::eltwise_preserves_zero(
+                                ee.alg, ee.alpha, ee.beta);
+            }
+        }
+        return !is_zero_preserved;
     }
 };
 

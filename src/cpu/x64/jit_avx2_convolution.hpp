@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ struct jit_avx2_convolution_fwd_t : public primitive_t {
                 const typename pd_t::base_class *hint_fwd_pd)
             : cpu_convolution_fwd_pd_t(adesc, attr, hint_fwd_pd), jcp_() {}
 
-        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", avx2, ""),
+        DECLARE_COMMON_PD_T(JIT_IMPL_NAME_HELPER("jit:", jcp_.isa, ""),
                 jit_avx2_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
@@ -55,12 +55,12 @@ struct jit_avx2_convolution_fwd_t : public primitive_t {
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops,
                             data_type::f32)
-                    && !has_zero_dim_memory() && set_default_formats();
+                    && !has_zero_dim_memory() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
-            status_t status = jit_avx2_conv_fwd_kernel_f32::init_conf(
-                    jcp_, *desc(), src_md(), weights_md(), dst_md(), *attr());
-            if (status != status::success) return status;
+            CHECK(jit_avx2_conv_fwd_kernel_f32::init_conf(
+                    jcp_, *desc(), src_md(), weights_md(), dst_md(), *attr()));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx2_conv_fwd_kernel_f32::init_scratchpad(scratchpad, jcp_);

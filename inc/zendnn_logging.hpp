@@ -1,8 +1,9 @@
 /*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 *******************************************************************************/
 
-#pragma once
+#ifndef _ZENDNN_LOGGING_HPP
+#define _ZENDNN_LOGGING_HPP
 
 #include <iostream>
 #include <fstream>
@@ -29,7 +30,30 @@ enum ZendnnLogModule {
 };
 
 struct ZendnnLogState {
-    ZendnnLogState(cn::steady_clock::time_point startTime);
+    ZendnnLogState(cn::steady_clock::time_point startTime):startTime_(startTime) {
+      moduleNames_[ZENDNN_ALGOLOG]  = "ALGO";
+      moduleNames_[ZENDNN_CORELOG]  = "CORE";
+      moduleNames_[ZENDNN_APILOG]   = "API";
+      moduleNames_[ZENDNN_TESTLOG]  = "TEST";
+      moduleNames_[ZENDNN_PROFLOG]  = "PROF";
+      moduleNames_[ZENDNN_FWKLOG]   = "FWK";
+
+
+      static_assert(ZENDNN_NUM_LOG_MODULES == 6,
+		    "Need to update moduleNames_ initialization");
+
+      for (int mod = 0; mod < ZENDNN_NUM_LOG_MODULES; mod++) {
+	auto name = moduleNames_.at(mod);
+	int lvl = zendnnGetLogLevel(name);
+	//std::cout << "mod: " << mod << "\n";
+	//std::cout << "name: " << name << "\n";
+	//std::cout << "lvl: " << lvl << "\n";
+	moduleLevels_.at(mod) = lvl;
+      }
+
+      log = &std::cout;
+
+    }
     cn::steady_clock::time_point startTime_;
     std::array<int, ZENDNN_NUM_LOG_MODULES> moduleLevels_;
     std::array<const char *, ZENDNN_NUM_LOG_MODULES> moduleNames_;
@@ -38,7 +62,10 @@ struct ZendnnLogState {
     //std::ios iosDefaultState;
 };
 
-ZendnnLogState *_zendnnGetLogState(void);
+static inline ZendnnLogState *_zendnnGetLogState(void) {
+    static ZendnnLogState logState(cn::steady_clock::now());
+    return &logState;
+}
 
 static inline void
 _zendnnLogMessageR(ZendnnLogState *logState) {
@@ -107,3 +134,5 @@ conditionFailed(const char *cond, const char *file, int line,
 
 
 }
+
+#endif

@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -47,11 +47,10 @@ struct _jit_avx512_common_conv_fwd_kernel : public jit_generator {
 
 private:
     constexpr static int isa_simd_width_
-            = cpu_isa_traits<avx512_common>::vlen / sizeof(float);
+            = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
     using reg64_t = const Xbyak::Reg64;
     enum {
         typesize = sizeof(float),
-        unroll_4fma = 4,
         ker_reg_base_idx = 28,
     };
 
@@ -60,24 +59,16 @@ private:
     reg64_t reg_ker = r9;
     reg64_t reg_out = r10;
 
-    reg64_t reg_inp_prf = r11;
-    reg64_t reg_ker_prf = r12;
-    reg64_t reg_out_prf = r13;
     reg64_t reg_owb = r12;
 
     reg64_t aux_reg_inp = r14;
     reg64_t aux_reg_ker = r15;
-
-    reg64_t aux_reg_inp_prf = rsi;
-    reg64_t aux_reg_ker_prf = rdx;
 
     reg64_t reg_channel = rsi;
     reg64_t reg_bias = rdx;
 
     reg64_t aux_reg_ker_d = r9;
     reg64_t aux_reg_inp_d = rbx;
-    reg64_t aux_reg_inp_d_prf = r13;
-    reg64_t aux_reg_ker_d_prf = abi_not_param1;
     reg64_t reg_ki = r10;
 
     reg64_t reg_kj = rax;
@@ -92,6 +83,10 @@ private:
     reg64_t reg_ker_long_offt = r11;
     reg64_t reg_tail = aux_reg_ker;
     reg64_t reg_load_work = reg_tail;
+
+    /* binary post-ops operand */
+    reg64_t temp_offset_reg = r12;
+
     Xbyak::Opmask k_oc_tail_mask = Xbyak::Opmask(2);
     const Xbyak::Opmask postops_mask = Xbyak::Opmask(3);
 
@@ -119,7 +114,7 @@ private:
     Xbyak::Reg64 imm_addr64 = r15;
     Vmm vmm_wei = Vmm(31);
 
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_common>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
             postops_injector_;
 
     inline void prepare_output(int ur_w);
@@ -127,8 +122,6 @@ private:
     inline void store_output(int ur_w);
     inline void compute_loop_fma(int ur_w, int pad_l, int pad_r);
     inline void compute_loop_fma_core(int ur_w, int pad_l, int pad_r);
-    inline void compute_loop_4fma(int ur_w, int pad_l, int pad_r);
-    inline void compute_loop_4fma_1st(int ur_w, int pad_l, int pad_r);
     inline void compute_loop(int ur_w, int pad_l, int pad_r);
 
     void generate() override;
@@ -216,7 +209,7 @@ struct jit_avx512_common_conv_fwd_kernel {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp);
 
@@ -250,20 +243,12 @@ private:
     reg64_t reg_ker = r9;
     reg64_t reg_src = r10;
 
-    reg64_t reg_dst_prf = r11;
-    reg64_t reg_ker_prf = r12;
-    reg64_t reg_src_prf = r13;
     reg64_t reg_iwb = r14;
 
     reg64_t aux_reg_dst = r14;
     reg64_t aux_reg_ker = r15;
 
-    reg64_t aux_reg_dst_prf = rsi;
-    reg64_t aux_reg_ker_prf = rdx;
-
-    reg64_t aux_reg_dst_d_prf = r13;
     reg64_t aux_reg_dst_d = rbx;
-    reg64_t aux_reg_ker_d_prf = abi_not_param1;
     reg64_t aux_reg_ker_d = r9;
     reg64_t reg_ki = r10;
 
@@ -300,7 +285,6 @@ private:
 
     inline void prepare_output(int ur_w);
     inline void store_output(int ur_w);
-    inline void compute_loop_4fma(int ur_w, int l_overflow, int r_overflow);
     inline void compute_loop_fma(int ur_w, int l_overflow, int r_overflow);
     inline void compute_loop_fma_core(
             int ur_w, int l_overflow, int r_overflow, int k_offset);
@@ -471,17 +455,11 @@ private:
     inline void compute_ic_block_step_fma_expl(int ur_w, int pad_l, int pad_r,
             int ic_block_step, int input_offset, int kernel_offset,
             int output_offset, bool input_wraparound);
-    inline void compute_ic_block_step_4fma(int ur_w, int pad_l, int pad_r,
-            int ic_block_step, int input_offset, int kernel_offset,
-            int output_offset, bool input_wraparound);
     inline void compute_oh_step_common(int ic_block_step, int max_ur_w);
     inline void compute_oh_step_disp();
     inline void compute_oh_loop_common();
     inline void compute_oh_loop_partial();
     inline void compute_od_loop_partial();
-
-    inline bool compute_full_spat_loop();
-    inline bool flat_4ops_compute();
 
     inline void compute_loop();
     inline bool is_src_layout_nxc() {
@@ -498,14 +476,10 @@ private:
         const bool is_nxc_layout = is_src_layout_nxc();
         const size_t w_shift_st = (jcp.is_hw_transp ? jcp.iw : 1)
                 * (jcp.is_1stconv ? 1 : jcp.ic_block);
-        ptrdiff_t w_shift = is_nxc_layout
-                ? jcp.ngroups * jcp.ic
-                : jcp.ver == ver_4fma ? 1 : w_shift_st;
-        ptrdiff_t ic_shift = jcp.ver == ver_4fma
-                ? jcp.tr_iw
-                : (jcp.is_1stconv && !is_nxc_layout
-                                ? (ptrdiff_t)jcp.ih * jcp.iw * jcp.id
-                                : 1);
+        ptrdiff_t w_shift = is_nxc_layout ? jcp.ngroups * jcp.ic : w_shift_st;
+        ptrdiff_t ic_shift = jcp.is_1stconv && !is_nxc_layout
+                ? (ptrdiff_t)jcp.ih * jcp.iw * jcp.id
+                : 1;
 
         ptrdiff_t local_input_offset = i_iw * w_shift + i_ic * ic_shift;
         return input_offset + typesize * local_input_offset;

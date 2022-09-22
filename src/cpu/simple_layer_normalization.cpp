@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
+#include "common/reorder.hpp"
 #include "common/type_helpers.hpp"
 
 #include "cpu/cpu_batch_normalization_utils.hpp"
@@ -51,22 +52,6 @@ status_t fill_compatible_stats_md(
             stat_md, src_md.format_desc.blocking);
 }
 
-status_t create_reorder_pd(engine_t *engine, const memory_desc_t *from_md,
-        const memory_desc_t *to_md,
-        std::unique_ptr<primitive_desc_t> &reorder_pd) {
-    auto r_impls = engine->get_reorder_implementation_list(from_md, to_md);
-    for (auto r = r_impls; *r; ++r) {
-        primitive_attr_t r_attr;
-        r_attr.set_scratchpad_mode(scratchpad_mode::user);
-        reorder_pd_t *r_pd = nullptr;
-        if ((*r)(&r_pd, engine, &r_attr, engine, from_md, engine, to_md)
-                == status::success) {
-            reorder_pd.reset(r_pd);
-            break;
-        }
-    }
-    return status::success;
-}
 } // namespace
 
 template <data_type_t data_type>
@@ -89,10 +74,9 @@ status_t simple_layer_normalization_fwd_t<data_type>::pd_t::init(
     CHECK(fill_compatible_stats_md(*src_md(), reordered_stat_md_));
 
     if (reordered_stat_md_ != *stat_md() && !stats_are_tmp()) {
-        CHECK(create_reorder_pd(engine,
+        CHECK(reorder_primitive_desc_create(reorder_pd_, engine,
                 stats_are_src() ? stat_md() : &reordered_stat_md_,
-                stats_are_src() ? &reordered_stat_md_ : stat_md(),
-                reorder_pd_));
+                stats_are_src() ? &reordered_stat_md_ : stat_md()));
     }
 
     init_scratchpad();
@@ -100,12 +84,24 @@ status_t simple_layer_normalization_fwd_t<data_type>::pd_t::init(
 }
 
 template <data_type_t data_type>
-void simple_layer_normalization_fwd_t<data_type>::execute_forward(
+status_t simple_layer_normalization_fwd_t<data_type>::execute_forward(
         const exec_ctx_t &ctx) const {
+    const bool use_ss = pd()->use_scaleshift();
+    const bool use_scale = pd()->use_scale();
+    const bool use_shift = pd()->use_shift();
+
     auto scratchpad = ctx.get_scratchpad_grantor();
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto dst = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DST);
-    auto scaleshift = CTX_IN_MEM(const float *, ZENDNN_ARG_SCALE_SHIFT);
+
+    const memory_desc_wrapper ss_d(pd()->weights_md());
+    const size_t shift_off
+            = use_ss && !ss_d.has_zero_dim() ? ss_d.off(1, 0) : 0;
+
+    auto scale = CTX_IN_MEM(
+            const float *, use_scale ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
+    auto shift = use_shift ? CTX_IN_MEM(const float *, ZENDNN_ARG_SHIFT)
+                           : use_ss ? &scale[shift_off] : nullptr;
 
     float *mean, *variance;
     if (pd()->use_tmp_stats()) {
@@ -131,9 +127,10 @@ void simple_layer_normalization_fwd_t<data_type>::execute_forward(
         balance211(N, nthr, ithr, N_start, N_end);
         const int block_size = N_end - N_start;
         (*stat_and_data_kernel_)(&src[N_start * C_padded],
-                &dst[N_start * C_padded], scaleshift, &mean[N_start],
+                &dst[N_start * C_padded], scale, shift, &mean[N_start],
                 &variance[N_start], block_size);
     });
+    return status::success;
 }
 
 template <data_type_t data_type>
@@ -157,23 +154,44 @@ status_t simple_layer_normalization_bwd_t<data_type>::pd_t::init(
     CHECK(fill_compatible_stats_md(*src_md(), reordered_stat_md_));
 
     if (reordered_stat_md_ != *stat_md()) {
-        CHECK(create_reorder_pd(
-                engine, stat_md(), &reordered_stat_md_, reorder_pd_));
+        CHECK(reorder_primitive_desc_create(
+                reorder_pd_, engine, stat_md(), &reordered_stat_md_));
     }
 
+    nthr_ = zendnn_get_max_threads();
     init_scratchpad();
     return status::success;
 }
 
 template <data_type_t data_type>
-void simple_layer_normalization_bwd_t<data_type>::execute_backward(
+status_t simple_layer_normalization_bwd_t<data_type>::execute_backward(
         const exec_ctx_t &ctx) const {
+    status_t status = status::success;
+
+    const memory_desc_wrapper diff_ss_d(pd()->diff_weights_md());
+
+    const bool use_ss = pd()->use_scaleshift();
+    const bool use_scale = pd()->use_scale();
+    const bool use_shift = pd()->use_shift();
+
     auto scratchpad = ctx.get_scratchpad_grantor();
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto diff_dst = CTX_IN_MEM(const data_t *, ZENDNN_ARG_DIFF_DST);
-    auto scaleshift = CTX_IN_MEM(const float *, ZENDNN_ARG_SCALE_SHIFT);
-    auto diff_src = CTX_OUT_MEM(data_t *, ZENDNN_ARG_DIFF_SRC);
-    auto diff_scaleshift = CTX_OUT_MEM(float *, ZENDNN_ARG_DIFF_SCALE_SHIFT);
+    auto scale = CTX_IN_MEM(
+            float *, use_scale ? ZENDNN_ARG_SCALE : ZENDNN_ARG_SCALE_SHIFT);
+    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, ZENDNN_ARG_DIFF_SRC, status);
+
+    const size_t diff_shift_off
+            = use_ss && !diff_ss_d.has_zero_dim() ? diff_ss_d.off(1, 0) : 0;
+
+    auto diff_scale = CTX_OUT_CLEAN_MEM(float *,
+            use_scale ? ZENDNN_ARG_DIFF_SCALE : ZENDNN_ARG_DIFF_SCALE_SHIFT,
+            status);
+    CHECK(status);
+    auto diff_shift = use_shift
+            ? CTX_OUT_CLEAN_MEM(float *, ZENDNN_ARG_DIFF_SHIFT, status)
+            : use_ss ? &diff_scale[diff_shift_off] : nullptr;
+    CHECK(status);
 
     const float *mean, *variance;
     if (pd()->use_tmp_stats()) {
@@ -194,10 +212,14 @@ void simple_layer_normalization_bwd_t<data_type>::execute_backward(
     const dim_t C_padded = src_d.padded_dims()[pd()->ndims() - 1];
 
     float *reduce = scratchpad.template get<float>(key_lnorm_reduction);
-    if (diff_scaleshift == nullptr)
-        diff_scaleshift = scratchpad.template get<float>(key_lnorm_tmp_diff_ss);
+    if (diff_scale == nullptr)
+        diff_scale = scratchpad.template get<float>(key_lnorm_tmp_diff_ss);
+    if (diff_shift == nullptr) {
+        diff_shift = scratchpad.template get<float>(key_lnorm_tmp_diff_ss);
+        if (diff_shift == diff_scale) diff_shift = &diff_shift[diff_shift_off];
+    }
 
-    const int max_nthr = zendnn_get_max_threads();
+    const int max_nthr = pd()->nthr_;
 
     parallel(max_nthr, [&](int ithr, int nthr) {
         dim_t N_start = 0, N_end = 0;
@@ -222,8 +244,8 @@ void simple_layer_normalization_bwd_t<data_type>::execute_backward(
             diff_gamma += reduce[C * n + c];
             diff_beta += reduce[C * max_nthr + C * n + c];
         }
-        diff_scaleshift[c] = diff_gamma;
-        diff_scaleshift[C + c] = diff_beta;
+        diff_scale[c] = diff_gamma;
+        diff_shift[c] = diff_beta;
     });
 
     parallel(max_nthr, [&](int ithr, int nthr) {
@@ -233,8 +255,9 @@ void simple_layer_normalization_bwd_t<data_type>::execute_backward(
 
         (*diff_data_kernel_)(&src[N_start * C_padded],
                 &diff_dst[N_start * C_padded], &diff_src[N_start * C_padded],
-                scaleshift, &mean[N_start], &inv_sqrtvar[N_start], block_size);
+                scale, &mean[N_start], &inv_sqrtvar[N_start], block_size);
     });
+    return status::success;
 }
 
 template struct simple_layer_normalization_fwd_t<bf16>;

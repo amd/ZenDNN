@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2021 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@
 #include "zendnn_types.h"
 
 #include "common/zendnn_thread.hpp"
+#include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
 #define XBYAK64
@@ -44,6 +45,7 @@
  * FIXME: replace size_t parameters with the appropriate ones */
 #pragma warning(disable : 4267)
 #endif
+#include "common/compiler_workarounds.hpp"
 #include "cpu/x64/xbyak/xbyak.h"
 #include "cpu/x64/xbyak/xbyak_util.h"
 
@@ -60,9 +62,6 @@ enum cpu_isa_bit_t : unsigned {
     sse41_bit = 1u << 0,
     avx_bit = 1u << 1,
     avx2_bit = 1u << 2,
-    avx512_common_bit = 1u << 3,
-    avx512_mic_bit = 1u << 4,
-    avx512_mic_4ops_bit = 1u << 5,
     avx512_core_bit = 1u << 6,
     avx512_core_vnni_bit = 1u << 7,
     avx512_core_bf16_bit = 1u << 8,
@@ -112,10 +111,7 @@ enum cpu_isa_t : unsigned {
     avx2 = avx2_bit | avx,
     avx_vnni = avx_vnni_bit | avx_bit,
     avx2_vnni = avx_vnni | avx2,
-    avx512_common = avx512_common_bit | avx2,
-    avx512_mic = avx512_mic_bit | avx512_common,
-    avx512_mic_4ops = avx512_mic_4ops_bit | avx512_mic,
-    avx512_core = avx512_core_bit | avx512_common,
+    avx512_core = avx512_core_bit | avx2,
     avx512_core_vnni = avx512_core_vnni_bit | avx512_core,
     avx512_core_bf16 = avx512_core_bf16_bit | avx512_core_vnni,
     avx512_core_bf16_ymm = prefer_ymm_bit | avx512_core_bf16,
@@ -125,10 +121,8 @@ enum cpu_isa_t : unsigned {
     avx512_core_bf16_amx_int8 = avx512_core_bf16 | amx_int8,
     avx512_core_bf16_amx_bf16 = avx512_core_bf16 | amx_bf16,
     avx512_core_amx = avx512_core_bf16 | amx_int8 | amx_bf16,
-    // NOTES: 1. Intel AMX is under initial support and turned off by default
-    //        2. isa_all by default has no isa specific hints
-    isa_all = ~0u & ~amx_tile_bit & ~amx_int8_bit & ~amx_bf16_bit
-            & ~cpu_isa_hints_utils::hints_mask,
+    // NOTES: 1. isa_all by default has no isa specific hints
+    isa_all = ~0u & ~cpu_isa_hints_utils::hints_mask,
 };
 
 enum class cpu_isa_cmp_t {
@@ -151,6 +145,7 @@ enum class cpu_isa_cmp_t {
 
 const char *get_isa_info();
 
+cpu_isa_t get_max_cpu_isa();
 cpu_isa_t ZENDNN_API get_max_cpu_isa_mask(bool soft = false);
 status_t set_max_cpu_isa(zendnn_cpu_isa_t isa);
 zendnn_cpu_isa_t get_effective_cpu_isa();
@@ -196,7 +191,7 @@ struct palette_config_t {
 template <>
 struct cpu_isa_traits<isa_all> {
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_all;
-    static constexpr const char *user_option_env = "ALL";
+    static constexpr const char *user_option_env = "all";
 };
 
 template <>
@@ -206,7 +201,7 @@ struct cpu_isa_traits<sse41> {
     static constexpr int vlen = 16;
     static constexpr int n_vregs = 16;
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_sse41;
-    static constexpr const char *user_option_env = "SSE41";
+    static constexpr const char *user_option_env = "sse41";
 };
 
 template <>
@@ -216,73 +211,66 @@ struct cpu_isa_traits<avx> {
     static constexpr int vlen = 32;
     static constexpr int n_vregs = 16;
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_avx;
-    static constexpr const char *user_option_env = "AVX";
+    static constexpr const char *user_option_env = "avx";
 };
 
 template <>
 struct cpu_isa_traits<avx2> : public cpu_isa_traits<avx> {
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_avx2;
-    static constexpr const char *user_option_env = "AVX2";
+    static constexpr const char *user_option_env = "avx2";
 };
 
 template <>
 struct cpu_isa_traits<avx2_vnni> : public cpu_isa_traits<avx2> {
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_avx2_vnni;
-    static constexpr const char *user_option_env = "AVX2_VNNI";
+    static constexpr const char *user_option_env = "avx2_vnni";
 };
 
 template <>
-struct cpu_isa_traits<avx512_common> {
+struct cpu_isa_traits<avx512_core> {
     typedef Xbyak::Zmm Vmm;
     static constexpr int vlen_shift = 6;
     static constexpr int vlen = 64;
     static constexpr int n_vregs = 32;
-};
-
-template <>
-struct cpu_isa_traits<avx512_core> : public cpu_isa_traits<avx512_common> {
     static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_avx512_core;
-    static constexpr const char *user_option_env = "AVX512_CORE";
-};
-
-template <>
-struct cpu_isa_traits<avx512_mic> : public cpu_isa_traits<avx512_common> {
-    static constexpr zendnn_cpu_isa_t user_option_val = zendnn_cpu_isa_avx512_mic;
-    static constexpr const char *user_option_env = "AVX512_MIC";
-};
-
-template <>
-struct cpu_isa_traits<avx512_mic_4ops> : public cpu_isa_traits<avx512_mic> {
-    static constexpr zendnn_cpu_isa_t user_option_val
-            = zendnn_cpu_isa_avx512_mic_4ops;
-    static constexpr const char *user_option_env = "AVX512_MIC_4OPS";
+    static constexpr const char *user_option_env = "avx512_core";
 };
 
 template <>
 struct cpu_isa_traits<avx512_core_vnni> : public cpu_isa_traits<avx512_core> {
     static constexpr zendnn_cpu_isa_t user_option_val
             = zendnn_cpu_isa_avx512_core_vnni;
-    static constexpr const char *user_option_env = "AVX512_CORE_VNNI";
+    static constexpr const char *user_option_env = "avx512_core_vnni";
 };
 
 template <>
 struct cpu_isa_traits<avx512_core_bf16> : public cpu_isa_traits<avx512_core> {
     static constexpr zendnn_cpu_isa_t user_option_val
             = zendnn_cpu_isa_avx512_core_bf16;
-    static constexpr const char *user_option_env = "AVX512_CORE_BF16";
+    static constexpr const char *user_option_env = "avx512_core_bf16";
 };
 
 template <>
 struct cpu_isa_traits<avx512_core_amx> {
     static constexpr zendnn_cpu_isa_t user_option_val
             = zendnn_cpu_isa_avx512_core_amx;
-    static constexpr const char *user_option_env = "AVX512_CORE_AMX";
+    static constexpr const char *user_option_env = "avx512_core_amx";
 };
 
 inline const Xbyak::util::Cpu &cpu() {
     const static Xbyak::util::Cpu cpu_;
     return cpu_;
 }
+
+namespace amx {
+
+int get_max_palette();
+int get_max_tiles(int palette);
+int get_max_column_bytes(int palette);
+int get_max_rows(int palette);
+bool ZENDNN_API is_available();
+
+} // namespace amx
 
 namespace {
 
@@ -300,7 +288,6 @@ static inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
         case avx2: return cpu().has(Cpu::tAVX2);
         case avx_vnni: return cpu().has(Cpu::tAVX_VNNI);
         case avx2_vnni: return mayiuse(avx2, soft) && mayiuse(avx_vnni, soft);
-        case avx512_common: return cpu().has(Cpu::tAVX512F);
         case avx512_core:
             return cpu().has(Cpu::tAVX512F) && cpu().has(Cpu::tAVX512BW)
                     && cpu().has(Cpu::tAVX512VL) && cpu().has(Cpu::tAVX512DQ);
@@ -308,12 +295,6 @@ static inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
             return cpu().has(Cpu::tAVX512F) && cpu().has(Cpu::tAVX512BW)
                     && cpu().has(Cpu::tAVX512VL) && cpu().has(Cpu::tAVX512DQ)
                     && cpu().has(Cpu::tAVX512_VNNI);
-        case avx512_mic:
-            return cpu().has(Cpu::tAVX512F) && cpu().has(Cpu::tAVX512CD)
-                    && cpu().has(Cpu::tAVX512ER) && cpu().has(Cpu::tAVX512PF);
-        case avx512_mic_4ops:
-            return mayiuse(avx512_mic, soft) && cpu().has(Cpu::tAVX512_4FMAPS)
-                    && cpu().has(Cpu::tAVX512_4VNNIW);
         case avx512_core_bf16:
             return mayiuse(avx512_core_vnni, soft)
                     && cpu().has(Cpu::tAVX512_BF16);
@@ -321,7 +302,8 @@ static inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
             return mayiuse(avx512_core_bf16)
                     && cpu_isa_hints_utils::is_hints_bit_set(
                             prefer_ymm_bit, soft);
-        case amx_tile: return cpu().has(Cpu::tAMX_TILE);
+        case amx_tile:
+            return cpu().has(Cpu::tAMX_TILE) && x64::amx::is_available();
         case amx_int8:
             return mayiuse(amx_tile, soft) && cpu().has(Cpu::tAMX_INT8);
         case amx_bf16:
@@ -354,25 +336,35 @@ static inline bool isa_has_bf16(cpu_isa_t isa) {
     ((isa) == avx ? prefix STRINGIFY(avx) : \
     ((isa) == avx2 ? prefix STRINGIFY(avx2) : \
     ((isa) == avx2_vnni ? prefix STRINGIFY(avx2_vnni) : \
-    ((isa) == avx512_common ? prefix STRINGIFY(avx512_common) : \
-    ((isa) == avx512_mic ? prefix STRINGIFY(avx512_mic) : \
-    ((isa) == avx512_mic_4ops ? prefix STRINGIFY(avx512_mic_4ops) : \
     ((isa) == avx512_core ? prefix STRINGIFY(avx512_core) : \
     ((isa) == avx512_core_vnni ? prefix STRINGIFY(avx512_core_vnni) : \
     ((isa) == avx512_core_bf16 ? prefix STRINGIFY(avx512_core_bf16) : \
     ((isa) == avx512_core_bf16_amx_int8 ? prefix STRINGIFY(avx512_core_amx_int8) : \
     ((isa) == avx512_core_bf16_amx_bf16 ? prefix STRINGIFY(avx512_core_amx_bf16) : \
-    prefix suffix_if_any)))))))))))))
+    prefix suffix_if_any))))))))))
 /* clang-format on */
 
-namespace amx {
+inline size_t data_type_vnni_granularity(data_type_t data_type) {
+    using namespace data_type;
+    switch (data_type) {
+        case f32:
+        case s32: return size_t(1);
+        case f16:
+        case bf16: return size_t(2);
+        case s8:
+        case u8: return size_t(4);
+        case data_type::undef:
+        default: assert(!"unknown data_type");
+    }
+    return size_t(0); /* should not be reachable */
+}
 
-int get_max_palette();
-int get_max_tiles(int palette);
-int get_max_column_bytes(int palette);
-int get_max_rows(int palette);
-
-} // namespace amx
+template <cpu_isa_t isa>
+inline size_t data_type_vnni_simd_elems(data_type_t data_type) {
+    const size_t dt_size = types::data_type_size(data_type);
+    assert(dt_size > 0);
+    return cpu_isa_traits<isa>::vlen / dt_size;
+}
 
 } // namespace x64
 } // namespace cpu

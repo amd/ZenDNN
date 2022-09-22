@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,12 +22,16 @@
 #ifndef CPU_X64_AMX_TILE_CONFIGURE_HPP
 #define CPU_X64_AMX_TILE_CONFIGURE_HPP
 
+#include "common/type_helpers.hpp"
+
 namespace zendnn {
 namespace impl {
 namespace cpu {
 namespace x64 {
 
-void amx_tile_configure(const char palette[64]);
+static constexpr size_t AMX_PALETTE_SIZE = 64;
+status_t ZENDNN_API amx_tile_configure(const char palette[AMX_PALETTE_SIZE]);
+status_t ZENDNN_API amx_tile_release();
 
 } // namespace x64
 } // namespace cpu

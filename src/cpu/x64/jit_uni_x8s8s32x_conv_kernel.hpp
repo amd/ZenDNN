@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -71,6 +71,7 @@ private:
     const Xbyak::Reg64 reg_out = r10;
     const Xbyak::Reg64 aux_reg_inp = r11;
     const Xbyak::Reg64 reg_ptr_sum_scale = r11;
+    const Xbyak::Reg64 reg_ptr_sum_zp = rdx;
     const Xbyak::Reg64 aux_reg_ker = r12;
     const Xbyak::Reg64 aux_reg_inp_d = r13;
     const Xbyak::Reg64 reg_compensation = r14;
@@ -96,6 +97,9 @@ private:
     const Xbyak::Reg64 reg_zp_compensation = aux_reg_inp;
     const Xbyak::Reg64 reg_src_zero_point = aux_reg_ker_d;
     const Xbyak::Reg64 reg_dst_zero_point = reg_src_zero_point;
+
+    /* binary post-ops operand */
+    const Xbyak::Reg64 temp_offset_reg = r12;
 
     const Vmm vmm_wei = Vmm(0);
     /* used during bias/comp/scale section of store_output */
@@ -189,10 +193,10 @@ private:
             int offset, int load_size);
     void apply_sum(const int nb_oc_block, const int ur_w,
             const bool last_oc_block_flag, const int oc_block,
-            const float *p_sum_scale);
+            const float *p_sum_scale, const int32_t *p_sum_zp);
     void apply_postops(const int nb_oc_block, const int ur_w,
             const bool last_oc_block_flag, const int oc_block,
-            const float *p_sum_scale);
+            const float *p_sum_scale, const int32_t *p_sum_zp);
 };
 
 template <cpu_isa_t isa>
@@ -227,14 +231,14 @@ struct jit_uni_x8s8s32x_fwd_kernel {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
 
     void (*jit_ker)(jit_conv_call_s *);
 
 private:
-    ZENDNN_DISALLOW_COPY_AND_ASSIGN(jit_uni_x8s8s32x_fwd_kernel<isa>);
+    ZENDNN_DISALLOW_COPY_AND_ASSIGN(jit_uni_x8s8s32x_fwd_kernel);
     jit_generator *kernel_;
 };
 

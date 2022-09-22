@@ -1,3 +1,8 @@
+#*******************************************************************************
+# Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+# Notified per clause 4(b) of the license.
+#******************************************************************************/
+
 ###########################################
 # Makefile to compile amdZenDNN
 #
@@ -133,7 +138,8 @@ SRCS := $(wildcard src/common/*.cpp \
     src/cpu/x64/matmul/*.cpp \
     src/cpu/x64/prelu/*.cpp \
     src/cpu/x64/rnn/*.cpp \
-    src/cpu/x64/shuffle/*.cpp )
+    src/cpu/x64/shuffle/*.cpp \
+	src/cpu/x64/utils/*.cpp )
 #$(info SRCS is $(SRCS))
 
 OBJECT_FILES  := $(SRCS:%.cpp=$(OUTDIR)/$(OBJDIR)/%.o)

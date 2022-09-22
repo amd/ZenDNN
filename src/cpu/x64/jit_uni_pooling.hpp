@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2017-2021 Intel Corporation
+* Copyright 2017-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -56,13 +56,12 @@ struct jit_uni_pooling_fwd_t : public primitive_t {
         status_t init(engine_t *engine) {
             using namespace utils;
 
-            const bool ok = true && set_default_params() == status::success
-                    && is_fwd() && !has_zero_dim_memory()
+            const bool ok = is_fwd() && !has_zero_dim_memory()
                     && everyone_is(
                             d_type, src_md()->data_type, dst_md()->data_type)
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops, d_type)
-                    && !is_dilated();
+                    && !is_dilated() && set_default_params() == status::success;
             if (!ok) return status::unimplemented;
 
             const bool is_training
@@ -71,8 +70,11 @@ struct jit_uni_pooling_fwd_t : public primitive_t {
                 init_default_ws();
 
             auto scratchpad = scratchpad_registry().registrar();
-            return jit_uni_pool_kernel<isa>::init_conf(
-                    jpp_, scratchpad, this, zendnn_get_max_threads());
+
+            CHECK(jit_uni_pool_kernel<isa>::init_conf(
+                    jpp_, scratchpad, attr_, this));
+
+            return status::success;
         }
 
         jit_pool_conf_t jpp_;
@@ -135,9 +137,13 @@ struct jit_uni_pooling_bwd_t : public primitive_t {
                 init_default_ws();
                 if (!compare_ws(hint_fwd_pd_)) return status::unimplemented;
             }
+
             auto scratchpad = scratchpad_registry().registrar();
-            return jit_uni_pool_kernel<isa>::init_conf(
-                    jpp_, scratchpad, this, zendnn_get_max_threads());
+
+            CHECK(jit_uni_pool_kernel<isa>::init_conf(
+                    jpp_, scratchpad, attr_, this));
+
+            return status::success;
         }
 
         jit_pool_conf_t jpp_;

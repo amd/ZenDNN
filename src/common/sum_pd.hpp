@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -31,29 +31,12 @@
 
 #include "utils.hpp"
 
+#include "primitive_hashing.hpp"
+
 namespace zendnn {
 namespace impl {
 
 struct sum_pd_t : public primitive_desc_t {
-    sum_pd_t(const primitive_attr_t *attr, const memory_desc_t *dst_md, int n,
-            const float *scales, const memory_desc_t *src_mds)
-        : primitive_desc_t(attr, primitive_kind::sum), n_(n), dst_md_(*dst_md) {
-        scales_.reserve(n_);
-        for (int i = 0; i < n_; ++i)
-            scales_.push_back(scales[i]);
-        src_mds_.reserve(n_);
-        for (int i = 0; i < n_; ++i)
-            src_mds_.push_back(src_mds[i]);
-
-        // Fill a desc that is intended for internal use only
-        desc_ = sum_desc_t();
-        desc_.primitive_kind = primitive_kind::sum;
-        desc_.dst_md = dst_md_;
-        desc_.n = n_;
-        desc_.scales = scales_;
-        desc_.src_mds = src_mds_;
-    }
-
     const sum_desc_t *desc() const { return &desc_; }
     const op_desc_t *op_desc() const override {
         return reinterpret_cast<const op_desc_t *>(this->desc());
@@ -102,7 +85,36 @@ protected:
     std::vector<float> scales_;
     memory_desc_t dst_md_, dst_acc_md_;
     std::vector<memory_desc_t> src_mds_;
+    memory_desc_t original_dst_md_;
+
     sum_desc_t desc_;
+
+    sum_pd_t(const primitive_attr_t *attr, const memory_desc_t *dst_md, int n,
+            const float *scales, const memory_desc_t *src_mds)
+        : primitive_desc_t(attr, primitive_kind::sum)
+        , n_(n)
+        , dst_md_(*dst_md)
+        , original_dst_md_(*dst_md) {
+        scales_.reserve(n_);
+        for (int i = 0; i < n_; ++i)
+            scales_.push_back(scales[i]);
+        src_mds_.reserve(n_);
+        for (int i = 0; i < n_; ++i)
+            src_mds_.push_back(src_mds[i]);
+
+        init_desc();
+    }
+
+    sum_pd_t(const sum_pd_t &other) : primitive_desc_t(other) {
+        n_ = other.n_;
+        scales_ = other.scales_;
+        dst_md_ = other.dst_md_;
+        dst_acc_md_ = other.dst_acc_md_;
+        src_mds_ = other.src_mds_;
+        original_dst_md_ = other.original_dst_md_;
+
+        init_desc();
+    }
 
     // backends could redefine the accumulation tensor if required
     virtual void define_dst_acc_md() {
@@ -148,6 +160,16 @@ protected:
 
         return status::success;
     }
+
+private:
+    void init_desc() {
+        desc_ = sum_desc_t();
+        desc_.primitive_kind = primitive_kind::sum;
+        desc_.dst_md = &original_dst_md_;
+        desc_.n = n_;
+        desc_.scales = scales_.data();
+        desc_.src_mds = src_mds_.data();
+    }
 };
 
 #define DECLARE_SUM_PD_t(impl_name, ...) \
@@ -166,17 +188,16 @@ protected:
     } \
     status_t create_primitive( \
             std::pair<std::shared_ptr<primitive_t>, bool> &primitive, \
-            engine_t *engine) const override { \
+            engine_t *engine, const cache_blob_t &cache_blob) const override { \
         return primitive_t::create_primitive_common<__VA_ARGS__, pd_t>( \
-                primitive, this, engine, false); \
+                primitive, this, engine, false, cache_blob); \
     } \
     pd_t *clone() const override { \
         auto new_pd = utils::make_unique<pd_t>(*this); \
         if (!new_pd->is_initialized()) return nullptr; \
         return new_pd.release(); \
     } \
-    const char *name() const override { return impl_name; } \
-    std::type_index impl_id() const override { return typeid(pd_t); }
+    const char *name() const override { return impl_name; }
 
 #define DECLARE_SUM_PD_T(impl_name, ...) \
     DECLARE_SUM_PD_t(impl_name, __VA_ARGS__)

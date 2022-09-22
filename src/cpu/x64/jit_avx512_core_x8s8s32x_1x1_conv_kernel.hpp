@@ -1,10 +1,10 @@
-﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+/*******************************************************************************
+* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include "common/memory_tracking.hpp"
 
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
+#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
 
@@ -46,7 +47,10 @@ struct _jit_avx512_core_x8s8s32x_1x1_conv_kernel : public jit_generator {
 private:
     constexpr static int isa_simd_width_
             = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    using Vmm_down_t =
+            typename utils::conditional<std::is_same<Vmm, Xbyak::Zmm>::value,
+                    Xbyak::Ymm, Xbyak::Xmm>::type;
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
 
     /* register mapping */
@@ -78,8 +82,10 @@ private:
     const Xbyak::Reg64 reg_load_dim_tail_mask = reg_scratch;
 
     const Xbyak::Opmask k_load_dim_mask = Xbyak::Opmask(2);
-    const Xbyak::Opmask k_load_dim_tail_mask = Xbyak::Opmask(3);
-    const Xbyak::Opmask postops_mask = Xbyak::Opmask(4);
+    const Xbyak::Opmask k_load_dim_mask_extended = Xbyak::Opmask(3);
+    const Xbyak::Opmask k_load_dim_tail_mask = Xbyak::Opmask(4);
+    const Xbyak::Opmask k_load_dim_tail_mask_extended = Xbyak::Opmask(5);
+    const Xbyak::Opmask postops_mask = Xbyak::Opmask(6);
     const Xbyak::Opmask vmask = k7;
 
     const Vmm vmm_tmp = Vmm(28);
@@ -89,11 +95,19 @@ private:
     const Vmm vmm_prev_dst = Vmm(30);
     const Vmm vmm_shift = Vmm(30);
     const Vmm vmm_bcast = Vmm(31);
-    const Vmm vmm_bias_alpha = Vmm(31);
-    const Xbyak::Xmm xmm_bias_alpha = Xbyak::Xmm(31);
     /* zero-point */
     const Vmm vmm_zp = Vmm(30);
     const Vmm vmm_zp_tmp = vmm_zp;
+
+    /* bfloat16 */
+    const Xbyak::Zmm bf16_emu_reserv_1 = Xbyak::Zmm(25);
+    const Xbyak::Zmm bf16_emu_reserv_2 = Xbyak::Zmm(26);
+    const Xbyak::Zmm bf16_emu_reserv_3 = Xbyak::Zmm(27);
+    const Xbyak::Reg64 bf16_emu_reserv_4 = imm_addr64;
+    const Xbyak::Zmm bf16_emu_reserv_5 = Xbyak::Zmm(28);
+    const Xbyak::Ymm ymm_store = Xbyak::Ymm(31);
+
+    std::unique_ptr<bf16_emulation_t> bf16_emu_;
 
     constexpr static int reg64_size_ = sizeof(int64_t);
     constexpr static int bcast_loop_work_off = 0;
@@ -101,13 +115,22 @@ private:
     constexpr static int reg_bcast_data_off = 2 * reg64_size_;
     constexpr static int reg_load_data_off = 3 * reg64_size_;
     constexpr static int reg_ptr_sum_scale_off = 4 * reg64_size_;
-    constexpr static int reg_comp_data_off = 5 * reg64_size_;
-    constexpr static int reg_zp_compensation_off = 6 * reg64_size_;
-    constexpr static int reg_src_zero_point_off = 7 * reg64_size_;
-    constexpr static int reg_dst_zero_point_off = 8 * reg64_size_;
-    constexpr static int reg_binary_post_op_acc_off = 9 * reg64_size_;
-    constexpr static int reg_abi_param1_backup = 10 * reg64_size_;
-    constexpr static int stack_space_needed = 11 * reg64_size_;
+    constexpr static int reg_ptr_sum_zp_off = 5 * reg64_size_;
+    constexpr static int reg_comp_data_off = 6 * reg64_size_;
+    constexpr static int reg_zp_compensation_off = 7 * reg64_size_;
+    constexpr static int reg_src_zero_point_off = 8 * reg64_size_;
+    constexpr static int reg_dst_zero_point_off = 9 * reg64_size_;
+    constexpr static int reg_binary_post_op_acc_off = 10 * reg64_size_;
+    constexpr static int reg_abi_param1_backup = 11 * reg64_size_;
+    constexpr static int stack_space_needed = 12 * reg64_size_;
+
+    inline Vmm maybe_mask_vmm(Vmm vmm, bool mask_flag) {
+        return mask_flag ? vmm | k_load_dim_mask_extended : vmm;
+    }
+    inline Vmm_down_t maybe_mask_vmm_down(Vmm_down_t vmm_down, bool mask_flag) {
+        return mask_flag ? vmm_down | k_load_dim_mask : vmm_down;
+    }
+    inline Vmm_down_t vmm_store() { return Vmm_down_t(ymm_store.getIdx()); };
 
     void bcast_loop(int load_loop_blk);
     void reduce_loop(int load_loop_blk, int ur, int substep, bool wraparound);
@@ -116,9 +139,11 @@ private:
     int vreg_accum_idx(const int load_loop_blk, int i_load, int i_ur) const;
     Vmm vreg_accum(const int load_loop_blk, int i_load, int i_ur) const;
     void apply_sum(const int load_loop_blk, const int ur,
-            const bool mask_flag_in, const float *p_sum_scale);
+            const bool mask_flag_in, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void apply_postops(const int load_loop_blk, const int ur,
-            const bool mask_flag_in, const float *p_sum_scale);
+            const bool mask_flag_in, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void generate() override;
     void cvt2ps(data_type_t type_in, const Vmm vmm_in, const Xbyak::Operand &op,
             bool mask_flag);
