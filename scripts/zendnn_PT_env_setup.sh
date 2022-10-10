@@ -151,6 +151,15 @@ then
 fi
 echo "ZENDNN_PT_USE_LOCAL_ZENDNN=$ZENDNN_PT_USE_LOCAL_ZENDNN"
 
+# Switch to enable Conv, Add fusion on users discretion. Currently it is
+# safe to enable this switch for vitis_ai models (resnet50
+# inception_v3) models only. By default the switch is disabled.
+# enable this flag when add doesnt need broadcasting of inputs
+
+#optimize_for_inference has to be called only after setting this flag for this fusion to happen
+export ZENDNN_PT_CONV_ADD_FUSION_SAFE=0
+echo "ZENDNN_PT_CONV_ADD_FUSION_SAFE=$ZENDNN_PT_CONV_ADD_FUSION_SAFE"
+
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
 #to optimize the use of system resources. ZenDNN depend on a number of threads
