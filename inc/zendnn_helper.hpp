@@ -90,7 +90,7 @@ class zendnnEnv {
         // 1 (Graph level Memory Reuse)
         // 2 (Node level Memory Reuse)
         zenEnableMemPool = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
-        if (zenEnableMemPool < 0 || zenEnableMemPool > 2) {
+        if (zenEnableMemPool > 2) {
             zenEnableMemPool = 1;
         }
         //TODO: Unified FWK and LIB mempool for next release
