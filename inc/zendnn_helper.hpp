@@ -5,9 +5,10 @@
 #pragma once
 
 #include <iostream>
-
+#include <zendnn.h>
 
 namespace zendnn {
+
 /// Read an integer from the environment variable
 /// Return default_value if the environment variable is not defined, otherwise
 /// return actual value.
@@ -87,7 +88,7 @@ class zendnnEnv {
         //              MatMul is redirected to BLIS directly
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=3) (current default)
         zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", 3);
-        if (zenGEMMalgo<=0 || zenGEMMalgo>3) {
+        if (zenGEMMalgo>4) {
             zenGEMMalgo = 3;
         }
 
@@ -359,4 +360,135 @@ extern "C" {
         unsigned long size
     );
 
+    void zenMatmulSplit(
+        zendnn::zendnnEnv zenEnvObj,
+        const bool auto_tuner,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc
+    );
+
+    zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
+                                 int64_t K, float alpha, const float *A, int64_t lda, const float *B,
+                                 const int64_t ldb, float beta, float *C, int64_t ldc);
+
+    void zenMatMul_gemm(
+        zendnn::zendnnEnv,
+        const bool,
+        const bool,
+        const bool,
+        const bool,
+        const int,
+        const int,
+        const int,
+        const float,
+        const float *,
+        const int,
+        const float *,
+        const int,
+        const float *,
+        const bool,
+        const int,
+        const float,
+        float *,
+        const int
+    );
+
+
+    int auto_compute_matmul_v1(
+        zendnn::zendnnEnv zenEnvObj,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc
+    );
+    int auto_compute_matmul_v2(
+        zendnn::zendnnEnv zenEnvObj,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc
+    );
+
+    int auto_compute_matmul_v3(
+        zendnn::zendnnEnv zenEnvObj,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc
+    );
+
+    int auto_compute_matmul_v4(
+        zendnn::zendnnEnv zenEnvObj,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc
+    );
 }

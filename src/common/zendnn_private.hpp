@@ -589,26 +589,6 @@ extern "C"
         const float *elementwise_input
     );
 
-    void zenMatmulSplit(
-        zendnnEnv zenEnvObj,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const float beta,
-        float *output,
-        const int ldc
-    );
-
     void im2row_unrool_3x3(
         float *data_col_tmp,
         unsigned long data_col_offset,

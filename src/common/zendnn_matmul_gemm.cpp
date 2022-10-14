@@ -14,36 +14,16 @@
 #include "zendnn.hpp"
 
 using namespace zendnn;
+
 #define BLIS_NORMAL_PATH1        1024
 #define BLIS_NORMAL_PATH2        4096
+
 extern float gelu_const;
-
-zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
-                             int64_t K, float alpha, const float *A, int64_t lda, const float *B,
-                             const int64_t ldb, float beta, float *C, int64_t ldc);
-
-void zenMatmulSplit(
-    zendnnEnv zenEnvObj,
-    const bool Layout,
-    const bool transpose_input,
-    const bool transpose_filter,
-    const int m,
-    const int k,
-    const int n,
-    const float alpha,
-    const float *input,
-    const int lda,
-    const float *filter,
-    const int ldb,
-    const float *bias,
-    const bool relu,
-    const int gelu,
-    const float beta,
-    float *output,
-    const int ldc
-);
+extern unsigned int graph_exe_count;
 
 void zenMatMul_gemm(
+    zendnnEnv zenEnvObj,
+    const bool auto_tuner,
     const bool Layout,
     const bool transpose_input,
     const bool transpose_filter,
@@ -68,30 +48,17 @@ void zenMatMul_gemm(
     //Set Format to GEMM as Matrix multiplication is always GEMM
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
+
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
     //MatMul with pipelining
-    unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    unsigned int blis_direct_matmul = zenEnvObj.zenGEMMalgo;
-
-    //Currently zendnn_sgemm is used only for m==1
-    //TODO: Need to run perf analysis on zendnn_sgemm and use it
-    // accordingly
-    if ((blis_direct_matmul==1) || (m==1)) {
-
-        if (blis_direct_matmul==1) {
-
-            //Perform MatMul using AMD BLIS
-            cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
-                        transpose_input ? CblasTrans : CblasNoTrans,
-                        transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
-                        input, lda, filter, ldb, beta, output, ldc);
-        }
-        else {
-            zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                         m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
-
-        }
+    if (zenEnvObj.zenGEMMalgo == 1) {
+        //Perform MatMul using AMD BLIS
+        cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
+                    transpose_input ? CblasTrans : CblasNoTrans,
+                    transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
+                    input, lda, filter, ldb, beta, output, ldc);
         if (bias || relu || gelu) {
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                        ldc, 0,
@@ -99,14 +66,26 @@ void zenMatMul_gemm(
                        thread_qty);
         }
     }
+    else if (zenEnvObj.zenGEMMalgo == 3) {
+        zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
+                     m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                       ldc, 0,
+                       bias, relu, gelu, NULL,
+                       thread_qty);
+        }
+
+    }
     else {
-        zenMatmulSplit(zenEnvObj, Layout, transpose_input, transpose_filter,
+        zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
                        m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
                        output, ldc);
     }
 
 
 }
+
 
 // Current parallel implementation for zenMatmulSplit does not consider column
 // major layout as input. To overcome that limitation zenMatMul_gemm_wrapper
@@ -131,20 +110,55 @@ void zenMatMul_gemm_wrapper(
     const int ldc
 ) {
 
-    // Get the number of threads that could be used for parallelization
     zendnnEnv zenEnvObj = readEnv();
-    unsigned int blis_direct_matmul = zenEnvObj.zenGEMMalgo;
-
+    bool auto_tuner=false;
+    unsigned int algo_type = zenEnvObj.zenGEMMalgo;
     // prologue code for time profiling of this kernel
     struct timeval start, end;
     gettimeofday(&start, 0);
 
-    if (false == Layout && !(blis_direct_matmul==1)) { //CblasColMajor
-        zenMatMul_gemm(!Layout, transpose_filter, transpose_input, n, k, m,
+    //Experimental version for auto tuner
+    if (zenEnvObj.zenGEMMalgo==0) {
+        auto_tuner=true;
+
+        //If graph_exe_count is incremented by framework
+        if (graph_exe_count != -1) {
+
+            if (false == Layout) { //CblasColMajor
+                algo_type = auto_compute_matmul_v3(zenEnvObj, !Layout, transpose_filter,
+                                                   transpose_input,
+                                                   n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
+            }
+            else {
+                algo_type = auto_compute_matmul_v3(zenEnvObj, Layout, transpose_input,
+                                                   transpose_filter,
+                                                   m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
+            }
+        }
+        //If graph_exe_count not incremented from framework
+        else {
+
+            if (false == Layout) { //CblasColMajor
+                algo_type = auto_compute_matmul_v4(zenEnvObj, !Layout, transpose_filter,
+                                                   transpose_input,
+                                                   n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
+            }
+            else {
+                algo_type = auto_compute_matmul_v4(zenEnvObj, Layout, transpose_input,
+                                                   transpose_filter,
+                                                   m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
+            }
+        }
+
+    }
+    else if (false == Layout) { //CblasColMajor
+        zenMatMul_gemm(zenEnvObj, auto_tuner, !Layout, transpose_filter,
+                       transpose_input, n, k, m,
                        alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
     }
     else {
-        zenMatMul_gemm(Layout, transpose_input, transpose_filter, m, k, n,
+        zenMatMul_gemm(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
+                       m, k, n,
                        alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
     }
 
@@ -152,13 +166,14 @@ void zenMatMul_gemm_wrapper(
     gettimeofday(&end, 0);
     float elapsed = timedifference_msec(start, end);
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenMatMul_gemm, Layout=",
+    zendnnInfo(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner, " Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
                " transa=", transpose_input ? "CblasTrans," : "CblasNoTrans,",
                " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
                " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
                " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                " relu=", relu, " gelu=", gelu,
+               " algo type=", algo_type,
                " Time=", elapsed, "ms");
 }
 
@@ -328,7 +343,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
         unsigned long k = K_Array[i];
 
         for (int j=0; j<group_size[i]; j++) {
-            zenMatmulSplit(zenEnvObj, Layout, transpose_input, transpose_filter,
+            zenMatmulSplit(zenEnvObj, 0, Layout, transpose_input, transpose_filter,
                            m, k, n, alpha_Array[i],
                            A_Array[grp_start + j], lda_Array[i],
                            B_Array[grp_start + j], ldb_Array[i],
@@ -467,7 +482,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
 #if 0
                 //TODO: Pass one parameter for omp_set_max_active_levels in zenMatmulSplit
                 //Need to add this in zendnnEnv class
-                zenMatmulSplit(zenEnvObj, Layout, transpose_input, transpose_filter, m, k, n,
+                zenMatmulSplit(zenEnvObj, 0, Layout, transpose_input, transpose_filter, m, k, n,
                                alpha_Array[i]
                                A_Array[i] + (A_offset*threadOffset), lda_Array[i],
                                B_Array[i] + (B_offset*threadOffset), ldb_Array[i], NULL,
@@ -551,6 +566,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
 //Matmul kernel
 void zenMatmulSplit(
     zendnnEnv zenEnvObj,
+    const bool auto_tuner,
     const bool Layout,
     const bool transpose_input,
     const bool transpose_filter,
@@ -585,11 +601,19 @@ void zenMatmulSplit(
     // more than 1, then thread_qty is set to 1.
     unsigned int l2_num_threads = 1;
 
-    //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
-    // enabled, then zendnn_sgemm jit based kernel will be
-    // called.
-    // refer src/common/zendnn_utils.cpp
-    if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
+
+    //Experimental version for auto tuner
+    // Nested Parallelism is disabled
+    if (auto_tuner) {
+        l2_num_threads = 1;
+        thread_qty = zenEnvObj.omp_num_threads;
+        omp_set_max_active_levels(1);
+    }
+    else if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
+        //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
+        // enabled, then zendnn_sgemm jit based kernel will be
+        // called.
+        // refer src/common/zendnn_utils.cpp
         l2_num_threads = thread_qty;
         thread_qty = 1;
         omp_set_max_active_levels(2);
@@ -678,12 +702,7 @@ void zenMatmulSplit(
 
         unsigned long gemmRows = m_per_thread;
 
-        if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
-            zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                         gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
-                         ldb, beta, output+outputOffset, ldc);
-        }
-        else {
+        if (zenEnvObj.zenGEMMalgo == 2) {
 #if BLIS_EXPERT
             if (transpose_input)
                 bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
@@ -720,6 +739,12 @@ void zenMatmulSplit(
                         output + outputOffset, ldc);
 #endif
         }
+        else {
+            zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
+                         gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
+                         ldb, beta, output+outputOffset, ldc);
+
+        }
 
         //Below Bias and activation code can be eliminated if not required
         unsigned long biasOffset = outputOffset;
@@ -731,4 +756,3 @@ void zenMatmulSplit(
         }
     }
 }
-
