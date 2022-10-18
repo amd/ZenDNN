@@ -33,6 +33,23 @@ inline std::string zendnn_getenv_string(const char *name,
     return val == NULL ? default_value : std::string(val);
 }
 
+// enum containing all supported convolution algo types
+// AUTO - Autotuner path which will be used in future release
+// GEMM - GEMM and im2row convolution path
+// WINOGRAD - Winograd path which will fall back to im2row + GEMM for non compatible sizes
+// (yet to be added WINOGRAD now defaults to GEMM)
+// DIRECT1 : Direct convolution with inputs and filters in blocked memory format
+// DIRECT2 : Direct convolution with only filters in blocked memory format
+// CK : Composable kernel path for convolution
+enum zenConvAlgoType {
+    AUTO = 0,
+    GEMM = 1,
+    WINOGRAD = 2,
+    DIRECT1 = 3,
+    DIRECT2 = 4,
+    CK = 5
+};
+
 //class to read environment variables for zendnnn
 //In future this will be used with operator memory desc
 class zendnnEnv {
@@ -40,12 +57,10 @@ class zendnnEnv {
     uint    omp_num_threads;
     uint    zen_num_threads;
     uint    zenGEMMalgo;
-    bool    zenBlockedFormat;
-    bool    zenBlockedNHWC;
+    uint    zenConvAlgo;
     uint    zenEnableMemPool;
     uint    zenLibMemPoolEnable;
     bool    zenINT8format;
-
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -75,14 +90,7 @@ class zendnnEnv {
         if (zenGEMMalgo<=0 || zenGEMMalgo>3) {
             zenGEMMalgo = 3;
         }
-        //ZENDNN_BLOCKED_FORMAT is to enable/disable BLOCKED Format.
-        zenBlockedFormat = zendnn_getenv_int("ZENDNN_BLOCKED_FORMAT", 0);
-        //ZENDNN_BLOCKED_NHWC is added to support NHWC data format for CONV DIRECT ALGO
-        zenBlockedNHWC = zendnn_getenv_int("ZENDNN_NHWC_BLOCKED",0);
-        //ZENDNN Library gives preference to NHWC-BLOCKED Format over BLOCKED Format.
-        if (zenBlockedNHWC) {
-            zenBlockedFormat=0;
-        }
+
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
         //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
         //Possible values for ZENDNN_ENABLE_MEMPOOL
@@ -97,6 +105,10 @@ class zendnnEnv {
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
+        zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
+        if (zenConvAlgo <= zenConvAlgoType::AUTO || zenConvAlgo > zenConvAlgoType::DIRECT2 || zenConvAlgo == zenConvAlgoType::WINOGRAD) {
+            zenConvAlgo = zenConvAlgoType::GEMM;
+        }
     }
 
   public:

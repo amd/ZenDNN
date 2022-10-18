@@ -65,9 +65,8 @@ void zenMatMul_gemm(
     // Get the number of threads that could be used for parallelization
     zendnnEnv zenEnvObj = readEnv();
 
-    bool is_blocked = zenEnvObj.zenBlockedFormat;
     //Set Format to GEMM as Matrix multiplication is always GEMM
-    zenEnvObj.zenBlockedFormat = 0;
+    zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
@@ -106,8 +105,6 @@ void zenMatMul_gemm(
                        output, ldc);
     }
 
-    // Reset the original Format back
-    zenEnvObj.zenBlockedFormat = is_blocked;
 
 }
 
@@ -504,9 +501,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
 
     zendnnEnv zenEnvObj = readEnv();
 
-    bool is_blocked = zenEnvObj.zenBlockedFormat;
     //Set Format to GEMM as Matrix multiplication is always GEMM
-    zenEnvObj.zenBlockedFormat = 0;
+    zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
     // prologue code for time profiling of this kernel
     struct timeval start, end;

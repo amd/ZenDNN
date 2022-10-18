@@ -160,13 +160,13 @@ echo "OMP_DYNAMIC=$OMP_DYNAMIC"
 export ZENDNN_INFERENCE_ONLY=1
 echo "ZENDNN_INFERENCE_ONLY=$ZENDNN_INFERENCE_ONLY"
 
-#Direct Algorithm Path with NHWC support
-export ZENDNN_NHWC_BLOCKED=0
-echo "ZENDNN_NHWC_BLOCKED=$ZENDNN_NHWC_BLOCKED"
-
 # INT8 support  is disabled by default
 export ZENDNN_INT8_SUPPORT=0
 echo "ZENDNN_INT8_SUPPORT=$ZENDNN_INT8_SUPPORT"
+
+# Convolution GEMM Algo path
+export ZENDNN_CONV_ALGO=1
+echo "ZENDNN_CONV_ALGO=$ZENDNN_CONV_ALGO"
 
 # INT8 Relu6 fusion support is disabled by default
 export ZENDNN_RELU_UPPERBOUND=0
@@ -280,8 +280,9 @@ export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
 echo "LD_LIBRARY_PATH: "$LD_LIBRARY_PATH
 
 # Flags for optimized execution of ONNXRT model
-export ZENDNN_BLOCKED_FORMAT=1
-echo "ZENDNN_BLOCKED_FORMAT: $ZENDNN_BLOCKED_FORMAT"
+# Convolution Direct Algo with Blocked inputs and filter
+export ZENDNN_CONV_ALGO=3
+echo "ZENDNN_CONV_ALGO=$ZENDNN_CONV_ALGO"
 
 export ZENDNN_CONV_ADD_FUSION_ENABLE=1
 echo "ZENDNN_CONV_ADD_FUSION_ENABLE: $ZENDNN_CONV_ADD_FUSION_ENABLE"

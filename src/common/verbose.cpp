@@ -1,4 +1,4 @@
-/*******************************************************************************
+﻿/*******************************************************************************
 * Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
@@ -563,7 +563,7 @@ static std::string init_info_convolution(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBlockedFormat) {
+    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -631,7 +631,7 @@ static std::string init_info_inner_product(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBlockedFormat) {
+    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -707,7 +707,7 @@ static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBlockedFormat) {
+    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
        << ",";
 
@@ -744,7 +744,7 @@ static std::string init_info_pooling(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBlockedFormat) {
+    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -1036,7 +1036,7 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
             case primitive_kind::softmax_v2:
             CASE(softmax);
             CASE(sum);
-			CASE(embedding_bag);
+            CASE(embedding_bag);
             case primitive_kind::zero_pad: break;
             default: assert(!"unknown primitive kind");
         }

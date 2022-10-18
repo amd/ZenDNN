@@ -314,7 +314,7 @@ void zenPostOps(
     const int batch_size
 ) {
 
-    if (!zenEnvObj.zenBlockedFormat) {  // NHWC Path
+    if (zenEnvObj.zenConvAlgo!=zenConvAlgoType::DIRECT1) {  // NHWC Path
 
         unsigned long i;
         unsigned long total_size = (unsigned long)out_height*out_width*total_filters;
