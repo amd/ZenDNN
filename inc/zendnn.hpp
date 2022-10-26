@@ -1167,12 +1167,12 @@ struct memory : public handle<zendnn_memory_t> {
     enum class data_type {
         /// Undefined data type (used for empty memory descriptors).
         undef = zendnn_data_type_undef,
-        /// [16-bit/half-precision floating point](https://en.wikipedia.org/wiki/Half-precision_floating-point_format).
+        /// [16-bit/half-precision floating point].
         f16 = zendnn_f16,
         /// non-standard
-        /// [16-bit floating point with 7-bit mantissa](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format).
+        /// [16-bit floating point with 7-bit mantissa].
         bf16 = zendnn_bf16,
-        /// [32-bit/single-precision floating point](https://en.wikipedia.org/wiki/Single-precision_floating-point_format).
+        /// [32-bit/single-precision floating point].
         f32 = zendnn_f32,
         /// 32-bit signed integer.
         s32 = zendnn_s32,
