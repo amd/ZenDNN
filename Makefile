@@ -16,6 +16,20 @@ ARCHIVE ?= 0
 #Set BLIS PATH
 BLIS_PATH:= ${ZENDNN_BLIS_PATH}
 
+DEPEND_ON_CK ?= 0
+
+ifeq ($(DEPEND_ON_CK), 1)
+# Set Composable Kernel paths
+	CK_PATH := ${ZENDNN_CK_PATH}
+	CK_LIB_PATH := $(CK_PATH)/build/lib
+	CK_DEFINES:= -DCK_NOGPU -DENABLE_CK
+	CK_COMMON_FLAGS:= -Wno-attributes -Wno-ignored-attributes -Wno-write-strings
+	CK_INCLUDES := -I$(CK_PATH) -I$(CK_PATH)/include -I$(CK_PATH)/library/include
+	CPP_STD := c++17
+else
+	CPP_STD := c++14
+endif
+
 #Set LIBM PATH
 ifeq "$(ZENDNN_ENABLE_LIBM)" "1"
 	LIBM_PATH:= $(ZENDNN_LIBM_PATH)
@@ -48,44 +62,44 @@ endif
 
 ifeq ($(RELEASE), 0)
 ifeq ($(AOCC), 0)
-	CXXFLAGS := -std=c++14 -O0 -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSGTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSBENCHTEST := -std=c++14 -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSONEDNN := -std=c++14 -O0 -g -fPIC -fopenmp
-	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1
+	CXXFLAGS := -std=$(CPP_STD) -O0 -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
+	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
 	else
 		COMMONFLAGS += -march=znver1
 	endif
 else
-	CXXFLAGS := -std=c++14 -O0 -march=$(ZNVER) -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSTEST := -std=c++14 -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSGTEST := -std=c++14 -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSBENCHTEST := -std=c++14 -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -ggdb
-	CXXFLAGSONEDNN := -std=c++14 -O0 -march=$(ZNVER) -g -fPIC -fopenmp
+	CXXFLAGS := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
+	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp
 	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1
 endif #AOCC
 else #RELEASE = 1
 ifeq ($(AOCC), 0)
-	CXXFLAGS := -std=c++14 -O3 -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -DNDEBUG
-	CXXFLAGSTEST := -std=c++14 -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSGTEST := -std=c++14 -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSBENCHTEST := -std=c++14 -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSONEDNN := -std=c++14 -O3 -fPIC -fopenmp
-	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1
+	CXXFLAGS := -std=$(CPP_STD) -O3 -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -DNDEBUG
+	CXXFLAGSTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -fPIC -fopenmp
+	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
 	else
 		COMMONFLAGS += -march=znver1
 	endif
 else
-	CXXFLAGS := -std=c++14 -O3 -march=$(ZNVER) -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 -DNDEBUG
-	CXXFLAGSTEST := -std=c++14 -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSGTEST := -std=c++14 -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSBENCHTEST := -std=c++14 -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1
-	CXXFLAGSONEDNN := -std=c++14 -O3 -march=$(ZNVER) -fPIC -fopenmp
+	CXXFLAGS := -std=$(CPP_STD) -O3 -march=$(ZNVER) -c -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -DNDEBUG
+	CXXFLAGSTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
+	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp
 	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1
 endif #AOCC
 endif #RELEASE = 1
@@ -113,7 +127,8 @@ TESTDIR  := tests
 ZENDNN_GIT_ROOT := $(shell pwd)
 
 INCDIRS  := -Iinc -Isrc -Isrc/common -Isrc/cpu \
-	-I$(BLIS_PATH)/include $(LIBM_INCLUDE_PATH)
+	-I$(BLIS_PATH)/include $(LIBM_INCLUDE_PATH) \
+	$(CK_INCLUDES)
 
 EXECUTABLE_SO := $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 EXECUTABLE_ARCHIVE := $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
@@ -185,6 +200,12 @@ clean:
 create_dir:
 	@mkdir -p $(OUTDIR)/$(LIBDIR)
 	@mkdir -p $(OUTDIR)/$(TESTDIR)
+
+ck_conv_test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp -L_out/lib -lamdZenDNN \
+		-L$(BLIS_PATH)/lib/ -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(CK_LIB_PATH) -lck_cpu_instance -lhost_tensor
 
 test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
