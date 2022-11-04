@@ -43,6 +43,7 @@ struct ref_convolution_fwd_t : public primitive_t {
         DECLARE_COMMON_PD_T("ref:any", ref_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init (before checks)");
             using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
             const auto src_type = src_md(0)->data_type;
@@ -51,7 +52,8 @@ struct ref_convolution_fwd_t : public primitive_t {
             const auto dst_type = dst_md(0)->data_type;
 
             bool ok = is_fwd()
-                    && set_default_alg_kind(alg_kind::convolution_direct)
+                    && (set_default_alg_kind(alg_kind::convolution_direct)
+                    || set_default_alg_kind(alg_kind::convolution_ck) )
                     && platform::has_data_type_support(src_type)
                     && platform::has_data_type_support(wei_type)
                     && platform::has_data_type_support(bia_type)
@@ -71,6 +73,7 @@ struct ref_convolution_fwd_t : public primitive_t {
                     && attr()->post_ops_.check_sum_consistent_dt(dst_type)
                     && post_ops_ok()
                     && attr_.set_default_formats(dst_md(0)) == status::success;
+            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init: ok=", ok, " (after checks)");
             return ok ? status::success : status::unimplemented;
         }
 

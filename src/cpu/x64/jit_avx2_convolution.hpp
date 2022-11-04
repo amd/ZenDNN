@@ -49,7 +49,8 @@ struct jit_avx2_convolution_fwd_t : public primitive_t {
 
         status_t init(engine_t *engine) {
             bool ok = true && is_fwd()
-                    && set_default_alg_kind(alg_kind::convolution_direct)
+                    && (set_default_alg_kind(alg_kind::convolution_direct)
+                    || set_default_alg_kind(alg_kind::convolution_ck) )
                     && expect_data_types(data_type::f32, data_type::f32,
                             data_type::f32, data_type::f32, data_type::f32)
                     && attr()->has_default_values(

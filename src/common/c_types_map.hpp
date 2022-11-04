@@ -74,6 +74,7 @@ const alg_kind_t convolution_gemm = zendnn_convolution_gemm;
 const alg_kind_t convolution_ref = zendnn_convolution_ref;
 const alg_kind_t convolution_direct = zendnn_convolution_direct;
 const alg_kind_t convolution_winograd = zendnn_convolution_winograd;
+const alg_kind_t convolution_ck = zendnn_convolution_ck;
 const alg_kind_t deconvolution_direct = zendnn_deconvolution_direct;
 const alg_kind_t deconvolution_winograd = zendnn_deconvolution_winograd;
 const alg_kind_t eltwise_relu = zendnn_eltwise_relu;

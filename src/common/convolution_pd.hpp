@@ -259,7 +259,8 @@ protected:
     }
 
     bool set_default_alg_kind(alg_kind_t alg_kind) {
-        assert(utils::one_of(alg_kind, alg_kind::convolution_direct,
+        assert(utils::one_of(alg_kind, alg_kind::convolution_ck,
+                             alg_kind::convolution_direct,
                              alg_kind::convolution_winograd,
                              alg_kind::convolution_gemm,
                              alg_kind::convolution_ref));

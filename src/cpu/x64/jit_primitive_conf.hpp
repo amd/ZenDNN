@@ -261,6 +261,9 @@ struct jit_conv_conf_t {
     //ReLU and BatchNorm fusion flags
     bool reluFused;
     bool batchNormFused;
+
+    // Composable Kernel index
+    int ck_fastest_kernel_idx;
 };
 
 // calculates filter size taking into account dilation

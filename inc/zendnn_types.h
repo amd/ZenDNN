@@ -1432,6 +1432,8 @@ typedef enum {
     zendnn_convolution_gemm = 0x4,
     /// Ref convolution
     zendnn_convolution_ref = 0x5,
+    /// Composable Kernel convolution (implicit GEMM algorithm)
+    zendnn_convolution_ck = 0x6,
     /// Direct deconvolution
     zendnn_deconvolution_direct = 0xa,
     /// Winograd deconvolution

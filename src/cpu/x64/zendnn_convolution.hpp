@@ -49,9 +49,10 @@ struct zendnn_convolution_fwd_t : public primitive_t {
         DECLARE_COMMON_PD_T("zendnn", zendnn_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init (before checks)");
             bool ok = true && is_fwd()
                       && (set_default_alg_kind(alg_kind::convolution_gemm)
-                      ||  set_default_alg_kind(alg_kind::convolution_ref))
+                      ||  set_default_alg_kind(alg_kind::convolution_ref) )
                       && expect_data_types(data_type::f32, data_type::f32,
                                            data_type::f32, data_type::f32,
                                            data_type::f32)
@@ -68,6 +69,7 @@ struct zendnn_convolution_fwd_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             zendnn_conv_fwd_kernel_f32::init_scratchpad(scratchpad, jcp_);
 
+            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init: status=status::success");
             return status::success;
         }
 

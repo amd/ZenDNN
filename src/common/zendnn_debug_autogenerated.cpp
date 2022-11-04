@@ -1108,6 +1108,7 @@ const char *zendnn_alg_kind2str(zendnn_alg_kind_t v) {
     if (v == zendnn_alg_kind_undef) return "undef";
     if (v == zendnn_convolution_gemm) return "convolution_gemm";
     if (v == zendnn_convolution_ref) return "convolution_ref";
+    if (v == zendnn_convolution_ck) return "convolution_ck";
     if (v == zendnn_convolution_direct) return "convolution_direct";
     if (v == zendnn_convolution_winograd) return "convolution_winograd";
     if (v == zendnn_convolution_auto) return "convolution_auto";

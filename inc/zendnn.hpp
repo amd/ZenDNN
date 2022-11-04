@@ -540,6 +540,8 @@ enum class algorithm {
     convolution_auto = zendnn_convolution_auto,
     /// Reference convolution
     convolution_ref = zendnn_convolution_ref,
+    /// Composable Kernel convolution
+    convolution_ck = zendnn_convolution_ck,
     /// GEMM convolution
     convolution_gemm = zendnn_convolution_gemm,
     /// Direct convolution

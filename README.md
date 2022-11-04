@@ -19,6 +19,7 @@ ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference app
   - [General Convention](#general-convention)
   - [AMD-BLIS Library Setup](#amd-blis-library-setup)
   - [AOCC Installation](#aocc-installation)
+- [Composable Kernel Library Installation](#composable-kernel-library-installation)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Build from Source](#build-from-source)
   - [AOCC compiler](#aocc-compiler)
@@ -152,6 +153,52 @@ For example, in the case of GCC compiled AMD-BLIS:
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.0-6/amd-blis
 ```
 
+# Composable Kernel Library Installation
+
+**Composable Kernel** aims to provide a programming model for writing performance critical kernels for machine learning workloads across multiple architectures including GPUs, CPUs, etc, through general purpose kernel languages, like HIP C++.  Composable Kernel can be downloaded from the AMD ROCm Software Platform Repository (https://github.com/ROCmSoftwarePlatform/composable_kernel).
+
+## Composable Kernel Library Setup
+
+Composable Kernel (CK) for CPU is currently only on the `cpu_avx2` branch of the Composable Kernel repository and is at the experimental stage of development.
+
+### Prerequisites
+CK is suitable for these compilers:
+1) hipclang: this is mainly used for compiling GPU hip kernels(require rocm environment), but also can be used for CPU. For a first trial I recommend use below 2 compilers.
+2) gcc: at least gcc-9 is needed, you may need manually install a gcc-9 if ubuntu default is not gcc-9 (This link can install gcc-9)
+3) aocc or clang: (https://developer.amd.com/amd-aocc/)
+
+### Download code
+```
+git clone https://github.com/ROCmSoftwarePlatform/composable_kernel.git
+cd composable_kernel
+git checkout origin/cpu_avx2 -b cpu_avx2
+```
+
+### Compile
+
+From the root directory of Composable Kernel (CK) build CK libraries:
+```
+# if use aocc or clang compiler
+sh script/cmake-avx2-clang-aocc.sh
+# if use gcc
+sh script/cmake-avx2-gcc.sh
+cd build
+make -j`nproc` example_cpu_conv2d_fwd example_cpu_conv2d_fwd_bias_relu_add
+```
+
+### Link from ZenDNN
+
+From the root directory of Composable Kernel (CK), this will set up the environment for including CK headers and linking to the CK libraries.
+```bash
+ export ZENDNN_CK_PATH=$(pwd)
+```
+
+The `Makefile` in this project contains a variable `DEPEND_ON_CK` which is set to `0` by default.  To enable CK use `DEPEND_ON_CK=1` when building the ZenDNN library.
+
+The `LD_LIBRARY_PATH` variable needs to be updated in order to run code that depends on CK.
+```bash
+export LD_LIBRARY_PATH=${ZENDNN_CK_PATH}/build/lib:${LD_LIBRARY_PATH}
+```
 
 # Runtime Dependencies
 ZenDNN has the following runtime dependencies:

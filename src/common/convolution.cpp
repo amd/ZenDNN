@@ -51,7 +51,7 @@ status_t conv_desc_init(convolution_desc_t *conv_desc, prop_kind_t prop_kind,
                     padding_l)
             && one_of(alg_kind, convolution_auto, convolution_direct,
                       convolution_winograd, convolution_gemm,
-                      convolution_ref);
+                      convolution_ref, convolution_ck);
     if (!args_ok) return invalid_arguments;
 
     if (padding_r == nullptr) padding_r = padding_l;
@@ -174,7 +174,7 @@ status_t zendnn_convolution_forward_desc_init(convolution_desc_t *conv_desc,
     if (!one_of(prop_kind, forward_training, forward_inference))
         return invalid_arguments;
 
-    zendnnInfo(ZENDNN_CORELOG, "Covolution forward desc [convolution]");
+    zendnnInfo(ZENDNN_CORELOG, "Covolution forward desc - basic [convolution]");
     return zendnn::impl::conv_desc_init(conv_desc, prop_kind, alg_kind, src_desc,
             weights_desc, bias_desc, dst_desc, strides, nullptr, padding_l,
             padding_r, false, false, nullptr, nullptr, nullptr);
@@ -193,7 +193,7 @@ status_t zendnn_fused_convolution_forward_desc_init(convolution_desc_t *conv_des
         return invalid_arguments;
     }
 
-    zendnnInfo(ZENDNN_CORELOG, "Covolution forward desc [convolution]");
+    zendnnInfo(ZENDNN_CORELOG, "Covolution forward desc - fused [convolution]");
     return zendnn::impl::conv_desc_init(conv_desc, prop_kind, alg_kind, src_desc,
                                         weights_desc, bias_desc, dst_desc,
                                         strides, nullptr, padding_l, padding_r,

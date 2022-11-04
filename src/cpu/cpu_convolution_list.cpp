@@ -36,6 +36,7 @@
 #include "cpu/ref_fused_convolution.hpp"
 
 #if ZENDNN_X64
+#include "cpu/x64/ck_convolution.hpp"
 #include "cpu/x64/gemm_bf16_convolution.hpp"
 #include "cpu/x64/ip_convolution.hpp"
 #include "cpu/x64/jit_avx2_1x1_convolution.hpp"
@@ -89,6 +90,9 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
     static const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_CONV_P({
         // FWD fp
         {{forward, f32, f32, f32}, {
+#ifdef ENABLE_CK
+            CPU_INSTANCE_X64(ck_convolution_fwd_t)
+#endif
             CPU_INSTANCE_AVX512(brdgmm_dw_convolution_fwd_t)
             CPU_INSTANCE_X64(ip_convolution_fwd_t)
             CPU_INSTANCE_AVX512(brgemm_1x1_convolution_fwd_t<avx512_core>)
