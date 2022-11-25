@@ -561,9 +561,6 @@ static std::string init_info_concat(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 static std::string init_info_convolution(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
-
-    zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -596,7 +593,6 @@ static std::string init_info_convolution(const engine_t *e, const pd_t *pd) {
            << pd->KSH() << "dh" << pd->KDH() << "ph" << pd->padT() << "_";
     ss << "iw" << pd->IW() << "ow" << pd->OW() << "kw" << pd->KW() << "sw"
        << pd->KSW() << "dw" << pd->KDW() << "pw" << pd->padL();
-    }
 
     return ss.str();
 }
@@ -629,9 +625,6 @@ static std::string init_info_eltwise(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 static std::string init_info_inner_product(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
-
-    zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -654,7 +647,6 @@ static std::string init_info_inner_product(const engine_t *e, const pd_t *pd) {
 
     ss << md2desc_str(src_md);
     ss << "oc" << pd->OC();
-    }
 
     return ss.str();
 }
@@ -705,9 +697,6 @@ static std::string init_info_lrn(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
-
-    zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
        << ",";
 
@@ -734,7 +723,6 @@ static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
 
     ss << md2dim_str(src_md) << ":" << md2dim_str(wei_md) << ":"
        << md2dim_str(dst_md);
-    }
 
     return ss.str();
 }
@@ -742,9 +730,6 @@ static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 static std::string init_info_pooling(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
-
-    zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenConvAlgo==zenConvAlgoType::DIRECT1) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
@@ -768,7 +753,6 @@ static std::string init_info_pooling(const engine_t *e, const pd_t *pd) {
            << pd->KSH() << "dh" << pd->KDH() << "ph" << pd->padT() << "_";
     ss << "iw" << pd->IW() << "ow" << pd->OW() << "kw" << pd->KW() << "sw"
        << pd->KSW() << "dw" << pd->KDW() << "pw" << pd->padL();
-    }
 
     return ss.str();
 }
@@ -985,6 +969,9 @@ template <typename pd_t>
 static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
     std::stringstream ss;
 
+    ss << e << "," << pd->kind() << "," << pd->name() << ","
+       << pd->desc()->prop_kind << ",";
+
     { // src
         for (int i = 0; i < pd->n_inputs(); ++i) {
             auto src_i_md = pd->src_md(i);
@@ -996,6 +983,8 @@ static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
 
     ss << pd->attr() << ",,";
     ss << md2dim_str(dst_md);
+
+    ss << "alg:" << pd->desc()->alg_kind << ",";
 
     return ss.str();
 }
