@@ -50,15 +50,10 @@ using namespace zendnn::impl::prop_kind;
 // clang-format off
 const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
     static const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_IP_P({
-#if ZENDNN_ENABLE
-        {{forward, f32, f32, f32}, {
-            CPU_INSTANCE_X64(zendnn_inner_product_fwd_t<f32>)
-            nullptr,
-        }},
-#else //ZENDNN_ENABLE
         {{forward, f32, f32, f32}, {
             CPU_INSTANCE_AVX512(brgemm_inner_product_fwd_t<avx512_core>)
             CPU_INSTANCE_AARCH64_ACL(acl_inner_product_fwd_t)
+            CPU_INSTANCE_X64(zendnn_inner_product_fwd_t<f32>)
             CPU_INSTANCE(gemm_inner_product_fwd_t<f32>)
             CPU_INSTANCE(ref_inner_product_fwd_t)
             nullptr,
@@ -185,7 +180,6 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE(ref_inner_product_int8_fwd_t)
             nullptr,
         }},
-#endif //ZENDNN_ENABLE
     });
     return the_map;
 }
