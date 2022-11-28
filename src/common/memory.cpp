@@ -110,7 +110,7 @@ status_t zendnn_memory::set_data_handle(void *handle, stream_t *stream) {
     if (handle != old_handle) {
         CHECK(memory_storage_->set_data_handle(handle));
     }
-    return status::success;
+    return zendnn::impl::status::success;
 }
 
 status_t zendnn_memory::reset_memory_storage(
@@ -121,12 +121,12 @@ status_t zendnn_memory::reset_memory_storage(
         memory_storage_t *memory_storage_ptr;
         status_t status = engine_->create_memory_storage(
                 &memory_storage_ptr, use_runtime_ptr, 0, nullptr);
-        if (status != status::success) return status;
+        if (status != zendnn::impl::status::success) return status;
 
         memory_storage_.reset(memory_storage_ptr);
     }
 
-    return status::success;
+    return zendnn::impl::status::success;
 }
 
 status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,

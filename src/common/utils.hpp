@@ -75,7 +75,7 @@ static_assert(sizeof(void *) == 8, "ZENDNN supports 64-bit architectures only");
 #define CHECK(f) \
     do { \
         status_t _status_ = f; \
-        if (_status_ != status::success) return _status_; \
+        if (_status_ != zendnn::impl::status::success) return _status_; \
     } while (0)
 
 #define IMPLICATION(cause, effect) (!(cause) || !!(effect))
