@@ -42,9 +42,6 @@ void zenMatMul_gemm(
     float *output,
     const int ldc
 ) {
-    // Get the number of threads that could be used for parallelization
-    zendnnEnv zenEnvObj = readEnv();
-
     //Set Format to GEMM as Matrix multiplication is always GEMM
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
