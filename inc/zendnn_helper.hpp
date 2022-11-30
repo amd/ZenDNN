@@ -107,7 +107,7 @@ class zendnnEnv {
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
-        if (zenConvAlgo <= zenConvAlgoType::AUTO || zenConvAlgo > zenConvAlgoType::DIRECT2 || zenConvAlgo == zenConvAlgoType::WINOGRAD) {
+        if (zenConvAlgo <= zenConvAlgoType::AUTO || zenConvAlgo > zenConvAlgoType::DIRECT2) {
             zenConvAlgo = zenConvAlgoType::GEMM;
         }
     }

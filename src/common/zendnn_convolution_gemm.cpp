@@ -3082,9 +3082,12 @@ void zenConvolution2Dgemm(
         //TODO: Tune CONV_INPUT_SIZE CONV_INPUT_HEIGHT for other models too
         //TODO: Need to support winograd version for ZenInceptionOp. Currenlty if we force winograd
         //version for googlenet variants the accuracy validation will fail.
-        if (stride_h == 1 && stride_w == 1 && kernel_h == 3 && kernel_w == 3 &&
-                height % 2 == 0 && width % 2 == 0 && (concat == false)
-                && (height*channels >= CONV_INPUT_SIZE) && (height<CONV_INPUT_HEIGHT)) {
+
+        bool kernelCondition = ((stride_h == 1) && (stride_w == 1) && (kernel_h == 3) &&
+                                (kernel_w == 3) && (height % 2 == 0) && (width % 2 == 0));
+        bool optimalConvInput = ((height*channels >= CONV_INPUT_SIZE) &&
+                                 (height<CONV_INPUT_HEIGHT));
+        if (kernelCondition && (concat == false) && ((zenEnvObj.zenConvAlgo==zenConvAlgoType::WINOGRAD) || optimalConvInput)) {
             winograd_2x2_3x3(zenEnvObj, in_layer, batchsize, channels, height, width,
                              filter, no_of_filter, kernel_h, kernel_w,
                              pad_t, pad_l, pad_b, pad_r,
