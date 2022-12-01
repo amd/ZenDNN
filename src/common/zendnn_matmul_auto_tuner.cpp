@@ -11,6 +11,7 @@
 #include <time.h>
 #include <sys/time.h>
 
+using namespace zendnn;
 
 //Total num of algo available
 #define NUM_OF_ALGO 4
@@ -243,7 +244,7 @@ int auto_compute_matmul_v2(
     //If Less than Skip iteration run default algo
     if (found_obj == matmul_kernel_map.end() ||
             found_obj->second.first < skip_iteration) {
-        zenEnvObj.zenGEMMalgo = 3;
+        zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
 
         zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
                        n,
@@ -366,7 +367,7 @@ int auto_compute_matmul_v3(
     if (graph_exe_count < skip_iteration) {
 
         //Set algo 3 initially
-        zenEnvObj.zenGEMMalgo = 3;
+        zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
 
         //If Key not found in map then time the algo and add new element to map
         if (found_obj == matmul_kernel_map2.end()) {
@@ -505,7 +506,7 @@ int auto_compute_matmul_v4(
             std::get<0>(found_obj->second) < skip_iteration) {
 
         //Set algo 3 initially
-        zenEnvObj.zenGEMMalgo = 3;
+        zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
 
         //If Key not found in map then time the algo and add new element to map
         if (found_obj == matmul_kernel_map2.end()) {

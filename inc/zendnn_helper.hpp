@@ -34,11 +34,18 @@ inline std::string zendnn_getenv_string(const char *name,
     return val == NULL ? default_value : std::string(val);
 }
 
+enum zenMatMulAlgoType {
+    MATMUL_AUTO = 0,
+    MATMUL_BLIS_GEMM1 = 1,
+    MATMUL_BLIS_GEMM2 = 2,
+    MATMUL_ZENDNN_GEMM1 = 3,
+    MATMUL_ZENDNN_GEMM2 = 4,
+};
+
 // enum containing all supported convolution algo types
 // AUTO - Autotuner path which will be used in future release
 // GEMM - GEMM and im2row convolution path
 // WINOGRAD - Winograd path which will fall back to im2row + GEMM for non compatible sizes
-// (yet to be added WINOGRAD now defaults to GEMM)
 // DIRECT1 : Direct convolution with inputs and filters in blocked memory format
 // DIRECT2 : Direct convolution with only filters in blocked memory format
 // CK : Composable kernel path for convolution
@@ -79,17 +86,17 @@ class zendnnEnv {
         // If value is set to 0, library decide the optimal path
         // based on the matrix sizes and other parameter settings. However,
         // this can be overridden with specific path.
-        // 1. DIRECT BLIS: MatMul is redirected to BLIS GEMM directly (zenGEMMalgo=1)
-        // 2. ZenDNN+BLIS (zenGEMMalgo=2)
+        // 1. DIRECT BLIS: MatMul is redirected to BLIS GEMM directly (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLIS_GEMM1)
+        // 2. ZenDNN+BLIS (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLIS_GEMM2)
         //      Case 1:
         //              ZenDNN take care of problem division and thread parallelism
         //              BLIS is used for single thread GEMM execution
         //      Case 2:
         //              MatMul is redirected to BLIS directly
-        // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=3) (current default)
-        zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", 3);
-        if (zenGEMMalgo>4) {
-            zenGEMMalgo = 3;
+        // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
+        zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+            zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
         }
 
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL

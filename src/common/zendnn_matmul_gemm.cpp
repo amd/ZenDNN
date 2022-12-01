@@ -50,7 +50,7 @@ void zenMatMul_gemm(
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
     //MatMul with pipelining
-    if (zenEnvObj.zenGEMMalgo == 1) {
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM1) {
         //Perform MatMul using AMD BLIS
         cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
                     transpose_input ? CblasTrans : CblasNoTrans,
@@ -63,7 +63,7 @@ void zenMatMul_gemm(
                        thread_qty);
         }
     }
-    else if (zenEnvObj.zenGEMMalgo == 3) {
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
         zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
                      m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
         if (bias || relu || gelu) {
@@ -115,7 +115,7 @@ void zenMatMul_gemm_wrapper(
     gettimeofday(&start, 0);
 
     //Experimental version for auto tuner
-    if (zenEnvObj.zenGEMMalgo==0) {
+    if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO) {
         auto_tuner=true;
 
         //If graph_exe_count is incremented by framework
@@ -170,7 +170,7 @@ void zenMatMul_gemm_wrapper(
                " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
                " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                " relu=", relu, " gelu=", gelu,
-               " algo type=", algo_type,
+               " algo_type=", algo_type,
                " Time=", elapsed, "ms");
 }
 
@@ -409,7 +409,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
                 // jit based kernel will be called.
                 // refer src/common/zendnn_utils.cpp
-                if (zenEnvObj.zenGEMMalgo == 3)
+                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1)
                     zendnn_sgemm(transpose_input ? 'T' : 'N',
                                  transpose_filter ? 'T' : 'N', m, n, k,
                                  alpha_Array[i],
@@ -537,7 +537,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     std::vector<CBLAS_TRANSPOSE> TransB_Array(
         group_count, TransB ? CblasTrans : CblasNoTrans);
 
-    //if (zenEnvObj.zenGEMMalgo == 1) {
+    //if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM1) {
     //Direct call to BLIS cblas_sgemm_batch is not performing well
     //TODO: check with BLIS team for optimal cblas_sgemm_batch function
     if (0) {
@@ -618,7 +618,7 @@ void zenMatmulSplit(
         thread_qty = zenEnvObj.omp_num_threads;
         omp_set_max_active_levels(1);
     }
-    else if (zenEnvObj.zenGEMMalgo == 3 || transpose_input) {
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1 || transpose_input) {
         //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
         // enabled, then zendnn_sgemm jit based kernel will be
         // called.
@@ -711,7 +711,7 @@ void zenMatmulSplit(
 
         unsigned long gemmRows = m_per_thread;
 
-        if (zenEnvObj.zenGEMMalgo == 2) {
+        if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM2) {
 #if BLIS_EXPERT
             if (transpose_input)
                 bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
