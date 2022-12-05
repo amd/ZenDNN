@@ -16,6 +16,17 @@ using namespace zendnn;
 //Total num of algo available
 #define NUM_OF_ALGO 4
 
+//Skip Iterations for auto tuner
+//Can be set by environment variable ZENDNN_MATMUL_SKIP_ITER
+#define MATMUL_SKIP_ITER_V2 2
+#define MATMUL_SKIP_ITER_V3 4
+#define MATMUL_SKIP_ITER_V4 10
+
+//Evaluate iterations for auto tuner
+//Can be set by environment variable ZENDNN_MATMUL_EVALUATE_ITER
+#define MATMUL_EVALUATE_ITER_V1 2
+#define MATMUL_EVALUATE_ITER_V3 6
+#define MATMUL_EVALUATE_ITER_V4 10
 //This tracks the no. of times graph executed
 // from the framework.
 unsigned int graph_exe_count = -1;
@@ -78,12 +89,12 @@ struct hash<Key_matmul> {
 };
 }
 
-//Map having Parameters as key and value as pair of (count,algo Path(1-4))
+//Map having Parameters as key and value as pair of (count,algo Path)
 //Used in auto_compute_matmul_v1 and auto_compute_matmul_v2
 std::unordered_map<Key_matmul,std::pair<unsigned int,int>>
         matmul_kernel_map;
 
-
+//Map value is tuple of (iteration count, execution time of algo, Algo Path)
 //Used in auto_compute_matmul_v3 and auto_compute_matmul_v4
 std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
         matmul_kernel_map2;
@@ -92,7 +103,8 @@ std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
 //Auto tuner for matmul
 //Runs only when ZENDNN_GEMM_ALGO=0
 //For choosing best algo it runs all available algo
-// using a tight FOR loop for getting best algo.
+// using a tight FOR loop.
+//Every EVALUATE_ITER it updates the best algo.
 //Uses EVALUATE_ITER only.
 int auto_compute_matmul_v1(
     zendnn::zendnnEnv zenEnvObj,
@@ -123,7 +135,8 @@ int auto_compute_matmul_v1(
     Key_matmul key_obj;
 
     int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 4);
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
+                                  MATMUL_EVALUATE_ITER_V1);
     key_obj.Layout = Layout;
     key_obj.transpose_input = transpose_input;
     key_obj.transpose_filter = transpose_filter;
@@ -187,6 +200,7 @@ int auto_compute_matmul_v1(
         }
     }
 
+    zenEnvObj.zenGEMMalgo = best_algo;
     return zenEnvObj.zenGEMMalgo;
 }
 
@@ -224,7 +238,8 @@ int auto_compute_matmul_v2(
 
     Key_matmul key_obj;
 
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER", 2);
+    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                         MATMUL_SKIP_ITER_V2);
 
     key_obj.Layout = Layout;
     key_obj.transpose_input = transpose_input;
@@ -263,7 +278,6 @@ int auto_compute_matmul_v2(
         //return the best kernel path
         zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj].second;
 
-        gettimeofday(&start_n, 0);
         zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
                        n,
                        alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
@@ -297,6 +311,7 @@ int auto_compute_matmul_v2(
 
         //update value for given key after running all paths.
         found_obj->second.second = best_algo;
+        zenEnvObj.zenGEMMalgo = best_algo;
     }
 
     return zenEnvObj.zenGEMMalgo;
@@ -342,11 +357,13 @@ int auto_compute_matmul_v3(
     Key_matmul key_obj;
 
     //Number of iterations to run without creating map for each unique layer.
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER", 2);
+    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                         MATMUL_SKIP_ITER_V3);
 
     //Number of iterations to run for creating map for each layer.
     int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 4);
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
+                                  MATMUL_EVALUATE_ITER_V3);
 
     key_obj.Layout = Layout;
     key_obj.transpose_input = transpose_input;
@@ -412,7 +429,8 @@ int auto_compute_matmul_v3(
 
         //Get the number of iteration already ran and select Algo to run for current iteration
         //get<0>(found_obj->second) = count of iteration
-        zenEnvObj.zenGEMMalgo = ((std::get<0>(found_obj->second) += 1)%NUM_OF_ALGO) +1;
+        zenEnvObj.zenGEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
+        std::get<0>(found_obj->second) += 1;
 
         //timer start
         gettimeofday(&start_n, 0);
@@ -479,11 +497,13 @@ int auto_compute_matmul_v4(
     Key_matmul key_obj;
 
     //Number of iterations to run without creating map for each unique layer.
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER", 10);
+    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                         MATMUL_SKIP_ITER_V4);
 
     //Number of iterations to run for creating map for each layer.
     int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 10);
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
+                                  MATMUL_EVALUATE_ITER_V4);
 
     key_obj.Layout = Layout;
     key_obj.transpose_input = transpose_input;
@@ -525,9 +545,9 @@ int auto_compute_matmul_v4(
                             (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
 
             //Create new entry
-            matmul_kernel_map2[key_obj] = {0, cur_algo_time, 3}; // {eval_count, time, algo}
+            matmul_kernel_map2[key_obj] = {1, cur_algo_time, 3}; // {iter_count, time, algo}
         }
-        //If key found then increment the eval_count and run algo 3.
+        //If key found then increment the iter_count and run algo 3.
         else {
             std::get<0>(found_obj->second) += 1;
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
@@ -552,8 +572,8 @@ int auto_compute_matmul_v4(
 
         //Get the number of iteration already ran and select Algo to run for current iteration
         //get<0>(found_obj->second) = count of iteration
-        zenEnvObj.zenGEMMalgo = ((std::get<0>(found_obj->second) += 1)%NUM_OF_ALGO) +1;
-
+        zenEnvObj.zenGEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
+        std::get<0>(found_obj->second) += 1;
         //timer start
         gettimeofday(&start_n, 0);
 
