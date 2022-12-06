@@ -83,17 +83,33 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
 
 // temporary solution to deal with format `any`
 bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
-    for (auto md : {&src_md_, &weights_md_, &bias_md_, &dst_md_}) {
+    for (auto md : {
+                &src_md_, &weights_md_, &dst_md_
+            }) {
         memory_desc_wrapper mdw(md);
         if (mdw.format_any()) {
-            if (mdw.has_runtime_dims_or_strides()) return false;
+            if (mdw.has_runtime_dims_or_strides()) {
+                return false;
+            }
             status_t status = memory_desc_init_by_strides(*md, nullptr);
-            if (status != status::success) return false;
+            if (status != status::success) {
+                return false;
+            }
+        }
+        if (!mdw.matches_tag(zendnn::impl::format_tag::ab) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abc) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcd) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcde) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdef) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefg) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefgh) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefghi) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefghij) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefghijk) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::abcdefghijkl)) {
+            return false;
         }
     }
-    memory_desc_wrapper mdw(dst_md_);
-    if (!mdw.matches_tag(zendnn::impl::format_tag::abc))
-        return false;
     return true;
 }
 
@@ -165,7 +181,7 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     return status::success;
 }
 
-static void fill_offset(std::vector<int>& offsets,
+static void fill_offset(std::vector<int> &offsets,
                         unsigned int offset_index,
                         unsigned int curr_offset,
                         long int const dims1[],
@@ -179,50 +195,54 @@ static void fill_offset(std::vector<int>& offsets,
         offset_index++;
         if (dims1[dims_index] == dims2[dims_index]) {
             for (int i = 1; i < dims1[dims_index]; i++) {
-                 offsets[offset_index] = offsets[offset_index - 1] + mat_size;
-                 offset_index++;
+                offsets[offset_index] = offsets[offset_index - 1] + mat_size;
+                offset_index++;
             }
-	} else {
-	    if (dims1[dims_index] == 1) {
+        }
+        else {
+            if (dims1[dims_index] == 1) {
                 for (int i = 1; i < dims2[dims_index]; i++) {
-                     offsets[offset_index] = offsets[offset_index - 1];
-                     offset_index++;
-	         }
+                    offsets[offset_index] = offsets[offset_index - 1];
+                    offset_index++;
+                }
             }
-	 }
-         return;
+        }
+        return;
     }
     unsigned int count = 1;
     for (int j = dims_index + 1; j < dims_len; j++) {
-         count = count * dims2[j];
+        count = count * dims2[j];
     }
     if (dims1[dims_index] == dims2[dims_index]) {
         int current_offset = curr_offset;
         for (int i = dims_index; i < dims1[dims_index]; i++) {
-             fill_offset(offsets, offset_index, current_offset, dims1, dims2, dims_len, dims_index + 1, mat_size);
-             offset_index += count;
-	     current_offset = offsets[offset_index - 1];
-	}
+            fill_offset(offsets, offset_index, current_offset, dims1, dims2, dims_len,
+                        dims_index + 1, mat_size);
+            offset_index += count;
+            current_offset = offsets[offset_index - 1];
+        }
     }
     else {
         if (dims1[dims_index] == 1) {
             for (int i = 0; i < dims2[dims_index]; i++) {
-                 fill_offset(offsets, offset_index, curr_offset, dims1, dims2, dims_len, dims_index + 1, mat_size);
-                 offset_index += count;
+                fill_offset(offsets, offset_index, curr_offset, dims1, dims2, dims_len,
+                            dims_index + 1, mat_size);
+                offset_index += count;
             }
         }
     }
     return;
 }
 
-static void calculate_offsets(std::vector<int>& offsets,
-	                      long int const dims1[],
+static void calculate_offsets(std::vector<int> &offsets,
+                              long int const dims1[],
                               long int const dims2[],
                               unsigned int dims_len,
                               unsigned long mat_dim1,
                               unsigned long mat_dim2) {
-  fill_offset(offsets, 0, -1*mat_dim1*mat_dim2, dims1, dims2, dims_len, 0, mat_dim1*mat_dim2);
-  return;
+    fill_offset(offsets, 0, -1*mat_dim1*mat_dim2, dims1, dims2, dims_len, 0,
+                mat_dim1*mat_dim2);
+    return;
 }
 
 status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
@@ -319,25 +339,29 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     calculate_offsets(wei_off,weights_d.dims(),dst_d.dims(), dst_d.ndims()-2, K, N);
 
 
-    int* input_offsets = ip_off.data();
-    int* dst_offsets = dst_off.data();
-    int* weight_offsets = wei_off.data();
+    int *input_offsets = ip_off.data();
+    int *dst_offsets = dst_off.data();
+    int *weight_offsets = wei_off.data();
 
     if ((float *)bias == NULL) {
         //MatMul without Bias
-        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets, weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda, (float *)weights, ldb, beta, (float *)dst, ldc);
+        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
+                  weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
+                  (float *)weights, ldb, beta, (float *)dst, ldc);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
         zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                          batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                          batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                          lda, (float *)weights, ldb,
                           (float *)bias, beta, (float *)dst, ldc);
     }
     else {
         if (has_eltwise_relu) {
             //MatMul with BiasRelu
             zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc);
         }
         else if (has_eltwise_gelu) {
@@ -346,7 +370,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc, 1);
 
         }
@@ -356,7 +381,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src, lda, (float *)weights, ldb,
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
                                   (float *)bias, beta, (float *)dst, ldc, 2);
         }
         else {
