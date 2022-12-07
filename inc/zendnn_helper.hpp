@@ -68,6 +68,7 @@ class zendnnEnv {
     uint    zenConvAlgo;
     uint    zenEnableMemPool;
     uint    zenLibMemPoolEnable;
+    uint    zenEnableTFOpts;
     bool    zenINT8format;
   private:
     //initializing ZenDNNEnv values.
@@ -109,6 +110,7 @@ class zendnnEnv {
         if (zenEnableMemPool > 2) {
             zenEnableMemPool = 1;
         }
+        zenEnableTFOpts = zendnn_getenv_int("TF_ENABLE_ZENDNN_OPTS", 1);
         //TODO: Unified FWK and LIB mempool for next release
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
