@@ -4,11 +4,10 @@
 
 #include "common/zendnn_private.hpp"
 #include <omp.h>
-#include <sys/sysinfo.h>
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
 #include "zendnn_logging.hpp"
+#include "zendnn_helper.hpp"
 
 using namespace zendnn;
 
@@ -43,8 +42,12 @@ void zenConvolution2D_Latency_blocked_layout(
 ) {
     zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_Latency_blocked_layout [zendnn convolution blocked]");
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
     int channel_group =  8;    // Modified hardcoding of 8 based on thread quantity in future
     int remainder = channels % channel_group;
@@ -54,7 +57,7 @@ void zenConvolution2D_Latency_blocked_layout(
 
     unsigned long data_col_size = ((kernel_h*kernel_w*channels)*(out_height*out_width)*sizeof(float)*no_of_images);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size : (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
     float *out_col;
     // out_col is an intermedidate output
@@ -159,9 +162,9 @@ void zenConvolution2D_Filterwise_Latency(
 
     // Allocate memory for reordering input , output and filters
 
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
-    float *out_col = (float *)aligned_alloc(ALIGNED_OFFSET, o_layer_size);
-    float *filter_col = (float *)aligned_alloc(ALIGNED_OFFSET, filter_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *out_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, o_layer_size);
+    float *filter_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, filter_col_size);
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG, "zenConvolution2D_Filterwise_Latency Memory Error while allocating patch matrix");

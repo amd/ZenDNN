@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <float.h>
 #include <math.h>
-#include <sys/sysinfo.h>
 #include <string>
 #include "zendnn_helper.hpp"
 #include "zendnn_utils.hpp"

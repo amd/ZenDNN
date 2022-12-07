@@ -4,13 +4,12 @@
 
 #include "common/zendnn_private.hpp"
 #include <omp.h>
-#include <sys/sysinfo.h>
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
 #include <vector>
 #include <cmath>
 #include "zendnn_logging.hpp"
+#include "zendnn_helper.hpp"
 #include "zendnn.hpp"
 
 using namespace zendnn;
@@ -111,8 +110,12 @@ void zenMatMul_gemm_wrapper(
     bool auto_tuner=false;
     unsigned int algo_type = zenEnvObj.zenGEMMalgo;
     // prologue code for time profiling of this kernel
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
     //Experimental version for auto tuner
     if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO) {
@@ -160,8 +163,15 @@ void zenMatMul_gemm_wrapper(
     }
 
     // Code for time profiling of this kernel
+    float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
     gettimeofday(&end, 0);
-    float elapsed = timedifference_msec(start, end);
+    elapsed = timedifference_msec(start, end);
+#endif
 
     zendnnInfo(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner, " Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
@@ -529,8 +539,12 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
     // prologue code for time profiling of this kernel
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
     std::vector<CBLAS_TRANSPOSE> TransA_Array(
         group_count, TransA ? CblasTrans : CblasNoTrans);
@@ -540,14 +554,13 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     //if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM1) {
     //Direct call to BLIS cblas_sgemm_batch is not performing well
     //TODO: check with BLIS team for optimal cblas_sgemm_batch function
-    if (0) {
-        cblas_sgemm_batch(Layout?CblasRowMajor:CblasColMajor, &TransA_Array[0],
+#if 0
+        cblas_sgemm_batch(Layout ? CblasRowMajor : CblasColMajor, &TransA_Array[0],
                           &TransB_Array[0], M_Array,
                           N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
                           B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
                           group_count, group_size);
-    }
-    else {
+#else
         //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
         //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
         //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
@@ -556,11 +569,17 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                               A_Array, lda_Array, B_Array, ldb_Array,
                               beta_Array, C_Array, ldc_Array,
                               group_count, group_size);
-    }
-
+#endif
     // Code for time profiling of this kernel
-    gettimeofday(&end, 0);
-    float elapsed = timedifference_msec(start, end);
+    float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
+        gettimeofday(&end, 0);
+        elapsed = timedifference_msec(start, end);
+#endif
 
     zendnnInfo(ZENDNN_PROFLOG, "zenBatchMatMul, Layout=",
                Layout ? "CblasRowMajor" : "CblasColMajor",

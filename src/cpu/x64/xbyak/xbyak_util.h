@@ -256,7 +256,13 @@ class Cpu {
 			    continue;
 			}
 			// Get CPUID with specified leaf and sub_leaf value
+#ifdef _WIN32
+				int data[4];
+				__cpuidex(reinterpret_cast<int*>(data),leaf,sub_leaf);
+				eax=data[0];ebx=data[1],ecx=data[2],edx=data[3];
+#else
 		        __cpuid_count(leaf, sub_leaf, eax, ebx, ecx, edx);
+#endif
 			// ebx = (Line Size - 1, bits 0 to 11) +
 			//       (Partitions - 1, bits 12 to 21) +
 			//       (Associativity - 1, bits 22 to 31)

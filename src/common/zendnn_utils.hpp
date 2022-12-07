@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <float.h>
 #include <math.h>
-#include <sys/sysinfo.h>
 #include <string>
 #include "zendnn_logging.hpp"
 #include "zendnn_helper.hpp"
@@ -297,7 +296,7 @@ class ZenLibMemoryPool {
                     else {
                         size = out_size;
                     }
-                    zenLibBufPoolArr[poolOffset].zenLibBufPtr = (float *) aligned_alloc(
+                    zenLibBufPoolArr[poolOffset].zenLibBufPtr = (float *) zendnn_aligned_alloc(
                                 ALIGNED_OFFSET, sizeof(
                                     float) * size);
 

@@ -334,9 +334,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     ip_off.resize(batch);
     wei_off.resize(batch);
 
-    calculate_offsets(dst_off, dst_d.dims(), dst_d.dims(), dst_d.ndims()-2, M, N);
-    calculate_offsets(ip_off,src_d.dims(),dst_d.dims(), dst_d.ndims()-2, M, K);
-    calculate_offsets(wei_off,weights_d.dims(),dst_d.dims(), dst_d.ndims()-2, K, N);
+    calculate_offsets(dst_off,(long int *)dst_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, M, N);
+    calculate_offsets(ip_off,(long int *)src_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, M, K);
+    calculate_offsets(wei_off,(long int *)weights_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, K, N);
 
 
     int *input_offsets = ip_off.data();

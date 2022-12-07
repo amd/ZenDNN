@@ -3,10 +3,9 @@
 *******************************************************************************/
 
 #include <omp.h>
-#include <sys/sysinfo.h>
+
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
 #include "zendnn_convolution_winograd.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
@@ -101,7 +100,7 @@ void zenConvolution2Dbase(
                                    (out_height*out_width)*sizeof(float)*thread_qty);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -222,7 +221,7 @@ void zenConvolution2DbaseVer5(
                                    (out_height*out_width)*sizeof(float)*thread_qty);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -339,7 +338,7 @@ void zenConvolution2DsmallGemm(
                                    (out_height*out_width)*sizeof(float)*thread_qty);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
 
     if (data_col == NULL) {
@@ -560,7 +559,7 @@ void zenConvolution2DsmallGemmVer2(
             }
         }
         if (!zenLibPoolEnable) {
-            data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+            data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
         }
 
     }
@@ -1025,7 +1024,7 @@ void zenConvolution2DsmallGemmMerge(
             }
         }
         if (!zenLibPoolEnable) {
-            data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+            data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
         }
     }
     if (data_col == NULL) {
@@ -1451,7 +1450,7 @@ void zenConvolution2DsmallGemmSplit(
         }
     }
     if (!zenLibPoolEnable) {
-        data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+        data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     }
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -1811,7 +1810,7 @@ void zenConvolution2DlatencyVer1(
                                    (out_height*out_width)*sizeof(float)*images);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -1938,7 +1937,7 @@ void zenConvolution2DlatencyVer2(
     float *data_col ;
     if (!(kernel_h ==1 && kernel_w==1 && out_height ==height &&
             out_width == width)) {
-        data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+        data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     }
     else {
         data_col = (float *)in_layer;
@@ -2103,7 +2102,7 @@ void zenConvolution2DlatencyVer3(
                                    (out_width)*sizeof(float)*threads);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DlatencyVer3 Memory Error while allocating patch matrix");
@@ -2299,7 +2298,7 @@ void zenConvolution2DlatencyVer4(
             }
         }
         if (!zenLibPoolEnable) {
-            data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+            data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
         }
 
     }
@@ -2499,7 +2498,7 @@ void zenConvolution2DlatencyVer5(
                                    (out_width)*sizeof(float)*thread_qty*height_merge_count);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DlatencyVer5 Memory Error while allocating patch matrix");
@@ -2674,7 +2673,7 @@ void zenConvolution2DsmallGemmSplitLatency(
                                    *sizeof(float)*threads);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DsmallGemmSplitLatency Memory Error while allocating patch matrix");
@@ -2884,7 +2883,7 @@ void zenConvolution2DsmallGemmMergeLatency(
         }
     }
     if (!zenLibPoolEnable) {
-        data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+        data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     }
 
 
@@ -3032,8 +3031,12 @@ void zenConvolution2Dgemm(
     //TODO: This should be part of zendnn initialization
     zendnnEnv zenEnvObj = readEnv();
 
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
     if (batchsize > 1) {
         //Throughput path BS > 1
@@ -3204,9 +3207,15 @@ void zenConvolution2Dgemm(
 
     }
 
-    gettimeofday(&end, 0);
     float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
+    gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
+#endif
     zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_gemm, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,

@@ -4,7 +4,7 @@
 
 #include "common/zendnn_private.hpp"
 #include <time.h>
-#include <sys/time.h>
+#include "zendnn_helper.hpp"
 #include "zendnn_logging.hpp"
 #include <omp.h>
 
@@ -218,8 +218,12 @@ void max_pooling(
 ) {
     zendnnEnv zenEnvObj = readEnv();
 
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
     max_pooling_v1(zenEnvObj, input, number_of_images, number_of_channel, height,
                    width, kernel_height,
@@ -234,9 +238,15 @@ void max_pooling(
                    data_format // 1 for NCHW and 0 for NHWC
                   );
 
-    gettimeofday(&end, 0);
     float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
+    gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
+#endif
     zendnnInfo(ZENDNN_PROFLOG, "ZENDNN MaxPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,

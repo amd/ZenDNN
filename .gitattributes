@@ -1,0 +1,14 @@
+# Set the default behavior, in case people don't have core.autocrlf set , overrides if set.
+* text=auto
+
+# Explicitly declare text files you want to always be normalized and converted
+# to native line endings on checkout.
+*.c text
+*.h text
+
+# Windows build files should be considered binary
+*.sln binary eol=crlf
+*.sln binary merge
+
+# make sure build.sh retains Unix line endings, even when checked out on windows.
+*.sh text eol=lf

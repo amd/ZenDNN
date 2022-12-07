@@ -4,10 +4,8 @@
 
 #include "common/zendnn_private.hpp"
 #include <omp.h>
-#include <sys/sysinfo.h>
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
 #include "zendnn_logging.hpp"
 #include "zendnn_helper.hpp"
 
@@ -160,11 +158,11 @@ void convolution2D_ver3(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned short bufferBucket = no_of_images;
-    if (no_of_images > cpuVitualCores) {
-        bufferBucket = cpuVitualCores;
-    }
+    //if (no_of_images > cpuVitualCores) {
+    //    bufferBucket = cpuVitualCores;
+    //}
 
     //#New Implementation with im2col and gemm function.
     //im2col().....parallel version is also available
@@ -258,7 +256,7 @@ void zenConvolution2D_ver4(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
 
@@ -391,7 +389,7 @@ void zenConvolution2D_ver5(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
 
@@ -532,7 +530,7 @@ void zenConvolution2D_ver6(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
 
@@ -720,7 +718,7 @@ void zenConvolution2DbaseRef(
                                    (out_height*out_width)*sizeof(float)*thread_qty);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -840,7 +838,7 @@ void zenConvolution2D_SmallGemm(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
 
@@ -967,7 +965,7 @@ void zenConvolution2D_BigGemm(
 ) {
 
 #if 1
-    unsigned short cpuVitualCores = get_nprocs();
+    //unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
 
@@ -1121,8 +1119,12 @@ void zenConvolution2DgemmRef(
     //In future this will be part of zendnn initialization
     zendnnEnv zenEnvObj = readEnv();
 
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
     struct timeval start, end;
     gettimeofday(&start, 0);
+#endif
 
 
     zenConvolution2DbaseRef(zenEnvObj, in_layer, batchsize, channels, height, width,
@@ -1130,9 +1132,15 @@ void zenConvolution2DgemmRef(
                             kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w, bias,
                             out_layer, out_height, out_width, relu, scale);
 
+float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
     gettimeofday(&end, 0);
-    float elapsed;
     elapsed = timedifference_msec(start, end);
+#endif
     zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2DbaseRef, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,

@@ -9,7 +9,6 @@
 #include <tuple>
 #include <zendnn_helper.hpp>
 #include <time.h>
-#include <sys/time.h>
 
 using namespace zendnn;
 
@@ -171,15 +170,25 @@ int auto_compute_matmul_v1(
             zenEnvObj.zenGEMMalgo = algo_type;
 
             //timer start
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
             gettimeofday(&start_n, 0);
+#endif
 
             zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_filter, m, k,
                            n,
                            alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
             //timer end
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
             gettimeofday(&end_n, 0);
             cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
                             (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+#endif
 
 
             //update with minimum time taken
@@ -291,16 +300,26 @@ int auto_compute_matmul_v2(
             zenEnvObj.zenGEMMalgo = algo_type;
 
             //timer start
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
             gettimeofday(&start_n, 0);
+#endif
 
 
             zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_filter, m, k,
                            n,
                            alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
             //timer end
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
             gettimeofday(&end_n, 0);
             cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
                             (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+#endif
 
             //update with minimum time taken
             if (cur_min_time < 0 || cur_algo_time<cur_min_time) {
@@ -351,7 +370,7 @@ int auto_compute_matmul_v3(
     const int ldc
 ) {
 
-    float cur_algo_time; //current algorithm's execution time
+    float cur_algo_time=0.0f; //current algorithm's execution time
     struct timeval start_n, end_n;
 
     Key_matmul key_obj;
@@ -390,20 +409,28 @@ int auto_compute_matmul_v3(
         if (found_obj == matmul_kernel_map2.end()) {
 
             //Time start
-            gettimeofday(&start_n,0);
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
+            gettimeofday(&start_n, 0);
+#endif
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
                            n,
                            alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
 
             //Time end
-            gettimeofday(&end_n,0);
-
-            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
-                            (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
-
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
+            gettimeofday(&end_n, 0);
+            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f
+                    + (end_n.tv_usec - start_n.tv_usec)/1000.0f; //time in milliseconds
+#endif
             //Create new entry
-            matmul_kernel_map2[key_obj] = {0, cur_algo_time, 3}; // {eval_count, time, algo}
+            matmul_kernel_map2[key_obj] = std::make_tuple(0, cur_algo_time, 3); // {eval_count, time, algo}
         }
         else {
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
@@ -433,16 +460,25 @@ int auto_compute_matmul_v3(
         std::get<0>(found_obj->second) += 1;
 
         //timer start
+#ifdef _WIN32
+        auto start_n = std::chrono::high_resolution_clock::now();
+#else
         gettimeofday(&start_n, 0);
+#endif
 
         zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_filter, m, k,
                        n,
                        alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
         //timer end
+#ifdef _WIN32
+        auto end_n = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> difference = end_n - start_n;
+        cur_algo_time = difference.count();
+#else
         gettimeofday(&end_n, 0);
-
         cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
-                        (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+            (end_n.tv_usec - start_n.tv_usec)/ 1000.0f; //time in milliseconds
+#endif
 
 
         //If current run gives better timing then update
@@ -532,20 +568,31 @@ int auto_compute_matmul_v4(
         if (found_obj == matmul_kernel_map2.end()) {
 
             //Time start
-            gettimeofday(&start_n,0);
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
+            gettimeofday(&start_n, 0);
+#endif
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_filter, m, k,
                            n,
                            alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
 
             //Time end
-            gettimeofday(&end_n,0);
-
-            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
-                            (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference
+                    = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
+            gettimeofday(&end_n, 0);
+            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f
+                    + (end_n.tv_usec - start_n.tv_usec)
+                            / 1000.0f; //time in milliseconds
+#endif
 
             //Create new entry
-            matmul_kernel_map2[key_obj] = {1, cur_algo_time, 3}; // {iter_count, time, algo}
+            matmul_kernel_map2[key_obj] = std::make_tuple(1, cur_algo_time, 3); // {iter_count, time, algo}
         }
         //If key found then increment the iter_count and run algo 3.
         else {
@@ -575,16 +622,25 @@ int auto_compute_matmul_v4(
         zenEnvObj.zenGEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
         std::get<0>(found_obj->second) += 1;
         //timer start
+#ifdef _WIN32
+        auto start_n = std::chrono::high_resolution_clock::now();
+#else
         gettimeofday(&start_n, 0);
+#endif
 
         zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_filter, m, k,
                        n,
                        alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
         //timer end
+#ifdef _WIN32
+        auto end_n = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> difference = end_n - start_n;
+        cur_algo_time = difference.count();
+#else
         gettimeofday(&end_n, 0);
-
-        cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
-                        (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+        cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f
+                + (end_n.tv_usec - start_n.tv_usec) / 1000.0f; //time in milliseconds
+#endif
 
 
         //If current run gives better timing then update

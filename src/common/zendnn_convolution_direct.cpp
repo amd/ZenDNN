@@ -4,11 +4,10 @@
 
 #include "common/zendnn_private.hpp"
 #include <omp.h>
-#include <sys/sysinfo.h>
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
 #include "zendnn_logging.hpp"
+#include "zendnn_helper.hpp"
 
 #define ALIGNED_OFFSET          64
 
@@ -65,7 +64,7 @@ void zenConvolution2D_direct(
                                        float)*thread_qty);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_direct Memory Error while allocating patch matrix");
@@ -210,7 +209,7 @@ void zenConvolution2D_directVer2(
     unsigned long data_col_size = (channels)*sizeof(float)*thread_qty;
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_directVer2 Memory Error while allocating patch matrix");
@@ -359,7 +358,7 @@ void zenConvolution2D_directVer3(
     unsigned long data_col_size = (channels)*sizeof(float)*thread_qty;
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
-    float *data_col = (float *)aligned_alloc(ALIGNED_OFFSET, data_col_size);
+    float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_directVer3 Error while allocating patch matrix");

@@ -46,7 +46,13 @@ static inline const std::string logLevelToStr(int logLevel) {
 }
 
 static inline int zendnnGetLogLevel(const std::string &name) {
-    static char *logCstr = getenv("ZENDNN_LOG_OPTS");
+#ifdef _WIN32
+    size_t sz = 0;
+    static char *logCstr;
+    _dupenv_s(&logCstr, &sz, "ZENDNN_LOG_OPTS");
+#else
+    static char *logCstr = std::getenv("ZENDNN_LOG_OPTS");
+#endif
     if (!logCstr) {
         return LOG_LEVEL_DEFAULT;
     }

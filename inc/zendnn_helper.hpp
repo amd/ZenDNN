@@ -7,6 +7,25 @@
 #include <iostream>
 #include <zendnn.h>
 
+#ifdef _WIN32
+#include <chrono>
+#include <sysinfoapi.h>
+#include <corecrt_math_defines.h>
+typedef unsigned int uint;
+using namespace std::chrono;
+#else
+#include <sys/sysinfo.h>
+#include <sys/time.h>
+#endif
+
+inline void *zendnn_aligned_alloc(size_t _Alignment, size_t _Size) {
+#ifdef _WIN32
+    return _aligned_malloc(_Size, _Alignment);
+#else
+    return aligned_alloc(_Alignment, _Size);
+#endif
+}
+
 namespace zendnn {
 
 /// Read an integer from the environment variable
@@ -22,7 +41,7 @@ inline int zendnn_getenv_int(const char *name, int default_value = 0) {
 /// return actual value.
 inline float zendnn_getenv_float(const char *name, float default_value = 0.0f) {
     char *val = std::getenv(name);
-    return val == NULL ? default_value : atof(val);
+    return val == NULL ? default_value : (float)atof(val);
 }
 
 /// Read an string from the environment variable
@@ -114,7 +133,7 @@ class zendnnEnv {
         //TODO: Unified FWK and LIB mempool for next release
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
-        zenINT8format = zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
+        zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
         if (zenConvAlgo <= zenConvAlgoType::AUTO || zenConvAlgo > zenConvAlgoType::DIRECT2) {
             zenConvAlgo = zenConvAlgoType::GEMM;

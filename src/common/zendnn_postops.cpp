@@ -4,10 +4,10 @@
 
 #include "common/zendnn_private.hpp"
 #include <omp.h>
-#include <sys/sysinfo.h>
+
 #include <cblas.h>
 #include <time.h>
-#include <sys/time.h>
+#include "zendnn_helper.hpp"
 #include "zendnn_logging.hpp"
 #include <immintrin.h>
 
@@ -532,8 +532,12 @@ void zenPostOps(
         }
     }
     else  {
+#ifdef _WIN32
+        auto start = std::chrono::high_resolution_clock::now();
+#else
         struct timeval start, end;
         gettimeofday(&start, 0);
+#endif
 
         // This section of the code enables Batchorm , Elementwise & Relu support for Blocked Format
         int filter_block = no_of_filter/8;          // Assumes Filters are multiple of 8
@@ -908,9 +912,15 @@ void zenPostOps(
             elementWise_enable = 1;
         }
 
-        gettimeofday(&end, 0);
         float elapsed;
+#ifdef _WIN32
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> difference = end - start;
+        elapsed = difference.count();
+#else
+        gettimeofday(&end, 0);
         elapsed = timedifference_msec(start, end);
+#endif
         zendnnInfo(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
                    " height=", out_height, " width=", out_width,
                    " no_of_filter=", no_of_filter, " relu_enable=", relu, " gelu=", gelu,
