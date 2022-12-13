@@ -7,8 +7,7 @@
 *.h text
 
 # Windows build files should be considered binary
-*.sln binary eol=crlf
-*.sln binary merge
+*.sln merge=binary
 
 # make sure build.sh retains Unix line endings, even when checked out on windows.
 *.sh text eol=lf
