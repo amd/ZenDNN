@@ -25,10 +25,10 @@
 // clang-format off
 
 /// Major version
-#define ZENDNN_VERSION_MAJOR 3
+#define ZENDNN_VERSION_MAJOR 4
 
 /// Minor version
-#define ZENDNN_VERSION_MINOR 3
+#define ZENDNN_VERSION_MINOR 0
 
 /// Patch version
 #define ZENDNN_VERSION_PATCH 0
