@@ -126,7 +126,7 @@ fi
 
 if [ -z "$OMP_NUM_THREADS" ];
 then
-    export OMP_NUM_THREADS=64
+    export OMP_NUM_THREADS=96
     echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
 else
     echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
