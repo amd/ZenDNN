@@ -123,7 +123,7 @@ fi
 
 if [ -z "$OMP_NUM_THREADS" ];
 then
-    export OMP_NUM_THREADS=64
+    export OMP_NUM_THREADS=96
     echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
 else
     echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
@@ -137,8 +137,6 @@ else
     echo "OMP_WAIT_POLICY=$OMP_WAIT_POLICY"
 fi
 
-export GOMP_CPU_AFFINITY="0-63"
-echo "GOMP_CPU_AFFINITY=$GOMP_CPU_AFFINITY"
 
 #By default setting ZENDNN_PT_VERSION as v1.12.0
 export ZENDNN_PT_VERSION="1.12.0"
@@ -167,8 +165,8 @@ echo "ZENDNN_PT_CONV_ADD_FUSION_SAFE=$ZENDNN_PT_CONV_ADD_FUSION_SAFE"
 export OMP_DYNAMIC=FALSE
 echo "OMP_DYNAMIC=$OMP_DYNAMIC"
 
-# ZENDNN_GEMM_ALGO is set to 1
-export ZENDNN_GEMM_ALGO=1
+# ZENDNN_GEMM_ALGO is set to 3
+export ZENDNN_GEMM_ALGO=3
 echo "ZENDNN_GEMM_ALGO=$ZENDNN_GEMM_ALGO"
 
 #Check if below declaration of ZENDNN_GIT_ROOT is correct
@@ -218,11 +216,6 @@ echo "PYTORCH_BENCHMARK_GIT_ROOT: $PYTORCH_BENCHMARK_GIT_ROOT"
 export ZENDNN_PRIMITIVE_CACHE_CAPACITY=1024
 echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
 
-# MAX_CPU_ISA
-# MAX_CPU_ISA is disabld at build time. When feature is enabled, uncomment the
-# below 2 lines
-#export ZENDNN_MAX_CPU_ISA=ALL
-#echo "ZENDNN_MAX_CPU_ISA: $ZENDNN_MAX_CPU_ISA"
 
 # Enable primitive create and primitive execute logs. By default it is disabled
 export ZENDNN_PRIMITIVE_LOG_ENABLE=0
@@ -243,7 +236,4 @@ source scripts/gather_hw_os_kernel_bios_info.sh true > system_hw_os_kernel_bios_
 echo -e "\n"
 echo "Please set below environment variables explicitly as per the platform you are using!!"
 echo -e "\tOMP_NUM_THREADS, GOMP_CPU_AFFINITY"
-echo "Please set below environment variables explicitly for better performance!!"
-echo "OMP_PROC_BIND=CLOSE"
-echo "OMP_PLACES=CORES"
 echo -e "\n"
