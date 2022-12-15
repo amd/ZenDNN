@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
 #*******************************************************************************
 
 #!/bin/bash
@@ -7,7 +7,7 @@
 #-----------------------------------------------------------------------------
 #   zendnn_gcc_env_setup.sh
 #   Prerequisite: This script needs to run first to setup environment variables
-#                 before any GCC build or TF setup
+#                 before any GCC build.
 #
 #   This script does following:
 #   -Checks if important env variables are declared
@@ -148,14 +148,6 @@ else
     echo "OMP_PROC_BIND=$OMP_PROC_BIND"
 fi
 
-#By default setting ZENDNN_TF_VERSION as 1.15
-export ZENDNN_TF_VERSION="1.15"
-echo "ZENDNN_TF_VERSION=$ZENDNN_TF_VERSION"
-
-#By default setting ZENDNN_PT_VERSION as 1.9.0
-export ZENDNN_PT_VERSION="1.9.0"
-echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
-
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
 #to optimize the use of system resources. ZenDNN depend on a number of threads
@@ -173,8 +165,8 @@ export ZENDNN_ENABLE_MEMPOOL=1
 echo "ZENDNN_ENABLE_MEMPOOL=$ZENDNN_ENABLE_MEMPOOL"
 
 #Set the max no. of tensors that can be used inside TF memory pool, Default is
-#set to 64
-export ZENDNN_TENSOR_POOL_LIMIT=64
+#set to 32
+export ZENDNN_TENSOR_POOL_LIMIT=32
 echo "ZENDNN_TENSOR_POOL_LIMIT=$ZENDNN_TENSOR_POOL_LIMIT"
 
 #Enable fixed max size allocation for Persistent tensor with TF memory pool
@@ -287,12 +279,6 @@ echo "PYTORCH_BENCHMARK_GIT_ROOT: $PYTORCH_BENCHMARK_GIT_ROOT"
 
 export ONNXRUNTIME_GIT_ROOT=$ZENDNN_PARENT_FOLDER/onnxruntime
 echo "ONNXRUNTIME_GIT_ROOT: $ONNXRUNTIME_GIT_ROOT"
-
-export ZENDNN_ONNXRT_VERSION="1.8.0"
-echo "ZENDNN_ONNXRT_VERSION: $ZENDNN_ONNXRT_VERSION"
-
-export ZENDNN_ONNX_VERSION="1.9.0"
-echo "ZENDNN_ONNX_VERSION: $ZENDNN_ONNX_VERSION"
 
 # Primitive Caching Capacity
 export ZENDNN_PRIMITIVE_CACHE_CAPACITY=1024
