@@ -210,14 +210,70 @@ void zenMatMul(
                     "zenMatMul Memory is not defined for input or filter or output");
         return;
     }
-    // Perform zen matmul. 'NULL' parameter indicates no biasadd fusion and
-    // 'false' parameter disables ReLU activation on the MatMul output.
-    for (int i=0; i<batch_size; ++i)
+
+    if (batch_size == 1) {
+        // Perform zen matmul. 'NULL' parameter indicates no biasadd fusion and
+        // 'false' parameter disables ReLU activation on the MatMul output.
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
-                               input + input_offsets[i], lda,
-                               filter + weights_offsets[i], ldb, NULL, false, 0, beta,
-                               output + dst_offsets[i], ldc);
+                               input + input_offsets[0], lda,
+                               filter + weights_offsets[0], ldb, NULL, false, 0, beta,
+                               output + dst_offsets[0], ldc);
+    } else {
+        int group_count = 1;
+
+        std::vector<int> M_Array;
+        std::vector<int> N_Array;
+        std::vector<int> K_Array;
+        std::vector<float> alpha_Array;
+        std::vector<float> beta_Array;
+        std::vector<const float*> A_Array;
+        std::vector<const float*> B_Array;
+        std::vector<float*> C_Array;
+        std::vector<int> lda_Array;
+        std::vector<int> ldb_Array;
+        std::vector<int> ldc_Array;
+        std::vector<int> group_size;
+
+
+        group_size.resize(group_count);
+        M_Array.resize(group_count);
+        N_Array.resize(group_count);
+        K_Array.resize(group_count);
+        alpha_Array.resize(group_count);
+        beta_Array.resize(group_count);
+        lda_Array.resize(group_count);
+        ldb_Array.resize(group_count);
+        ldc_Array.resize(group_count);
+        A_Array.resize(batch_size);
+        B_Array.resize(batch_size);
+        C_Array.resize(batch_size);
+
+        M_Array[0] = no_of_images;
+        K_Array[0] = no_of_channels;
+        N_Array[0] = no_of_filters;
+        alpha_Array[0] = alpha;
+        beta_Array[0] = beta;
+        lda_Array[0] = lda;
+        ldb_Array[0] = ldb;
+        ldc_Array[0] = ldb;
+        group_size[0] = batch_size;
+
+        for (int i=0; i<batch_size; ++i) {
+            A_Array[i] = input + input_offsets[i];
+            B_Array[i] = filter+ weights_offsets[i];
+            C_Array[i] = output + dst_offsets[i];
+        }
+
+
+        zenBatchMatMul(Layout, transpose_input, transpose_filter,
+                       M_Array.data(), N_Array.data(), K_Array.data(),
+                       alpha_Array.data(), A_Array.data(), lda_Array.data(),
+                       B_Array.data(), ldb_Array.data(),
+                       beta_Array.data(), C_Array.data(), ldc_Array.data(),
+                       group_count, group_size.data());
+    }
+
 }
 
 void zenMatMulWithBias(
