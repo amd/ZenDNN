@@ -184,12 +184,14 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
 static void fill_offset(std::vector<int> &offsets,
                         unsigned int offset_index,
                         unsigned int curr_offset,
-                        long int const dims1[],
-                        long int const dims2[],
+                        int64_t const dims1[],
+                        int64_t const dims2[],
                         unsigned int dims_len,
                         unsigned int dims_index,
                         unsigned int mat_size) {
 
+    if (dims_len == 0)
+        return;
     if (dims_index == dims_len - 1) {
         offsets[offset_index] = curr_offset + mat_size;
         offset_index++;
@@ -215,7 +217,7 @@ static void fill_offset(std::vector<int> &offsets,
     }
     if (dims1[dims_index] == dims2[dims_index]) {
         int current_offset = curr_offset;
-        for (int i = dims_index; i < dims1[dims_index]; i++) {
+        for (int i = 0; i < dims1[dims_index]; i++) {
             fill_offset(offsets, offset_index, current_offset, dims1, dims2, dims_len,
                         dims_index + 1, mat_size);
             offset_index += count;
@@ -235,8 +237,8 @@ static void fill_offset(std::vector<int> &offsets,
 }
 
 static void calculate_offsets(std::vector<int> &offsets,
-                              long int const dims1[],
-                              long int const dims2[],
+                              int64_t const dims1[],
+                              int64_t const dims2[],
                               unsigned int dims_len,
                               unsigned long mat_dim1,
                               unsigned long mat_dim2) {
@@ -334,9 +336,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     ip_off.resize(batch);
     wei_off.resize(batch);
 
-    calculate_offsets(dst_off,(long int *)dst_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, M, N);
-    calculate_offsets(ip_off,(long int *)src_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, M, K);
-    calculate_offsets(wei_off,(long int *)weights_d.dims(),(long int *)dst_d.dims(),dst_d.ndims() - 2, K, N);
+    calculate_offsets(dst_off,(int64_t *)dst_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, M, N);
+    calculate_offsets(ip_off,(int64_t *)src_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, M, K);
+    calculate_offsets(wei_off,(int64_t *)weights_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, K, N);
 
 
     int *input_offsets = ip_off.data();
