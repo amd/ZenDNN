@@ -134,35 +134,16 @@ void zenMatMul_gemm_wrapper(
     if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO) {
         auto_tuner=true;
 
-        //If graph_exe_count is incremented by framework
-        if (graph_exe_count != -1) {
-
-            if (false == Layout) { //CblasColMajor
-                algo_type = auto_compute_matmul_v3(zenEnvObj, !Layout, transpose_filter,
-                                                   transpose_input,
-                                                   n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
-            }
-            else {
-                algo_type = auto_compute_matmul_v3(zenEnvObj, Layout, transpose_input,
-                                                   transpose_filter,
-                                                   m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
-            }
+        if (false == Layout) { //CblasColMajor
+            algo_type = auto_compute_matmul(zenEnvObj, !Layout, transpose_filter,
+                                            transpose_input,
+                                            n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
         }
-        //If graph_exe_count not incremented from framework
         else {
-
-            if (false == Layout) { //CblasColMajor
-                algo_type = auto_compute_matmul_v4(zenEnvObj, !Layout, transpose_filter,
-                                                   transpose_input,
-                                                   n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu, beta, output, ldc);
-            }
-            else {
-                algo_type = auto_compute_matmul_v4(zenEnvObj, Layout, transpose_input,
-                                                   transpose_filter,
-                                                   m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
-            }
+            algo_type = auto_compute_matmul(zenEnvObj, Layout, transpose_input,
+                                            transpose_filter,
+                                            m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
         }
-
     }
     else if (false == Layout) { //CblasColMajor
         zenMatMul_gemm(zenEnvObj, auto_tuner, !Layout, transpose_filter,
@@ -202,9 +183,9 @@ void zenMatMul(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
-    const int* input_offsets,
-    const int* weights_offsets,
-    const int* dst_offsets,
+    const int *input_offsets,
+    const int *weights_offsets,
+    const int *dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -232,7 +213,8 @@ void zenMatMul(
                                input + input_offsets[0], lda,
                                filter + weights_offsets[0], ldb, NULL, false, 0, beta,
                                output + dst_offsets[0], ldc);
-    } else {
+    }
+    else {
         int group_count = 1;
 
         std::vector<int> M_Array;
@@ -240,14 +222,14 @@ void zenMatMul(
         std::vector<int> K_Array;
         std::vector<float> alpha_Array;
         std::vector<float> beta_Array;
-        std::vector<const float*> A_Array;
-        std::vector<const float*> B_Array;
-        std::vector<float*> C_Array;
+        std::vector<const float *> A_Array;
+        std::vector<const float *> B_Array;
+        std::vector<float *> C_Array;
         std::vector<int> lda_Array;
         std::vector<int> ldb_Array;
         std::vector<int> ldc_Array;
         std::vector<int> group_size;
-        std::vector<const float*> ADD_Array;
+        std::vector<const float *> ADD_Array;
 
 
         group_size.resize(group_count);
@@ -295,9 +277,9 @@ void zenMatMulWithBias(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
-    const int* input_offsets,
-    const int* weights_offsets,
-    const int* dst_offsets,
+    const int *input_offsets,
+    const int *weights_offsets,
+    const int *dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -332,9 +314,9 @@ void zenMatMulWithBiasReLU(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
-    const int* input_offsets,
-    const int* weights_offsets,
-    const int* dst_offsets,
+    const int *input_offsets,
+    const int *weights_offsets,
+    const int *dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -369,9 +351,9 @@ void zenMatMulWithBiasGeLU(
     const bool transpose_input,
     const bool transpose_filter,
     const int batch_size,
-    const int* input_offsets,
-    const int* weights_offsets,
-    const int* dst_offsets,
+    const int *input_offsets,
+    const int *weights_offsets,
+    const int *dst_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -498,7 +480,8 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                  B_Array[grp_start + threadOffset], ldb_Array[i],
                                  beta_Array[i],
                                  C_Array[grp_start + threadOffset], ldc_Array[i]);
-                } else {
+                }
+                else {
                     cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
                                 TransA_Array[i], TransB_Array[i], m, n, k,
                                 alpha_Array[i],
@@ -512,7 +495,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
                             (C_Array[grp_start + threadOffset][k] * mul_node) +
-                             ADD_Array[(grp_start + threadOffset) % batch_size][k];
+                            ADD_Array[(grp_start + threadOffset) % batch_size][k];
                     }
                 }
             }
@@ -637,21 +620,21 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     //Direct call to BLIS cblas_sgemm_batch is not performing well
     //TODO: check with BLIS team for optimal cblas_sgemm_batch function
 #if 0
-        cblas_sgemm_batch(Layout ? CblasRowMajor : CblasColMajor, &TransA_Array[0],
-                          &TransB_Array[0], M_Array,
-                          N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
-                          B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
-                          group_count, group_size);
+    cblas_sgemm_batch(Layout ? CblasRowMajor : CblasColMajor, &TransA_Array[0],
+                      &TransB_Array[0], M_Array,
+                      N_Array, K_Array, &alpha_Array[0], A_Array, lda_Array,
+                      B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
+                      group_count, group_size);
 #else
-        //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
-        //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-        //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-        zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                              M_Array, N_Array, K_Array, alpha_Array,
-                              A_Array, lda_Array, B_Array, ldb_Array,
-                              beta_Array, C_Array, ldc_Array,
-                              group_count, group_size, is_mul_add, ADD_Array,
-                              mul_node, batch_size);
+    //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
+    //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+    //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+    zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                          M_Array, N_Array, K_Array, alpha_Array,
+                          A_Array, lda_Array, B_Array, ldb_Array,
+                          beta_Array, C_Array, ldc_Array,
+                          group_count, group_size, is_mul_add, ADD_Array,
+                          mul_node, batch_size);
 #endif
     // Code for time profiling of this kernel
     float elapsed;
@@ -660,8 +643,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     std::chrono::duration<double, std::milli> difference = end - start;
     elapsed = difference.count();
 #else
-        gettimeofday(&end, 0);
-        elapsed = timedifference_msec(start, end);
+    gettimeofday(&end, 0);
+    elapsed = timedifference_msec(start, end);
 #endif
 
     zendnnInfo(ZENDNN_PROFLOG, "zenBatchMatMul, Layout=",
@@ -720,7 +703,8 @@ void zenMatmulSplit(
         thread_qty = zenEnvObj.omp_num_threads;
         omp_set_max_active_levels(1);
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1 || transpose_input) {
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1 ||
+             transpose_input) {
         //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
         // enabled, then zendnn_sgemm jit based kernel will be
         // called.

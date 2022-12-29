@@ -21,14 +21,14 @@
 #include <zendnn.h>
 
 #ifdef _WIN32
-#include <chrono>
-#include <sysinfoapi.h>
-#include <corecrt_math_defines.h>
-typedef unsigned int uint;
-using namespace std::chrono;
+    #include <chrono>
+    #include <sysinfoapi.h>
+    #include <corecrt_math_defines.h>
+    typedef unsigned int uint;
+    using namespace std::chrono;
 #else
-#include <sys/sysinfo.h>
-#include <sys/time.h>
+    #include <sys/sysinfo.h>
+    #include <sys/time.h>
 #endif
 
 inline void *zendnn_aligned_alloc(size_t _Alignment, size_t _Size) {
@@ -127,7 +127,8 @@ class zendnnEnv {
         //      Case 2:
         //              MatMul is redirected to BLIS directly
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
-        zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO", zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
+        zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO",
+                                        zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
         }
@@ -148,7 +149,8 @@ class zendnnEnv {
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
-        if (zenConvAlgo <= zenConvAlgoType::AUTO || zenConvAlgo > zenConvAlgoType::DIRECT2) {
+        if (zenConvAlgo <= zenConvAlgoType::AUTO ||
+                zenConvAlgo > zenConvAlgoType::DIRECT2) {
             zenConvAlgo = zenConvAlgoType::GEMM;
         }
     }
@@ -453,74 +455,11 @@ extern "C" {
         const int
     );
 
-
-    int auto_compute_matmul_v1(
+    int auto_compute_matmul(
         zendnn::zendnnEnv zenEnvObj,
         const bool Layout,
         const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc
-    );
-    int auto_compute_matmul_v2(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc
-    );
-
-    int auto_compute_matmul_v3(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc
-    );
-
-    int auto_compute_matmul_v4(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
+        const bool transpose_weights,
         const int m,
         const int k,
         const int n,
