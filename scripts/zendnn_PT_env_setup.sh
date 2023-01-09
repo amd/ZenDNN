@@ -151,8 +151,8 @@ else
 fi
 
 
-#By default setting ZENDNN_PT_VERSION as v1.12.0
-export ZENDNN_PT_VERSION="1.12.0"
+#By default setting ZENDNN_PT_VERSION as v1.12
+export ZENDNN_PT_VERSION="1.12"
 echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
 #Use local copy of ZenDNN library source code when building
 #pytorch wih zendnn
