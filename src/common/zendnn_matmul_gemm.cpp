@@ -247,6 +247,7 @@ void zenMatMul(
         std::vector<int> ldb_Array;
         std::vector<int> ldc_Array;
         std::vector<int> group_size;
+        std::vector<const float*> ADD_Array;
 
 
         group_size.resize(group_count);
@@ -284,7 +285,7 @@ void zenMatMul(
                        alpha_Array.data(), A_Array.data(), lda_Array.data(),
                        B_Array.data(), ldb_Array.data(),
                        beta_Array.data(), C_Array.data(), ldc_Array.data(),
-                       group_count, group_size.data());
+                       group_count, group_size.data(), 0, NULL, 1, 1);
     }
 
 }
@@ -453,7 +454,8 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size) {
+                           int group_count, int *group_size, bool is_mul_add,
+                           const float **ADD_Array, float mul_node, int batch_size) {
 
 
     zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
@@ -488,7 +490,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
                 // jit based kernel will be called.
                 // refer src/common/zendnn_utils.cpp
-                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1)
+                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
                     zendnn_sgemm(transpose_input ? 'T' : 'N',
                                  transpose_filter ? 'T' : 'N', m, n, k,
                                  alpha_Array[i],
@@ -496,7 +498,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                  B_Array[grp_start + threadOffset], ldb_Array[i],
                                  beta_Array[i],
                                  C_Array[grp_start + threadOffset], ldc_Array[i]);
-                else
+                } else {
                     cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
                                 TransA_Array[i], TransB_Array[i], m, n, k,
                                 alpha_Array[i],
@@ -504,6 +506,15 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                 B_Array[grp_start + threadOffset], ldb_Array[i],
                                 beta_Array[i],
                                 C_Array[grp_start + threadOffset], ldc_Array[i]);
+                }
+                if (is_mul_add) {
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node) +
+                             ADD_Array[(grp_start + threadOffset) % batch_size][k];
+                    }
+                }
             }
         }
         grp_start +=group_size[i];
@@ -600,7 +611,9 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     int *N_Array, int *K_Array, const float *alpha_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
-                    float **C_Array, int *ldc_Array, int group_count, int *group_size) {
+                    float **C_Array, int *ldc_Array, int group_count, int *group_size,
+                    bool is_mul_add, const float **ADD_Array, float mul_node,
+                    int batch_size) {
 
     zendnnEnv zenEnvObj = readEnv();
 
@@ -637,7 +650,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                               M_Array, N_Array, K_Array, alpha_Array,
                               A_Array, lda_Array, B_Array, ldb_Array,
                               beta_Array, C_Array, ldc_Array,
-                              group_count, group_size);
+                              group_count, group_size, is_mul_add, ADD_Array,
+                              mul_node, batch_size);
 #endif
     // Code for time profiling of this kernel
     float elapsed;

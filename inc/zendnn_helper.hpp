@@ -336,7 +336,11 @@ extern "C" {
         float **C_Array,
         int *ldc_Array,
         int group_count,
-        int *group_size
+        int *group_size,
+        bool is_mul_add,
+        const float **ADD_Array,
+        float mul_node=1,
+        int batch_size=1
     );
 
     void max_pooling(
