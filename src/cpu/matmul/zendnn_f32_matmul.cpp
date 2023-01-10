@@ -276,13 +276,13 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
     const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
                                                 2];
-
+    // In case of normal matrices, the stride of the last dimension will always be 1,
+    // as the elements are contiguous. However in case of transposed matrix, the
+    // stride of the last dimension will be greater than 1.
     const char *transA
-        = src_strides[1] == 1 &&
-          src_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
+        = src_strides[1] == 1 ? "N" : "T";
     const char *transB
-        = weights_strides[1] == 1 &&
-          weights_d.dims()[dst_d.ndims() - 2] > 1 ? "N" : "T";
+        = weights_strides[1] == 1 ? "N" : "T";
 
     const dim_t M_s32 = (dim_t)M;
     const dim_t N_s32 = (dim_t)N;
