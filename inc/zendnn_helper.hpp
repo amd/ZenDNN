@@ -73,6 +73,7 @@ enum zenMatMulAlgoType {
     MATMUL_BLIS_GEMM2 = 2,
     MATMUL_ZENDNN_GEMM1 = 3,
     MATMUL_ZENDNN_GEMM2 = 4,
+    MATMUL_BLIS_BLOCKED_GEMM1 = 5,
 };
 
 // enum containing all supported convolution algo types
@@ -130,10 +131,9 @@ class zendnnEnv {
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
         zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO",
                                         zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
         }
-
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
         //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
         //Possible values for ZENDNN_ENABLE_MEMPOOL
@@ -162,7 +162,9 @@ class zendnnEnv {
         return envObj;
     }
 };
+
 }
+
 
 zendnn::zendnnEnv readEnv();
 

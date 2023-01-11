@@ -20,7 +20,7 @@
 #include <vector>
 #include <utility>
 #include <tuple>
-#include <zendnn_helper.hpp>
+#include <zendnn_private.hpp>
 #include <time.h>
 
 #include "utils.hpp"
@@ -45,55 +45,6 @@ using namespace zendnn;
 //This tracks the no. of times graph executed
 // from the framework.
 unsigned int graph_exe_count = -1;
-
-//structure to make key
-struct Key_matmul {
-    bool transpose_input;
-    bool transpose_weights;
-    unsigned int m;
-    unsigned int k;
-    unsigned int n;
-    unsigned int lda;
-    unsigned int ldb;
-    unsigned int ldc;
-    unsigned int thread_count;
-    const void *weights;
-
-    bool operator==(const Key_matmul &other) const {
-        return (thread_count == other.thread_count
-                && m == other.m
-                && k == other.k
-                && n == other.n
-                && lda == other.lda
-                && ldb == other.ldb
-                && ldc == other.ldc
-                && weights == other.weights
-                && transpose_input == other.transpose_input
-                && transpose_weights == other.transpose_weights
-               );
-    }
-};
-
-namespace std {
-
-template <>
-struct hash<Key_matmul> {
-    std::size_t operator()(const Key_matmul &k) const {
-        std::size_t seed = 0;
-        seed = zendnn::impl::hash_combine(seed, (k.transpose_input));
-        seed = zendnn::impl::hash_combine(seed, (k.transpose_weights));
-        seed = zendnn::impl::hash_combine(seed, (k.m));
-        seed = zendnn::impl::hash_combine(seed, (k.k));
-        seed = zendnn::impl::hash_combine(seed, (k.n));
-        seed = zendnn::impl::hash_combine(seed, (k.lda));
-        seed = zendnn::impl::hash_combine(seed, (k.ldb));
-        seed = zendnn::impl::hash_combine(seed, (k.ldc));
-        seed = zendnn::impl::hash_combine(seed, (k.thread_count));
-        seed = zendnn::impl::hash_combine(seed, (k.weights));
-        return seed;
-    }
-};
-}
 
 
 //Simplified Map having Key as struct and value as Algo.

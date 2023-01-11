@@ -55,6 +55,11 @@ else
 	LIBM_ENABLE:= -DLIBM_ENABLE=0
 endif
 
+ifeq "$(ZENDNN_TF_USE_CUSTOM_BLIS)" "1"
+	USE_CUSTOM_BLIS:= -DUSE_CUSTOM_BLIS=1
+else
+	USE_CUSTOM_BLIS:= -DUSE_CUSTOM_BLIS=0
+endif
 #Compare if GCC version is 9 or above, so that we can use -march=znver2
 GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 
@@ -119,9 +124,9 @@ endif #RELEASE = 1
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX      := $(CXX_PREFIX) g++ $(LIBM_ENABLE)
+	CXX      := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
 else
-	CXX      := $(CXX_PREFIX) clang++ $(LIBM_ENABLE)
+	CXX      := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
 endif
 
 # https://github.com/mapbox/cpp/issues/37

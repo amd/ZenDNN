@@ -180,6 +180,16 @@ then
 fi
 echo "ZENDNN_TF_USE_LOCAL_ZENDNN=$ZENDNN_TF_USE_LOCAL_ZENDNN"
 
+#Use local copy of Blis source code when building
+#Tensorflow with --config=zendnn
+if [ -z "$ZENDNN_TF_USE_CUSTOM_BLIS" ];
+then
+    export ZENDNN_TF_USE_CUSTOM_BLIS=0
+    export ZENDNN_TF_CUSTOM_BLIS="blis"
+fi
+echo "ZENDNN_TF_USE_CUSTOM_BLIS=$ZENDNN_TF_USE_CUSTOM_BLIS"
+echo "ZENDNN_TF_CUSTOM_BLIS=$ZENDNN_TF_CUSTOM_BLIS"
+
 #If the environment variable OMP_DYNAMIC is set to true, the OpenMP implementation
 #may adjust the number of threads to use for executing parallel regions in order
 #to optimize the use of system resources. ZenDNN depend on a number of threads

@@ -22,7 +22,7 @@
 #include <vector>
 #include <cmath>
 #include "zendnn_logging.hpp"
-#include "zendnn_helper.hpp"
+#include "zendnn_private.hpp"
 #include "zendnn.hpp"
 
 using namespace zendnn;
@@ -32,6 +32,93 @@ using namespace zendnn;
 
 extern float gelu_const;
 extern unsigned int graph_exe_count;
+
+//Simplified Map having Key as struct and value as Blocked Weight matrix address.
+std::unordered_map<Key_matmul, const float * >
+matmul_weight_caching_map;
+
+void zenMatMul_gemm_blocked(
+    zendnnEnv zenEnvObj,
+    const bool auto_tuner,
+    const bool Layout,
+    const bool transpose_input,
+    const bool transpose_filter,
+    const int m,
+    const int k,
+    const int n,
+    const float alpha,
+    const float *input,
+    const int lda,
+    const float *filter,
+    const int ldb,
+    const float *bias,
+    const bool relu,
+    const int gelu,
+    const float beta,
+    float *output,
+    const int ldc
+) {
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
+
+#if USE_CUSTOM_BLIS
+    zendnnInfo(ZENDNN_PROFLOG,"Custom blis is used");
+    Key_matmul key_obj;
+    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_weights = transpose_filter;
+    key_obj.m = m;
+    key_obj.k = k;
+    key_obj.n = n;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+    key_obj.weights = filter;
+
+    //finds object in map
+    auto found_obj = matmul_weight_caching_map.find(key_obj);
+    // Blocked BLIS API for matmul
+    // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
+    // Define dimentions of B matrix as reorder_param1 and reorder_param2
+    // Define memory format as 'n'(non reordered) for A matrix and 'r'(reordered) for B matrix
+    aocl_post_op *post_ops = NULL;
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = k;
+    const dim_t reorder_param2 = n;
+    char mem_format_a = 'n', mem_format_b = 'r';
+    if (found_obj == matmul_weight_caching_map.end()) {
+        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
+                                          reorder_param0, reorder_param1, reorder_param2);
+        float_t *reorder_filter = (float_t *) aligned_alloc(64,
+                                  b_reorder_buf_siz_req);
+        aocl_reorder_f32f32f32of32('B', filter, reorder_filter, k,
+                                   n, ldb);
+        //Create new entry
+        matmul_weight_caching_map[key_obj] = reorder_filter;
+    }
+    //Perform MatMul using AMD BLIS
+    aocl_gemm_f32f32f32of32(Layout? CblasRowMajor : CblasColMajor,
+                            transpose_input ? CblasTrans : CblasNoTrans,
+                            transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
+                            input, lda, mem_format_a, matmul_weight_caching_map[key_obj], ldb, mem_format_b,
+                            beta,
+                            output, ldc,
+                            post_ops);
+#else
+    zendnnInfo(ZENDNN_PROFLOG,"Custom blis is not used");
+    //Perform MatMul using AMD BLIS
+    cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
+                transpose_input ? CblasTrans : CblasNoTrans,
+                transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
+                input, lda, filter, ldb, beta, output, ldc);
+#endif
+    if (bias || relu || gelu) {
+        zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                   ldc, 0,
+                   bias, relu, gelu, NULL,
+                   thread_qty);
+    }
+
+
+}
 
 void zenMatMul_gemm(
     zendnnEnv zenEnvObj,
@@ -58,7 +145,6 @@ void zenMatMul_gemm(
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
     //MatMul with pipelining
@@ -85,6 +171,13 @@ void zenMatMul_gemm(
                        thread_qty);
         }
 
+    }
+    else if (zenEnvObj.zenGEMMalgo ==
+             zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
+        zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout, transpose_input,
+                               transpose_filter,
+                               m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
+                               output, ldc);
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
@@ -155,7 +248,6 @@ void zenMatMul_gemm_wrapper(
                        m, k, n,
                        alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc);
     }
-
     // Code for time profiling of this kernel
     float elapsed;
 #ifdef _WIN32
@@ -175,7 +267,7 @@ void zenMatMul_gemm_wrapper(
                " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                " relu=", relu, " gelu=", gelu,
                " algo_type=", algo_type,
-               " Time=", elapsed, "ms");
+               " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
 }
 
 void zenMatMul(

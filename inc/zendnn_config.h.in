@@ -163,4 +163,5 @@
 #cmakedefine01 ZENDNN_DIRECT_CONV
 #cmakedefine01 ZENDNN_BLOCKED_POOLING
 #cmakedefine01 LIBM_ENABLE
+#cmakedefine01 USE_CUSTOM_BLIS
 #endif
