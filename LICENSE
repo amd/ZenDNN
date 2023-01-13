@@ -1,6 +1,6 @@
    Apache License
 
-   * Copyright (c) 2018 Advanced Micro Devices, Inc. All Rights Reserved.
+   * Copyright (c) 2018-2023 Advanced Micro Devices, Inc. All Rights Reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -193,28 +193,3 @@
    END OF TERMS AND CONDITIONS
 
    ============================================================================
-
-   Copyright 2016-2020 Intel Corporation
-   Copyright 2018 YANDEX LLC
-   Copyright 2020 Arm Limited and affiliates
-   Copyright 2019-2020 FUJITSU LIMITED
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-
-   This distribution includes third party software ("third party programs").
-   This third party software, even if included with the distribution of
-   the Advanced Micro Devices software, may be governed by separate license
-   terms, including without limitation, third party license terms, other
-   Advanced Micro Devices software license terms, and open source software
-   license terms. These separate license terms govern your use of the third
-   party programs as set forth in the "THIRD-PARTY-PROGRAMS" file.
