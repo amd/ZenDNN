@@ -244,6 +244,18 @@ else
     echo "ZENDNN_UTILS_GIT_ROOT: $ZENDNN_UTILS_GIT_ROOT"
 fi
 
+#Change ZENDNN_TOOLS_GIT_ROOT as per need in future
+cd ..
+export ZENDNN_TOOLS_GIT_ROOT=$(pwd)/ZenDNN_tools
+cd -
+if [ -z "$ZENDNN_TOOLS_GIT_ROOT" ];
+then
+    echo "Error: Environment variable ZENDNN_TOOLS_GIT_ROOT needs to be set"
+else
+    [ ! -d "$ZENDNN_TOOLS_GIT_ROOT" ] && echo "Directory ZenDNN_tools DOES NOT exists!"
+    echo "ZENDNN_TOOLS_GIT_ROOT: $ZENDNN_TOOLS_GIT_ROOT"
+fi
+
 if [ -z "$ZENDNN_BLIS_PATH" ];
 then
     echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"

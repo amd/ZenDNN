@@ -97,6 +97,24 @@ else (
     echo "ZENDNN_UTILS_GIT_ROOT=%ZENDNN_UTILS_GIT_ROOT%"
 )
 
+::Change ZENDNN_TOOLS_GIT_ROOT as per need in future
+cd ..
+set ZENDNN_TOOLS_GIT_ROOT=%cd%\ZenDNN_tools
+if not defined ZENDNN_TOOLS_GIT_ROOT (
+    echo "Error: Environment variable ZENDNN_TOOLS_GIT_ROOT needs to be set"
+    echo "Error: \ZENDNN_TOOLS_GIT_ROOT points to root of ZENDNN repo"
+    pause
+    exit
+)
+else (
+    if exist "%ZENDNN_TOOLS_GIT_ROOT%\" (
+        echo "Directory ZenDNN_tools exists!"
+    ) else (
+        echo "Directory ZenDNN_tools DOES NOT exists!"
+    )
+    echo "ZENDNN_TOOLS_GIT_ROOT=%ZENDNN_TOOLS_GIT_ROOT%"
+)
+
 ::Change ZENDNN_PARENT_FOLDER as per need in future
 ::Current assumption, ONNXRT is located parallel to ZenDNN
 set ZENDNN_PARENT_FOLDER=%cd%
