@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -339,10 +339,10 @@ extern "C" {
         int *ldc_Array,
         int group_count,
         int *group_size,
-        bool is_mul_add,
-        const float **ADD_Array,
-        float mul_node=1,
-        int batch_size=1
+        bool is_mul_add = 0,
+        const float **Add_Array = NULL,
+        float mul_node = 1,
+        int batch_size = 1
     );
 
     void max_pooling(

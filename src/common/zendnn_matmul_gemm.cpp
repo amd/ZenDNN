@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -229,7 +229,7 @@ void zenMatMul(
         std::vector<int> ldb_Array;
         std::vector<int> ldc_Array;
         std::vector<int> group_size;
-        std::vector<const float *> ADD_Array;
+        std::vector<const float *> Add_Array;
 
 
         group_size.resize(group_count);
@@ -437,7 +437,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
                            int group_count, int *group_size, bool is_mul_add,
-                           const float **ADD_Array, float mul_node, int batch_size) {
+                           const float **Add_Array, float mul_node, int batch_size) {
 
 
     zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
@@ -495,7 +495,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
                             (C_Array[grp_start + threadOffset][k] * mul_node) +
-                            ADD_Array[(grp_start + threadOffset) % batch_size][k];
+                            Add_Array[(grp_start + threadOffset) % batch_size][k];
                     }
                 }
             }
@@ -595,7 +595,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
                     float **C_Array, int *ldc_Array, int group_count, int *group_size,
-                    bool is_mul_add, const float **ADD_Array, float mul_node,
+                    bool is_mul_add, const float **Add_Array, float mul_node,
                     int batch_size) {
 
     zendnnEnv zenEnvObj = readEnv();
@@ -633,7 +633,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                           M_Array, N_Array, K_Array, alpha_Array,
                           A_Array, lda_Array, B_Array, ldb_Array,
                           beta_Array, C_Array, ldc_Array,
-                          group_count, group_size, is_mul_add, ADD_Array,
+                          group_count, group_size, is_mul_add, Add_Array,
                           mul_node, batch_size);
 #endif
     // Code for time profiling of this kernel
