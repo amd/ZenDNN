@@ -261,9 +261,9 @@ class ZenLibMemoryPool {
                     zenLibBufPoolArr[i].zenLibBufPtrStatus = outlinks;
                     acquire_flag = 1;
                     zendnnInfo(ZENDNN_ALGOLOG,
-                               "\nLIB-MEM-POOL: Acquired libBufPool Ptr[", i,
+                               "LIB-MEM-POOL: Acquired libBufPool Ptr[", i,
                                "] pointed to size(no. of elements)",
-                               buffer_size, "\n");
+                               buffer_size);
 
                     break;
                 }
@@ -275,11 +275,11 @@ class ZenLibMemoryPool {
                 if (zenLibBufPoolSize == zenLibBufPoolLimit) {
                     if (free_flag) {
                         zendnnInfo(ZENDNN_ALGOLOG,
-                                   "\nLIB-MEM-POOL: Requested buffer from ZenLibMemPool, But Falling back to default allocation as out_size > available buffer_size inside Pool\n");
+                                   "LIB-MEM-POOL: Requested buffer from ZenLibMemPool, But Falling back to default allocation as out_size > available buffer_size inside Pool");
                     }
                     else {
                         zendnnInfo(ZENDNN_ALGOLOG,
-                                   "\nLIB-MEM-POOL: Requested buffer from ZenLibMemPool, But Falling back to default allocation as zenLibBufPoolSize == ZEN_LIB_BUF_POOL_LIMIT\n");
+                                   "LIB-MEM-POOL: Requested buffer from ZenLibMemPool, But Falling back to default allocation as zenLibBufPoolSize == ZEN_LIB_BUF_POOL_LIMIT");
                     }
                     return_flag = 1;
                 }
@@ -323,12 +323,13 @@ class ZenLibMemoryPool {
                         acquire_flag = 1;
                         zenLibBufPoolSize++;
                         zendnnInfo(ZENDNN_ALGOLOG,
-                                   "\nLIB-MEM-POOL: Allocation done for Buffer in Pool of size = ",
+                                   "LIB-MEM-POOL: Allocation done for Buffer in Pool of size = ",
                                    size, " elements", " zenLibBufPoolCount = ",
-                                   zenLibBufPoolSize-1, "\n",
+                                   zenLibBufPoolSize-1);
+                        zendnnInfo(ZENDNN_ALGOLOG,
                                    "LIB-MEM-POOL: Acquired LibBufPool Ptr[", poolOffset,
                                    "] pointed to size(no. of elements)",
-                                   size, "\n");
+                                   size);
                     }
                 }
             }
