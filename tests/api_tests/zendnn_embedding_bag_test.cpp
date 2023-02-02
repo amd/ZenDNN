@@ -32,7 +32,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <sys/time.h>
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -43,9 +42,11 @@
 #include <string>
 #include <math.h>
 #include <cstdlib>
-#include <unistd.h>
 #include <string.h>
-
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/time.h>
+#endif
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
 

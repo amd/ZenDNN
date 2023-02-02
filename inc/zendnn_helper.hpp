@@ -21,6 +21,7 @@
 #include <zendnn.h>
 
 #ifdef _WIN32
+    #include <Windows.h>
     #include <chrono>
     #include <sysinfoapi.h>
     #include <corecrt_math_defines.h>
