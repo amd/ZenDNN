@@ -98,7 +98,7 @@ else (
 )
 
 ::Change ZENDNN_TOOLS_GIT_ROOT as per need in future
-cd ..
+
 set ZENDNN_TOOLS_GIT_ROOT=%cd%\ZenDNN_tools
 if not defined ZENDNN_TOOLS_GIT_ROOT (
     echo "Error: Environment variable ZENDNN_TOOLS_GIT_ROOT needs to be set"
