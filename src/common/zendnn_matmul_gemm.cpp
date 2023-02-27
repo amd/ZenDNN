@@ -495,7 +495,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
                             (C_Array[grp_start + threadOffset][k] * mul_node) +
-                            Add_Array[(grp_start + threadOffset) % batch_size][k];
+                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k];
                     }
                 }
             }
