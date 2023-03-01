@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -17,7 +17,11 @@
 
 #include <cmath>
 #include <cassert>
+#ifndef ZENDNN_USE_AOCL_BLIS_API
 #include <cblas.h>
+#else // ZENDNN_USE_AOCL_BLIS_API
+#include "cblas_with_blis_api.hpp"
+#endif // ZENDNN_USE_AOCL_BLIS_API
 #include <iostream>
 #include <algorithm>
 #include "common/zendnn_private.hpp"

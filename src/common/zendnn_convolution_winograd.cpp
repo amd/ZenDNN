@@ -17,7 +17,11 @@
 
 #include <cmath>
 #include <cassert>
+#ifndef ZENDNN_USE_AOCL_BLIS_API
 #include <cblas.h>
+#else // ZENDNN_USE_AOCL_BLIS_API
+#include "cblas_with_blis_api.hpp"
+#endif // ZENDNN_USE_AOCL_BLIS_API
 #include <iostream>
 #include <algorithm>
 #include <chrono>

@@ -24,6 +24,7 @@ AOCC ?= 1
 # Set ARCHIVE to 1 to build libamdZenDNN.a
 # make -j ARCHIVE=1
 ARCHIVE ?= 0
+BLIS_API ?= 0
 
 # Set ZENDNN_STANDALONE_BUILD to 1 to build ZenDNN stanalone library
 # BLIS include path and lib path is not same when BLIS is build from source vs
@@ -142,6 +143,11 @@ else
 endif #AOCC
 endif #RELEASE = 1
 
+ifeq ($(BLIS_API), 0)
+	COMMONFLAGS += -UZENDNN_USE_AOCL_BLIS_API
+else
+	COMMONFLAGS += -DZENDNN_USE_AOCL_BLIS_API
+endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)

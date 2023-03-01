@@ -18,7 +18,11 @@
 #include "common/zendnn_private.hpp"
 #include <omp.h>
 
+#ifndef ZENDNN_USE_AOCL_BLIS_API
 #include <cblas.h>
+#else // ZENDNN_USE_AOCL_BLIS_API
+#include "cblas_with_blis_api.hpp"
+#endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include "zendnn_helper.hpp"
 #include "zendnn_logging.hpp"

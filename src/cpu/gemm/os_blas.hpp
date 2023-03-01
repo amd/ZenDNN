@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -57,7 +57,11 @@
 extern "C" {
 #endif
 
+#ifndef ZENDNN_USE_AOCL_BLIS_API
 #include "cblas.h"
+#else // ZENDNN_USE_AOCL_BLIS_API
+#include "cblas_with_blis_api.hpp"
+#endif // ZENDNN_USE_AOCL_BLIS_API
 
 #if defined(_SX)
 }
