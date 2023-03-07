@@ -16,9 +16,9 @@
 ::*******************************************************************************
 
 ::-----------------------------------------------------------------------------
-::   zendnn_ONNXRT_env_setup_win.bat
+::   zendnn_env_setup_win.bat
 ::   Prerequisite: This script needs to run first to setup environment variables
-::                 before ONNXRT setup
+::                before any ZenDNN build in Windows.
 ::
 ::   This script does following:
 ::   -sets the environment variables , if they are present they will bre replaced
@@ -52,21 +52,53 @@ echo "OMP_DYNAMIC=%OMP_DYNAMIC%"
 set ZENDNN_INFERENCE_ONLY=1
 echo "ZENDNN_INFERENCE_ONLY=%ZENDNN_INFERENCE_ONLY%"
 
+::Disable TF memory pool optimization, By default, its enabled
+set ZENDNN_ENABLE_MEMPOOL=1
+echo "ZENDNN_ENABLE_MEMPOOL=%ZENDNN_ENABLE_MEMPOOL%"
+
+::Set the max no. of tensors that can be used inside TF memory pool, Default is
+::set to 64
+set ZENDNN_TENSOR_POOL_LIMIT=64
+echo "ZENDNN_TENSOR_POOL_LIMIT=%ZENDNN_TENSOR_POOL_LIMIT"%
+
+::Enable fixed max size allocation for Persistent tensor with TF memory pool
+::optimization, By default, its disabled
+set ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE=0
+echo "ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE=%ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE%"
+
+::Convolution GEMM Algo path is default
+set ZENDNN_CONV_ALGO=1
+echo "ZENDNN_CONV_ALGO=%ZENDNN_CONV_ALGO%"
+
 :: INT8 support  is disabled by default
 set ZENDNN_INT8_SUPPORT=0
 echo "ZENDNN_INT8_SUPPORT=%ZENDNN_INT8_SUPPORT%"
-
-:: Convolution GEMM Algo path
-set ZENDNN_CONV_ALGO=1
-echo "ZENDNN_CONV_ALGO=%ZENDNN_CONV_ALGO%"
 
 :: INT8 Relu6 fusion support is disabled by default
 set ZENDNN_RELU_UPPERBOUND=0
 echo "ZENDNN_RELU_UPPERBOUND=%ZENDNN_RELU_UPPERBOUND%"
 
-::ZENDNN_GEMM_ALGO is set to 3 by default
+:: ZENDNN_GEMM_ALGO is set to 3 by default
 set ZENDNN_GEMM_ALGO=3
 echo "ZENDNN_GEMM_ALGO=%ZENDNN_GEMM_ALGO%"
+
+:: Switch to enable Conv, Add fusion on users discretion. Currently it is
+:: safe to enable this switch for resnet50v1_5, resnet101, and
+:: inception_resnet_v2 models only. By default the switch is disabled.
+set ZENDNN_TF_CONV_ADD_FUSION_SAFE=0
+echo "ZENDNN_TF_CONV_ADD_FUSION_SAFE=%ZENDNN_TF_CONV_ADD_FUSION_SAFE%"
+
+:: Primitive reuse is disabled by default
+set TF_ZEN_PRIMITIVE_REUSE_DISABLE=FALSE
+echo "TF_ZEN_PRIMITIVE_REUSE_DISABLE=%TF_ZEN_PRIMITIVE_REUSE_DISABLE%"
+
+:: Disable LIBM, By default, its enabled
+set ZENDNN_ENABLE_LIBM=1
+echo "ZENDNN_ENABLE_LIBM=%ZENDNN_ENABLE_LIBM%"
+
+:: Set the no. of InterOp threads, Default is set to 1
+set ZENDNN_TF_INTEROP_THREADS=1
+echo "ZENDNN_TF_INTEROP_THREADS=%ZENDNN_TF_INTEROP_THREADS%"
 
 ::Check if below declaration of ZENDNN_GIT_ROOT is correct
 set ZENDNN_GIT_ROOT=%cd%
@@ -135,82 +167,58 @@ if defined ZENDNN_PARENT_FOLDER (
 if defined ZENDNN_PARENT_FOLDER (
     set ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=1
 )
-echo "ZENDNN_ONNXRT_USE_LOCAL_ZENDNN:%ZENDNN_ONNXRT_USE_LOCAL_ZENDNN%"
 
-set BENCHMARKS_GIT_ROOT=%ZENDNN_PARENT_FOLDER%\benchmarks
-echo "BENCHMARKS_GIT_ROOT:%BENCHMARKS_GIT_ROOT%"
+if defined ZENDNN_BLIS_PATH (
+    echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"
+) else (
+    echo "ZENDNN_BLIS_PATH: %ZENDNN_BLIS_PATH%"
+)
 
-set ONNXRUNTIME_GIT_ROOT=%ZENDNN_PARENT_FOLDER%\onnxruntime
-echo "ONNXRUNTIME_GIT_ROOT:%ONNXRUNTIME_GIT_ROOT%"
+::check if ZENDNN_LIBM_PATH is defined, otherwise return Error
+::if defined ZENDNN_LIBM_PATH (
+::    echo "Error: Environment variable ZENDNN_LIBM_PATH needs to be set"
+::) else (
+::    echo "ZENDNN_LIBM_PATH: %ZENDNN_LIBM_PATH%"
+::)
 
-set ZENDNN_ONNXRT_VERSION=1.12.1
-echo "ZENDNN_ONNXRT_VERSION:%ZENDNN_ONNXRT_VERSION%"
 
-set ZENDNN_ONNX_VERSION=1.12.0
-echo "ZENDNN_ONNX_VERSION:%ZENDNN_ONNX_VERSION%"
+set TF_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/tensorflow
+echo "TF_GIT_ROOT: %TF_GIT_ROOT%"
+
+set BENCHMARKS_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/benchmarks
+echo "BENCHMARKS_GIT_ROOT: %BENCHMARKS_GIT_ROOT%"
+
+set PYTORCH_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/pytorch
+echo "PYTORCH_GIT_ROOT: %PYTORCH_GIT_ROOT%"
+
+set PYTORCH_BENCHMARK_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/pytorch-benchmarks
+echo "PYTORCH_BENCHMARK_GIT_ROOT: %PYTORCH_BENCHMARK_GIT_ROOT%"
+
+set ONNXRUNTIME_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/onnxruntime
+echo "ONNXRUNTIME_GIT_ROOT: %ONNXRUNTIME_GIT_ROOT%"
 
 :: Primitive Caching Capacity
 set ZENDNN_PRIMITIVE_CACHE_CAPACITY=1024
-echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY:%ZENDNN_PRIMITIVE_CACHE_CAPACITY%"
+echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: %ZENDNN_PRIMITIVE_CACHE_CAPACITY%"
+
+:: MAX_CPU_ISA
+:: MAX_CPU_ISA is disabld at build time. When feature is enabled, uncomment the
+:: below 2 lines
+::export ZENDNN_MAX_CPU_ISA=ALL
+::echo "ZENDNN_MAX_CPU_ISA: %ZENDNN_MAX_CPU_ISA%"
 
 :: Enable primitive create and primitive execute logs. By default it is disabled
 set ZENDNN_PRIMITIVE_LOG_ENABLE=0
-echo "ZENDNN_PRIMITIVE_LOG_ENABLE:%ZENDNN_PRIMITIVE_LOG_ENABLE%"
+echo "ZENDNN_PRIMITIVE_LOG_ENABLE: %ZENDNN_PRIMITIVE_LOG_ENABLE%"
 
-:: Enable LIBM, By default, its disabled
-set ZENDNN_ENABLE_LIBM=0
-echo "ZENDNN_ENABLE_LIBM:%ZENDNN_ENABLE_LIBM%"
-
-:: Flags for optimized execution of ONNXRT model
-:: Convolution Direct Algo with Blocked inputs and filter
-set ZENDNN_CONV_ALGO=3
-echo "ZENDNN_CONV_ALGO=%ZENDNN_CONV_ALGO%"
-
-set ZENDNN_CONV_ADD_FUSION_ENABLE=0
-echo "ZENDNN_CONV_ADD_FUSION_ENABLE:%ZENDNN_CONV_ADD_FUSION_ENABLE%"
-
-set ZENDNN_RESNET_STRIDES_OPT1_ENABLE=0
-echo "ZENDNN_RESNET_STRIDES_OPT1_ENABLE:%ZENDNN_RESNET_STRIDES_OPT1_ENABLE%"
-
-set ZENDNN_CONV_CLIP_FUSION_ENABLE=0
-echo "ZENDNN_CONV_CLIP_FUSION_ENABLE:%ZENDNN_CONV_CLIP_FUSION_ENABLE%"
-
-set ZENDNN_BN_RELU_FUSION_ENABLE=0
-echo "ZENDNN_BN_RELU_FUSION_ENABLE:%ZENDNN_BN_RELU_FUSION_ENABLE%"
-
-set ZENDNN_CONV_ELU_FUSION_ENABLE=0
-echo "ZENDNN_CONV_ELU_FUSION_ENABLE:%ZENDNN_CONV_ELU_FUSION_ENABLE%"
-
-set ZENDNN_LN_FUSION_ENABLE=0
-echo "ZENDNN_LN_FUSION_ENABLE%ZENDNN_LN_FUSION_ENABLE%"
-
-set ZENDNN_CONV_RELU_FUSION_ENABLE=1
-echo "ZENDNN_CONV_RELU_FUSION_ENABLE:%ZENDNN_CONV_RELU_FUSION_ENABLE%"
-
-set ORT_ZENDNN_ENABLE_INPLACE_CONCAT=0
-echo "ORT_ZENDNN_ENABLE_INPLACE_CONCAT:%ORT_ZENDNN_ENABLE_INPLACE_CONCAT%"
-
-set ZENDNN_ENABLE_MATMUL_BINARY_ELTWISE=1
-echo "ZENDNN_ENABLE_MATMUL_BINARY_ELTWISE:%ZENDNN_ENABLE_MATMUL_BINARY_ELTWISE%"
-
-set ZENDNN_ENABLE_GELU=1
-echo "ZENDNN_ENABLE_GELU:%ZENDNN_ENABLE_GELU%"
-
-set ZENDNN_ENABLE_FAST_GELU=1
-echo "ZENDNN_ENABLE_FAST_GELU:%ZENDNN_ENABLE_FAST_GELU%"
-
-set ZENDNN_REMOVE_MATMUL_INTEGER=1
-echo "ZENDNN_REMOVE_MATMUL_INTEGER:%ZENDNN_REMOVE_MATMUL_INTEGER%"
-
-set ZENDNN_MATMUL_ADD_FUSION_ENABLE=1
-echo "ZENDNN_MATMUL_ADD_FUSION_ENABLE:%ZENDNN_MATMUL_ADD_FUSION_ENABLE%"
-
-set KMP_DUPLICATE_LIB_OK=TRUE
-echo "KMP_DUPLICATE_LIB_OK:%KMP_DUPLICATE_LIB_OK%"
-
+::-------------------------------------------------------------------------------
+:: Go to ZENDNN_GIT_ROOT
 cd %ZENDNN_GIT_ROOT%
-echo:
-echo Please set below environment variable explicitly as per the platform you are using!!
-echo:
-echo     OMP_NUM_THREADS
-echo:
+echo :
+echo "Please set below environment variables explicitly as per the platform you are using!!"
+echo :
+echo "      OMP_NUM_THREADS"
+echo "Please set below environment variables explicitly for better performance!!"
+echo "      OMP_PROC_BIND=CLOSE"
+echo "      OMP_PLACES=CORES"
+echo :
