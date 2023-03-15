@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -106,6 +106,15 @@ status_t zendnn_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
     jcp.reluFused      = cd.reluFused;
     jcp.batchNormFused = cd.batchNormFused;
 
+    // jcp.reluFused must also be enabled when the eltwise relu
+    // is set through the postops in the primitive attributes.
+    if (jcp.with_eltwise && jcp.post_ops.len() == 1) {
+       const auto &eltwise
+                     = jcp.post_ops.entry_.back().eltwise;
+       if (eltwise.alg == alg_kind::eltwise_relu) {
+          jcp.reluFused = true;
+       }
+    }
     return status::success;
 }
 

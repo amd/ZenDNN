@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -74,6 +74,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     if (total_filters == jcp.oc) {
         concat = false;
     }
+
 
     //TBD: To add support for gemm, ref, direct, winograd, fft
     //we need to move else part to [ZENDNN ALGO] code
@@ -277,6 +278,11 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else if ((jcp.reluFused == true)) {
+            // Bias must be checked for NULL. In case reluFused is true
+            // and Bias is NOT NULL appropriate argument must be passed
+            float* bias_ptr = NULL;
+            if (bias != NULL)
+               bias_ptr = (float *)bias;
             //ReLU fused with conv
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithRelu [cpu/convolution]");
@@ -296,7 +302,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 jcp.r_pad,
                 jcp.stride_h,
                 jcp.stride_w,
-                NULL,
+                bias_ptr,
                 (float *)dst,
                 jcp.oh,
                 jcp.ow,
