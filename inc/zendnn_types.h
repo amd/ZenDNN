@@ -2585,7 +2585,9 @@ typedef struct {
     int32_t padding_idx; //padding index, set to -1 if no padding index
     bool  is_weights; // true if weight memory descriptor provided
 
-    int32_t num_threads; // no of parallel threads
+    int32_t   num_threads; // no of parallel threads
+    uint32_t  scatter_offset; //offset at which emb output will go
+    uint32_t  scatter_stride; //stride for emb output scatter
 
 } zendnn_embedding_bag_desc_t;
 

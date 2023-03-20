@@ -3814,7 +3814,9 @@ zendnn_embedding_bag_desc_init(zendnn_embedding_bag_desc_t *desc,
                                const zendnn_memory_desc_t *offsets_desc,
                                const zendnn_memory_desc_t *weights_desc,
                                const zendnn_memory_desc_t *dst_desc,
-                               int32_t padding_idx);
+                               int32_t padding_idx,
+                               uint32_t scatter_stride,
+                               uint32_t scatter_offset);
 /// @} zendnn_api_embedding_bag
 
 /// @} zendnn_api_primitives

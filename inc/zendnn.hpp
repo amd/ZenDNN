@@ -13015,6 +13015,97 @@ struct embedding_bag : public primitive {
              const memory::desc &offsets_desc,
              const memory::desc &weights_desc,
              const memory::desc &dst_desc,
+             int32_t            padding_idx,
+             uint32_t           scatter_stride,
+             uint32_t           scatter_offset) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   num_threads,
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   &weights_desc.data,
+                                                   &dst_desc.data,
+                                                   padding_idx,
+                                                   scatter_stride,
+                                                   scatter_offset),
+                    "could not create an embedding_bag descriptor:1");
+        }
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        /// (zero for default omp threads)
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        /// @param weights_desc Weights memory descriptor.
+        /// @param padding_idx Padding Index.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &dst_desc,
+             int32_t            padding_idx,
+             uint32_t           scatter_stride,
+             uint32_t           scatter_offset) {
+             error::wrap_c_api(
+                    zendnn_embedding_bag_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   num_threads,
+                                                   &input_desc.data,
+                                                   &indices_desc.data,
+                                                   &offsets_desc.data,
+                                                   nullptr,
+                                                   &dst_desc.data,
+                                                   padding_idx,
+                                                   scatter_stride,
+                                                   scatter_offset),
+                    "could not create an embedding_bag descriptor:1");
+        }
+
+        /// Constructs a descriptor for an embedding_bag primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm embedding_mag algorithm kind. Possible values:
+        ///     embedding_bag_max, embedding_bag_sum or embedding_bag_mean,
+        /// @param num_threads Parallel threads for the primitive
+        /// (zero for default omp threads)
+        /// @param input_desc Input (embedding table) memory descriptor.
+        /// @param indices_desc Indices memory descriptor.
+        /// @param offsets_desc Offsets memory descriptor.
+        /// @param weights_desc Weights memory descriptor.
+        /// @param padding_idx Padding Index.
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             uint32_t num_threads,
+             const memory::desc &input_desc,
+             const memory::desc &indices_desc,
+             const memory::desc &offsets_desc,
+             const memory::desc &weights_desc,
+             const memory::desc &dst_desc,
              int32_t            padding_idx) {
              error::wrap_c_api(
                     zendnn_embedding_bag_desc_init(&data,
@@ -13026,8 +13117,9 @@ struct embedding_bag : public primitive {
                                                    &offsets_desc.data,
                                                    &weights_desc.data,
                                                    &dst_desc.data,
-                                                   padding_idx),
-                    "could not create an embedding_bag descriptor");
+                                                   padding_idx,
+                                                   1,0),
+                    "could not create an embedding_bag descriptor:2");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13066,8 +13158,9 @@ struct embedding_bag : public primitive {
                                                    &offsets_desc.data,
                                                    nullptr,
                                                    &dst_desc.data,
-                                                   padding_idx),
-                    "could not create an embedding_bag descriptor");
+                                                   padding_idx,
+                                                   1,0),
+                    "could not create an embedding_bag descriptor:3");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13107,8 +13200,8 @@ struct embedding_bag : public primitive {
                                                    &offsets_desc.data,
                                                    &weights_desc.data,
                                                    &dst_desc.data,
-                                                   -1),
-                    "could not create an embedding_bag descriptor");
+                                                   -1,1,0),
+                    "could not create an embedding_bag descriptor:4");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13145,8 +13238,8 @@ struct embedding_bag : public primitive {
                                                    &offsets_desc.data,
                                                    nullptr,
                                                    &dst_desc.data,
-                                                   -1),
-                    "could not create an embedding_bag descriptor");
+                                                   -1,1,0),
+                    "could not create an embedding_bag descriptor:5");
 
         }
     };

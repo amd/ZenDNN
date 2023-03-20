@@ -37,7 +37,9 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
                                const memory_desc_t *offsets_desc,
                                const memory_desc_t *weights_desc,
                                const memory_desc_t *dst_desc,
-                               int32_t padding_idx) {
+                               int32_t  padding_idx,
+                               uint32_t scatter_stride,
+                               uint32_t scatter_offset) {
 
     // run sanity check on parameters
     bool args_ok = !any_null(desc, input_desc, indices_desc,
@@ -64,9 +66,12 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
     }
 
     // check the tensor sizes
+    // output size should at least be bags*scatter_offset. please see documentation
+    // of embedding_bag_desc_t for scatter_offset
     auto bags           = offsets_desc->dims[0];
     auto embedding_dim  = input_desc->dims[1];
-    if ((dst_desc->dims[0] != bags) || (dst_desc->dims[1] != embedding_dim)) {
+
+    if ((dst_desc->dims[0] < bags*scatter_stride) || (dst_desc->dims[1] != embedding_dim)) {
         return invalid_arguments;
     }
 
@@ -85,6 +90,8 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
     emd.offsets_desc     = *offsets_desc;
     emd.dst_desc         = *dst_desc;
     emd.padding_idx      = padding_idx;
+    emd.scatter_stride   = scatter_stride;
+    emd.scatter_offset   = scatter_offset;
 
     // weights tensor may or may not be present.
     emd.is_weights = false;

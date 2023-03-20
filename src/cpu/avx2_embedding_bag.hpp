@@ -46,6 +46,8 @@ struct emb_params_t {
     int32_t         dst_size;
     int32_t         padidx;
     uint32_t        nthr;
+    uint32_t        scatter_stride;
+    uint32_t        scatter_offset;
     void            *input;
     void            *indices;
     void            *offsets;
