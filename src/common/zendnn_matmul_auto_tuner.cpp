@@ -22,13 +22,17 @@
 #include <tuple>
 #include <zendnn_private.hpp>
 #include <time.h>
-
+#include <sstream>
+#include <fstream>
+#include "zendnn_logging.hpp"
 #include "utils.hpp"
 
 using namespace zendnn;
 
 //Total num of algo available
-#define NUM_OF_ALGO 4
+#define NUM_OF_ALGO 5
+//Total num of struct members and algo field in MAP.
+#define NUM_MAP_VALUES 10
 
 //Skip Iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_SKIP_ITER
@@ -46,6 +50,15 @@ using namespace zendnn;
 // from the framework.
 unsigned int graph_exe_count = -1;
 
+//enum defines the persistent map controls
+//0: disables
+//1: Write the map on the file
+//2: Read the map from file
+enum persistentMapType {
+    DISABLE = 0,
+    WRITE = 1,
+    READ = 2,
+};
 
 //Simplified Map having Key as struct and value as Algo.
 std::unordered_map<Key_matmul, unsigned int>
@@ -62,6 +75,144 @@ std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
 std::unordered_map<Key_matmul,std::tuple<std::vector<std::pair<unsigned int,float>>, float, unsigned int>>
         matmul_kernel_map2_helper;
 
+//Writing in the file from the map.
+int map_write_to_file(unsigned int persistent_map) {
+
+    //Fetch File name given by user.
+    char *fname = getenv("ZENDNN_MATMUL_MAP_FILE");
+    if (fname == NULL) {
+        fname = "key_matmul_map.csv";
+    }
+
+    std::ofstream file;
+    Key_matmul sobj;
+    file.open(fname,std::ios::out);
+
+    //File not open
+    if (!file.is_open()) {
+        return 1;
+    }
+
+    //Put Main header.
+    file<<"ZENDNN MatMul Primitive Map for selecting best Algo path\n";
+    int cpu_i[CPU_INFO_SIZE];
+
+    //get the cpuid in cpu_i
+    if (getCpuID_brandString(cpu_i)==0) {
+        file<<(char *)cpu_i<<"\n";
+    }
+    else {
+        file<<"Architecture brand string not found\n";
+    }
+    file<<"Transpose Input,Transpose Filter,M,K,N,lda,ldb,ldc,Thread,Algo\n";
+    for (auto itr=matmul_kernel_map.begin(); itr!=matmul_kernel_map.end(); itr++) {
+        sobj = (*itr).first;
+        int algo_type = (*itr).second;
+
+        file<<sobj.transpose_input<<","<<sobj.transpose_weights<<","<<sobj.m<<","<<sobj.k<<","<<sobj.n<<","<<sobj.lda<<","<<sobj.ldb<<","<<sobj.ldc<<","<<sobj.thread_count<<","<<algo_type<<"\n";
+    }
+
+    file.close();
+
+    zendnnInfo(ZENDNN_ALGOLOG, "MAP FILE LOCATION ", fname);
+
+    return 0;
+}
+
+
+//Reading already existing map
+int map_read_from_file() {
+
+    //Fetch File name given by user.
+    char *fname = getenv("ZENDNN_MATMUL_MAP_FILE");
+
+    //File not specified
+    if (fname == NULL) {
+        return 1;
+    }
+
+    Key_matmul obj;
+    std::vector<unsigned int> map_data; //Store each comma separated value
+    std::string temp1,temp2;
+    const char *cpu_str; //To store cpu name as char array.
+    int *temp_cpu_name;
+
+    std::ifstream file;
+    file.open(fname,std::ios::in);
+
+    int cpu_i[CPU_INFO_SIZE];
+    if (getCpuID_brandString(cpu_i)!=0) {
+        zendnnError(ZENDNN_ALGOLOG, "Could not fetch CPUID.");
+        return 1;
+    }
+
+    if (file.fail()) {
+        return 1;
+    }
+    else {
+        //read first header
+        getline(file,temp1);
+
+        //Read CPU Name and Check
+        getline(file,temp1);
+
+        cpu_str = temp1.c_str();
+        temp_cpu_name = (int *)cpu_str;
+
+        //Check if CPU name in File is same as current CPU.
+        for (int i=0; i<CPU_INFO_SIZE; i++) {
+            if (temp_cpu_name[i]!=cpu_i[i]) {
+                return 1;
+            }
+        }
+
+        //Read Third line of header
+        getline(file,temp1);
+
+        //Read values from file
+        while (getline(file,temp1)) {
+            std::stringstream line(temp1);
+
+            //Checking for invalid value provided in the file.
+            try {
+                //Retrieve each value from the line(comma separated).
+                while (getline(line, temp2, ',')) {
+                    map_data.push_back(stod(temp2));
+                }
+
+                //Few or more number of values in line
+                if (map_data.size() != NUM_MAP_VALUES) {
+                    return 1;
+                }
+
+            }
+            catch (std::invalid_argument const &e) {
+                return 1;
+            }
+
+            obj.transpose_input = map_data[0];
+            obj.transpose_weights = map_data[1];
+            obj.m = map_data[2];
+            obj.k = map_data[3];
+            obj.n = map_data[4];
+            obj.lda = map_data[5];
+            obj.ldb = map_data[6];
+            obj.ldc = map_data[7];
+            obj.thread_count = map_data[8];
+
+            // weight address is set to NULL for Persistent map feature.
+            obj.weights = NULL;
+
+            //Fill value in the map.
+            matmul_kernel_map[obj] = map_data[9];
+
+            map_data.clear();
+        }
+        file.close();
+    }
+
+    return 0;
+}
 
 
 /*Verion 1
@@ -77,10 +228,12 @@ std::unordered_map<Key_matmul,std::tuple<std::vector<std::pair<unsigned int,floa
 
 //Runs when ZENDNN_GEMM_AUTO_TYPE=1
 //Makes use of graph_exe_count that is incremented by framework.
-//Evaluates each algo during warmup(skip + evaluation) phase.
+//Evaluates each algo during warmup evaluation phase.
 //During evaluation, the best timed algo is selected.
 int auto_compute_matmul_v1(
     zendnn::zendnnEnv zenEnvObj,
+    std::pair<unsigned int,unsigned int> *persistent_map_flag,
+    Key_matmul key_obj,
     const bool Layout,
     const bool transpose_input,
     const bool transpose_weights,
@@ -103,11 +256,6 @@ int auto_compute_matmul_v1(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    Key_matmul key_obj;
-
-    //It is used here to know if weights should be enabled or not for map.
-    int map_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
-
     //Number of iterations to run without creating map for each unique layer.
     int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V1);
@@ -116,17 +264,6 @@ int auto_compute_matmul_v1(
     int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V1);
-
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_weights;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = map_type==2 ? weights : NULL;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
 
     //finds object in map
     auto found_obj = matmul_kernel_map1_helper.find(key_obj);
@@ -166,7 +303,7 @@ int auto_compute_matmul_v1(
 
             //Create new entry
             matmul_kernel_map[key_obj] = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
-            matmul_kernel_map1_helper[key_obj] = {0, cur_algo_time, 3}; // {eval_count, time, algo}
+            matmul_kernel_map1_helper[key_obj] = {0, cur_algo_time, zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1}; // {eval_count, time, algo}
         }
         else {
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
@@ -186,6 +323,16 @@ int auto_compute_matmul_v1(
                        k,
                        n,
                        alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
+
+        //Writing Map in file.
+        if (persistent_map_flag->first == persistentMapType::WRITE &&
+                persistent_map_flag->second) {
+            if (map_write_to_file(persistent_map_flag->first)) {
+                zendnnError(ZENDNN_ALGOLOG,
+                            "Error occured while writing Persistent Map File. Check the file");
+            }
+            persistent_map_flag->second = 0;
+        }
     }
     //Runs for evaluate iterations
     //Updates the map values accordingly
@@ -221,7 +368,7 @@ int auto_compute_matmul_v1(
         if (cur_algo_time < std::get<1>(found_obj->second)) {
             std::get<1>(found_obj->second) = cur_algo_time; //Minimum time for chosen algo
             std::get<2>(found_obj->second) =
-                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-4)
+                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-NUM_OF_ALGO)
 
             matmul_kernel_map[key_obj] = zenEnvObj.zenGEMMalgo;
         }
@@ -246,9 +393,11 @@ int auto_compute_matmul_v1(
 //Runs when ZENDNN_GEMM_AUTO_TYPE=2
 //Makes use of graph_exe_count that is incremented by framework.
 //For each graph_exe_count one of the algorithm runs
-//Evaluates each algo during warmup(skip + evaluation) phase based on average time.
+//Evaluates each algo during evaluation phase based on average time.
 int auto_compute_matmul_v2(
     zendnn::zendnnEnv zenEnvObj,
+    std::pair<unsigned int, unsigned int> *persistent_map_flag,
+    Key_matmul key_obj,
     const bool Layout,
     const bool transpose_input,
     const bool transpose_weights,
@@ -271,11 +420,6 @@ int auto_compute_matmul_v2(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    Key_matmul key_obj;
-
-    //It is used here to know if weights should be enabled or not for map.
-    int map_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
-
     //Number of iterations to run without creating map for each unique layer.
     int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V2);
@@ -284,17 +428,6 @@ int auto_compute_matmul_v2(
     int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V2);
-
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_weights;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = map_type==2 ? weights : NULL;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
 
     //finds object in map
     auto found_obj = matmul_kernel_map2_helper.find(key_obj);
@@ -357,6 +490,16 @@ int auto_compute_matmul_v2(
                        k,
                        n,
                        alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
+
+        //Writing Map in file.
+        if (persistent_map_flag->first == persistentMapType::WRITE &&
+                persistent_map_flag->second) {
+            if (map_write_to_file(persistent_map_flag->first)) {
+                zendnnError(ZENDNN_ALGOLOG,
+                            "Error occured while writing Persistent Map File. Check the file");
+            }
+            persistent_map_flag->second = 0;
+        }
     }
     //Runs for evaluate iterations
     //Updates the map values accordingly
@@ -401,7 +544,7 @@ int auto_compute_matmul_v2(
         if (cur_algo_time < std::get<1>(found_obj->second)) {
             std::get<1>(found_obj->second) = cur_algo_time; //Minimum time for chosen algo
             std::get<2>(found_obj->second) =
-                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-4)
+                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-NUM_OF_ALGO)
             matmul_kernel_map[key_obj] = zenEnvObj.zenGEMMalgo;
         }
     }
@@ -413,6 +556,7 @@ int auto_compute_matmul_v2(
 
 /*verion 3
   Makes use of eval_count to decide when to fetch value from map.
+  Uses iteration count of each unique layer.
   Doesn't need framework to increment the graph_exe_count.
 
   Map value tuple
@@ -425,6 +569,8 @@ int auto_compute_matmul_v2(
 //Runs when ZENDNN_GEMM_AUTO_TYPE=3
 int auto_compute_matmul_v3(
     zendnn::zendnnEnv zenEnvObj,
+    std::pair<unsigned int, unsigned int> *persistent_map_flag,
+    Key_matmul key_obj,
     const bool Layout,
     const bool transpose_input,
     const bool transpose_weights,
@@ -447,11 +593,6 @@ int auto_compute_matmul_v3(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    Key_matmul key_obj;
-
-    //It is used here to know if weights should be enabled or not for map.
-    int map_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
-
     //Number of iterations to run without creating map for each unique layer.
     int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V3);
@@ -460,17 +601,6 @@ int auto_compute_matmul_v3(
     int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V3);
-
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_weights;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = map_type==2 ? weights : NULL;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
 
     //finds object in map
     auto found_obj = matmul_kernel_map1_helper.find(key_obj);
@@ -533,6 +663,16 @@ int auto_compute_matmul_v3(
                        n,
                        alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
 
+        //Writing Map in file.
+        if (persistent_map_flag->first == persistentMapType::WRITE &&
+                persistent_map_flag->second) {
+            if (map_write_to_file(persistent_map_flag->first)) {
+                zendnnError(ZENDNN_ALGOLOG,
+                            "Error occured while writing Persistent Map File. Check the file");
+            }
+            persistent_map_flag->second = 0;
+        }
+
     }
     //Updates the map values by running different algorithms
     else {
@@ -567,8 +707,11 @@ int auto_compute_matmul_v3(
         if (cur_algo_time < std::get<1>(found_obj->second)) {
             std::get<1>(found_obj->second) = cur_algo_time; //Minimum time for chosen algo
             std::get<2>(found_obj->second) =
-                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-4)
+                zenEnvObj.zenGEMMalgo; //Algo with minimum time (1-NUM_OF_ALGO)
             matmul_kernel_map[key_obj] = zenEnvObj.zenGEMMalgo;
+
+            //To update the map file if any update occurs after writing map once.
+            persistent_map_flag->second = 1;
         }
 
     }
@@ -600,31 +743,105 @@ int auto_compute_matmul(
     float *output,
     const int ldc
 ) {
-
     unsigned int algo_type;
+
+    Key_matmul key_obj;
+
+    //Persistent Map
+    //{ 0: disable, 1: write, 2:read }
+    unsigned int persistent_map =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_PERSISTENT_MAP",
+                                  persistentMapType::DISABLE);
+
+    //If Persistent map value not 0/1/2 then assume it as Disabled.
+    if (persistent_map >2) {
+        persistent_map = persistentMapType::DISABLE;
+    }
 
     //Select auto_tuner version
     //Auto_type 1 and 2 works only with framework.
     unsigned int auto_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_AUTO_TYPE",3);
+
+    //It is used to know if weights address should be enabled or not for map.
+    //0: disable, 1: enable.
+    unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
+
+    //These flags are passed in different versions to ensure that writing of map is done
+    //only when needed.
+    static std::pair<unsigned int, unsigned int> persistent_map_flag = {persistent_map, 1};
+
+    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_weights = transpose_weights;
+    key_obj.m = m;
+    key_obj.k = k;
+    key_obj.n = n;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+
+    //This condition makes sure that address
+    //doesn't gets saved while using persistent map.
+    key_obj.weights = mapType == 1 &&
+                      persistent_map == persistentMapType::DISABLE ? weights : NULL;
+    key_obj.thread_count = zenEnvObj.omp_num_threads;
+
+    //Read operation from File (Persistent Map)
+    if (persistent_map == persistentMapType::READ) {
+        //Check if we need to read the map from file.
+        if (persistent_map_flag.second) {
+            if (map_read_from_file()) {
+
+                zendnnError(ZENDNN_ALGOLOG,
+                            "Persistent Map File Not Found or invalid value in file. Persistent feature won't work. Set ZENDNN_MATMUL_MAP_FILE environment variable. Executing with default algo.");
+            }
+            persistent_map_flag.second = 0;
+        }
+        //Check if given key exist in map or not
+        if (matmul_kernel_map.find(key_obj) != matmul_kernel_map.end()) {
+            zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
+
+            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k,
+                           n,
+                           alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
+
+        }
+        else {
+
+            zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
+
+            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k,
+                           n,
+                           alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
+
+        }
+
+        return zenEnvObj.zenGEMMalgo;
+    }
+
 
     //If graph_exe_count is incremented by framework
     if (graph_exe_count != -1) {
 
         //uses framework.
         if (auto_type == 1) {
-            algo_type = auto_compute_matmul_v1(zenEnvObj, Layout, transpose_input,
+            algo_type = auto_compute_matmul_v1(zenEnvObj, &persistent_map_flag, key_obj,
+                                               Layout, transpose_input,
                                                transpose_weights,
                                                m, k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
         }
         //uses framework(graph_exe_count) and average time
         else if (auto_type == 2) {
-            algo_type = auto_compute_matmul_v2(zenEnvObj, Layout, transpose_input,
+            algo_type = auto_compute_matmul_v2(zenEnvObj, &persistent_map_flag, key_obj,
+                                               Layout, transpose_input,
                                                transpose_weights,
                                                m, k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
         }
         //Without framework(graph_exe_count)
         else {
-            algo_type = auto_compute_matmul_v3(zenEnvObj, Layout, transpose_input,
+            algo_type = auto_compute_matmul_v3(zenEnvObj, &persistent_map_flag, key_obj,
+                                               Layout, transpose_input,
                                                transpose_weights,
                                                m, k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
         }
@@ -632,7 +849,8 @@ int auto_compute_matmul(
 
     //When framework doesn't increment graph_exe_count
     else {
-        algo_type = auto_compute_matmul_v3(zenEnvObj, Layout, transpose_input,
+        algo_type = auto_compute_matmul_v3(zenEnvObj, &persistent_map_flag, key_obj,
+                                           Layout, transpose_input,
                                            transpose_weights,
                                            m, k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc);
     }

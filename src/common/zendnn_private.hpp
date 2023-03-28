@@ -27,6 +27,8 @@
 #ifndef ZENDNN_PRIVATE_HPP
 #define ZENDNN_PRIVATE_HPP
 
+#define CPU_INFO_SIZE 12
+
 //structure to make key
 struct Key_matmul {
     bool transpose_input;
@@ -74,6 +76,39 @@ struct hash<Key_matmul> {
         return seed;
     }
 };
+}
+
+//Updates the cpu information(BRAND String) in the given array.
+//Makes use of inline assembly
+inline int getCpuID_brandString(int *a) {
+
+    __asm__ __volatile__("xor %eax , %eax\n\t");
+    __asm__ __volatile__("xor %ebx , %ebx\n\t");
+    __asm__ __volatile__("xor %ecx , %ecx\n\t");
+    __asm__ __volatile__("xor %edx , %edx\n\t");
+
+    __asm__ __volatile__("mov $0x80000002 , %eax\n\t");
+
+    __asm__ __volatile__("cpuid\n\t");
+    __asm__ __volatile__("mov %%eax, %0\n\t":"=r"(a[0]));
+    __asm__ __volatile__("mov %%ebx, %0\n\t":"=r"(a[1]));
+    __asm__ __volatile__("mov %%ecx, %0\n\t":"=r"(a[2]));
+    __asm__ __volatile__("mov %%edx, %0\n\t":"=r"(a[3]));
+
+    __asm__ __volatile__("mov $0x80000003 , %eax\n\t");
+    __asm__ __volatile__("cpuid\n\t");
+    __asm__ __volatile__("mov %%eax, %0\n\t":"=r"(a[4]));
+    __asm__ __volatile__("mov %%ebx, %0\n\t":"=r"(a[5]));
+    __asm__ __volatile__("mov %%ecx, %0\n\t":"=r"(a[6]));
+    __asm__ __volatile__("mov %%edx, %0\n\t":"=r"(a[7]));
+
+    __asm__ __volatile__("mov $0x80000004 , %eax\n\t");
+    __asm__ __volatile__("cpuid\n\t");
+    __asm__ __volatile__("mov %%eax, %0\n\t":"=r"(a[8]));
+    __asm__ __volatile__("mov %%ebx, %0\n\t":"=r"(a[9]));
+    __asm__ __volatile__("mov %%ecx, %0\n\t":"=r"(a[10]));
+    __asm__ __volatile__("mov %%edx, %0\n\t":"=r"(a[11]));
+    return 0;
 }
 
 extern "C"
