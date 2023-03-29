@@ -225,6 +225,10 @@ echo "TF_ZEN_PRIMITIVE_REUSE_DISABLE=$TF_ZEN_PRIMITIVE_REUSE_DISABLE"
 export ZENDNN_ENABLE_LIBM=1
 echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
 
+# Enable build of ZenDNN standlone library
+export ZENDNN_STANDALONE_BUILD=1
+echo "ZENDNN_STANDALONE_BUILD=$ZENDNN_STANDALONE_BUILD"
+
 #Set the no. of InterOp threads, Default is set to 1
 export ZENDNN_TF_INTEROP_THREADS=1
 echo "ZENDNN_TF_INTEROP_THREADS=$ZENDNN_TF_INTEROP_THREADS"
@@ -362,7 +366,15 @@ export LD_LIBRARY_PATH=$ZENDNN_AOCC_COMP_PATH/lib:$ZENDNN_AOCC_COMP_PATH/lib32:$
 
 # Export PATH and LD_LIBRARY_PATH for ZenDNN
 export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
-export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/:$LD_LIBRARY_PATH
+# BLIS include path and lib path is not same when BLIS is build from source vs
+# BLIS official release is used
+if [ "$ZENDNN_STANDALONE_BUILD" = "1" ];
+then
+    export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/LP64:$LD_LIBRARY_PATH
+else
+    export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib:$LD_LIBRARY_PATH
+fi
+
 if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
 then
     export LD_LIBRARY_PATH=$ZENDNN_LIBM_PATH/lib/:$LD_LIBRARY_PATH
