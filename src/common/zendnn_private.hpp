@@ -571,6 +571,9 @@ extern "C"
         const int lda,
         const float *filter,
         const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
         const float beta,
         float *output,
         const int ldc

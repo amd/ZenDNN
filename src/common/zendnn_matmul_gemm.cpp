@@ -110,12 +110,14 @@ void zenMatMul_gemm_blocked(
                 transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
                 input, lda, filter, ldb, beta, output, ldc);
 #endif
+    /*
     if (bias || relu || gelu) {
         zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                    ldc, 0,
                    bias, relu, gelu, NULL,
                    thread_qty);
     }
+    */
 
 
 }
@@ -178,6 +180,12 @@ void zenMatMul_gemm(
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
                                output, ldc);
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                       ldc, 0,
+                       bias, relu, gelu, NULL,
+                       thread_qty);
+        }
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
@@ -286,6 +294,9 @@ void zenMatMul(
     const int lda,
     const float *filter,
     const int ldb,
+    const float *bias,
+    const bool relu,
+    const int gelu,
     const float beta,
     float *output,
     const int ldc
@@ -303,7 +314,7 @@ void zenMatMul(
         zenMatMul_gemm_wrapper(Layout, transpose_input, transpose_filter,
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + input_offsets[0], lda,
-                               filter + weights_offsets[0], ldb, NULL, false, 0, beta,
+                               filter + weights_offsets[0], ldb, bias, relu, gelu, beta,
                                output + dst_offsets[0], ldc);
     }
     else {
@@ -317,6 +328,7 @@ void zenMatMul(
         std::vector<const float *> A_Array;
         std::vector<const float *> B_Array;
         std::vector<float *> C_Array;
+        std::vector<const float *> bias_Array;
         std::vector<int> lda_Array;
         std::vector<int> ldb_Array;
         std::vector<int> ldc_Array;
@@ -336,6 +348,7 @@ void zenMatMul(
         A_Array.resize(batch_size);
         B_Array.resize(batch_size);
         C_Array.resize(batch_size);
+        bias_Array.resize(batch_size);
 
         M_Array[0] = no_of_images;
         K_Array[0] = no_of_channels;
@@ -344,22 +357,23 @@ void zenMatMul(
         beta_Array[0] = beta;
         lda_Array[0] = lda;
         ldb_Array[0] = ldb;
-        ldc_Array[0] = ldb;
+        ldc_Array[0] = ldc;
         group_size[0] = batch_size;
 
         for (int i=0; i<batch_size; ++i) {
+
             A_Array[i] = input + input_offsets[i];
             B_Array[i] = filter+ weights_offsets[i];
             C_Array[i] = output + dst_offsets[i];
+            bias_Array[i] = bias + (N_Array[0]*i);
         }
-
 
         zenBatchMatMul(Layout, transpose_input, transpose_filter,
                        M_Array.data(), N_Array.data(), K_Array.data(),
                        alpha_Array.data(), A_Array.data(), lda_Array.data(),
                        B_Array.data(), ldb_Array.data(),
                        beta_Array.data(), C_Array.data(), ldc_Array.data(),
-                       group_count, group_size.data(), 0, NULL, 1, 1);
+                       group_count, group_size.data(), 0, NULL, 1, 1, bias_Array.data(), relu, gelu);
     }
 
 }
@@ -490,13 +504,15 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size) {
+                           int group_count, int *group_size, const float **bias, const bool relu,
+                           const int gelu) {
 
     zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
                " group_count=", group_count);
 
 
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned int grp_start = 0;
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
@@ -510,8 +526,13 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            m, k, n, alpha_Array[i],
                            A_Array[grp_start + j], lda_Array[i],
                            B_Array[grp_start + j], ldb_Array[i],
-                           NULL, false, false, beta_Array[i],
+                           NULL, relu, gelu, beta_Array[i],
                            C_Array[grp_start + j], ldc_Array[i]);
+            if (relu || gelu)
+                zenPostOps(zenEnvObj, C_Array[grp_start + j], NULL, m, 1, n,
+                           ldc_Array[i], 0,
+                           bias[grp_start + j], relu, gelu, NULL,
+                           thread_qty);
         }
         grp_start +=group_size[i];
     }
@@ -529,7 +550,8 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
                            int group_count, int *group_size, bool is_mul_add,
-                           const float **Add_Array, float mul_node, int batch_size) {
+                           const float **Add_Array, float mul_node, int batch_size, const float **bias,
+                           const bool relu, const int gelu) {
 
 
     zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
@@ -582,6 +604,12 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                 beta_Array[i],
                                 C_Array[grp_start + threadOffset], ldc_Array[i]);
                 }
+                if (relu || gelu)
+                    zenPostOps(zenEnvObj, C_Array[grp_start + threadOffset], NULL, m, 1, n,
+                               ldc_Array[i], 0,
+                               bias[grp_start + threadOffset], relu, gelu, NULL,
+                               thread_qty);
+
                 if (is_mul_add) {
                     #pragma omp simd
                     for (int k = 0; k < m * n; k++) {
@@ -606,7 +634,8 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size) {
+                           int group_count, int *group_size, const float **bias, const bool relu,
+                           const int gelu) {
 
 
     zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
@@ -672,6 +701,11 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                             beta_Array[i],
                             C_Array[grp_start + threadOffset], ldc_Array[i]);
 #endif
+                if (relu || gelu)
+                    zenPostOps(zenEnvObj, C_Array[grp_start + threadOffset], NULL, m, 1, n,
+                               ldc_Array[i], 0,
+                               bias[grp_start + threadOffset], relu, gelu, NULL,
+                               thread_qty);
 
             }
         }
@@ -682,13 +716,14 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
 
 //Batched MatMul Wrapper, internally calls BLAS cblas_sgemm_batch from BLIS
 //or //zenBatchMatMulSplitV1/V2/V3
+//TODO: Add support for group_count TransA and TransB
 void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     int *N_Array, int *K_Array, const float *alpha_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
                     float **C_Array, int *ldc_Array, int group_count, int *group_size,
                     bool is_mul_add, const float **Add_Array, float mul_node,
-                    int batch_size) {
+                    int batch_size, const float **bias, const bool relu, const int gelu) {
 
     zendnnEnv zenEnvObj = readEnv();
 
@@ -726,7 +761,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                           A_Array, lda_Array, B_Array, ldb_Array,
                           beta_Array, C_Array, ldc_Array,
                           group_count, group_size, is_mul_add, Add_Array,
-                          mul_node, batch_size);
+                          mul_node, batch_size, bias, relu, gelu);
 #endif
     // Code for time profiling of this kernel
     float elapsed;
@@ -744,7 +779,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                " group_count=", group_count, " group_size[0]=", group_size[0],
                " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
                " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
-               " beta_Array[0]=", beta_Array[0], " Time=", elapsed, "ms");
+               " beta_Array[0]=", beta_Array[0], " relu=", relu, " gelu=", gelu, " Time=",
+               elapsed, "ms");
 
 }
 
@@ -926,11 +962,17 @@ void zenMatmulSplit(
                         output + outputOffset, ldc);
 #endif
         }
-        else {
+        else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
             zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
                          gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
                          ldb, beta, output+outputOffset, ldc);
 
+        }
+        else {
+            zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout,
+                                   transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
+                                   gemmRows, k, n, alpha, data_col+inputOffset, lda, filter,
+                                   ldb, bias, relu, gelu, beta, output+outputOffset, ldc);
         }
 
         //Below Bias and activation code can be eliminated if not required

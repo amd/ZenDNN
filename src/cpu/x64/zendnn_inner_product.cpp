@@ -80,6 +80,8 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
                                 pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                                 alg_kind::eltwise_gelu_erf : 0;
 
+    unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
+
     const float *scales = pd()->attr()->output_scales_.scales_;
 
     // The mask value of 0 implies a common output scaling factor for the
@@ -102,7 +104,8 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
         zenMatMul(
             Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
             OC, alpha, (float *)src, IC,
-            (float *)weights, wei_tr ? IC : OC, beta_, (float *)dst, OC);
+            (float *)weights, wei_tr ? IC : OC, NULL, has_eltwise_relu, geluType, beta_,
+            (float *)dst, OC);
     }
     else if (!has_eltwise) {
         zendnnInfo(ZENDNN_CORELOG,

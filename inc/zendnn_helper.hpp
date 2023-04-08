@@ -74,6 +74,7 @@ enum zenMatMulAlgoType {
     MATMUL_ZENDNN_GEMM1 = 3,
     MATMUL_ZENDNN_GEMM2 = 4,
     MATMUL_BLIS_BLOCKED_GEMM1 = 5,
+    MATMUL_BLIS_BLOCKED_GEMM2 = 6,
 };
 
 // enum containing all supported convolution algo types
@@ -131,7 +132,7 @@ class zendnnEnv {
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
         zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO",
                                         zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM2) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
@@ -514,7 +515,11 @@ extern "C" {
         bool is_mul_add = 0,
         const float **Add_Array = NULL,
         float mul_node = 1,
-        int batch_size = 1
+        int batch_size = 1,
+        const float **bias = NULL,
+        const bool relu = 0,
+        const int gelu = 0
+
     );
 
     void max_pooling(

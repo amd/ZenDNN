@@ -327,6 +327,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                 pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                                 alg_kind::eltwise_gelu_erf : 0;
 
+    unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
+
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     std::vector<int> dst_off;
@@ -353,7 +355,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         //MatMul without Bias
         zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
                   weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
-                  (float *)weights, ldb, beta, (float *)dst, ldc);
+                  (float *)weights, ldb, NULL, has_eltwise_relu, geluType, beta, (float *)dst,
+                  ldc);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
