@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -34,10 +34,10 @@ void zenBatchNorm(
     int data_format,
     const bool relu) {
     zendnnEnv zenEnvObj = readEnv();
-    zendnnInfo(ZENDNN_ALGOLOG, "zenBatchNorm [zendnn batchnorm]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchNorm [zendnn batchnorm]");
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     if (data_format == 0) {       // NCHW Format
-        zendnnInfo(ZENDNN_ALGOLOG, "zenBatchNorm data_format: NCHW [zendnn batchnorm]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchNorm data_format: NCHW [zendnn batchnorm]");
         if (no_of_images > 1) {
             #pragma omp parallel for num_threads(thread_qty)
             for (int i=0; i<no_of_images; i++) {
@@ -73,7 +73,7 @@ void zenBatchNorm(
         }
     }
     else  {                      // NHWC Format
-        zendnnInfo(ZENDNN_ALGOLOG, "zenBatchNorm data_format: NHWC [zendnn batchnorm]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchNorm data_format: NHWC [zendnn batchnorm]");
         if (no_of_images > 1) {
             #pragma omp parallel for num_threads(thread_qty)
             for (int i=0; i<no_of_images; i++) {

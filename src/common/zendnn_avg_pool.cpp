@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -41,10 +41,10 @@ void avg_pooling_v1(
     float *output,
     const int data_format // 1 for NCHW and 0 for NHWC
 ) {
-    zendnnInfo(ZENDNN_ALGOLOG, "zendnn avgpool [zendnn avg_pool]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool [zendnn avg_pool]");
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
-    zendnnInfo(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,
@@ -55,7 +55,7 @@ void avg_pooling_v1(
     // TensorFlow does not support NCHW data format
     // TODO: Validate this C++ API (NCHW) using MKLDNN and make changes accordingly
     if (data_format == DATA_FORMAT_NCHW) {
-        zendnnInfo(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NCHW [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NCHW [zendnn avg_pool]");
         int out_index = 0;
         int kernel_HxW = kernel_height*kernel_width;
         for (int n=0; n<number_of_images; n++) {
@@ -87,7 +87,7 @@ void avg_pooling_v1(
         }
     }
     else if (data_format == DATA_FORMAT_NHWC) { // NHWC
-        zendnnInfo(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
 
         int height_col = (height + padding_height_top + padding_height_bottom -
                           kernel_height) / stride_height + 1;
@@ -267,7 +267,7 @@ void avg_pooling(
     gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
 #endif
-    zendnnInfo(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,

@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -61,7 +61,7 @@ struct ck_convolution_fwd_t : public primitive_t {
         DECLARE_COMMON_PD_T("ck", ck_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
-            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init (before checks)");
+            zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init (before checks)");
             bool ok = true && is_fwd()
                       && set_default_alg_kind(alg_kind::convolution_ck)
                       && expect_data_types(data_type::f32, data_type::f32,
@@ -72,28 +72,28 @@ struct ck_convolution_fwd_t : public primitive_t {
                           data_type::f32)
                       && !has_zero_dim_memory() && set_default_formats();
             if (!ok) {
-                zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init: ok=false (after checks)");
+                zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init: ok=false (after checks)");
                 return status::unimplemented;
             }else{
-                zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init: ok=true (after checks)");
+                zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in ck_convolution_fwd_t::pd_t::init: ok=true (after checks)");
             }
 
             status_t status = ck_conv_fwd_kernel_f32::init_conf(
                                   jcp_, *desc(), src_md(), weights_md(), dst_md(), *attr());
             if (status != status::success) {
-                zendnnInfo(ZENDNN_CORELOG, "status != status::success on exit from ck_conv_fwd_kernel_f32::init_conf");
+                zendnnVerbose(ZENDNN_CORELOG, "status != status::success on exit from ck_conv_fwd_kernel_f32::init_conf");
                 return status;
             } else {
-                zendnnInfo(ZENDNN_CORELOG, "status == status::success on exit from ck_conv_fwd_kernel_f32::init_conf");
+                zendnnVerbose(ZENDNN_CORELOG, "status == status::success on exit from ck_conv_fwd_kernel_f32::init_conf");
             }
 
             status = ck_conv_fwd_kernel_f32::init_ck_idx(
                          jcp_, *desc(), src_md(), weights_md(), dst_md(), *attr());
             if (status != status::success) {
-                zendnnInfo(ZENDNN_CORELOG, "status != status::success on exit from ck_conv_fwd_kernel_f32::init_ck_idx");
+                zendnnVerbose(ZENDNN_CORELOG, "status != status::success on exit from ck_conv_fwd_kernel_f32::init_ck_idx");
                 return status;
             } else {
-                zendnnInfo(ZENDNN_CORELOG, "status == status::success on exit from ck_conv_fwd_kernel_f32::init_ck_idx");
+                zendnnVerbose(ZENDNN_CORELOG, "status == status::success on exit from ck_conv_fwd_kernel_f32::init_ck_idx");
             }
 
             auto scratchpad = scratchpad_registry().registrar();

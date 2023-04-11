@@ -1,10 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
-* Notified per clause 4(b) of the license.
-*******************************************************************************/
-
-/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -164,7 +159,7 @@ status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
     }
 
     if (status == success) {
-        zendnnInfo(ZENDNN_CORELOG, "Memory desc init by tag [memory]");
+        zendnnVerbose(ZENDNN_CORELOG, "Memory desc init by tag [memory]");
         *memory_desc = md;
     }
 

@@ -61,7 +61,7 @@ void zenMatMul_gemm_blocked(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
 #if USE_CUSTOM_BLIS
-    zendnnInfo(ZENDNN_PROFLOG,"Custom blis is used");
+    zendnnVerbose(ZENDNN_PROFLOG,"Custom blis is used");
     Key_matmul key_obj;
     key_obj.transpose_input = transpose_input;
     key_obj.transpose_weights = transpose_filter;
@@ -103,7 +103,7 @@ void zenMatMul_gemm_blocked(
                             output, ldc,
                             post_ops);
 #else
-    zendnnInfo(ZENDNN_PROFLOG,"Custom blis is not used");
+    zendnnVerbose(ZENDNN_PROFLOG,"Custom blis is not used");
     //Perform MatMul using AMD BLIS
     cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
                 transpose_input ? CblasTrans : CblasNoTrans,
@@ -267,7 +267,7 @@ void zenMatMul_gemm_wrapper(
     elapsed = timedifference_msec(start, end);
 #endif
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner, " Layout=",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner, " Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
                " transa=", transpose_input ? "CblasTrans," : "CblasNoTrans,",
                " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
@@ -507,7 +507,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            int group_count, int *group_size, const float **bias, const bool relu,
                            const int gelu) {
 
-    zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
                " group_count=", group_count);
 
@@ -554,7 +554,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            const bool relu, const int gelu) {
 
 
-    zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
                " Layout=", Layout ? "CblasRowMajor," : "CblasColMajor,",
                " group_count=", group_count);
 
@@ -638,7 +638,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            const int gelu) {
 
 
-    zendnnInfo(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
                Layout ? "CblasRowMajor" : "CblasColMajor",
                " group_count=", group_count);
 
@@ -774,7 +774,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     elapsed = timedifference_msec(start, end);
 #endif
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenBatchMatMul, Layout=",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenBatchMatMul, Layout=",
                Layout ? "CblasRowMajor" : "CblasColMajor",
                " group_count=", group_count, " group_size[0]=", group_size[0],
                " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
@@ -811,7 +811,7 @@ void zenMatmulSplit(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
     //TODO: Naming convention need to change like for "images"
-    zendnnInfo(ZENDNN_ALGOLOG, "zenMatmulSplit, Layout=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenMatmulSplit, Layout=",
                Layout? "CblasRowMajor" : "CblasColMajor", " transpose_input=",
                transpose_input, " transpose_filter=", transpose_filter, " M=", m,
                " K=", k, " N=", n, " lda=", lda, " ldb=", ldb, " ldc=", ldc,

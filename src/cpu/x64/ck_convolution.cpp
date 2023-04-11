@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -132,7 +132,7 @@ using DeviceConvFwdNoOpPtr = ck::tensor_operation::cpu::device::
 status_t ck_convolution_fwd_t::add_device_conv_ptrs(
     std::vector<DeviceConvFwdNoOpPtr> &conv_ptrs,
     float input_type, float wei_type, float out_type) {
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
                "ZENDNN implementation path in ck_convolution_fwd_t::add_device_conv_ptrs (1) [cpu/convolution]");
     using InDataType  = decltype(input_type);
     using WeiDataType = decltype(wei_type);
@@ -226,7 +226,7 @@ status_t ck_convolution_fwd_t::add_device_conv_ptrs(
     if (conv_ptrs.size() <= 0) {
         throw std::runtime_error("wrong! no device Conv instance found");
     }
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
                "ZENDNN implementation path in ck_convolution_fwd_t::add_device_conv_ptrs (2) [cpu/convolution]");
     return status::success;
 }
@@ -257,9 +257,9 @@ status_t ck_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
 
     // TODO - throw error if K % 8 != 0
 
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
                "ZENDNN implementation path in ck_convolution_fwd_t::execute_forward (1) [cpu/convolution]");
-    zendnnInfo(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih,
+    zendnnVerbose(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih,
                " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
                " kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
@@ -374,7 +374,7 @@ status_t ck_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     std::cout << std::endl;
 #endif
 
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
                "ZENDNN implementation path in ck_convolution_fwd_t::execute_forward (2) [cpu/convolution]");
 
     return status::success;

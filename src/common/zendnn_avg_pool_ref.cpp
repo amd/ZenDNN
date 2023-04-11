@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -41,10 +41,10 @@ void avgPoolingRefV1(
     float *output,
     const int data_format // 1 for NCHW and 0 for NHWC
 ) {
-    zendnnInfo(ZENDNN_ALGOLOG, "zendnn avgpool [zendnn avg_pool]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool [zendnn avg_pool]");
     unsigned int thread_qty = 1;//zenEnvObj.omp_num_threads;
 
-    zendnnInfo(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,
@@ -54,7 +54,7 @@ void avgPoolingRefV1(
 
     // TensorFlow does not support NCHW data format
     if (data_format == DATA_FORMAT_NHWC) { // NHWC
-        zendnnInfo(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
 
         int height_col = (height + padding_height_top + padding_height_bottom -
                           kernel_height) / stride_height + 1;
@@ -224,7 +224,7 @@ void avgPoolingRef(
     gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
 #endif
-    zendnnInfo(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,

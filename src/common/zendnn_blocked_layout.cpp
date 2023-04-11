@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ void zenConvolution2D_Latency_blocked_layout(
     const int out_height,           //o/p to this function
     const int out_width             //o/p to this function
 ) {
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_Latency_blocked_layout [zendnn convolution blocked]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_Latency_blocked_layout [zendnn convolution blocked]");
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 #ifdef _WIN32
     auto start = std::chrono::high_resolution_clock::now();
@@ -162,7 +162,7 @@ void zenConvolution2D_Filterwise_Latency(
     const int out_width,
     const bool relu
 ) {
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_Filterwise_Latency [zendnn convolution Filter parallelization]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_Filterwise_Latency [zendnn convolution Filter parallelization]");
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned long data_col_size = ((kernel_h*kernel_w*channels)*(out_height*out_width)*sizeof(float)*no_of_images);

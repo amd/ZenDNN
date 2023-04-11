@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -63,11 +63,12 @@ primitive_cache_t &primitive_cache() {
     std::call_once(initialized, [&] {
             capacity
             = getenv_int("ZENDNN_PRIMITIVE_CACHE_CAPACITY", 1024);
+    zendnnInfo(ZENDNN_CORELOG, "CPU Engine: primitive_cache_capacity: ",capacity);
     });
 #else
     static const int capacity = 0;
+    zendnnInfo(ZENDNN_CORELOG, "CPU Engine: primitive_cache_capacity: ",capacity);
 #endif
-	zendnnInfo(ZENDNN_CORELOG, "CPU Engine: primitive_cache_capacity: ",capacity);
 
     static lru_primitive_cache_t cache(capacity);
     return cache;

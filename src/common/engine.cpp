@@ -1,10 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
-* Notified per clause 4(b) of the license.
-*******************************************************************************/
-
-/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -94,7 +89,7 @@ status_t zendnn_engine_create(
     auto ef = get_engine_factory(kind, get_default_runtime(kind));
     if (ef == nullptr || index >= ef->count()) return invalid_arguments;
 
-    zendnnInfo(ZENDNN_CORELOG, "CPU Engine created [engine]");
+    zendnnVerbose(ZENDNN_CORELOG, "CPU Engine created [engine]");
     return ef->engine_create(engine, index);
 }
 

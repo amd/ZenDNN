@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -39,7 +39,7 @@ namespace cpu {
 
 struct cpu_stream_t : public stream_t {
     cpu_stream_t(engine_t *engine, unsigned flags) : stream_t(engine, flags) {
-        zendnnInfo(ZENDNN_CORELOG, "CPU Stream created [cpu/stream]");
+        zendnnVerbose(ZENDNN_CORELOG, "CPU Stream created [cpu/stream]");
     }
     virtual ~cpu_stream_t() = default;
 

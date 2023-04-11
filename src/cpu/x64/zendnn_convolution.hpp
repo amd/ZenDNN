@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -49,7 +49,7 @@ struct zendnn_convolution_fwd_t : public primitive_t {
         DECLARE_COMMON_PD_T("zendnn", zendnn_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
-            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init (before checks)");
+            zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init (before checks)");
             bool ok = true && is_fwd()
                       && (set_default_alg_kind(alg_kind::convolution_gemm)
                       ||  set_default_alg_kind(alg_kind::convolution_ref) )
@@ -69,7 +69,7 @@ struct zendnn_convolution_fwd_t : public primitive_t {
             auto scratchpad = scratchpad_registry().registrar();
             zendnn_conv_fwd_kernel_f32::init_scratchpad(scratchpad, jcp_);
 
-            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init: status=status::success");
+            zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in zendnn_convolution_fwd_t::pd_t::init: status=status::success");
             return status::success;
         }
 

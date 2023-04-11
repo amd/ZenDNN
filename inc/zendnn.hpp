@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -2531,7 +2531,7 @@ struct memory : public handle<zendnn_memory_t> {
             : data() {
             validate_dims(adims);
             if (!strides.empty()) validate_dims(strides, (int)adims.size());
-            zendnnInfo(ZENDNN_APILOG, "Memory create");
+            zendnnInfo(ZENDNN_APILOG, "Memory create - strides");
             zendnn_status_t status = zendnn_memory_desc_init_by_strides(&data,
                     (int)adims.size(), adims.data(), convert_to_c(adata_type),
                     strides.empty() ? nullptr : &strides[0]);
@@ -4721,7 +4721,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create - bias");
             error::wrap_c_api(
                     zendnn_convolution_forward_desc_init(&data,
                             zendnn::convert_to_c(aprop_kind),
@@ -4767,7 +4767,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create - no bias");
             error::wrap_c_api(
                     zendnn_convolution_forward_desc_init(&data,
                             zendnn::convert_to_c(aprop_kind),
@@ -4894,7 +4894,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create - relu");
             error::wrap_c_api(
                 zendnn_fused_convolution_forward_desc_init(&data,
                         zendnn::convert_to_c(aprop_kind),
@@ -4925,7 +4925,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create -  relu, batchNorm");
             error::wrap_c_api(
                 zendnn_fused_convolution_forward_desc_init(&data,
                         zendnn::convert_to_c(aprop_kind),
@@ -4958,7 +4958,7 @@ struct convolution_forward : public primitive {
                 bool allow_empty = false)
             : zendnn::primitive_desc(
                     &adesc.data, nullptr, aengine, nullptr, allow_empty) {
-            zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - no attr");
             }
 
         /// Constructs a primitive descriptor for a convolution forward
@@ -4976,7 +4976,7 @@ struct convolution_forward : public primitive {
                 const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
                     &adesc.data, &attr, aengine, nullptr, allow_empty) {
-             zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create");
+             zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - attr");
             }
 
         /// Constructs a primitive descriptor for a convolution forward
@@ -4989,7 +4989,7 @@ struct convolution_forward : public primitive {
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::convolution,
                     zendnn::prop_kind::forward_training,
                     zendnn::prop_kind::forward_inference) {
-            zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - C API");
             }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
@@ -12032,7 +12032,7 @@ struct matmul : public primitive {
                 bool allow_empty = false)
             : zendnn::primitive_desc(
                     &adesc.data, nullptr, aengine, nullptr, allow_empty) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create");
+                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - no attr");
             }
 
         /// Constructs a primitive descriptor for a matmul primitive.
@@ -12048,7 +12048,7 @@ struct matmul : public primitive {
                 const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
                     &adesc.data, &attr, aengine, nullptr, allow_empty) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create");
+                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - attr");
             }
 
         /// Constructs a primitive descriptor for a matmul primitive from a C
@@ -12057,7 +12057,7 @@ struct matmul : public primitive {
         /// @param pd C API primitive descriptor for a matmul primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::matmul) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create");
+                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - C API");
             }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const

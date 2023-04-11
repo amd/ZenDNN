@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -51,7 +51,7 @@ namespace matmul {
 using namespace data_type;
 
 status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
-    zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::pd_t::init()");
+    zendnnVerbose(ZENDNN_CORELOG, "zendnn_f32_matmul_t::pd_t::init()");
     auto check_bias = [&]() -> bool {
         return !with_bias()
         || (weights_md(1)->data_type == f32 && is_bias_1xN());
@@ -115,7 +115,7 @@ bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
 
 
 status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
                "zendnn_gemm_f32_matmul_t::pd_t::check_and_configure_attributes");
     auto check_attr_oscale = [&]() -> bool {
         const auto &oscale = attr()->output_scales_;
@@ -306,7 +306,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto dst_batch_stride = dst_d.blocking_desc().strides[0];
 
     zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::execute_ref");
-    zendnnInfo(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
+    zendnnVerbose(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
                " transA: ", transA, " transB: ", transB,
                " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
                " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
@@ -376,7 +376,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 1 refers to tanh based gelu
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
@@ -387,7 +387,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         else if (has_eltwise_gelu_erf) {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 2 refers to erf based gelu
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,

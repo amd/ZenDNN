@@ -59,7 +59,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
 
     zendnnInfo(ZENDNN_CORELOG,
                "ZENDNN implementation path in zendnn_convolution_fwd_t::execute_forward [cpu/convolution]");
-    zendnnInfo(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih,
+    zendnnVerbose(ZENDNN_CORELOG, "algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",jcp.ih,
                " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
                " kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
@@ -82,7 +82,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         if ((jcp.reluFused == false) &&
                 (jcp.batchNormFused == true)) {
             //Only BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRef [cpu/convolution]");
             zenConvolution2DwithBatchNormRef(
                 (float *)src,
@@ -111,7 +111,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         else if ((jcp.reluFused == true) &&
                  (jcp.batchNormFused == true)) {
             //ReLU and  BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormReluRef [cpu/convolution]");
             zenConvolution2DwithBatchNormReluRef(
                 (float *)src,
@@ -138,7 +138,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else if (bias != NULL && !jcp.with_eltwise) {
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRef [cpu/convolution]");
             zenConvolution2DwithBiasRef(
                 (float *)src,
@@ -163,7 +163,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else if (bias != NULL && jcp.with_eltwise) {
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasReluRef [cpu/convolution]");
             zenConvolution2DwithBiasReluRef(
                 (float *)src,
@@ -188,7 +188,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             );
         }
         else {
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DRef [cpu/convolution]");
             zenConvolution2DRef(
                 (float *)src,
@@ -216,7 +216,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         if ((jcp.reluFused == false) &&
                 (jcp.batchNormFused == true)) {
             //Only BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNorm [cpu/convolution]");
             zenConvolution2DwithBatchNorm(
                 (float *)src,
@@ -248,7 +248,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         else if ((jcp.reluFused == true) &&
                  (jcp.batchNormFused == true)) {
             //ReLU and  BatchNorm fused with conv
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBatchNormRelu [cpu/convolution]");
             zenConvolution2DwithBatchNormRelu(
                 (float *)src,
@@ -284,7 +284,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             if (bias != NULL)
                bias_ptr = (float *)bias;
             //ReLU fused with conv
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithRelu [cpu/convolution]");
             zenConvolution2DwithBiasRelu(
                 (float *)src,
@@ -314,7 +314,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         }
         else if (bias != NULL && !jcp.with_eltwise) {
             if (!jcp.with_sum) {
-                zendnnInfo(ZENDNN_CORELOG,
+                zendnnVerbose(ZENDNN_CORELOG,
                            "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBias [cpu/convolution]");
                 zenConvolution2DwithBias(
                     (float *)src,
@@ -342,7 +342,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 );
             }
             else {
-                zendnnInfo(ZENDNN_CORELOG,
+                zendnnVerbose(ZENDNN_CORELOG,
                            "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSum [cpu/convolution]");
                 zenConvolution2DwithBiasSum(
                     (float *)src,
@@ -373,7 +373,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         else if (bias != NULL && jcp.with_eltwise) {
             if (!jcp.with_sum) {
                 //Only ReLU fused with conv
-                zendnnInfo(ZENDNN_CORELOG,
+                zendnnVerbose(ZENDNN_CORELOG,
                            "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasRelu [cpu/convolution]");
                 zenConvolution2DwithBiasRelu(
                     (float *)src,
@@ -401,7 +401,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
                 );
             }
             else {
-                zendnnInfo(ZENDNN_CORELOG,
+                zendnnVerbose(ZENDNN_CORELOG,
                            "zendnn_convolution_fwd_t::execute_forward zenConvolution2DwithBiasSumRelu [cpu/convolution]");
                 zenConvolution2DwithBiasSumRelu(
                     (float *)src,
@@ -431,7 +431,7 @@ void zendnn_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
         }
         else {
             //Convolution
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_convolution_fwd_t::execute_forward zenConvolution2D [cpu/convolution]");
             zenConvolution2D(
                 (float *)src,

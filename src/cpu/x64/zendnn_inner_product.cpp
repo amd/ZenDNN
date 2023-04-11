@@ -1,10 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
-* Notified per clause 4(b) of the license.
-*******************************************************************************/
-
-/*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -99,7 +94,7 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     int dst_offsets[] = {0};
 
     if (bias == NULL) {
-        zendnnInfo(ZENDNN_CORELOG,
+        zendnnVerbose(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMul [cpu/inner_product]");
         zenMatMul(
             Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
@@ -108,7 +103,7 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             (float *)dst, OC);
     }
     else if (!has_eltwise) {
-        zendnnInfo(ZENDNN_CORELOG,
+        zendnnVerbose(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBias [cpu/inner_product]");
         zenMatMulWithBias(
             Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
@@ -119,7 +114,7 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     else {
         if (has_eltwise_relu) {
             //MatMul with BiasRelu
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasReLU [cpu/inner_product]");
             zenMatMulWithBiasReLU(
                 Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
@@ -130,7 +125,7 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
         else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 1 refers to tanh based gelu
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
                 Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
@@ -142,7 +137,7 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
         else if (has_eltwise_gelu_erf) {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 2 refers to erf based gelu
-            zendnnInfo(ZENDNN_CORELOG,
+            zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
                 Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,

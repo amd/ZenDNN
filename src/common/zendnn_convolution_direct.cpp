@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ void zenConvolution2D_direct(
 
 ) {
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_direct, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_direct, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -204,7 +204,7 @@ void zenConvolution2D_directVer2(
     const float *elementwise_input
 ) {
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_directVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_directVer2, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -353,7 +353,7 @@ void zenConvolution2D_directVer3(
 
 ) {
 
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_directiVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_directiVer3, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,

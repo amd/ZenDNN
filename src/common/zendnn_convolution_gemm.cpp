@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -929,7 +929,7 @@ void zenConvolution2Dbase(
 
 #endif
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2Dbase, no_of_images=", batchsize,
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2Dbase, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_t=", pad_t, " pad_l=", pad_l,
@@ -1000,7 +1000,7 @@ void zenConvolution2Dbase(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_best, no_of_images=", no_of_images,
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_best, no_of_images=", no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_h=", pad_h, " pad_w=", pad_w,
@@ -1050,7 +1050,7 @@ void zenConvolution2DbaseVer5(
 ) {
 
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_ver5, no_of_images=", batchsize,
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_ver5, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_t=", pad_t, " pad_l=", pad_l,
@@ -1273,7 +1273,7 @@ void zenConvolution2DsmallGemm(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemm, images=", images,
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemm, images=", images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_h=", pad_h, " pad_w=", pad_w,
@@ -1332,7 +1332,7 @@ void zenConvolution2DsmallGemmVer2(
     gettimeofday(&start, 0);
 #endif
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmVer2, no_of_images=",
                batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -1559,7 +1559,7 @@ void zenConvolution2DsmallGemmVer2(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -1616,7 +1616,7 @@ void zenConvolution2DGemm1x1Direct(
     gettimeofday(&start, 0);
 #endif
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DGemm1x1Direct, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DGemm1x1Direct, no_of_images=",
                batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -1728,7 +1728,7 @@ void zenConvolution2DGemm1x1Direct(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer3, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -1786,7 +1786,7 @@ void zenConvolution2DsmallGemmMerge(
     gettimeofday(&start, 0);
 #endif
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmMerge, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmMerge, no_of_images=",
                batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2006,7 +2006,7 @@ void zenConvolution2DsmallGemmMerge(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2063,7 +2063,7 @@ void zenConvolution2DsmallGemm1x1(
 #endif
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     int batchsize = images;
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemm1x1, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemm1x1, no_of_images=",
                batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2179,7 +2179,7 @@ void zenConvolution2DsmallGemm1x1(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_bestSmallGemmVer2, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2227,7 +2227,7 @@ void zenConvolution2DsmallGemmSplit(
     const int total_filters
 ) {
 
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmSplit, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DsmallGemmSplit, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2716,7 +2716,7 @@ void zenConvolution2DlatencyVer1(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer1, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer1, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2861,7 +2861,7 @@ void zenConvolution2DlatencyVer2(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer2, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer2, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -2921,7 +2921,7 @@ void zenConvolution2DlatencyVer3(
     struct timeval start, end;
     gettimeofday(&start, 0);
 #endif
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer3, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3016,7 +3016,7 @@ void zenConvolution2DlatencyVer3(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3075,7 +3075,7 @@ void zenConvolution2DlatencyVer4(
     gettimeofday(&start, 0);
 #endif
 
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer4, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer4, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3253,7 +3253,7 @@ void zenConvolution2DlatencyVer4(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3310,7 +3310,7 @@ void zenConvolution2DlatencyVer5(
     struct timeval start, end;
     gettimeofday(&start, 0);
 #endif
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer5, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2DlatencyVer5, no_of_images=",
                images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3422,7 +3422,7 @@ void zenConvolution2DlatencyVer5(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D_LatencyVer3, no_of_images=",
                no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3471,7 +3471,7 @@ void zenConvolution2DsmallGemmSplitLatency(
     const int total_filters
 ) {
 
-    zendnnInfo(ZENDNN_ALGOLOG,
+    zendnnVerbose(ZENDNN_ALGOLOG,
                "zenConvolution2DsmallGemmSplitLatency, no_of_images=", images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -3663,7 +3663,7 @@ void zenConvolution2DsmallGemmMergeLatency(
     const int total_filters
 ) {
 
-    zendnnInfo(ZENDNN_ALGOLOG,
+    zendnnVerbose(ZENDNN_ALGOLOG,
                "zenConvolution2DsmallGemmMergeLatency, no_of_images=", images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
@@ -4066,7 +4066,7 @@ void zenConvolution2Dgemm(
     gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
 #endif
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_gemm, no_of_images=", batchsize,
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_gemm, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_t=", pad_t, " pad_l=", pad_l,

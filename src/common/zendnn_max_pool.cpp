@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ void max_pooling_v1(
     zendnnInfo(ZENDNN_ALGOLOG, "zendnn maxpool [zendnn max_pool]");
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
-    zendnnInfo(ZENDNN_ALGOLOG, "ZENDNN MaxPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_ALGOLOG, "ZENDNN MaxPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,
@@ -55,7 +55,7 @@ void max_pooling_v1(
     // TensorFlow does not support NCHW data format
     // TODO: Validate this C++ API (NCHW) using MKLDNN and make changes accordingly
     if (data_format == DATA_FORMAT_NCHW) {
-        zendnnInfo(ZENDNN_ALGOLOG, "zendnn maxpool DATA_FORMAT_NCHW [zendnn max_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn maxpool DATA_FORMAT_NCHW [zendnn max_pool]");
         int out_index = 0;
         for (int n=0; n<number_of_images; n++) {
             for (int c=0; c<number_of_channel; c++) {
@@ -90,7 +90,7 @@ void max_pooling_v1(
         }
     }
     else if (data_format == DATA_FORMAT_NHWC) { // NHWC
-        zendnnInfo(ZENDNN_ALGOLOG, "zendnn maxpool DATA_FORMAT_NHWC [zendnn max_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn maxpool DATA_FORMAT_NHWC [zendnn max_pool]");
 
         int height_col = (height + padding_height_top + padding_height_bottom -
                           kernel_height) / stride_height + 1;
@@ -260,7 +260,7 @@ void max_pooling(
     gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
 #endif
-    zendnnInfo(ZENDNN_PROFLOG, "ZENDNN MaxPool profile, no_of_images=",
+    zendnnVerbose(ZENDNN_PROFLOG, "ZENDNN MaxPool profile, no_of_images=",
                number_of_images,
                " channels=", number_of_channel, " height=", height, " width=", width,
                " kernel_h=", kernel_height, " kernel_w=", kernel_width,

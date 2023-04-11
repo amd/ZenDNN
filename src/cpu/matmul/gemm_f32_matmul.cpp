@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -47,7 +47,7 @@ namespace matmul {
 using namespace data_type;
 
 status_t gemm_f32_matmul_t::pd_t::init(engine_t *engine) {
-    zendnnInfo(ZENDNN_CORELOG, "ZenDNN Ref gemm_f32_matmul_t::pd_t::init()");
+    zendnnVerbose(ZENDNN_CORELOG, "ZenDNN Ref gemm_f32_matmul_t::pd_t::init()");
     auto check_bias = [&]() -> bool {
         return !with_bias()
                 || (weights_md(1)->data_type == f32 && is_bias_1xN());
@@ -94,7 +94,7 @@ static bool should_gemm_execute_sum_po(
 }
 
 status_t gemm_f32_matmul_t::pd_t::check_and_configure_attributes() {
-    zendnnInfo(ZENDNN_CORELOG, "ZenDNN Ref gemm_f32_matmul_t::pd_t::check_and_configure_attributes");
+    zendnnVerbose(ZENDNN_CORELOG, "ZenDNN Ref gemm_f32_matmul_t::pd_t::check_and_configure_attributes");
     auto check_attr_oscale = [&]() -> bool {
         const auto &oscale = attr()->output_scales_;
         return oscale.mask_ == 0

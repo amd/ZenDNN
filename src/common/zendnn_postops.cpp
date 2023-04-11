@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -934,7 +934,7 @@ void zenPostOps(
         gettimeofday(&end, 0);
         elapsed = timedifference_msec(start, end);
 #endif
-        zendnnInfo(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
+        zendnnVerbose(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
                    " height=", out_height, " width=", out_width,
                    " no_of_filter=", no_of_filter, " relu_enable=", relu, " gelu=", gelu,
                    " batchNorm_enable=", batchNorm_enable, " elementWise_enable=",

@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ void zenConvolution2D_ver2(
     const int out_height,           //o/p to this function
     const int out_width             //o/p to this function
 ) {
-    zendnnInfo(ZENDNN_ALGOLOG, "zenConvolution2D ver2 [zendnn convolution]");
+    zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D ver2 [zendnn convolution]");
 #if 1
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
     if (thread_qty == 0) thread_qty = 1;
@@ -808,7 +808,7 @@ void zenConvolution2DbaseRef(
     gettimeofday(&end, 0);
     float elapsed;
     elapsed = timedifference_msec(start, end);
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2D_best, no_of_images=", no_of_images,
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_best, no_of_images=", no_of_images,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_h=", pad_h, " pad_w=", pad_w,
@@ -1154,7 +1154,7 @@ float elapsed;
     gettimeofday(&end, 0);
     elapsed = timedifference_msec(start, end);
 #endif
-    zendnnInfo(ZENDNN_PROFLOG, "zenConvolution2DbaseRef, no_of_images=", batchsize,
+    zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2DbaseRef, no_of_images=", batchsize,
                " channels=", channels, " height=", height, " width=", width,
                " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
                " pad_t=", pad_t, " pad_l=", pad_l,

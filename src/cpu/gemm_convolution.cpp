@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -62,8 +62,8 @@ status_t gemm_convolution_fwd_t::execute_forward_nspc(
     const conv_gemm_conf_t &jcp = pd()->jcp_;
     std::atomic<status_t> st(status::success);
 #if ZENDNN_ENABLE //ZENDNN implementation
-    zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementaion path in gemm_convolution_fwd_t::execute_forward");
-    zendnnInfo(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
+    zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementaion path in gemm_convolution_fwd_t::execute_forward");
+    zendnnVerbose(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od,
                " kh=",jcp.kh," kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
                " stride_w=",jcp.stride_w, " l_pad=",jcp.l_pad, " t_pad=",jcp.t_pad,
@@ -91,8 +91,8 @@ status_t gemm_convolution_fwd_t::execute_forward_nspc(
         jcp.ow
     );
 #else //ZENDNN implementation
-    zendnnInfo(ZENDNN_CORELOG, "ZenDNN Ref implementaion path in gemm_convolution_fwd_t::execute_forward");
-    zendnnInfo(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
+    zendnnVerbose(ZENDNN_CORELOG, "ZenDNN Ref implementaion path in gemm_convolution_fwd_t::execute_forward");
+    zendnnVerbose(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih, " iw=",jcp.iw,
                " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od,
                " kh=",jcp.kh," kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
                " stride_w=",jcp.stride_w, " l_pad=",jcp.l_pad, " t_pad=",jcp.t_pad,

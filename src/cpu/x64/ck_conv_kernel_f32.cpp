@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -298,9 +298,9 @@ status_t ck_conv_fwd_kernel_f32::init_ck_idx(jit_conv_conf_t &jcp,
     prb.ph = jcp.t_pad;
     prb.pw = jcp.l_pad;
 
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
         "ZENDNN implementation path in ck_conv_fwd_kernel_f32::init_ck_idx [cpu/convolution]");
-    zendnnInfo(ZENDNN_CORELOG,
+    zendnnVerbose(ZENDNN_CORELOG,
         " jcp.mb=", jcp.mb,
         " jcp.oc=", jcp.oc,
         " jcp.ic=", jcp.ic,

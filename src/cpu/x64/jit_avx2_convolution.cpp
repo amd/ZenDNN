@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -69,7 +69,7 @@ void jit_avx2_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
             = jcp.mb * jcp.ngroups * ocb_work * jcp.od * jcp.oh;
 
     zendnnInfo(ZENDNN_CORELOG, "ZenDNN implementation path in jit_avx2_convolution_fwd_t::execute_forward [cpu/jit_avx2_convolution_fwd]");
-    zendnnInfo(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih,
+    zendnnVerbose(ZENDNN_CORELOG, "mb=",jcp.mb, " ih=",jcp.ih,
                " iw=",jcp.iw, " id=",jcp.id, " oh=",jcp.oh,
                " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
                " kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,

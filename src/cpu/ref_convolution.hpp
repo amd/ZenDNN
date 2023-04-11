@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -43,7 +43,7 @@ struct ref_convolution_fwd_t : public primitive_t {
         DECLARE_COMMON_PD_T("ref:any", ref_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
-            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init (before checks)");
+            zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init (before checks)");
             using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
             const auto src_type = src_md(0)->data_type;
@@ -73,7 +73,7 @@ struct ref_convolution_fwd_t : public primitive_t {
                     && attr()->post_ops_.check_sum_consistent_dt(dst_type)
                     && post_ops_ok()
                     && attr_.set_default_formats(dst_md(0)) == status::success;
-            zendnnInfo(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init: ok=", ok, " (after checks)");
+            zendnnVerbose(ZENDNN_CORELOG, "ZENDNN implementation path in ref_convolution_fwd_t::pd_t::init: ok=", ok, " (after checks)");
             return ok ? status::success : status::unimplemented;
         }
 
