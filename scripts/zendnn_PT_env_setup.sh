@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -151,8 +151,8 @@ else
 fi
 
 
-#By default setting ZENDNN_PT_VERSION as v1.12
-export ZENDNN_PT_VERSION="1.12"
+#By default, setting ZENDNN_PT_VERSION as v1.13
+export ZENDNN_PT_VERSION="1.13"
 echo "ZENDNN_PT_VERSION=$ZENDNN_PT_VERSION"
 #Use local copy of ZenDNN library source code when building
 #pytorch wih zendnn
