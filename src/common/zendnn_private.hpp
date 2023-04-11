@@ -27,8 +27,6 @@
 #ifndef ZENDNN_PRIVATE_HPP
 #define ZENDNN_PRIVATE_HPP
 
-#define CPU_INFO_SIZE 12
-
 //structure to make key
 struct Key_matmul {
     bool transpose_input;

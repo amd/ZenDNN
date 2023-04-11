@@ -100,14 +100,16 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
         zendnnInfo(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMul [cpu/inner_product]");
         zenMatMul(
-            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC, OC, alpha, (float *)src, IC,
+            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+            OC, alpha, (float *)src, IC,
             (float *)weights, wei_tr ? IC : OC, beta_, (float *)dst, OC);
     }
     else if (!has_eltwise) {
         zendnnInfo(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBias [cpu/inner_product]");
         zenMatMulWithBias(
-            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC, OC, alpha, (float *)src, IC,
+            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+            OC, alpha, (float *)src, IC,
             (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
             (float *)dst, OC);
     }
@@ -117,7 +119,8 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasReLU [cpu/inner_product]");
             zenMatMulWithBiasReLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC, OC, alpha, (float *)src, IC,
+                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                OC, alpha, (float *)src, IC,
                 (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
                 (float *)dst, OC);
         }
@@ -127,7 +130,8 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC, OC, alpha, (float *)src, IC,
+                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                OC, alpha, (float *)src, IC,
                 (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
                 (float *)dst, OC, 1);
 
@@ -138,7 +142,8 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnInfo(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC, OC, alpha, (float *)src, IC,
+                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                OC, alpha, (float *)src, IC,
                 (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
                 (float *)dst, OC, 2);
 

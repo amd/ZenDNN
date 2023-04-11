@@ -190,8 +190,9 @@ static void fill_offset(std::vector<int> &offsets,
                         unsigned int dims_index,
                         unsigned int mat_size) {
 
-    if (dims_len == 0)
+    if (dims_len == 0) {
         return;
+    }
     if (dims_index == dims_len - 1) {
         offsets[offset_index] = curr_offset + mat_size;
         offset_index++;
@@ -336,9 +337,12 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     ip_off.resize(batch);
     wei_off.resize(batch);
 
-    calculate_offsets(dst_off,(int64_t *)dst_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, M, N);
-    calculate_offsets(ip_off,(int64_t *)src_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, M, K);
-    calculate_offsets(wei_off,(int64_t *)weights_d.dims(),(int64_t *)dst_d.dims(),dst_d.ndims() - 2, K, N);
+    calculate_offsets(dst_off,(int64_t *)dst_d.dims(),(int64_t *)dst_d.dims(),
+                      dst_d.ndims() - 2, M, N);
+    calculate_offsets(ip_off,(int64_t *)src_d.dims(),(int64_t *)dst_d.dims(),
+                      dst_d.ndims() - 2, M, K);
+    calculate_offsets(wei_off,(int64_t *)weights_d.dims(),(int64_t *)dst_d.dims(),
+                      dst_d.ndims() - 2, K, N);
 
 
     int *input_offsets = ip_off.data();

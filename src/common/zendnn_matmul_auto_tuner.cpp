@@ -33,6 +33,8 @@ using namespace zendnn;
 #define NUM_OF_ALGO 5
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
+//CPU information size
+#define CPU_INFO_SIZE 12
 
 //Skip Iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_SKIP_ITER
@@ -48,7 +50,7 @@ using namespace zendnn;
 
 //This tracks the no. of times graph executed
 // from the framework.
-unsigned int graph_exe_count = -1;
+int graph_exe_count = -1;
 
 //enum defines the persistent map controls
 //0: disables
@@ -76,12 +78,12 @@ std::unordered_map<Key_matmul,std::tuple<std::vector<std::pair<unsigned int,floa
         matmul_kernel_map2_helper;
 
 //Writing in the file from the map.
-int map_write_to_file(unsigned int persistent_map) {
+int map_write_to_file() {
 
     //Fetch File name given by user.
     char *fname = getenv("ZENDNN_MATMUL_MAP_FILE");
     if (fname == NULL) {
-        fname = "key_matmul_map.csv";
+        fname = (char*)"key_matmul_map.csv";
     }
 
     std::ofstream file;
@@ -107,7 +109,7 @@ int map_write_to_file(unsigned int persistent_map) {
     file<<"Transpose Input,Transpose Filter,M,K,N,lda,ldb,ldc,Thread,Algo\n";
     for (auto itr=matmul_kernel_map.begin(); itr!=matmul_kernel_map.end(); itr++) {
         sobj = (*itr).first;
-        int algo_type = (*itr).second;
+        unsigned int algo_type = (*itr).second;
 
         file<<sobj.transpose_input<<","<<sobj.transpose_weights<<","<<sobj.m<<","<<sobj.k<<","<<sobj.n<<","<<sobj.lda<<","<<sobj.ldb<<","<<sobj.ldc<<","<<sobj.thread_count<<","<<algo_type<<"\n";
     }
@@ -257,11 +259,11 @@ int auto_compute_matmul_v1(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V1);
 
     //Number of iterations to run for creating map for each layer.
-    int evaluate_iteration =
+    unsigned int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V1);
 
@@ -327,7 +329,7 @@ int auto_compute_matmul_v1(
         //Writing Map in file.
         if (persistent_map_flag->first == persistentMapType::WRITE &&
                 persistent_map_flag->second) {
-            if (map_write_to_file(persistent_map_flag->first)) {
+            if (map_write_to_file()) {
                 zendnnError(ZENDNN_ALGOLOG,
                             "Error occured while writing Persistent Map File. Check the file");
             }
@@ -421,11 +423,11 @@ int auto_compute_matmul_v2(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V2);
 
     //Number of iterations to run for creating map for each layer.
-    int evaluate_iteration =
+    unsigned int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V2);
 
@@ -494,7 +496,7 @@ int auto_compute_matmul_v2(
         //Writing Map in file.
         if (persistent_map_flag->first == persistentMapType::WRITE &&
                 persistent_map_flag->second) {
-            if (map_write_to_file(persistent_map_flag->first)) {
+            if (map_write_to_file()) {
                 zendnnError(ZENDNN_ALGOLOG,
                             "Error occured while writing Persistent Map File. Check the file");
             }
@@ -532,7 +534,7 @@ int auto_compute_matmul_v2(
         //Finding the current algorithm's average time and iteration stored in Map
         float t_algo =  std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo -
                                               1].second;
-        int i_algo = std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo - 1].first;
+        unsigned int i_algo = std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo - 1].first;
 
         //updating the average time and iteration for the current algorithm run.
         cur_algo_time = ((t_algo*i_algo) + cur_algo_time)/(i_algo+1);
@@ -594,11 +596,11 @@ int auto_compute_matmul_v3(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                          MATMUL_SKIP_ITER_V3);
 
     //Number of iterations to run for creating map for each layer.
-    int evaluate_iteration =
+    unsigned int evaluate_iteration =
         zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_V3);
 
@@ -666,7 +668,7 @@ int auto_compute_matmul_v3(
         //Writing Map in file.
         if (persistent_map_flag->first == persistentMapType::WRITE &&
                 persistent_map_flag->second) {
-            if (map_write_to_file(persistent_map_flag->first)) {
+            if (map_write_to_file()) {
                 zendnnError(ZENDNN_ALGOLOG,
                             "Error occured while writing Persistent Map File. Check the file");
             }
