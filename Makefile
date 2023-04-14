@@ -31,7 +31,9 @@ BLIS_API ?= 0
 # BLIS official release is used
 # Set LPGEMM to 1 to enable LPGEMM based Conv
 # make -j LPGEMM=1
-LPGEMM ?= 0
+# LPGEMM kernels enabled by default
+# Set to 0 to make it optional
+LPGEMM ?= 1
 
 #Set BLIS PATH
 ifeq "$(ZENDNN_STANDALONE_BUILD)" "1"

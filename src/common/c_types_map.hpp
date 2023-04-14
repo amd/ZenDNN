@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -77,6 +77,10 @@ const alg_kind_t convolution_gemm_u8s8s16os16 = zendnn_convolution_gemm_u8s8s16o
 const alg_kind_t convolution_gemm_u8s8s16os8 = zendnn_convolution_gemm_u8s8s16os8;
 const alg_kind_t convolution_gemm_u8s8s32os32 = zendnn_convolution_gemm_u8s8s32os32;
 const alg_kind_t convolution_gemm_u8s8s32os8 = zendnn_convolution_gemm_u8s8s32os8;
+const alg_kind_t convolution_gemm_s8s8s32os32 = zendnn_convolution_gemm_s8s8s32os32;
+const alg_kind_t convolution_gemm_s8s8s32os8 = zendnn_convolution_gemm_s8s8s32os8;
+const alg_kind_t convolution_gemm_s8s8s16os16 = zendnn_convolution_gemm_s8s8s16os16;
+const alg_kind_t convolution_gemm_s8s8s16os8 = zendnn_convolution_gemm_s8s8s16os8;
 const alg_kind_t convolution_ref = zendnn_convolution_ref;
 const alg_kind_t convolution_direct = zendnn_convolution_direct;
 const alg_kind_t convolution_winograd = zendnn_convolution_winograd;

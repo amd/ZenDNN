@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -53,7 +53,9 @@ status_t conv_desc_init(convolution_desc_t *conv_desc, prop_kind_t prop_kind,
                       convolution_winograd, convolution_gemm,
                       convolution_ref, convolution_ck, convolution_gemm_u8s8s16os16,
                       convolution_gemm_u8s8s16os8, convolution_gemm_u8s8s32os32,
-                      convolution_gemm_u8s8s32os8, convolution_gemm_bf16bf16f32of32,
+                      convolution_gemm_u8s8s32os8, convolution_gemm_s8s8s32os32,
+                      convolution_gemm_s8s8s32os8, convolution_gemm_s8s8s16os16,
+                      convolution_gemm_s8s8s16os8, convolution_gemm_bf16bf16f32of32,
                       convolution_gemm_bf16bf16f32obf16);
     if (!args_ok) return invalid_arguments;
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -1441,6 +1441,10 @@ typedef enum {
     zendnn_convolution_gemm_u8s8s32os32 = 0x10,
     zendnn_convolution_gemm_bf16bf16f32obf16 = 0x11,
     zendnn_convolution_gemm_bf16bf16f32of32 = 0x12,
+    zendnn_convolution_gemm_s8s8s32os32 = 0x13,
+    zendnn_convolution_gemm_s8s8s32os8 = 0x14,
+    zendnn_convolution_gemm_s8s8s16os16 = 0x15,
+    zendnn_convolution_gemm_s8s8s16os8 = 0x16,
     /// Direct deconvolution
     zendnn_deconvolution_direct = 0xa,
     /// Winograd deconvolution

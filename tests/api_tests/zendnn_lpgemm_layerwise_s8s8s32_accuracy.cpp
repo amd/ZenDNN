@@ -59,6 +59,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdlib>
+#include <climits>
 
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
@@ -69,13 +70,13 @@
 using namespace zendnn;
 using namespace std;
 
-#define ITERATIONS 50
-#define WARMUP 50
+#define ITERATIONS 1
+#define WARMUP 0
 
-#define NUM_LAYERS 1011
+#define NUM_LAYERS 177
 int num_test_cases = NUM_LAYERS;
 
-int bf16_downscaling_val = 1;
+int s32_downscaling_val = 1;
 int all_direct_val = 0;
 
 double time_taken = 0;
@@ -146,6 +147,85 @@ void init_data_s32(memory &m, int8_t value) {
     }
 }
 
+//function to get summary of s8 data
+void summary_data_s8(memory &m) {
+    size_t size = m.get_desc().get_size() /sizeof(int8_t);
+    srand(1111);
+    int8_t *data = (int8_t *)m.get_data_handle();
+    double sum = 0.0f;
+    int8_t max = -128, min = 127;
+    for (size_t i = 0; i < size; ++i) {
+	sum += (int8_t)data[i];
+	if(max < (int8_t)data[i])
+		max = (int8_t)data[i];
+	if(min > (int8_t)data[i])
+		min = (int8_t)data[i];
+    }
+    sum = sum / size;
+    std::cout << "Average: " << sum << ", Min: " << (int)min << ", Max: " << (int)max << std::endl;
+}
+
+void compare_output(int test_num, memory &m1, memory &m2) {
+    size_t size = m1.get_desc().get_size() /sizeof(int8_t);
+    srand(1111);
+    int8_t *data1 = (int8_t *)m1.get_data_handle();
+    int8_t *data2 = (int8_t *)m2.get_data_handle();
+    double sum1 = 0.0f, sum2 = sum1;
+    int8_t max1 = -128, min1 = 127, max2 = max1, min2 = min1;
+    int mismatch = 0;
+    for (size_t i = 0; i < size; ++i) {
+	if((int8_t)data1[i] != (int8_t)data2[i])
+		++ mismatch;
+        sum1 += (int8_t)data1[i];
+	sum2 += (int8_t)data2[i];
+        if(max1 < (int8_t)data1[i])
+                max1 = (int8_t)data1[i];
+        if(min1 > (int8_t)data1[i])
+                min1 = (int8_t)data1[i];
+	if(max2 < (int8_t)data2[i])
+                max2 = (int8_t)data2[i];
+        if(min2 > (int8_t)data2[i])
+                min2 = (int8_t)data2[i];
+    }
+    sum1 = sum1 / size;
+    sum2 = sum2 / size;
+    bool sum_match = (sum1 == sum2)? true: false;
+    bool elementwise_match = (mismatch == 0)? true: false;
+    bool min_max_match  = (min1 == min2 && max1 == max2)? true: false;
+    std::cout << std::boolalpha;
+    std::cout << "TEST " << test_num << ": SUM MATCH = " << sum_match << ", ELEMENT-WISE MATCH = " << elementwise_match << ", MIN MAX MATCH = "<< min_max_match << std::endl;
+}
+
+void compare_output_s32(int test_num, memory &m1, memory &m2) {
+    size_t size = m1.get_desc().get_size() /sizeof(int32_t);
+    srand(1111);
+    int32_t *data1 = (int32_t *)m1.get_data_handle();
+    int32_t *data2 = (int32_t *)m2.get_data_handle();
+    double sum1 = 0.0f, sum2 = sum1;
+    int32_t max1 = INT_MIN, min1 = INT_MAX, max2 = max1, min2 = min1;
+    int mismatch = 0;
+    for (size_t i = 0; i < size; ++i) {
+        if((int32_t)data1[i] != (int32_t)data2[i])
+                ++ mismatch;
+        sum1 += (int32_t)data1[i];
+        sum2 += (int32_t)data2[i];
+        if(max1 < (int32_t)data1[i])
+                max1 = (int32_t)data1[i];
+        if(min1 > (int32_t)data1[i])
+                min1 = (int32_t)data1[i];
+        if(max2 < (int32_t)data2[i])
+                max2 = (int32_t)data2[i];
+        if(min2 > (int32_t)data2[i])
+                min2 = (int32_t)data2[i];
+    }
+    sum1 = sum1 / size;
+    sum2 = sum2 / size;
+    bool sum_match = (sum1 == sum2)? true: false;
+    bool elementwise_match = (mismatch == 0)? true: false;
+    bool min_max_match  = (min1 == min2 && max1 == max2)? true: false;
+    std::cout << std::boolalpha;
+    std::cout << "TEST " << test_num << ": SUM MATCH = " << sum_match << ", ELEMENT-WISE MATCH = " << elementwise_match << ", MIN MAX MATCH = "<< min_max_match << std::endl;
+}
 
 void convolution_param(engine eng, zendnn::memory user_src_memory, int batch,
                        int channel, int height, int width,
@@ -194,12 +274,12 @@ void convolution_param(engine eng, zendnn::memory user_src_memory, int batch,
     /// the convolution (as explained below).
     /// @snippet cnn_inference_f32.cpp Create convolution memory descriptors
     //[Create convolution memory descriptors]
-    auto conv1_src_md = memory::desc({conv1_src_tz}, dt::bf16, tag::any);
-    auto conv1_bias_md = memory::desc({conv1_bias_tz}, dt::f32, tag::any);
-    auto conv1_weights_md = memory::desc({conv1_weights_tz}, dt::bf16, tag::any);
-    auto conv1_dst_md = memory::desc({conv1_dst_tz}, dt::bf16, tag::any);
-    if (bf16_downscaling_val == 0)
-        conv1_dst_md = memory::desc({conv1_dst_tz}, dt::f32, tag::any);
+    auto conv1_src_md = memory::desc({conv1_src_tz}, dt::s8, tag::any);
+    auto conv1_bias_md = memory::desc({conv1_bias_tz}, dt::s32, tag::any);
+    auto conv1_weights_md = memory::desc({conv1_weights_tz}, dt::s8, tag::any);
+    auto conv1_dst_md = memory::desc({conv1_dst_tz}, dt::s8, tag::any);
+    if (s32_downscaling_val == 0)
+        conv1_dst_md = memory::desc({conv1_dst_tz}, dt::s32, tag::any);
     //[Create convolution memory descriptors]
 
     /// Create a convolution descriptor by specifying propagation kind,
@@ -212,11 +292,10 @@ void convolution_param(engine eng, zendnn::memory user_src_memory, int batch,
     //[Create convolution descriptor]
     bool reluFused = true;
     auto conv1_desc = convolution_forward::desc(prop_kind::forward_inference,
-                      bf16_downscaling_val!=0? algorithm::convolution_gemm_bf16bf16f32obf16:
-                      algorithm::convolution_gemm_bf16bf16f32of32, conv1_src_md, conv1_weights_md,
+                      s32_downscaling_val!=0? algorithm::convolution_gemm_s8s8s32os8:
+                      algorithm::convolution_gemm_s8s8s32os32, conv1_src_md, conv1_weights_md,
                       conv1_bias_md, conv1_dst_md, conv1_strides, conv1_padding,
                       conv1_padding, reluFused);
-
     //[Create convolution descriptor]
 
     /// Create a convolution primitive descriptor. Once created, this
@@ -231,11 +310,11 @@ void convolution_param(engine eng, zendnn::memory user_src_memory, int batch,
     std::vector<float> scales(1);
     // Scaling value hardcoded. Add correct scale value depending on layer
     // for exact accuracy validation.
-    //float output_scale = 0.74f;
-    //if (bf16_downscaling_val != 0) {
-    //    scales[0] = output_scale;
-    //    conv_attr.set_output_scales(0, scales);
-    //}
+    float output_scale = 0.74f;
+    if (s32_downscaling_val != 0) {
+        scales[0] = output_scale;
+        conv_attr.set_output_scales(0, scales);
+    }
     conv_attr.set_post_ops(post_ops);
 
     auto conv1_prim_desc = convolution_forward::primitive_desc(conv1_desc,
@@ -295,15 +374,25 @@ void convolution_param(engine eng, zendnn::memory user_src_memory, int batch,
 }
 
 void convolution_ref_direct(engine eng, zendnn::memory user_src_memory,
-                            int batch, int channel, int height, int width,
-                            zendnn::memory user_weights_memory, int no_of_filter, int kernel_h,
-                            int kernel_w, int pad_h,
-                            int pad_w, int stride_h, int stride_w, zendnn::memory conv1_user_bias_memory,
-                            zendnn::memory conv1_dst_memory, int out_height, int out_width) {
+        int batch, int channel, int height, int width,
+        zendnn::memory user_weights_memory, int no_of_filter, int kernel_h,
+        int kernel_w, int pad_h,
+        int pad_w, int stride_h, int stride_w, zendnn::memory conv1_user_bias_memory,
+        zendnn::memory conv1_dst_memory, int out_height, int out_width, bool reluFused, float *output_scales,
+        int scale_size) {
 
-    int times = 1;
     using tag = memory::format_tag;
     using dt = memory::data_type;
+    auto dtype = dt::s8;
+    if (s32_downscaling_val == 0)
+	    dtype = dt::s32;
+    //if (std::is_same<T, int32_t>::value) {
+    //    dtype = dt::s32;
+    //}
+    auto stype = dt::s8;
+    //if (std::is_same<K, int8_t>::value) {
+    //    dtype = dt::s8;
+    //}
 
     stream s(eng);
 
@@ -314,11 +403,19 @@ void convolution_ref_direct(engine eng, zendnn::memory user_src_memory,
     memory::dims conv1_strides = {stride_h, stride_w};
     memory::dims conv1_padding = {pad_h, pad_w};
 
+    //memory user_src_memory, user_weights_memory, conv1_user_bias_memory,
+    //       conv1_dst_memory;
 
-    auto conv1_src_md = memory::desc({conv1_src_tz}, dt::bf16, tag::acdb);
-    auto conv1_bias_md = memory::desc({conv1_bias_tz}, dt::f32, tag::x);
-    auto conv1_weights_md = memory::desc({conv1_weights_tz}, dt::bf16, tag::any);
-    auto conv1_dst_md = memory::desc({conv1_dst_tz}, dt::bf16, tag::acdb);
+    //user_src_memory = memory({{conv1_src_tz}, stype, tag::nhwc}, eng, src);
+    //user_weights_memory = memory({{conv1_weights_tz}, dt::s8, tag::hwcn},
+    //eng, weights);
+    //conv1_user_bias_memory = memory({{conv1_bias_tz}, dt::s32, tag::x}, eng, bias);
+    //conv1_dst_memory = memory({{conv1_dst_tz}, dtype, tag::nhwc }, eng, dst);
+
+    auto conv1_src_md = memory::desc({conv1_src_tz}, stype, tag::acdb);
+    auto conv1_bias_md = memory::desc({conv1_bias_tz}, dt::s32, tag::x);
+    auto conv1_weights_md = memory::desc({conv1_weights_tz}, dt::s8, tag::hwcn);
+    auto conv1_dst_md = memory::desc({conv1_dst_tz}, dtype, tag::acdb);
     auto conv1_desc = convolution_forward::desc(prop_kind::forward_inference,
                       algorithm::convolution_direct, conv1_src_md, conv1_weights_md,
                       conv1_bias_md, conv1_dst_md, conv1_strides, conv1_padding,
@@ -328,14 +425,34 @@ void convolution_ref_direct(engine eng, zendnn::memory user_src_memory,
     zendnn::post_ops post_ops;
     float relu_scale = 1.0f;
     bool relu_alpha = true;
+    std::vector<float> output_scales_vector {output_scales, output_scales + scale_size};
 
-    post_ops.append_eltwise(1.0f, zendnn::algorithm::eltwise_relu, 0.0, 0.0f);
 
-    //std::vector<float> scales(1);
-    //float output_scale = 0.74f;
-    //scales[0] = output_scale;
-    //conv_attr.set_output_scales(0, scales);
+    if (reluFused) {
+        //post_ops.append_binary(zendnn::algorithm::binary_add, conv1_dst_memory.get_desc());
+        post_ops.append_eltwise(1.0f, zendnn::algorithm::eltwise_relu, 0.0, 0.0f);
+        //conv_attr.set_post_ops(post_ops);
+        //attr.set_post_ops(conv_post_ops);
+    }
+
+    /*
+    if (reluFused) {
+        auto relu_algo = zendnn::algorithm::eltwise_relu;
+        if (relu_alpha) {
+            relu_algo = zendnn::algorithm::eltwise_bounded_relu;
+            relu_alpha = 6.0f * std::pow(2, output_scales[0]);
+        }
+        post_ops.append_eltwise(relu_scale, relu_algo, relu_alpha, 0.0f);
+    }
+    else if (relu_scale != 1.0f) {
+        post_ops.append_eltwise(relu_scale, zendnn::algorithm::eltwise_linear, 1.0f,
+                                0.0f);
+    }*/
+
+    if(s32_downscaling_val == 1)
+       conv_attr.set_output_scales(0, output_scales_vector);
     conv_attr.set_post_ops(post_ops);
+
     auto conv1_prim_desc = convolution_forward::primitive_desc(conv1_desc,
                            conv_attr, eng);
     auto conv1_src_memory = user_src_memory;
@@ -352,11 +469,9 @@ void convolution_ref_direct(engine eng, zendnn::memory user_src_memory,
         {ZENDNN_ARG_DST, conv1_dst_memory}
     });
 
-    for (int j = 0; j < times; ++j) {
-        assert(net.size() == net_args.size() && "something is missing");
-        for (size_t i = 0; i < net.size(); ++i) {
-            net.at(i).execute(s, net_args.at(i));
-        }
+    assert(net.size() == net_args.size() && "something is missing");
+    for (size_t i = 0; i < net.size(); ++i) {
+        net.at(i).execute(s, net_args.at(i));
     }
     s.wait();
 
@@ -385,7 +500,7 @@ int main(int argc, char **argv) {
 
     std::cout << "Number of layers = " << count_entry << std::endl;
 
-    int conv_test_dimension[1011][13] = {}; //count_entry][13] = {};
+    int conv_test_dimension[190][13] = {}; //count_entry][13] = {};
 
     if (argc > 1) {
         my_file = fopen(argv[1], "r");
@@ -416,13 +531,13 @@ int main(int argc, char **argv) {
     fclose(my_file);
     num_test_cases = count_entry;
 
-    const char *bf16_downscaling = std::getenv("BF16_DOWNSCALING");
-    //int bf16_downscaling_val = 1;
-    if (bf16_downscaling) {
-        bf16_downscaling_val = atoi(bf16_downscaling);
+    const char *s32_downscaling = std::getenv("S32_DOWNSCALING");
+    //int s32_downscaling_val = 1;
+    if (s32_downscaling) {
+        s32_downscaling_val = atoi(s32_downscaling);
     }
-    if (bf16_downscaling_val != 0) {
-        bf16_downscaling_val = 1;
+    if (s32_downscaling_val != 0) {
+        s32_downscaling_val = 1;
     }
 
     const char *all_direct = std::getenv("ALL_DIRECT");
@@ -434,12 +549,12 @@ int main(int argc, char **argv) {
     }
 
     if (all_direct_val == 1) {
-        bf16_downscaling_val = 1;
+        s32_downscaling_val = 1;
     }
 
-    std::cout << "BF16_DOWNSCALING: " << bf16_downscaling_val << std::endl;
+    std::cout << "S32_DOWNSCALING: " << s32_downscaling_val << std::endl;
     std::cout << "ALL_DIRECT: " << all_direct_val <<
-              " (if set to 1, BF16_DOWNSCALING has no impact)" << std::endl;
+              " (if set to 1, S32_DOWNSCALING has no impact)" << std::endl;
 
     int count_elementwise_match = 0, count_sum_match = 0;
     double highest_gflops = 0, lowest_gflops = 100000;
@@ -469,7 +584,7 @@ int main(int argc, char **argv) {
         stream s(eng);
 
         memory user_src_memory[NUM_LAYERS], user_weights_memory[NUM_LAYERS],
-               conv1_user_bias_memory[NUM_LAYERS], conv1_dst_memory[NUM_LAYERS];
+               conv1_user_bias_memory[NUM_LAYERS], conv1_dst_memory[NUM_LAYERS], conv1_dst_memory_test[NUM_LAYERS];
 
         int batch[num_test_cases], channel[num_test_cases], height[num_test_cases],
             width[num_test_cases],
@@ -539,33 +654,42 @@ int main(int argc, char **argv) {
             memory::dims conv1_dst_tz = {batch[test_num], no_of_filter[test_num], out_height[test_num], out_width[test_num]};
 
             //memory allocation
-            user_src_memory[test_num] = memory({{conv1_src_tz}, dt::bf16, tag::nhwc}, eng);
-            user_weights_memory[test_num] = memory({{conv1_weights_tz}, dt::bf16, tag::hwcn},
+            user_src_memory[test_num] = memory({{conv1_src_tz}, dt::s8, tag::nhwc}, eng);
+            user_weights_memory[test_num] = memory({{conv1_weights_tz}, dt::s8, tag::hwcn},
             eng); //cdba is hwcn for zendnn lib
-            conv1_user_bias_memory[test_num] = memory({{conv1_bias_tz}, dt::f32, tag::x},
+            conv1_user_bias_memory[test_num] = memory({{conv1_bias_tz}, dt::s32, tag::x},
             eng);
             if (lpgemm_path == 1)
-                conv1_user_bias_memory[test_num] = memory({{conv1_bias_tz}, dt::f32, tag::x},
+                conv1_user_bias_memory[test_num] = memory({{conv1_bias_tz}, dt::s32, tag::x},
             eng);
-            conv1_dst_memory[test_num] = memory({{conv1_dst_tz}, dt::bf16, tag::aBcd8b },
+            conv1_dst_memory[test_num] = memory({{conv1_dst_tz}, dt::s8, tag::aBcd8b },
             eng);
-            if (bf16_downscaling_val == 0)
-                conv1_dst_memory[test_num] = memory({{conv1_dst_tz}, dt::f32, tag::aBcd8b },
+	    conv1_dst_memory_test[test_num] = memory({{conv1_dst_tz}, dt::s8, tag::aBcd8b },
             eng);
+            if (s32_downscaling_val == 0) {
+                conv1_dst_memory[test_num] = memory({{conv1_dst_tz}, dt::s32, tag::aBcd8b },
+            eng);
+		 conv1_dst_memory_test[test_num] = memory({{conv1_dst_tz}, dt::s32, tag::aBcd8b },
+            eng);
+	    }
 
             //data initialization
-            //init_data_u8(user_src_memory[test_num], -1);
-            //init_data_s8(user_weights_memory[test_num], -1);
+            init_data_s8(user_src_memory[test_num], -1);
+            init_data_s8(user_weights_memory[test_num], -1);
             //if (lpgemm_path == 0) {
-            //    init_data_s32(conv1_user_bias_memory[test_num], 0);
+                init_data_s32(conv1_user_bias_memory[test_num], -1);
             //}
             //else {
-            //    init_data_s32(conv1_user_bias_memory[test_num], 0);
+            //    init_data_s32(conv1_user_bias_memory[test_num], -1);
             //}
-            //init_data_s8(conv1_dst_memory[test_num], 0);
+	    if (s32_downscaling_val == 1)
+            init_data_s8(conv1_dst_memory[test_num], 0);
+	    else
+            init_data_s32(conv1_dst_memory[test_num], 0);
 
         }
 
+	int accuracy_test_num = 0;
         for (int test_num = 0; test_num < num_test_cases; ++test_num) {
 
             //std::cout << "Inference started (layerwise): (" << (test_num+1) << "/" <<
@@ -589,31 +713,46 @@ int main(int argc, char **argv) {
                                       user_weights_memory[test_num],
                                       no_of_filter[test_num], kernel_h[test_num], kernel_w[test_num], pad_h[test_num],
                                       pad_w[test_num], stride_h[test_num], stride_w[test_num],
-                                      conv1_user_bias_memory[test_num], conv1_dst_memory[test_num],
+                                      conv1_user_bias_memory[test_num], conv1_dst_memory_test[test_num],
                                       out_height[test_num], out_width[test_num]);
+		    
+		    //std::cout << "lpgemm summary: " << std::endl;
+		    //summary_data_s8(conv1_dst_memory_test[test_num]);
                 }
-                else {
+                //else {
+		//
+		std::vector<float> scales(1);
+                float output_scale = 0.74f;
+                scales[0] = output_scale;
+		float *scale1 = &scales[0];
+
                     convolution_ref_direct(eng, user_src_memory[test_num], batch[test_num],
                                            channel[test_num], height[test_num], width[test_num],
                                            user_weights_memory[test_num],
                                            no_of_filter[test_num], kernel_h[test_num], kernel_w[test_num], pad_h[test_num],
                                            pad_w[test_num], stride_h[test_num], stride_w[test_num],
                                            conv1_user_bias_memory[test_num], conv1_dst_memory[test_num],
-                                           out_height[test_num], out_width[test_num]);
-                }
+                                           out_height[test_num], out_width[test_num], true, scale1, 1);
+                //}
 
                 std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
                 time_taken = std::chrono::duration_cast<std::chrono::microseconds>
                              (end - begin).count();
 
-                lpgemm_path = 0;
+		// Analyze output
+		// Get average, min, max
+		//std::cout << "direct summary: " << std::endl;
+	        //summary_data_s8(conv1_dst_memory[test_num]);
+	        //std::cout << "--------------------------------" << std::endl;
+
+	        if(lpgemm_path && s32_downscaling_val==1) compare_output(++accuracy_test_num, conv1_dst_memory[test_num], conv1_dst_memory_test[test_num]);
+                if(lpgemm_path && s32_downscaling_val==0) compare_output_s32(++accuracy_test_num, conv1_dst_memory[test_num], conv1_dst_memory_test[test_num]);
+		
+		lpgemm_path = 0;
                 if (num_iteration >= WARMUP) {
                     time_taken_avg += time_taken;
                 }
             }
-
-            std::cout << "Layer " << test_num << ": " << time_taken_avg / ITERATIONS << " microseconds" << std::endl;
-
 
             time_taken_avg /= ITERATIONS;
             total_time_taken += time_taken_avg;
@@ -624,8 +763,6 @@ int main(int argc, char **argv) {
         std::cout << "\nAverage GFLOPs: " << gflops << std::endl;
         std::cout << "Average throughput: " << ((batch[0] * 1000000 / total_time_taken))
                   << " images/second\n" << std::endl;
-
-
         std::cout << "Total " << (num_direct_layer + num_lpgemm_layer) << " layers: " <<
                   num_direct_layer << " direct path, " << num_lpgemm_layer << " lpgemm path." <<
                   std::endl;

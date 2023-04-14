@@ -72,7 +72,7 @@ using namespace std;
 #define ITERATIONS 50
 #define WARMUP 50
 
-#define NUM_LAYERS 177
+#define NUM_LAYERS 1011
 int num_test_cases = NUM_LAYERS;
 
 int s32_downscaling_val = 1;
@@ -323,7 +323,24 @@ void convolution_ref_direct(engine eng, zendnn::memory user_src_memory,
                       conv1_bias_md, conv1_dst_md, conv1_strides, conv1_padding,
                       conv1_padding);
 
-    auto conv1_prim_desc = convolution_forward::primitive_desc(conv1_desc, eng);
+    zendnn::primitive_attr conv_attr;
+    zendnn::post_ops post_ops;
+    float relu_scale = 1.0f;
+    bool relu_alpha = true;
+    //std::vector<float> output_scales_vector {output_scales, output_scales + scale_size};
+
+    if (1) { //reluFused) {
+        post_ops.append_eltwise(1.0f, zendnn::algorithm::eltwise_relu, 0.0, 0.0f);
+    }
+
+    std::vector<float> scales(1);
+    float output_scale = 0.74f;
+    scales[0] = output_scale;
+    conv_attr.set_output_scales(0, scales);
+    //conv_attr.set_output_scales(0, output_scales_vector);
+    conv_attr.set_post_ops(post_ops);
+    auto conv1_prim_desc = convolution_forward::primitive_desc(conv1_desc,
+                           conv_attr, eng);
     auto conv1_src_memory = user_src_memory;
     auto conv1_weights_memory = user_weights_memory;
 
@@ -371,7 +388,7 @@ int main(int argc, char **argv) {
 
     std::cout << "Number of layers = " << count_entry << std::endl;
 
-    int conv_test_dimension[190][13] = {}; //count_entry][13] = {};
+    int conv_test_dimension[1010][13] = {}; //count_entry][13] = {};
 
     if (argc > 1) {
         my_file = fopen(argv[1], "r");
@@ -554,8 +571,8 @@ int main(int argc, char **argv) {
 
         for (int test_num = 0; test_num < num_test_cases; ++test_num) {
 
-            std::cout << "Inference started (layerwise): (" << (test_num+1) << "/" <<
-                      num_test_cases << ")" << '\r' << flush;
+            //std::cout << "Inference started (layerwise): (" << (test_num+1) << "/" <<
+            //          num_test_cases << ")" << '\r' << flush;
 
             float time_taken_avg = 0.0;
 
@@ -597,6 +614,8 @@ int main(int argc, char **argv) {
                     time_taken_avg += time_taken;
                 }
             }
+
+	    std::cout << "Layer " << test_num << ": " << time_taken_avg / ITERATIONS << " microseconds" << std::endl;
 
             time_taken_avg /= ITERATIONS;
             total_time_taken += time_taken_avg;

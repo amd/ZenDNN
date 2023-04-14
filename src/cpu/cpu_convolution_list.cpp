@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -289,7 +289,13 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE(gemm_x8s8s32x_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_int8_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
+        }},
+	{{forward, s8, s8,s16}, {
+            // Quantization Support
+            // signed int8 input, signed int8  filters, signed int16 output (int16 bias accumulation)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
         }},
         {{forward, s8, s8, s8}, {
             /*
@@ -312,6 +318,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE(gemm_x8s8s32x_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_int8_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
         }},
         {{forward, s8, s8, u8}, {

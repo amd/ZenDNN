@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -267,6 +267,10 @@ protected:
                              alg_kind::convolution_gemm_u8s8s16os8,
                              alg_kind::convolution_gemm_u8s8s32os32,
                              alg_kind::convolution_gemm_u8s8s32os8,
+                             alg_kind::convolution_gemm_s8s8s32os32,
+                             alg_kind::convolution_gemm_s8s8s32os8,
+                             alg_kind::convolution_gemm_s8s8s16os16,
+                             alg_kind::convolution_gemm_s8s8s16os8,
                              alg_kind::convolution_gemm_bf16bf16f32of32,
                              alg_kind::convolution_gemm_bf16bf16f32obf16,
                              alg_kind::convolution_ref));
