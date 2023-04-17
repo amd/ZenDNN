@@ -826,20 +826,11 @@ void zenMatmulSplit(
 
     //Experimental version for auto tuner
     // Nested Parallelism is disabled
-    if (auto_tuner) {
+    if (auto_tuner ||
+            zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
         l2_num_threads = 1;
         thread_qty = zenEnvObj.omp_num_threads;
         omp_set_max_active_levels(1);
-    }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1 ||
-             transpose_input) {
-        //if ZENDNN_GEMM_ALGO is set to 3 and transpose_input is
-        // enabled, then zendnn_sgemm jit based kernel will be
-        // called.
-        // refer src/common/zendnn_utils.cpp
-        l2_num_threads = thread_qty;
-        thread_qty = 1;
-        omp_set_max_active_levels(2);
     }
     else {
 
@@ -970,7 +961,7 @@ void zenMatmulSplit(
         }
         else {
             zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout,
-                                   transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
+                                   transpose_input, transpose_filter,
                                    gemmRows, k, n, alpha, data_col+inputOffset, lda, filter,
                                    ldb, bias, relu, gelu, beta, output+outputOffset, ldc);
         }

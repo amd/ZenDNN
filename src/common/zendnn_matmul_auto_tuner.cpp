@@ -30,7 +30,7 @@
 using namespace zendnn;
 
 //Total num of algo available
-#define NUM_OF_ALGO 5
+#define NUM_OF_ALGO 6
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
 //CPU information size
@@ -83,7 +83,7 @@ int map_write_to_file() {
     //Fetch File name given by user.
     char *fname = getenv("ZENDNN_MATMUL_MAP_FILE");
     if (fname == NULL) {
-        fname = (char*)"key_matmul_map.csv";
+        fname = (char *)"key_matmul_map.csv";
     }
 
     std::ofstream file;
@@ -259,8 +259,9 @@ int auto_compute_matmul_v1(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                         MATMUL_SKIP_ITER_V1);
+    unsigned int skip_iteration =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                                  MATMUL_SKIP_ITER_V1);
 
     //Number of iterations to run for creating map for each layer.
     unsigned int evaluate_iteration =
@@ -423,8 +424,9 @@ int auto_compute_matmul_v2(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                         MATMUL_SKIP_ITER_V2);
+    unsigned int skip_iteration =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                                  MATMUL_SKIP_ITER_V2);
 
     //Number of iterations to run for creating map for each layer.
     unsigned int evaluate_iteration =
@@ -534,7 +536,8 @@ int auto_compute_matmul_v2(
         //Finding the current algorithm's average time and iteration stored in Map
         float t_algo =  std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo -
                                               1].second;
-        unsigned int i_algo = std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo - 1].first;
+        unsigned int i_algo = std::get<0>(found_obj->second)[zenEnvObj.zenGEMMalgo -
+                                                    1].first;
 
         //updating the average time and iteration for the current algorithm run.
         cur_algo_time = ((t_algo*i_algo) + cur_algo_time)/(i_algo+1);
@@ -596,8 +599,9 @@ int auto_compute_matmul_v3(
     struct timeval start_n, end_n;
 
     //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                         MATMUL_SKIP_ITER_V3);
+    unsigned int skip_iteration =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                                  MATMUL_SKIP_ITER_V3);
 
     //Number of iterations to run for creating map for each layer.
     unsigned int evaluate_iteration =
