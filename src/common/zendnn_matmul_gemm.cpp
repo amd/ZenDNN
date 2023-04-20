@@ -31,7 +31,7 @@ using namespace zendnn;
 #define BLIS_NORMAL_PATH2        4096
 
 extern float gelu_const;
-extern unsigned int graph_exe_count;
+extern int graph_exe_count;
 
 //Simplified Map having Key as struct and value as Blocked Weight matrix address.
 std::unordered_map<Key_matmul, const float * >

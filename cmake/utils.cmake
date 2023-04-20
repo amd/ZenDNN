@@ -50,6 +50,8 @@ endfunction()
 #   test -- "test" to mark executable as a test, "" otherwise
 #   arg4 -- (optional) list of extra library dependencies
 function(register_exe name srcs test)
+	string(FIND ${name} "lpgemm" check)
+	if(${check} MATCHES -1)
     add_executable(${name} ${srcs})
     target_link_libraries(${name} ${ZENDNN_LIBRARY_NAME} ${EXTRA_SHARED_LIBS} ${ARGV3})
     if("x${test}" STREQUAL "xtest")
@@ -58,6 +60,7 @@ function(register_exe name srcs test)
     else()
         maybe_configure_windows_test(${name} TARGET)
     endif()
+	endif()
 endfunction()
 
 # Append to a variable

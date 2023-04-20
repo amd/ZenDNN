@@ -360,5 +360,6 @@ option(ZENDNN_LIBM_ENABLE "Enables ZenDNN LibM specific code specifc
     code." ON)
 option(ZENDNN_USE_LOCAL_BLIS "Use locally installed BLIS.
     export ZENDNN_BLIS_PATH to use it." ON)
+option(ZENDNN_ENABLE_LPGEMM "Enable ZENDNN_ENABLE_LPGEMM for Zendnn." OFF)
 option(ZENDNN_USE_LOCAL_LIBM "Use locally installed LIBM.
     export ZENDNN_LIBM_PATH to use it." ON)

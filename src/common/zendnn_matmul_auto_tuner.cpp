@@ -20,7 +20,7 @@
 #include <vector>
 #include <utility>
 #include <tuple>
-#include <zendnn_private.hpp>
+#include "zendnn_private.hpp"
 #include <time.h>
 #include <sstream>
 #include <fstream>
