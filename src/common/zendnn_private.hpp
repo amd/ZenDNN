@@ -563,6 +563,7 @@ extern "C"
         const int *input_offsets,
         const int *weights_offsets,
         const int *dst_offsets,
+        const int *bias_offsets,
         const int no_of_images,
         const int no_of_channels,
         const int no_of_filters,

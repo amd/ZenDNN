@@ -286,6 +286,7 @@ void zenMatMul(
     const int *input_offsets,
     const int *weights_offsets,
     const int *dst_offsets,
+    const int *bias_offsets,
     const int no_of_images,
     const int no_of_channels,
     const int no_of_filters,
@@ -365,7 +366,7 @@ void zenMatMul(
             A_Array[i] = input + input_offsets[i];
             B_Array[i] = filter+ weights_offsets[i];
             C_Array[i] = output + dst_offsets[i];
-            bias_Array[i] = bias + (N_Array[0]*i);
+            bias_Array[i] = bias + bias_offsets[i];
         }
 
         zenBatchMatMul(Layout, transpose_input, transpose_filter,
