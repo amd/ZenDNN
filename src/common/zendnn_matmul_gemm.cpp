@@ -504,8 +504,9 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, const float **bias, const bool relu,
-                           const int gelu) {
+                           int group_count, int *group_size, bool is_mul_add,
+                           const float **Add_Array, float mul_node, int batch_size,
+                           const float **bias, const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
                Layout ? "CblasRowMajor," : "CblasColMajor,",
@@ -533,6 +534,15 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            ldc_Array[i], 0,
                            bias[grp_start + j], relu, gelu, NULL,
                            thread_qty);
+
+            if (is_mul_add) {
+                #pragma omp simd
+                for (int k = 0; k < m * n; k++) {
+                    C_Array[grp_start + j][k] =
+                        (C_Array[grp_start + j][k] * mul_node) +
+                        Add_Array[(grp_start + j) / (group_size[i] / batch_size)][k];
+                }
+            }
         }
         grp_start +=group_size[i];
     }
@@ -634,9 +644,9 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, const float **bias, const bool relu,
-                           const int gelu) {
-
+                           int group_count, int *group_size, bool is_mul_add,
+                           const float **Add_Array, float mul_node, int batch_size,
+                           const float **bias, const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
                Layout ? "CblasRowMajor" : "CblasColMajor",
@@ -707,6 +717,14 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                                bias[grp_start + threadOffset], relu, gelu, NULL,
                                thread_qty);
 
+                if (is_mul_add) {
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node) +
+                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k];
+                    }
+                }
             }
         }
         grp_start +=group_size[i];
@@ -779,8 +797,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                " group_count=", group_count, " group_size[0]=", group_size[0],
                " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
                " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
-               " beta_Array[0]=", beta_Array[0], " relu=", relu, " gelu=", gelu, " Time=",
-               elapsed, "ms");
+               " beta_Array[0]=", beta_Array[0], " is_mul_add=", is_mul_add,
+               " relu=", relu, " gelu=", gelu, " Time=", elapsed, "ms");
 
 }
 
