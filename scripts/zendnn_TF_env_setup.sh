@@ -160,8 +160,8 @@ else
     echo "OMP_PROC_BIND=$OMP_PROC_BIND"
 fi
 
-#By default setting ZENDNN_TF_VERSION as 2.10
-export ZENDNN_TF_VERSION=2.10
+#By default setting ZENDNN_TF_VERSION as 2.12
+export ZENDNN_TF_VERSION=2.12
 echo "ZENDNN_TF_VERSION=$ZENDNN_TF_VERSION"
 
 #Disabling export of GCC BLIS and ZenDNN library and other paths when building
