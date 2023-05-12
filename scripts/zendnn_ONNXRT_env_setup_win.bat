@@ -132,10 +132,18 @@ if defined ZENDNN_PARENT_FOLDER (
 :: Use local copy of ZenDNN library source code when building ONNXRT
 :: Default is build from local source for development and verification.
 :: For release, set ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=0
-if defined ZENDNN_PARENT_FOLDER (
+if not defined ZENDNN_ONNXRT_USE_LOCAL_ZENDNN (
     set ZENDNN_ONNXRT_USE_LOCAL_ZENDNN=1
 )
 echo "ZENDNN_ONNXRT_USE_LOCAL_ZENDNN:%ZENDNN_ONNXRT_USE_LOCAL_ZENDNN%"
+
+:: Use local copy of BLIS library source code when building ONNXRT
+:: Default is download and build from external git for development and verification
+:: For verification with early drop pf BLIS, export ZENDNN_ONNXRT_USE_LOCAL_BLIS=1
+if not defined ZENDNN_ONNXRT_USE_LOCAL_BLIS (
+    set ZENDNN_ONNXRT_USE_LOCAL_BLIS=0
+)
+echo "ZENDNN_ONNXRT_USE_LOCAL_BLIS:%ZENDNN_ONNXRT_USE_LOCAL_BLIS%"
 
 set BENCHMARKS_GIT_ROOT=%ZENDNN_PARENT_FOLDER%\benchmarks
 echo "BENCHMARKS_GIT_ROOT:%BENCHMARKS_GIT_ROOT%"
