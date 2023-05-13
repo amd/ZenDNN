@@ -4714,7 +4714,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution forward create");
             error::wrap_c_api(
                     zendnn_convolution_forward_desc_init(&data,
                             zendnn::convert_to_c(aprop_kind),
@@ -4760,7 +4760,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution forward create");
             error::wrap_c_api(
                     zendnn_convolution_forward_desc_init(&data,
                             zendnn::convert_to_c(aprop_kind),
@@ -4887,7 +4887,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution forward create");
             error::wrap_c_api(
                 zendnn_fused_convolution_forward_desc_init(&data,
                         zendnn::convert_to_c(aprop_kind),
@@ -4918,7 +4918,7 @@ struct convolution_forward : public primitive {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
-            zendnnInfo(ZENDNN_APILOG, "Covolution forward create");
+            zendnnInfo(ZENDNN_APILOG, "Convolution forward create");
             error::wrap_c_api(
                 zendnn_fused_convolution_forward_desc_init(&data,
                         zendnn::convert_to_c(aprop_kind),
