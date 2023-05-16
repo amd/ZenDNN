@@ -260,7 +260,6 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto src_d = ctx.memory_mdw(ZENDNN_ARG_SRC, pd()->src_md());
     const auto weights_d = ctx.memory_mdw(ZENDNN_ARG_WEIGHTS, pd()->weights_md());
     const auto dst_d = ctx.memory_mdw(ZENDNN_ARG_DST, pd()->dst_md());
-    const auto bias_d = ctx.memory_mdw(ZENDNN_ARG_BIAS, pd()->weights_md(1));
 
     matmul_helper_t helper(src_d, weights_d, dst_d);
     const int ndims = pd()->ndims();
@@ -335,17 +334,10 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     std::vector<int> dst_off;
     std::vector<int> ip_off;
     std::vector<int> wei_off;
-    std::vector<int> bias_off;
 
     dst_off.resize(batch);
     ip_off.resize(batch);
     wei_off.resize(batch);
-    bias_off.resize(batch);
-
-    // bias dims
-    const dim_t B1 = bias_d.dims()[ndims-2];
-    const dim_t B2 = bias_d.dims()[ndims-1];
-
 
     calculate_offsets(dst_off,(int64_t *)dst_d.dims(),(int64_t *)dst_d.dims(),
                       dst_d.ndims() - 2, M, N);
@@ -353,21 +345,59 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                       dst_d.ndims() - 2, M, K);
     calculate_offsets(wei_off,(int64_t *)weights_d.dims(),(int64_t *)dst_d.dims(),
                       dst_d.ndims() - 2, K, N);
-    calculate_offsets(bias_off,(int64_t *)bias_d.dims(),(int64_t *)dst_d.dims(),
-                      dst_d.ndims() - 2, B1, B2);
 
 
     int *input_offsets = ip_off.data();
     int *dst_offsets = dst_off.data();
     int *weight_offsets = wei_off.data();
-    int *bias_offsets = bias_off.data();
 
-    zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch,
-                     input_offsets, weight_offsets, dst_offsets, bias_offsets,
-                     M, K, N, alpha, (float *)src, lda,(float *)weights,
-                     ldb, (float*)bias, has_eltwise_relu, geluType, beta,
-                     (float *)dst, ldc);
-    
+    if ((float *)bias == NULL) {
+        //MatMul without Bias
+        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
+                  weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
+                  (float *)weights, ldb, NULL, has_eltwise_relu, geluType, beta, (float *)dst,
+                  ldc);
+    }
+    else if ((float *)bias != NULL && !has_eltwise) {
+        //MatMul with Bias
+        zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                          batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                          lda, (float *)weights, ldb,
+                          (float *)bias, beta, (float *)dst, ldc);
+    }
+    else {
+        if (has_eltwise_relu) {
+            //MatMul with BiasRelu
+            zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc);
+        }
+        else if (has_eltwise_gelu) {
+            //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 1 refers to tanh based gelu
+            zendnnVerbose(ZENDNN_CORELOG,
+                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
+            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc, 1);
+
+        }
+        else if (has_eltwise_gelu_erf) {
+            //MatMul with BiasGelu
+            //gelu_type is passed as last argument, 2 refers to erf based gelu
+            zendnnVerbose(ZENDNN_CORELOG,
+                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
+            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
+                                  lda, (float *)weights, ldb,
+                                  (float *)bias, beta, (float *)dst, ldc, 2);
+        }
+        else {
+            return status::unimplemented;
+        }
+    }
 #endif //ZENDNN_ENABLE
 
     return status::success;

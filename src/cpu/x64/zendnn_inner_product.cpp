@@ -92,13 +92,12 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     int input_offsets[] = {0};
     int weight_offsets[] = {0};
     int dst_offsets[] = {0};
-    int bias_offsets[] = {0};
 
     if (bias == NULL) {
         zendnnVerbose(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMul [cpu/inner_product]");
         zenMatMul(
-            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, bias_offsets, MB, IC,
+            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
             OC, alpha, (float *)src, IC,
             (float *)weights, wei_tr ? IC : OC, NULL, has_eltwise_relu, geluType, beta_,
             (float *)dst, OC);
