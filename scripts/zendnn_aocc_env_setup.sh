@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -226,7 +226,7 @@ export ZENDNN_ENABLE_LIBM=1
 echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
 
 # Enable build of ZenDNN standlone library
-export ZENDNN_STANDALONE_BUILD=1
+export ZENDNN_STANDALONE_BUILD="${ZENDNN_STANDALONE_BUILD:-1}"
 echo "ZENDNN_STANDALONE_BUILD=$ZENDNN_STANDALONE_BUILD"
 
 #Set the no. of InterOp threads, Default is set to 1

@@ -218,7 +218,7 @@ export ZENDNN_ENABLE_LIBM=1
 echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
 
 # Enable build of ZenDNN standlone library
-export ZENDNN_STANDALONE_BUILD=1
+export ZENDNN_STANDALONE_BUILD="${ZENDNN_STANDALONE_BUILD:-1}"
 echo "ZENDNN_STANDALONE_BUILD=$ZENDNN_STANDALONE_BUILD"
 
 #Set the no. of InterOp threads, Default is set to 1
