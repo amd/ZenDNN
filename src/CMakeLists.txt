@@ -50,7 +50,7 @@ append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_SRC_CXX_FLAGS}")
 append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
 
 if(NOT ZENDNN_VERBOSE)
-    add_definitions_with_host_compiler(-DDISABLE_VERBOSE)
+    add_definitions_with_host_compiler(-UDISABLE_VERBOSE)
 endif()
 
 if(ZENDNN_ENABLE_CONCURRENT_EXEC)
