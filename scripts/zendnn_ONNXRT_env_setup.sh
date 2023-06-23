@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -263,10 +263,10 @@ echo "BENCHMARKS_GIT_ROOT: $BENCHMARKS_GIT_ROOT"
 export ONNXRUNTIME_GIT_ROOT=$ZENDNN_PARENT_FOLDER/onnxruntime
 echo "ONNXRUNTIME_GIT_ROOT: $ONNXRUNTIME_GIT_ROOT"
 
-export ZENDNN_ONNXRT_VERSION="1.13.1"
+export ZENDNN_ONNXRT_VERSION="1.15.1"
 echo "ZENDNN_ONNXRT_VERSION: $ZENDNN_ONNXRT_VERSION"
 
-export ZENDNN_ONNX_VERSION="1.12.0"
+export ZENDNN_ONNX_VERSION="1.14.0"
 echo "ZENDNN_ONNX_VERSION: $ZENDNN_ONNX_VERSION"
 
 # Primitive Caching Capacity
