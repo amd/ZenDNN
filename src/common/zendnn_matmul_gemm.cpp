@@ -778,12 +778,21 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
     //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
     //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-    zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                          M_Array, N_Array, K_Array, alpha_Array,
-                          A_Array, lda_Array, B_Array, ldb_Array,
-                          beta_Array, C_Array, ldc_Array,
-                          group_count, group_size, is_mul_add, Add_Array,
-                          mul_node, batch_size, bias, relu, gelu);
+    if (group_size[0] == 1) {
+      zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                            M_Array, N_Array, K_Array, alpha_Array,
+                            A_Array, lda_Array, B_Array, ldb_Array,
+                            beta_Array, C_Array, ldc_Array,
+                            group_count, group_size, is_mul_add, Add_Array,
+                            mul_node, batch_size, bias, relu, gelu);
+    } else {
+      zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                            M_Array, N_Array, K_Array, alpha_Array,
+                            A_Array, lda_Array, B_Array, ldb_Array,
+                            beta_Array, C_Array, ldc_Array,
+                            group_count, group_size, is_mul_add, Add_Array,
+                            mul_node, batch_size, bias, relu, gelu);
+    }
 #endif
     // Code for time profiling of this kernel
     float elapsed;
