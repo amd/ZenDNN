@@ -690,7 +690,8 @@ extern "C" {
         const int no_of_threads,
         const float *offset = NULL,
         const float  *mean = NULL,
-        const int batch_size = 1
+        const int batch_size = 1,
+        const float alpha = 0.0f
     );
 
     void zenClipOp(

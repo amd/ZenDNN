@@ -328,7 +328,8 @@ void zenPostOps(
     const int no_of_threads,
     const float *offset,
     const float  *mean,
-    const int batch_size
+    const int batch_size,
+    const float alpha
 ) {
 
     if (zenEnvObj.zenConvAlgo!=zenConvAlgoType::DIRECT1) {  // NHWC Path
@@ -345,7 +346,8 @@ void zenPostOps(
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
                                                               bias[c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
                         }
                 }
                 else if (bias != NULL && scale == NULL) {
@@ -355,7 +357,8 @@ void zenPostOps(
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
                         }
                 }
                 else if (bias == NULL && scale == NULL) {
@@ -364,7 +367,8 @@ void zenPostOps(
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
                         }
                 }
             }
@@ -446,7 +450,9 @@ void zenPostOps(
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
                                                               bias[c] + elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              
                         }
                 }
                 else if (bias != NULL && scale == NULL) {
@@ -457,7 +463,8 @@ void zenPostOps(
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
                                                               elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
                         }
                 }
                 else if (bias == NULL && scale == NULL) {
@@ -468,7 +475,8 @@ void zenPostOps(
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] +
                                                               elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
-                                                              ?out_layer[ biasOffset + i + c ]:0;
+                                                              ?out_layer[ biasOffset + i + c ]
+                                                              :out_layer[ biasOffset + i + c ]*alpha;
                         }
                 }
             }
@@ -576,8 +584,8 @@ void zenPostOps(
                                     out_layer[index + m + n]  = scale[index_filter + n]*(out_layer[index + m + n] -
                                                                 mean[index_filter + n])
                                                                 + offset[index_filter + n]  + elementwise_input[index + m + n];
-                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
-                                                             0;
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0
+                                        ? out_layer[index + m + n] : out_layer[index + m + n] * alpha;
                                 }
                             }
                         }
@@ -594,8 +602,8 @@ void zenPostOps(
                                     out_layer[index + m +n]  = scale[index_filter + n]*(out_layer[index + m + n] -
                                                                mean[index_filter + n])
                                                                + offset[index_filter + n];
-                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
-                                                             0;
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0
+                                        ? out_layer[index + m + n] : out_layer[index + m + n]*alpha ;
                                 }
                             }
                         }
@@ -731,9 +739,8 @@ void zenPostOps(
                             for (int m=0; m< blocked_out_height_width; m=m+8) {
                                 for (int n=0; n < 8; n++) {
                                     out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
-                                    out_layer[index + m + n] = out_layer[index + m + n]>0 ? out_layer[index + m +
-                                                               n] :
-                                                               0;
+                                    out_layer[index + m + n] = out_layer[index + m + n]>0
+                                        ? out_layer[index + m + n] : out_layer[index + m + n] * alpha ;
                                 }
                             }
                         }
@@ -749,8 +756,8 @@ void zenPostOps(
                                 for (int n=0; n < 8; n++) {
                                     out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
                                                                elementwise_input[index + m + n];
-                                    out_layer[index + m + n]=out_layer[index + m + n]>0 ? out_layer[index + m + n] :
-                                                             0;
+                                    out_layer[index + m + n]=out_layer[index + m + n]>0
+                                        ? out_layer[index + m + n] : out_layer[index + m + n] * alpha ;
                                 }
                             }
                         }
@@ -764,7 +771,8 @@ void zenPostOps(
                             #pragma omp simd
                             for (int m=0; m< blocked_out_height_width; m++) {
                                 out_layer[index + m] = out_layer[index + m ] + elementwise_input[index + m ];
-                                out_layer[index + m] = out_layer[index + m]>0 ? out_layer[index + m] : 0;
+                                out_layer[index + m] = out_layer[index + m]>0
+                                    ? out_layer[index + m] : out_layer[index + m]*alpha;
                             }
                         }
                 }
@@ -938,12 +946,17 @@ void zenPostOps(
         gettimeofday(&end, 0);
         elapsed = timedifference_msec(start, end);
 #endif
+        if(!alpha)
         zendnnVerbose(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
                    " height=", out_height, " width=", out_width,
                    " no_of_filter=", no_of_filter, " relu_enable=", relu, " gelu=", gelu,
                    " batchNorm_enable=", batchNorm_enable, " elementWise_enable=",
                    elementWise_enable, " Time=", elapsed, "ms");
-
-
+        else
+        zendnnVerbose(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
+                   " height=", out_height, " width=", out_width,
+                   " no_of_filter=", no_of_filter, " leakyrelu_enable=", relu,
+                   " with alpha= " , alpha," gelu=", gelu, " batchNorm_enable=", batchNorm_enable, 
+                   " elementWise_enable=", elementWise_enable, " Time=", elapsed, "ms");
     }
 }
