@@ -27,7 +27,7 @@
 
 #include "cpu/x64/zendnn_lpgemm_convolution.hpp"
 #ifdef ZENDNN_ENABLE_LPGEMM_CONV
-    #include "../tests/api_tests/test_utils.hpp"
+    #include "cpu/x64/zendnn_lpgemm_utils.hpp"
 #endif
 #include "zendnn_logging.hpp"
 #include <type_traits>
