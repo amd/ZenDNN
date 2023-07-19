@@ -186,8 +186,8 @@ export ZENDNN_ENABLE_MEMPOOL=1
 echo "ZENDNN_ENABLE_MEMPOOL=$ZENDNN_ENABLE_MEMPOOL"
 
 #Set the max no. of tensors that can be used inside TF memory pool, Default is
-#set to 64
-export ZENDNN_TENSOR_POOL_LIMIT=64
+#set to 1024
+export ZENDNN_TENSOR_POOL_LIMIT=1024
 echo "ZENDNN_TENSOR_POOL_LIMIT=$ZENDNN_TENSOR_POOL_LIMIT"
 
 #Enable fixed max size allocation for Persistent tensor with TF memory pool
@@ -196,7 +196,7 @@ export ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE=0
 echo "ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE=$ZENDNN_TENSOR_BUF_MAXSIZE_ENABLE"
 
 # Convolution GEMM Algo path is default
-export ZENDNN_CONV_ALGO=1
+export ZENDNN_CONV_ALGO=4
 echo "ZENDNN_CONV_ALGO=$ZENDNN_CONV_ALGO"
 
 # INT8 support  is disabled by default
