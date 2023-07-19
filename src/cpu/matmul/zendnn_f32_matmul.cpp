@@ -67,6 +67,11 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
 
+    zendnnEnv zenEnvObj = readEnv();
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        return status::unimplemented;
+    }
+
     if (!ok) {
         return status::unimplemented;
     }
@@ -116,7 +121,7 @@ bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
 
 status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     zendnnVerbose(ZENDNN_CORELOG,
-               "zendnn_gemm_f32_matmul_t::pd_t::check_and_configure_attributes");
+                  "zendnn_gemm_f32_matmul_t::pd_t::check_and_configure_attributes");
     auto check_attr_oscale = [&]() -> bool {
         const auto &oscale = attr()->output_scales_;
         return oscale.mask_ == 0
@@ -307,10 +312,10 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::execute_ref");
     zendnnVerbose(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
-               " transA: ", transA, " transB: ", transB,
-               " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
-               " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
-               " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)");
+                  " transA: ", transA, " transB: ", transB,
+                  " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
+                  " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
+                  " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)");
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
 
     int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
@@ -377,7 +382,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 1 refers to tanh based gelu
             zendnnVerbose(ZENDNN_CORELOG,
-                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
+                          "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
@@ -388,7 +393,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             //MatMul with BiasGelu
             //gelu_type is passed as last argument, 2 refers to erf based gelu
             zendnnVerbose(ZENDNN_CORELOG,
-                       "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
+                          "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,

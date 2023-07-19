@@ -18,9 +18,9 @@
 #include "common/zendnn_private.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
-#include <cblas.h>
+    #include <cblas.h>
 #else // ZENDNN_USE_AOCL_BLIS_API
-#include "cblas_with_blis_api.hpp"
+    #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include <vector>
@@ -30,6 +30,8 @@
 #include "zendnn.hpp"
 
 using namespace zendnn;
+using tag = memory::format_tag;
+using dt = memory::data_type;
 
 #define BLIS_NORMAL_PATH1        1024
 #define BLIS_NORMAL_PATH2        4096
@@ -271,15 +273,16 @@ void zenMatMul_gemm_wrapper(
     elapsed = timedifference_msec(start, end);
 #endif
 
-    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner, " Layout=",
-               Layout ? "CblasRowMajor," : "CblasColMajor,",
-               " transa=", transpose_input ? "CblasTrans," : "CblasNoTrans,",
-               " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
-               " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
-               " ldc=", ldc, " alpha=", alpha, " beta=", beta,
-               " relu=", relu, " gelu=", gelu,
-               " algo_type=", algo_type,
-               " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
+    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner,
+                  " Layout=",
+                  Layout ? "CblasRowMajor," : "CblasColMajor,",
+                  " transa=", transpose_input ? "CblasTrans," : "CblasNoTrans,",
+                  " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
+                  " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
+                  " ldc=", ldc, " alpha=", alpha, " beta=", beta,
+                  " relu=", relu, " gelu=", gelu,
+                  " algo_type=", algo_type,
+                  " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
 }
 
 void zenMatMul(
@@ -513,8 +516,8 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            const float **bias, const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
-               Layout ? "CblasRowMajor," : "CblasColMajor,",
-               " group_count=", group_count);
+                  Layout ? "CblasRowMajor," : "CblasColMajor,",
+                  " group_count=", group_count);
 
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -569,8 +572,8 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
 
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV2,",
-               " Layout=", Layout ? "CblasRowMajor," : "CblasColMajor,",
-               " group_count=", group_count);
+                  " Layout=", Layout ? "CblasRowMajor," : "CblasColMajor,",
+                  " group_count=", group_count);
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned int grp_start = 0;
@@ -653,8 +656,8 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            const float **bias, const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
-               Layout ? "CblasRowMajor" : "CblasColMajor",
-               " group_count=", group_count);
+                  Layout ? "CblasRowMajor" : "CblasColMajor",
+                  " group_count=", group_count);
 
     unsigned int grp_start = 0;
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -735,6 +738,119 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
     }
 }
 
+// ZenBatchMatMulPrimitives helps to execute using MatMul primitives.
+// TODO: Add support for Primitive caching
+void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
+                             bool TransA, bool TransB, int *M_Array,
+                             int *N_Array, int *K_Array, const float *alpha_Array,
+                             const float **A_Array, int *lda_Array,
+                             const float **B_Array, int *ldb_Array, const float *beta_Array,
+                             float **C_Array, int *ldc_Array,
+                             int group_count, int *group_size, bool is_mul_add,
+                             const float **Add_Array, float mul_node, int batch_size,
+                             const float **bias, const bool relu, const int gelu) {
+    zendnn::engine eng(engine::kind::cpu, 0);
+    zendnn::stream engine_stream(eng);
+
+    std::vector<primitive> net;
+    std::vector<std::unordered_map<int, memory>> net_args;
+
+    float *in_arr = const_cast<float *>(A_Array[0]);
+    float *filt_arr = const_cast<float *>(B_Array[0]);
+    float *output_array = const_cast<float *>(C_Array[0]);
+
+    unsigned long M = M_Array[0];
+    unsigned long N = N_Array[0];
+    unsigned long K = K_Array[0];
+
+    memory::dims src_dims = (group_size[0] == 1) ? (memory::dims) {M, K} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, M, K};
+    memory::dims weight_dims = (group_size[0] == 1) ? (memory::dims) {K, N} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, K, N};
+    memory::dims dst_dims = (group_size[0] == 1) ? (memory::dims) {M, N} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, M, N};
+    memory::dims bias_dims = (group_size[0] == 1) ? (memory::dims) {1, N} :
+      (memory::dims) {1, 1, 1, N};
+
+    memory::desc src_md = memory::desc({src_dims}, dt::f32,
+                                       (group_size[0] == 1) ? tag::ab : tag::abcd);
+    memory::desc dst_md = memory::desc({dst_dims}, dt::f32,
+                                       (group_size[0] == 1) ? tag::ab : tag::abcd);
+    memory::desc matmul_weights_md =
+        memory::desc({weight_dims}, dt::f32,
+                     (group_size[0] == 1) ? tag::ab : (TransB ? tag::abdc : tag::abcd));
+    memory::desc bias_md = memory::desc();
+
+    zendnn::memory user_weights_memory, src_memory, dst_memory;
+    src_memory = memory({{src_dims}, dt::f32,(group_size[0] == 1) ? tag::ab : tag::abcd},
+    eng, in_arr);
+    dst_memory = memory({{dst_dims}, dt::f32,(group_size[0] == 1) ? tag::ab : tag::abcd},
+    eng, output_array);
+    user_weights_memory =
+    memory({{weight_dims}, dt::f32,(group_size[0] == 1) ? tag::ab : (TransB ? tag::abdc : tag::abcd)},
+    eng,
+    filt_arr);
+
+    primitive_attr matmul_attr;
+    if (is_mul_add) {
+        float *add_arr = const_cast<float *>(Add_Array[0]);
+
+        const float *mul = &mul_node;
+        float *mul_arr = const_cast<float *>(mul);
+
+        memory::dims mul_dims = {1, 1, 1, 1};
+        memory::dims add_dims = {batch_size, 1, M, N};
+
+        zendnn::post_ops post_ops;
+        post_ops.append_binary(algorithm::binary_mul,
+                               memory::desc({mul_dims}, dt::f32, tag::abcd));
+        post_ops.append_binary(algorithm::binary_add,
+                               memory::desc({add_dims}, dt::f32, tag::abcd));
+
+        matmul_attr.set_post_ops(post_ops);
+        matmul::desc matmul_pd1 =
+            matmul::desc(src_md, matmul_weights_md, bias_md, dst_md);
+        matmul::primitive_desc matmul_pd =
+            matmul::primitive_desc(matmul_pd1, matmul_attr, eng);
+
+        net.push_back(matmul(matmul_pd));
+
+        zendnn::memory postop_memory1, postop_memory2;
+        postop_memory1 =
+        memory({{mul_dims}, dt::f32, tag::abcd}, eng, mul_arr);
+        postop_memory2 =
+        memory({{add_dims}, dt::f32, tag::abcd}, eng, add_arr);
+
+        net_args.push_back( {
+            {ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_DST, dst_memory},
+            {
+                ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
+                postop_memory1
+            },
+            {
+                ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1,
+                postop_memory2
+            }});
+    }
+    else {
+        matmul::desc matmul_pd1 =
+            matmul::desc(src_md, matmul_weights_md, bias_md, dst_md);
+        matmul::primitive_desc matmul_pd =
+            matmul::primitive_desc(matmul_pd1, matmul_attr, eng);
+
+        net.push_back(matmul(matmul_pd));
+        net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_DST, dst_memory}});
+    }
+    assert(net.size() == net_args.size() && "something is missing");
+    for (size_t i = 0; i < net.size(); ++i) {
+        net.at(i).execute(engine_stream, net_args.at(i));
+    }
+}
+
 
 //Batched MatMul Wrapper, internally calls BLAS cblas_sgemm_batch from BLIS
 //or //zenBatchMatMulSplitV1/V2/V3
@@ -775,24 +891,37 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                       B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
                       group_count, group_size);
 #else
-    //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
-    //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-    //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-    if (group_size[0] == 1) {
-      zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                            M_Array, N_Array, K_Array, alpha_Array,
-                            A_Array, lda_Array, B_Array, ldb_Array,
-                            beta_Array, C_Array, ldc_Array,
-                            group_count, group_size, is_mul_add, Add_Array,
-                            mul_node, batch_size, bias, relu, gelu);
-    } else {
-      zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                            M_Array, N_Array, K_Array, alpha_Array,
-                            A_Array, lda_Array, B_Array, ldb_Array,
-                            beta_Array, C_Array, ldc_Array,
-                            group_count, group_size, is_mul_add, Add_Array,
-                            mul_node, batch_size, bias, relu, gelu);
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        zenBatchMatMulPrimitive(zenEnvObj, Layout, TransA, TransB,
+                                M_Array, N_Array, K_Array, alpha_Array,
+                                A_Array, lda_Array, B_Array, ldb_Array,
+                                beta_Array, C_Array, ldc_Array,
+                                group_count, group_size, is_mul_add, Add_Array,
+                                mul_node, batch_size, bias, relu, gelu);
     }
+    else {
+        //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
+        //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+        //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+        if (group_size[0] == 1) {
+            // For Matrices with 2Dimensions we use zenBatchMatMulSplitV3
+            zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                                  M_Array, N_Array, K_Array, alpha_Array,
+                                  A_Array, lda_Array, B_Array, ldb_Array,
+                                  beta_Array, C_Array, ldc_Array,
+                                  group_count, group_size, is_mul_add, Add_Array,
+                                  mul_node, batch_size, bias, relu, gelu);
+        }
+        else {
+            zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
+                                  M_Array, N_Array, K_Array, alpha_Array,
+                                  A_Array, lda_Array, B_Array, ldb_Array,
+                                  beta_Array, C_Array, ldc_Array,
+                                  group_count, group_size, is_mul_add, Add_Array,
+                                  mul_node, batch_size, bias, relu, gelu);
+        }
+    }
+
 #endif
     // Code for time profiling of this kernel
     float elapsed;
@@ -806,12 +935,12 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
 #endif
 
     zendnnVerbose(ZENDNN_PROFLOG, "zenBatchMatMul, Layout=",
-               Layout ? "CblasRowMajor" : "CblasColMajor",
-               " group_count=", group_count, " group_size[0]=", group_size[0],
-               " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
-               " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
-               " beta_Array[0]=", beta_Array[0], " is_mul_add=", is_mul_add,
-               " relu=", relu, " gelu=", gelu, " Time=", elapsed, "ms");
+                  Layout ? "CblasRowMajor" : "CblasColMajor",
+                  " group_count=", group_count, " group_size[0]=", group_size[0],
+                  " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
+                  " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
+                  " beta_Array[0]=", beta_Array[0], " is_mul_add=", is_mul_add,
+                  " relu=", relu, " gelu=", gelu, " Time=", elapsed, "ms");
 
 }
 
@@ -843,10 +972,10 @@ void zenMatmulSplit(
 
     //TODO: Naming convention need to change like for "images"
     zendnnVerbose(ZENDNN_ALGOLOG, "zenMatmulSplit, Layout=",
-               Layout? "CblasRowMajor" : "CblasColMajor", " transpose_input=",
-               transpose_input, " transpose_filter=", transpose_filter, " M=", m,
-               " K=", k, " N=", n, " lda=", lda, " ldb=", ldb, " ldc=", ldc,
-               " relu=", relu, " gelu=", gelu, " alpha=", alpha, " beta=", beta);
+                  Layout? "CblasRowMajor" : "CblasColMajor", " transpose_input=",
+                  transpose_input, " transpose_filter=", transpose_filter, " M=", m,
+                  " K=", k, " N=", n, " lda=", lda, " ldb=", ldb, " ldc=", ldc,
+                  " relu=", relu, " gelu=", gelu, " alpha=", alpha, " beta=", beta);
 
     //l2 is level 2 no. of threads for nested parallelism.
     // thread_qty is level 1 no. of threads
