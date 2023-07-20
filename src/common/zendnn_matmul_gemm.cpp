@@ -759,9 +759,9 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
     float *filt_arr = const_cast<float *>(B_Array[0]);
     float *output_array = const_cast<float *>(C_Array[0]);
 
-    unsigned long M = M_Array[0];
-    unsigned long N = N_Array[0];
-    unsigned long K = K_Array[0];
+    long M = M_Array[0];
+    long N = N_Array[0];
+    long K = K_Array[0];
 
     memory::dims src_dims = (group_size[0] == 1) ? (memory::dims) {M, K} :
       (memory::dims) {batch_size, group_size[0]/batch_size, M, K};
