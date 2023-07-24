@@ -223,8 +223,8 @@ extern "C" {
         const int total_filters = 0,
         bool reluFused=false,
         float *output_scales=nullptr,
-	const int* zero_point_dst=nullptr,
-	const int scale_count=1
+        const int *zero_point_dst=nullptr,
+        const int scale_count=1
     );
 
     void zenConvolution2D_s8s8s32os32(
@@ -281,7 +281,7 @@ extern "C" {
         bool reluFused=false,
         int elementwiseType = 1,
         float *output_scales=nullptr,
-        const int* zero_point_dst=nullptr,
+        const int *zero_point_dst=nullptr,
         const int scale_count=1
     );
 
@@ -339,7 +339,7 @@ extern "C" {
         bool reluFused=false,
         int elementwiseType = 1,
         float *output_scales=nullptr,
-        const int* zero_point_dst=nullptr,
+        const int *zero_point_dst=nullptr,
         const int scale_count=1
     );
 
@@ -395,7 +395,7 @@ extern "C" {
         const int total_filters = 0,
         bool reluFused=false,
         float *output_scales=nullptr,
-        const int* zero_point_dst=nullptr,
+        const int *zero_point_dst=nullptr,
         const int scale_count=1
     );
 
@@ -451,7 +451,7 @@ extern "C" {
         const int total_filters = 0,
         bool reluFused=false,
         float *output_scales=nullptr,
-        const int* zero_point_dst=nullptr,
+        const int *zero_point_dst=nullptr,
         const int scale_count=1
     );
 
@@ -768,5 +768,66 @@ extern "C" {
         const float beta,
         float *output,
         const int ldc
+    );
+    int auto_compute_conv(
+        int supportedPath,
+        void *in_layer,
+        int no_of_images,
+        int channels,
+        int height,
+        int width,
+        int8_t *filter,
+        int no_of_filter,
+        int kernel_h,
+        int kernel_w,
+        int pad_t,
+        int pad_l,
+        int pad_b,
+        int pad_r,
+        int stride_h,
+        int stride_w,
+        void *bias,
+        void *out_layer,
+        int out_height,
+        int out_width,
+        bool concat,
+        int filter_offset,
+        int total_filters,
+        bool reluFused,
+        int elementwiseType,
+        float *output_scales,
+        const int *zero_point_dst,
+        int scale_count
+    );
+    void zendnnConvolutionLPGEMM(
+        int supportedPath,
+        int zendnn_lpgemm_algo,
+        void *src,
+        int no_of_images,
+        int channels,
+        int height,
+        int width,
+        int8_t *filter,
+        int no_of_filter,
+        int kernel_h,
+        int kernel_w,
+        int pad_t,
+        int pad_l,
+        int pad_b,
+        int pad_r,
+        int stride_h,
+        int stride_w,
+        void *bias,
+        void *dst,
+        int out_height,
+        int out_width,
+        bool concat,
+        int filter_offset,
+        int total_filters,
+        bool reluFused,
+        int elementwiseType,
+        float *output_scales,
+        const int *zero_point_dst,
+        int scale_size
     );
 }

@@ -34,10 +34,11 @@
 
 using namespace zendnn;
 
+
 #ifdef ZENDNN_ENABLE_LPGEMM_CONV
 // Direct Convolution
 // for Auto-tuner
-template <typename T, typename K> void convolution_ref_direct(engine eng, K src,
+template <typename T, typename K> void convolution_direct_lp(engine eng, K src,
         int batch, int channel, int height, int width,
         int8_t *weights, int no_of_filter, int kernel_h,
         int kernel_w, int pad_h,
@@ -53,7 +54,7 @@ template <typename T, typename K> void convolution_ref_direct(engine eng, K src,
     }
     auto stype = dt::u8;
     if (std::is_same<K, int8_t>::value) {
-        dtype = dt::s8;
+        stype = dt::s8;
     }
 
     stream s(eng);
@@ -139,6 +140,368 @@ template <typename T, typename K> void convolution_ref_direct(engine eng, K src,
 }
 #endif
 
+void zendnnConvolutionLPGEMM(
+    int supportedPath,
+    int zendnn_lpgemm_algo,
+    void *src,
+    int no_of_images,
+    int channels,
+    int height,
+    int width,
+    int8_t *filter,
+    int no_of_filter,
+    int kernel_h,
+    int kernel_w,
+    int pad_t,
+    int pad_l,
+    int pad_b,
+    int pad_r,
+    int stride_h,
+    int stride_w,
+    void *bias,
+    void *dst,
+    int out_height,
+    int out_width,
+    bool concat,
+    int filter_offset,
+    int total_filters,
+    bool reluFused,
+    int elementwiseType,
+    float *output_scales,
+    const int *zero_point_dst,
+    int scale_size
+) {
+
+    if (supportedPath == 0) {
+
+        if (zendnn_lpgemm_algo == 1) {
+            zenConvolution2D_u8s8s32os8(
+                (uint8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int32_t *)bias,
+                (int8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+        }
+
+        else if (zendnn_lpgemm_algo == 2) {
+            zenConvolution2D_u8s8s16os8(
+                (uint8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int16_t *)bias,
+                (int8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+        }
+
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+        else {
+
+            char **cpu = NULL;
+            engine::kind engine_kind = parse_engine_kind(1, cpu);
+            engine eng(engine_kind, 0);
+            stream s(eng);
+
+            convolution_direct_lp<int8_t *, uint8_t *>(eng,
+                                  (uint8_t *)src, no_of_images,
+                                  channels, height, width,
+                                  (int8_t *)filter,
+                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                                  (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
+                                  scale_size);
+        }
+#endif
+    }
+    else if (supportedPath == 1) {
+
+        if (zendnn_lpgemm_algo == 1) {
+            zenConvolution2D_u8s8s32os32(
+                (uint8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int32_t *)bias,
+                (int32_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                output_scales
+            );
+        }
+
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+        else {
+
+            char **cpu = NULL;
+            engine::kind engine_kind = parse_engine_kind(1, cpu);
+            engine eng(engine_kind, 0);
+            stream s(eng);
+
+            convolution_direct_lp<int32_t *, uint8_t *>(eng,
+                                  (uint8_t *)src, no_of_images,
+                                  channels, height, width,
+                                  (int8_t *)filter,
+                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                                  (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
+                                  scale_size);
+        }
+#endif
+    }
+    else if (supportedPath == 2) {
+
+        zenConvolution2D_u8s8s16os16(
+            (uint8_t *)src,
+            no_of_images,
+            channels,
+            height,
+            width,
+            (int8_t *)filter,
+            no_of_filter,
+            kernel_h,
+            kernel_w,
+            pad_t,
+            pad_l,
+            pad_b,
+            pad_r,
+            stride_h,
+            stride_w,
+            (int16_t *)bias,
+            (int16_t *)dst,
+            out_height,
+            out_width,
+            concat,
+            filter_offset,
+            total_filters,
+            reluFused,
+            output_scales
+        );
+    }
+    else if (supportedPath == 3) {
+
+        if (zendnn_lpgemm_algo == 1) {
+
+            zenConvolution2D_s8s8s32os8(
+                (int8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int32_t *)bias,
+                (int8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                elementwiseType,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+        }
+
+        else if (zendnn_lpgemm_algo == 2) {
+
+            zenConvolution2D_s8s8s16os8(
+                (int8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int16_t *)bias,
+                (int8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                elementwiseType,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+        }
+
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+        else {
+
+            char **cpu = NULL;
+            engine::kind engine_kind = parse_engine_kind(1, cpu);
+            engine eng(engine_kind, 0);
+            stream s(eng);
+
+            convolution_direct_lp<int8_t *, int8_t *>(eng,
+                                  (int8_t *)src, no_of_images,
+                                  channels, height, width,
+                                  (int8_t *)filter,
+                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                                  (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
+                                  scale_size);
+        }
+#endif
+    }
+    else if (supportedPath == 4) {
+
+        if (zendnn_lpgemm_algo == 1) {
+
+            zenConvolution2D_s8s8s32os32(
+                (int8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int32_t *)bias,
+                (int32_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                elementwiseType,
+                output_scales
+            );
+        }
+
+#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+        else {
+
+            char **cpu = NULL;
+            engine::kind engine_kind = parse_engine_kind(1, cpu);
+            engine eng(engine_kind, 0);
+            stream s(eng);
+
+            convolution_direct_lp<int32_t *, int8_t *>(eng,
+                                  (int8_t *)src, no_of_images,
+                                  channels, height, width,
+                                  (int8_t *)filter,
+                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                                  (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
+                                  scale_size);
+        }
+#endif
+    }
+    else if (supportedPath == 5) {
+
+        zenConvolution2D_s8s8s16os16(
+            (int8_t *)src,
+            no_of_images,
+            channels,
+            height,
+            width,
+            (int8_t *)filter,
+            no_of_filter,
+            kernel_h,
+            kernel_w,
+            pad_t,
+            pad_l,
+            pad_b,
+            pad_r,
+            stride_h,
+            stride_w,
+            (int16_t *)bias,
+            (int16_t *)dst,
+            out_height,
+            out_width,
+            concat,
+            filter_offset,
+            total_filters,
+            reluFused,
+            elementwiseType,
+            output_scales
+        );
+    }
+}
+
+
 namespace zendnn {
 namespace impl {
 namespace cpu {
@@ -149,32 +512,36 @@ using namespace zendnn::impl::memory_tracking::names;
 using namespace zendnn::impl::utils;
 using namespace nstl;
 
-int isSupportedAutoPath(int lpgemm_auto_type, alg_kind_t alg_kind) {
+int isSupportedLpgemmPath(alg_kind_t alg_kind) {
     // 0 = direct path with s8 output
-    if (lpgemm_auto_type == 2 && (alg_kind == zendnn_convolution_gemm_u8s8s16os8 ||
-                                  alg_kind == zendnn_convolution_gemm_u8s8s32os8)) {
+    if ((alg_kind == zendnn_convolution_gemm_u8s8s16os8 ||
+            alg_kind == zendnn_convolution_gemm_u8s8s32os8)) {
+
         return 0;
     }
     // 1 = direct path with s32 output
-    else if (lpgemm_auto_type == 2 &&
-             alg_kind == zendnn_convolution_gemm_u8s8s32os32) {
+    else if (alg_kind == zendnn_convolution_gemm_u8s8s32os32) {
         return 1;
     }
-    else if (lpgemm_auto_type == 2 &&
-             alg_kind == zendnn_convolution_gemm_s8s8s32os8) {
+    else if (alg_kind == zendnn_convolution_gemm_u8s8s16os16) {
         return 2;
     }
-    else if (lpgemm_auto_type == 2 &&
-             alg_kind == zendnn_convolution_gemm_s8s8s32os32) {
+    else if (alg_kind == zendnn_convolution_gemm_s8s8s16os8 ||
+             alg_kind == zendnn_convolution_gemm_s8s8s32os8) {
         return 3;
     }
-    // All cases with lpgemm_auto_type = 1 are valid
-    else if (lpgemm_auto_type == 1) {
+    else if (alg_kind == zendnn_convolution_gemm_s8s8s32os32) {
         return 4;
     }
+    else if (alg_kind == zendnn_convolution_gemm_s8s8s16os16) {
+        return 5;
+    }
+    // All cases with lpgemm_auto_type = 1 are valid
+    else if (alg_kind == zendnn_convolution_gemm_bf16bf16f32of32 ||
+             alg_kind == zendnn_convolution_gemm_bf16bf16f32obf16) {
+        return 6;
+    }
     // -1 means the conditions are not supported
-    // This include cases when lpgemm_auto_type = 2 (direct path) and
-    // alg_kind is set to zendnn_convolution_gemm_u8s8s16os16 (dst as s16) or bf16 APIs
     return -1;
 }
 
@@ -242,94 +609,83 @@ const {
         concat = false;
     }
 
-    // ZENDNN_LPGEMM_AUTO_TYPE (for auto-tuner)
-    // 1 = LPGEMM path is taken (default)
-    // 2 = DIRECT path is taken
-    int lpgemm_auto_type = zendnn_getenv_int("ZENDNN_LPGEMM_AUTO_TYPE", 1);
-
+    //ZENDNN_LPGEMM_ALGO:
+    //0 :- Auto tuner
+    int zendnn_lpgemm_algo = zendnn_getenv_int("ZENDNN_LPGEMM_ALGO",-1);
     zendnnInfo(ZENDNN_CORELOG,
                "zendnn_lpgemm_convolution_fwd_t::execute_forward zenConvolution2D [cpu/convolution]");
 
-    int supportedPath = isSupportedAutoPath(lpgemm_auto_type, jcp.alg_kind);
+    int supportedPath = isSupportedLpgemmPath(jcp.alg_kind);
+
+    //If path NOT set by environment variable then
+    //set zendnn_lpgemm_algo
+    if (zendnn_lpgemm_algo == -1) {
+        if (supportedPath == 0) {
+            if (jcp.alg_kind == zendnn_convolution_gemm_u8s8s32os8) {
+                zendnn_lpgemm_algo = 1;
+            }
+            else {
+                zendnn_lpgemm_algo = 2;
+            }
+        }
+        else if (supportedPath == 3) {
+            if (jcp.alg_kind == zendnn_convolution_gemm_s8s8s32os8) {
+                zendnn_lpgemm_algo = 1;
+            }
+            else {
+                zendnn_lpgemm_algo = 2;
+            }
+
+        }
+        else {
+            zendnn_lpgemm_algo = 1;
+        }
+    }
+
+#ifdef _WIN32
+    auto start = std::chrono::high_resolution_clock::now();
+#else
+    struct timeval start, end;
+    gettimeofday(&start, 0);
+#endif
 
     if (supportedPath == -1) {
         zendnnInfo(ZENDNN_CORELOG,
                    "ZENDNN_LPGEMM_AUTO_TYPE is set to 2 (direct path) but no valid path found for given algotype [cpu/convolution]");
         exit(0);
     }
-    else if (supportedPath < 4) {
-        char **cpu = NULL;
-        engine::kind engine_kind = parse_engine_kind(1, cpu);
-        engine eng(engine_kind, 0);
-        stream s(eng);
-
-
-        convolution_ref_direct(eng,
-                               (supportedPath<2)?(uint8_t *)src:(true? (int8_t *)src: (void *)src), jcp.mb,
-                               jcp.ic, jcp.ih, jcp.iw,
-                               (int8_t *)weights,
-                               jcp.oc, jcp.kh, jcp.kw, jcp.t_pad, jcp.l_pad, jcp.stride_h, jcp.stride_w,
-                               (int32_t *)bias, (supportedPath==0 ||
-                                       supportedPath==2)?(int8_t *)dst:(true? (int32_t *)dst:
-                                               (void *)dst), jcp.oh, jcp.ow, jcp.reluFused, output_scales, scale_size);
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_u8s8s16os16) {
-        zenConvolution2D_u8s8s16os16(
-            (uint8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int16_t *)bias,
-            (int16_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            output_scales
-        );
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_u8s8s16os8) {
-        zenConvolution2D_u8s8s16os8(
-            (uint8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int16_t *)bias,
-            (int8_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            output_scales,
-            zero_point_dst,
-            scale_size
-        );
+    // Auto_Type = 0
+    else if (zendnn_lpgemm_algo == 0 && supportedPath < 2 && jcp.kh == 1 &&
+             jcp.kw == 1) {
+        zendnn_lpgemm_algo = auto_compute_conv(supportedPath,
+                                               (uint8_t *)src,
+                                               jcp.mb,
+                                               jcp.ic,
+                                               jcp.ih,
+                                               jcp.iw,
+                                               (int8_t *)weights,
+                                               jcp.oc,
+                                               jcp.kh,
+                                               jcp.kw,
+                                               jcp.t_pad,
+                                               jcp.l_pad,
+                                               jcp.b_pad,
+                                               jcp.r_pad,
+                                               jcp.stride_h,
+                                               jcp.stride_w,
+                                               (void *)bias,
+                                               (void *)dst,
+                                               jcp.oh,
+                                               jcp.ow,
+                                               concat,
+                                               filter_offset,
+                                               total_filters,
+                                               jcp.reluFused,
+                                               elementwiseType,
+                                               output_scales,
+                                               zero_point_dst,
+                                               scale_size
+                                              );
     }
     else if (jcp.alg_kind == zendnn_convolution_gemm_bf16bf16f32of32) {
         zenConvolution2D_bf16bf16f32of32(
@@ -389,10 +745,12 @@ const {
             scale_size
         );
     }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_u8s8s32os32) {
+    else {
 
-        zenConvolution2D_u8s8s32os32(
-            (uint8_t *)src,
+        zendnnConvolutionLPGEMM(
+            supportedPath,
+            zendnn_lpgemm_algo,
+            (supportedPath<3)?(uint8_t *)src:(true? (int8_t *)src: (void *)src),
             jcp.mb,
             jcp.ic,
             jcp.ih,
@@ -407,98 +765,8 @@ const {
             jcp.r_pad,
             jcp.stride_h,
             jcp.stride_w,
-            (int32_t *)bias,
-            (int32_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            output_scales
-        );
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_u8s8s32os8) {
-
-        zenConvolution2D_u8s8s32os8(
-            (uint8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int32_t *)bias,
-            (int8_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            output_scales,
-            zero_point_dst,
-            scale_size
-        );
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_s8s8s32os32) {
-
-        zenConvolution2D_s8s8s32os32(
-            (int8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int32_t *)bias,
-            (int32_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            elementwiseType,
-            output_scales
-        );
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_s8s8s32os8) {
-
-        zenConvolution2D_s8s8s32os8(
-            (int8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int32_t *)bias,
-            (int8_t *)dst,
+            (void *)bias,
+            (void *)dst,
             jcp.oh,
             jcp.ow,
             concat,
@@ -511,68 +779,28 @@ const {
             scale_size
         );
     }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_s8s8s16os16) {
 
-        zenConvolution2D_s8s8s16os16(
-            (int8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int16_t *)bias,
-            (int16_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            elementwiseType,
-            output_scales
-        );
-    }
-    else if (jcp.alg_kind == zendnn_convolution_gemm_s8s8s16os8) {
+    // Code for time profiling of this kernel
+    float elapsed;
+#ifdef _WIN32
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> difference = end - start;
+    elapsed = difference.count();
+#else
+    gettimeofday(&end, 0);
+    elapsed = timedifference_msec(start, end);
+#endif
 
-        zenConvolution2D_s8s8s16os8(
-            (int8_t *)src,
-            jcp.mb,
-            jcp.ic,
-            jcp.ih,
-            jcp.iw,
-            (int8_t *)weights,
-            jcp.oc,
-            jcp.kh,
-            jcp.kw,
-            jcp.t_pad,
-            jcp.l_pad,
-            jcp.b_pad,
-            jcp.r_pad,
-            jcp.stride_h,
-            jcp.stride_w,
-            (int16_t *)bias,
-            (int8_t *)dst,
-            jcp.oh,
-            jcp.ow,
-            concat,
-            filter_offset,
-            total_filters,
-            jcp.reluFused,
-            elementwiseType,
-            output_scales,
-            zero_point_dst,
-            scale_size
-        );
-    }
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_LPGEMM auto_tuner=",
+                  zendnn_lpgemm_algo == 0 ?1:0,"algo=", jcp.alg_kind, " mb=",jcp.mb, " ih=",
+                  jcp.ih,
+                  " iw=",jcp.iw,
+                  " id=",jcp.id, " oh=",jcp.oh, " ow=",jcp.ow, " od=",jcp.od, " kh=",jcp.kh,
+                  " kw=",jcp.kw, " kd=",jcp.kd, " stride_h=",jcp.stride_h,
+                  " stride_w=",jcp.stride_w, " l_pad=",jcp.l_pad, " t_pad=",jcp.t_pad,
+                  " f_pad=",jcp.f_pad, " ngroups=",jcp.ngroups, " ic=",jcp.ic, " oc=",jcp.oc,
+                  " algo_type=", zendnn_lpgemm_algo,
+                  " Time=", elapsed, "ms");
     if (pd()->wants_zero_pad_dst()) {
         ctx.zero_pad_output(ZENDNN_ARG_DST);
     }
@@ -583,4 +811,5 @@ const {
 } // namespace cpu
 } // namespace impl
 } // namespace zendnn
+
 // vim: et ts=4 sw=4 cindent cino+=l0,\:4,N-s
