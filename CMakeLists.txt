@@ -77,7 +77,7 @@ endif()
 
 set(PROJECT_NAME "ZenDNN")
 set(PROJECT_FULL_NAME "Zen Deep Neural Network Library (ZenDNN)")
-set(PROJECT_VERSION "3.3.0")
+set(PROJECT_VERSION "4.1.0")
 
 if (CMAKE_VERSION VERSION_LESS 3.0)
     project(${PROJECT_NAME} C CXX)
