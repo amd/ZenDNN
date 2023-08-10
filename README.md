@@ -41,15 +41,15 @@ Kernel is an optional dependency.
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v4.0 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v4.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.10, ONNXRT v1.12.1, and PyTorch v1.12.
-* Python v3.7-v3.10 has been used to generate the TensorFlow v2.10 wheel files (*.whl).
-* Python v3.7-v3.10 has been used to generate the ONNXRT v1.12.1 wheel files (*.whl).
-* Python v3.7-v3.10 has been used to generate the PyTorch v1.12 wheel files (*.whl).
+* ZenDNN library is integrated with TensorFlow v2.12, ONNXRT v1.15.1, and PyTorch v1.13.
+* Python v3.8-v3.11 has been used to generate the TensorFlow v2.12 wheel files (*.whl).
+* Python v3.8-v3.11 has been used to generate the ONNXRT v1.15.1 wheel files (*.whl).
+* Python v3.7-v3.10 has been used to generate the PyTorch v1.13 wheel files (*.whl).
 * NHWC (default format), NHWC_BLOCKED and Blocked Format (NCHWc8) are supported.
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
@@ -59,7 +59,7 @@ The latest information on the ZenDNN release and installers is available on AMD.
 # Supported OS and Compilers
 This release of ZenDNN supports the following Operating Systems (OS) and compilers:
 ## OS
-* Ubuntu® 20.04 LTS and later
+* Ubuntu® 22.04 LTS and later
 * Red Hat® Enterprise Linux® (RHEL) 9.0 and later
 * CentOS Stream 9 and later
 ## Compilers
@@ -71,7 +71,7 @@ For C++ interface binaries, any Linux based OS with GLIBC version later than 2.3
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* AOCL-BLIS v4.0 and AOCL-LibM v3.1.0 must be installed for optimal performance of the ZenDNN library.
+* AOCL-BLIS v4.1 and AOCL-LibM v3.1.0 must be installed for optimal performance of the ZenDNN library.
 
 
 # AOCL-BLIS and AOCL-libM Library Installation
@@ -90,12 +90,10 @@ The following points must be considered while installing AOCL-BLIS and AOCL-LibM
 ## AOCL-BLIS Library Setup
 Complete the following steps to setup the GCC compiled AOCL-BLIS library:
 1. Execute the command `cd <compdir>`
-2.  Download aocl-linux-gcc-4.0.tar.gz.
+2. Download aocl-blis-linux-gcc-4.1.0.tar.gz.
 3. Execute the following commands:
     ```bash
-    tar -xvf aocl-linux-gcc-4.0.tar.gz
-    cd aocl-linux-gcc-4.0
-    tar -xvf aocl-blis-linux-gcc-4.0.tar.g
+    tar -xvf aocl-blis-linux-gcc-4.1.0.tar.gz
     cd amd-blis
 	```
 This will set up the environment for AOCL-BLIS path:
@@ -104,7 +102,7 @@ export ZENDNN_BLIS_PATH=$(pwd)
 ```
 For example:
 ```bash
-export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-4.0/amd-blis
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
 ```
 ## AOCL-LibM Library Setup
 Complete the following steps to setup the GCC compiled AOCL-LibM library:
@@ -130,7 +128,7 @@ export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
 The bashrc file can be edited to setup ZENDNN_BLIS_PATH and ZENDNN_LIBM_PATH environment path.
 For example, in the case of GCC compiled AOCL-BLIS and AOCL-LibM:
 ```bash
-export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-4.0/amd-blis
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
 export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
 ```
 
@@ -189,9 +187,9 @@ ZenDNN has the following runtime dependencies:
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python v3.7-v3.10 for TensorFlow v2.10
-* Python v3.7-v3.10 for PyTorch v1.12
-* Python v3.7-v3.10 for ONNXRT v1.12.1
+* Python v3.8-v3.11 for TensorFlow v2.12
+* Python v3.7-v3.10 for PyTorch v1.13
+* Python v3.8-v3.11 for ONNXRT v1.15.1
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
@@ -206,7 +204,7 @@ cd ZenDNN
 **ZENDNN_BLIS_PATH** and **ZENDNN_LIBM_PATH** should be defined.
 example:
 ```bash
-export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/aocl-linux-gcc-4.0/amd-blis
+export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
 export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
 make clean
 source scripts/zendnn_build.sh gcc
