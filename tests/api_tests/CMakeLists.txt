@@ -41,8 +41,6 @@ append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
 file(GLOB_RECURSE sources *.cpp *.c)
 file(GLOB_RECURSE headers *.hpp *.h)
 
-message(STATUS "RATAN>>>>>>>>>>>>>>>>>>>>>>>>: Inside test api_test cmake")
-
 # Skip SYCL, GPU and cross-engine examples
 foreach(f ${sources})
     get_filename_component(f_name ${f} NAME)

@@ -27,8 +27,6 @@ if(POLICY CMP0065)
     cmake_policy(SET CMP0065 NEW)
 endif()
 
-message(STATUS "RATAN>>>>>>>>>>>>>>>>>>>>>>>>: Inside test cmake")
-
 # propagate TEST specific flags
 append(CMAKE_C_FLAGS "${CMAKE_TEST_CCXX_FLAGS}")
 append(CMAKE_CXX_FLAGS "${CMAKE_TEST_CCXX_FLAGS}")
