@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -38,6 +38,8 @@
 
 # Enable/Disable HW_OS_KERNEL_BIOS environment export prints
 _HW_OS_KERNEL_BIOS_EXPORT_PRINT=${1:-false}
+# Disable some functionality. prints which require addition linux packages
+_HW_OS_KERNEL_BIOS_EXPORT_EXTRA=false
 
 #-------------------------------------------------------------------------------
 # HW, HW architecture, Cache, OS, Kernel details
@@ -111,12 +113,14 @@ export _SYSTEM_HW_CPU_MAX_MHZ=$(lscpu | grep 'CPU max MHz' | awk '{print $4}')
 export _SYSTEM_HW_CPU_MIN_MHZ=$(lscpu | grep 'CPU min MHz' | awk '{print $4}')
 export _SYSTEM_HW_BOGOMIPS=$(lscpu | grep 'BogoMIPS' | awk '{print $2}')
 export _SYSTEM_HW_VIRTUALIZATION=$(lscpu | grep 'Virtualization' | awk '{print $2}')
-export _SYSTEM_HW_L1D_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $7}' | sed 's/[()]//g')
-export _SYSTEM_HW_L1I_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $11}'| sed 's/[()]//g')
-export _SYSTEM_HW_L2_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $3}' | sed 's/[()]//g')
-export _SYSTEM_HW_L3_CACHE_CCX_CCD=$(lstopo-no-graphics | grep ' L3 L#0' |awk '{print $3}' | sed 's/[()]//g')
-#FIXME: Flags => sse sse2 ssse3 sse4_1 sse4_2 avx sse4a avx2
-export _SYSTEM_HW_FLAGS=$(lscpu | grep 'Flags' | grep -o 'sse\|sse2\|ssse3\|sse4_1\|sse4_2\|avx\|sse4a\|avx2\|avx512')
+if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_EXTRA" = true ]]; then
+    export _SYSTEM_HW_L1D_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $7}' | sed 's/[()]//g')
+    export _SYSTEM_HW_L1I_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $11}'| sed 's/[()]//g')
+    export _SYSTEM_HW_L2_CACHE_CORE=$(lstopo-no-graphics | grep ' L2 L#0' |awk '{print $3}' | sed 's/[()]//g')
+    export _SYSTEM_HW_L3_CACHE_CCX_CCD=$(lstopo-no-graphics | grep ' L3 L#0' |awk '{print $3}' | sed 's/[()]//g')
+    #FIXME: Flags => sse sse2 ssse3 sse4_1 sse4_2 avx sse4a avx2
+    export _SYSTEM_HW_FLAGS=$(lscpu | grep 'Flags' | grep -o 'sse\|sse2\|ssse3\|sse4_1\|sse4_2\|avx\|sse4a\|avx2\|avx512')
+fi
 
 if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
     echo ""
@@ -150,57 +154,62 @@ if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
     echo "_SYSTEM_HW_FLAGS: "$_SYSTEM_HW_FLAGS
 fi
 
-_HW_LSTOPO_PACKAGES=$(lstopo-no-graphics -s | grep 'Package' | awk '{print $3}')
-_HW_LSTOPO_NUM_L3CACHE=$(lstopo-no-graphics -s | grep 'L3Cache' | awk '{print $3}')
-_HW_LSTOPO_NUM_L2CACHE=$(lstopo-no-graphics -s | grep 'L2Cache' | awk '{print $3}')
-_HW_NUM_CORES_SOCKET=$((_HW_LSTOPO_NUM_L2CACHE/_HW_LSTOPO_PACKAGES))
-_HW_LSTOPO_NUM_L3_CACHE_SOCKET=$((_HW_LSTOPO_NUM_L3CACHE/_HW_LSTOPO_PACKAGES))
-_HW_PRCOCESSOR_NUM=$(lscpu | grep 'Model name:' | awk '{print $5}')
+if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_EXTRA" = true ]]; then
+    _HW_LSTOPO_PACKAGES=$(lstopo-no-graphics -s | grep 'Package' | awk '{print $3}')
+    _HW_LSTOPO_NUM_L3CACHE=$(lstopo-no-graphics -s | grep 'L3Cache' | awk '{print $3}')
+    _HW_LSTOPO_NUM_L2CACHE=$(lstopo-no-graphics -s | grep 'L2Cache' | awk '{print $3}')
+    _HW_NUM_CORES_SOCKET=$((_HW_LSTOPO_NUM_L2CACHE/_HW_LSTOPO_PACKAGES))
+    _HW_LSTOPO_NUM_L3_CACHE_SOCKET=$((_HW_LSTOPO_NUM_L3CACHE/_HW_LSTOPO_PACKAGES))
+    _HW_PRCOCESSOR_NUM=$(lscpu | grep 'Model name:' | awk '{print $5}')
 
-#if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
-    #echo "_HW_LSTOPO_PACKAGES: "$_HW_LSTOPO_PACKAGES
-    #echo "_HW_LSTOPO_NUM_L3CACHE: "$_HW_LSTOPO_NUM_L3CACHE
-    #echo "_HW_LSTOPO_NUM_L2CACHE: "$_HW_LSTOPO_NUM_L2CACHE
-    #echo "_HW_NUM_CORES_SOCKET: "$_HW_NUM_CORES_SOCKET
-    #echo "_HW_LSTOPO_NUM_L3_CACHE_SOCKET: "$_HW_LSTOPO_NUM_L3_CACHE_SOCKET
-    #echo "_HW_PRCOCESSOR_NUM: "$_HW_PRCOCESSOR_NUM
-#fi
+    if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
+        echo "_HW_LSTOPO_PACKAGES: "$_HW_LSTOPO_PACKAGES
+        echo "_HW_LSTOPO_NUM_L3CACHE: "$_HW_LSTOPO_NUM_L3CACHE
+        echo "_HW_LSTOPO_NUM_L2CACHE: "$_HW_LSTOPO_NUM_L2CACHE
+        echo "_HW_NUM_CORES_SOCKET: "$_HW_NUM_CORES_SOCKET
+        echo "_HW_LSTOPO_NUM_L3_CACHE_SOCKET: "$_HW_LSTOPO_NUM_L3_CACHE_SOCKET
+        echo "_HW_PRCOCESSOR_NUM: "$_HW_PRCOCESSOR_NUM
+    fi
+fi
 
 #Find the last digit of EPYC model number
 EPYC_FAMILY_LAST_DIGIT=$(cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($6, 4);}')
 #echo $EPYC_FAMILY_LAST_DIGIT
 
-if [[ " $EPYC_FAMILY_LAST_DIGIT " == " 2 " ]]; then
-    export _SYSTEM_HW_CORES_CCX=$((_HW_NUM_CORES_SOCKET/_HW_LSTOPO_NUM_L3_CACHE_SOCKET))
-    _L3CACHE_SIZE_CCX_NUM=$(echo $_SYSTEM_HW_L3_CACHE_CCX_CCD | tr -dc '0-9')
-    _L3CACHE_SIZE_CCX_UNIT=${_SYSTEM_HW_L3_CACHE_CCX_CCD//[0-9]/}
-    _SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE=$(echo $(( 100 * $_L3CACHE_SIZE_CCX_NUM / $_SYSTEM_HW_CORES_CCX )) | sed 's/..$/.&/')
-    #echo $_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE
-    export _SYSTEM_HW_EQUI_L3_CACHE_CORE="${_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE}${_L3CACHE_SIZE_CCX_UNIT}"
-    if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
-        echo "This is Rome "$_HW_PRCOCESSOR_NUM
-        echo "_SYSTEM_HW_CORES_CCX: "$_SYSTEM_HW_CORES_CCX
-        echo "_SYSTEM_HW_EQUI_L3_CACHE_CORE: "$_SYSTEM_HW_EQUI_L3_CACHE_CORE
-    fi
-elif [[ " $EPYC_FAMILY_LAST_DIGIT " == " 3 " ]]; then
-    export _SYSTEM_HW_CORES_CCD=$((_HW_NUM_CORES_SOCKET/_HW_LSTOPO_NUM_L3_CACHE_SOCKET))
-    _L3CACHE_SIZE_CCD_NUM=$(echo $_SYSTEM_HW_L3_CACHE_CCX_CCD | tr -dc '0-9')
-    _L3CACHE_SIZE_CCD_UNIT=${_SYSTEM_HW_L3_CACHE_CCX_CCD//[0-9]/}
-    _SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE=$(echo $(( 100 * $_L3CACHE_SIZE_CCD_NUM / $_SYSTEM_HW_CORES_CCD )) | sed 's/..$/.&/')
-    #echo $_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE
-    export _SYSTEM_HW_EQUI_L3_CACHE_CORE="${_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE}${_L3CACHE_SIZE_CCD_UNIT}"
-    if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
-        echo "This is Milan "$_HW_PRCOCESSOR_NUM
-        echo "_SYSTEM_HW_CORES_CCD: "$_SYSTEM_HW_CORES_CCD
-        echo "_SYSTEM_HW_EQUI_L3_CACHE_CORE: "$_SYSTEM_HW_EQUI_L3_CACHE_CORE
-    fi
-else
-    if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
-        echo "Unable to determine CPU Architecture"
-        echo "Env variable _SYSTEM_HW_CORES_CCD is not defined"
-        echo "Env variable _SYSTEM_HW_EQUI_L3_CACHE_CORE is not defined"
+if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_EXTRA" = true ]]; then
+    if [[ " $EPYC_FAMILY_LAST_DIGIT " == " 2 " ]]; then
+        export _SYSTEM_HW_CORES_CCX=$((_HW_NUM_CORES_SOCKET/_HW_LSTOPO_NUM_L3_CACHE_SOCKET))
+        _L3CACHE_SIZE_CCX_NUM=$(echo $_SYSTEM_HW_L3_CACHE_CCX_CCD | tr -dc '0-9')
+        _L3CACHE_SIZE_CCX_UNIT=${_SYSTEM_HW_L3_CACHE_CCX_CCD//[0-9]/}
+        _SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE=$(echo $(( 100 * $_L3CACHE_SIZE_CCX_NUM / $_SYSTEM_HW_CORES_CCX )) | sed 's/..$/.&/')
+        #echo $_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE
+        export _SYSTEM_HW_EQUI_L3_CACHE_CORE="${_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE}${_L3CACHE_SIZE_CCX_UNIT}"
+        if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
+            echo "This is Rome "$_HW_PRCOCESSOR_NUM
+            echo "_SYSTEM_HW_CORES_CCX: "$_SYSTEM_HW_CORES_CCX
+            echo "_SYSTEM_HW_EQUI_L3_CACHE_CORE: "$_SYSTEM_HW_EQUI_L3_CACHE_CORE
+        fi
+    elif [[ " $EPYC_FAMILY_LAST_DIGIT " == " 3 " ]]; then
+        export _SYSTEM_HW_CORES_CCD=$((_HW_NUM_CORES_SOCKET/_HW_LSTOPO_NUM_L3_CACHE_SOCKET))
+        _L3CACHE_SIZE_CCD_NUM=$(echo $_SYSTEM_HW_L3_CACHE_CCX_CCD | tr -dc '0-9')
+        _L3CACHE_SIZE_CCD_UNIT=${_SYSTEM_HW_L3_CACHE_CCX_CCD//[0-9]/}
+        _SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE=$(echo $(( 100 * $_L3CACHE_SIZE_CCD_NUM / $_SYSTEM_HW_CORES_CCD )) | sed 's/..$/.&/')
+        #echo $_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE
+        export _SYSTEM_HW_EQUI_L3_CACHE_CORE="${_SYSTEM_HW_EQUI_L3_CACHE_VAL_CORE}${_L3CACHE_SIZE_CCD_UNIT}"
+        if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
+            echo "This is Milan "$_HW_PRCOCESSOR_NUM
+            echo "_SYSTEM_HW_CORES_CCD: "$_SYSTEM_HW_CORES_CCD
+            echo "_SYSTEM_HW_EQUI_L3_CACHE_CORE: "$_SYSTEM_HW_EQUI_L3_CACHE_CORE
+        fi
+    else
+        if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
+            echo "Unable to determine CPU Architecture"
+            echo "Env variable _SYSTEM_HW_CORES_CCD is not defined"
+            echo "Env variable _SYSTEM_HW_EQUI_L3_CACHE_CORE is not defined"
+        fi
     fi
 fi
+
 #FIXME: Information about number of memory channel
 
 # Print OS details
@@ -239,18 +248,6 @@ fi
 #FIXME: Print value of tunable kernel parameters, but dont define a env variable
 echo -e "\nVarious tunable kernel parameters:"
 echo "transparent_hugepage: "$(cat /sys/kernel/mm/transparent_hugepage/enabled)
-echo "numa_balancing_scan_delay_ms: "$(cat /proc/sys/kernel/numa_balancing_scan_delay_ms)
-echo "numa_balancing_scan_size_mb: "$(cat /proc/sys/kernel/numa_balancing_scan_size_mb)
-echo "numa_balancing_scan_period_min_ms: "$(cat /proc/sys/kernel/numa_balancing_scan_period_min_ms)
-echo "sched_tunable_scaling: "$(cat /proc/sys/kernel/sched_tunable_scaling)
-echo "sched_rr_timeslice_ms: "$(cat /proc/sys/kernel/sched_rr_timeslice_ms)
-echo "randomize_va_space: "$(cat /proc/sys/kernel/randomize_va_space)
-echo "sched_min_granularity_ns: "$(cat /proc/sys/kernel/sched_min_granularity_ns)
-echo "sched_wakeup_granularity_ns: "$(cat /proc/sys/kernel/sched_wakeup_granularity_ns)
-echo "sched_migration_cost_ns: "$(cat /proc/sys/kernel/sched_migration_cost_ns)
-echo "sched_nr_migrate: "$(cat /proc/sys/kernel/sched_nr_migrate)
-echo "sched_rt_runtime_us: "$(cat /proc/sys/kernel/sched_rt_runtime_us)
-echo "sched_latency_ns: "$(cat /proc/sys/kernel/sched_latency_ns)
 echo "numa_balancing: "$(cat /proc/sys/kernel/numa_balancing)
 echo "transparent_hugepage_defrag: "$(cat /sys/kernel/mm/transparent_hugepage/defrag)
 echo "dirty_expire_centisecs: "$(cat /proc/sys/vm/dirty_expire_centisecs)
@@ -270,18 +267,19 @@ if type -P tuned-adm >/dev/null 2>&1;
     fi
 
 # Print BIOS details
-export _SYSTEM_BIOS_VERSION=$(sudo dmidecode -s bios-version)
-export _SYSTEM_BIOS_VENDOR=$(sudo dmidecode -s bios-vendor)
-export _SYSTEM_BIOS_RELEASE_DATE=$(sudo dmidecode -s bios-release-date)
-export _SYSTEM_BIOS_PROC_FAMILY=$(sudo dmidecode -s processor-family 2>&1 | head -n 1)
-#export _SYSTEM_BIOS_PROC_VERSION=$(sudo dmidecode -s processor-version 2>&1 | head -n 1)
+if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_EXTRA" = true ]]; then
+    export _SYSTEM_BIOS_VERSION=$(sudo dmidecode -s bios-version)
+    export _SYSTEM_BIOS_VENDOR=$(sudo dmidecode -s bios-vendor)
+    export _SYSTEM_BIOS_RELEASE_DATE=$(sudo dmidecode -s bios-release-date)
+    export _SYSTEM_BIOS_PROC_FAMILY=$(sudo dmidecode -s processor-family 2>&1 | head -n 1)
+    export _SYSTEM_BIOS_PROC_VERSION=$(sudo dmidecode -s processor-version 2>&1 | head -n 1)
 
-if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
-    echo ""
-    echo "BIOS Details:"
-    echo "_SYSTEM_BIOS_VERSION: "$_SYSTEM_BIOS_VERSION
-    echo "_SYSTEM_BIOS_VENDOR: "$_SYSTEM_BIOS_VENDOR
-    echo "_SYSTEM_BIOS_RELEASE_DATE: "$_SYSTEM_BIOS_RELEASE_DATE
-    echo "_SYSTEM_BIOS_PROC_FAMILY: "$_SYSTEM_BIOS_PROC_FAMILY
+    if [[ "$_HW_OS_KERNEL_BIOS_EXPORT_PRINT" = true ]]; then
+        echo ""
+        echo "BIOS Details:"
+        echo "_SYSTEM_BIOS_VERSION: "$_SYSTEM_BIOS_VERSION
+        echo "_SYSTEM_BIOS_VENDOR: "$_SYSTEM_BIOS_VENDOR
+        echo "_SYSTEM_BIOS_RELEASE_DATE: "$_SYSTEM_BIOS_RELEASE_DATE
+        echo "_SYSTEM_BIOS_PROC_FAMILY: "$_SYSTEM_BIOS_PROC_FAMILY
+    fi
 fi
-
