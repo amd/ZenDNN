@@ -22,6 +22,7 @@
 
 #include "cpu/cpu_engine.hpp"
 
+#include "cpu/matmul/zendnn_bf16_matmul.hpp"
 #include "cpu/matmul/gemm_bf16_matmul.hpp"
 #include "cpu/matmul/gemm_f32_matmul.hpp"
 #include "cpu/matmul/gemm_x8s8s32x_matmul.hpp"
@@ -55,7 +56,11 @@ constexpr impl_list_item_t impl_list[] = REG_MATMUL_P({
         CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core>)
         CPU_INSTANCE(gemm_f32_matmul_t)
         CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_bf16>)
-        CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_bf16>)
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+	CPU_INSTANCE(zendnn_bf16_matmul_t<f32>)
+        CPU_INSTANCE(zendnn_bf16_matmul_t<bf16>)
+#endif
+	CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_bf16>)
         CPU_INSTANCE(gemm_bf16_matmul_t<f32>)
         CPU_INSTANCE(gemm_bf16_matmul_t<bf16>)
         CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_int8>)
