@@ -548,6 +548,7 @@ enum class algorithm {
     convolution_gemm_bf16bf16f32obf16 = zendnn_convolution_gemm_bf16bf16f32obf16,
     convolution_gemm_u8s8s16os16 = zendnn_convolution_gemm_u8s8s16os16,
     convolution_gemm_u8s8s16os8 = zendnn_convolution_gemm_u8s8s16os8,
+    convolution_gemm_u8s8s16ou8 = zendnn_convolution_gemm_u8s8s16ou8,
     convolution_gemm_u8s8s32os32 = zendnn_convolution_gemm_u8s8s32os32,
     convolution_gemm_u8s8s32os8 = zendnn_convolution_gemm_u8s8s32os8,
     convolution_gemm_s8s8s32os32 = zendnn_convolution_gemm_s8s8s32os32,

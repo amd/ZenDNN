@@ -32,6 +32,7 @@ BLIS_API ?= 0
 # Set LPGEMM to 1 to enable LPGEMM based Conv
 # make -j LPGEMM=1
 LPGEMM ?= 0
+LPGEMM_V4_2 ?= 0
 
 #Set BLIS PATH
 ifeq "$(ZENDNN_STANDALONE_BUILD)" "1"
@@ -45,7 +46,11 @@ endif
 DEPEND_ON_CK ?= 0
 
 ifeq "$(LPGEMM)" "1"
-       LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM_CONV=1
+       LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM=1
+endif
+
+ifeq "$(LPGEMM_V4_2)" "1"
+       LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM=1 -DZENDNN_ENABLE_LPGEMM_V4_2=1
 endif
 
 ifeq ($(DEPEND_ON_CK), 1)

@@ -38,6 +38,10 @@ if [[ "$2" == "lpgemm" ]]; then
 	make_lpgemm_args="LPGEMM=1"
 fi
 
+if [[ "$3" == "lpgemm_v4_2" ]]; then
+	make_lpgemm_args="LPGEMM=1 LPGEMM_V4_2=1"
+fi
+
 #check again if ZENDNN_BLIS_PATH is defined, otherwise return
 if [ -z "$ZENDNN_BLIS_PATH" ];
 then

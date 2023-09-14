@@ -1445,6 +1445,7 @@ typedef enum {
     zendnn_convolution_gemm_s8s8s32os8 = 0x14,
     zendnn_convolution_gemm_s8s8s16os16 = 0x15,
     zendnn_convolution_gemm_s8s8s16os8 = 0x16,
+    zendnn_convolution_gemm_u8s8s16ou8 = 0x17,
     /// Direct deconvolution
     zendnn_deconvolution_direct = 0xa,
     /// Winograd deconvolution

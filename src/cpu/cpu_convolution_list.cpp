@@ -459,6 +459,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE(gemm_x8s8s32x_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_int8_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
+            CPU_INSTANCE_X64(zendnn_lpgemm_convolution_fwd_t)
             nullptr,
         }},
         // BWD int8 (diff_dst:u8)

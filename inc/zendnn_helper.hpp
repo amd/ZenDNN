@@ -393,6 +393,35 @@ extern "C" {
         const int scale_count=1
     );
 
+    void zenConvolution2D_u8s8s16ou8(
+        const uint8_t *in_layer,
+        const int no_of_images,
+        const int channels,
+        const int height,
+        const int width,
+        const int8_t *filter,
+        const int no_of_filter,
+        const int kernel_h,
+        const int kernel_w,
+        const int pad_t,
+        const int pad_l,
+        const int pad_b,
+        const int pad_r,
+        const int stride_h,
+        const int stride_w,
+        int16_t *bias,
+        uint8_t *out_layer,
+        const int out_height,
+        const int out_width,
+        const bool concat = false,
+        const int filter_offset = 0,
+        const int total_filters = 0,
+        bool reluFused=false,
+        float *output_scales=nullptr,
+        const int *zero_point_dst=nullptr,
+        const int scale_count=1
+    );
+
     void zenConvolution2D_bf16bf16f32of32(
         const int16_t *in_layer,
         const int no_of_images,

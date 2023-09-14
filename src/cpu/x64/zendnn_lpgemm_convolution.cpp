@@ -26,7 +26,7 @@
 #include "common/zendnn_private.hpp"
 
 #include "cpu/x64/zendnn_lpgemm_convolution.hpp"
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     #include "cpu/x64/zendnn_lpgemm_utils.hpp"
 #endif
 #include "zendnn_logging.hpp"
@@ -35,7 +35,7 @@
 using namespace zendnn;
 
 
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
 // Direct Convolution
 // for Auto-tuner
 template <typename T, typename K> void convolution_direct_lp(engine eng, K src,
@@ -236,7 +236,7 @@ void zendnnConvolutionLPGEMM(
             );
         }
 
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
         else {
 
             char **cpu = NULL;
@@ -285,7 +285,7 @@ void zendnnConvolutionLPGEMM(
             );
         }
 
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
         else {
 
             char **cpu = NULL;
@@ -331,6 +331,37 @@ void zendnnConvolutionLPGEMM(
             reluFused,
             output_scales
         );
+    }
+    else if (supportedPath == 7) {
+	    zenConvolution2D_u8s8s16ou8(
+                (uint8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int16_t *)bias,
+                (uint8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+
     }
     else if (supportedPath == 3) {
 
@@ -399,8 +430,40 @@ void zendnnConvolutionLPGEMM(
                 scale_size
             );
         }
+        else if (supportedPath == 7) {
 
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+            zenConvolution2D_u8s8s16ou8(
+                (uint8_t *)src,
+                no_of_images,
+                channels,
+                height,
+                width,
+                (int8_t *)filter,
+                no_of_filter,
+                kernel_h,
+                kernel_w,
+                pad_t,
+                pad_l,
+                pad_b,
+                pad_r,
+                stride_h,
+                stride_w,
+                (int16_t *)bias,
+                (uint8_t *)dst,
+                out_height,
+                out_width,
+                concat,
+                filter_offset,
+                total_filters,
+                reluFused,
+                output_scales,
+                zero_point_dst,
+                scale_size
+            );
+
+        }
+
+#ifdef ZENDNN_ENABLE_LPGEMM
         else {
 
             char **cpu = NULL;
@@ -451,7 +514,7 @@ void zendnnConvolutionLPGEMM(
             );
         }
 
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
         else {
 
             char **cpu = NULL;
@@ -541,13 +604,16 @@ int isSupportedLpgemmPath(alg_kind_t alg_kind) {
              alg_kind == zendnn_convolution_gemm_bf16bf16f32obf16) {
         return 6;
     }
+    else if (alg_kind == zendnn_convolution_gemm_u8s8s16ou8) {
+        return 7;
+    }
     // -1 means the conditions are not supported
     return -1;
 }
 
 void zendnn_lpgemm_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx)
 const {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     const auto &jcp = kernel_->jcp;
     auto src = CTX_IN_MEM(const data_t *, ZENDNN_ARG_SRC);
     auto weights = CTX_IN_MEM(const data_t *, ZENDNN_ARG_WEIGHTS);
@@ -582,6 +648,7 @@ const {
     float *output_scales {nullptr};
     output_scales = pd()->attr()->output_scales_.scales_;
     int scale_size = pd()->attr()->output_scales_.count_;
+    // Reading DST zero-point
     const int *zero_point_dst {nullptr};
     zero_point_dst = pd()->attr()->zero_points_.get(ZENDNN_ARG_DST);
 

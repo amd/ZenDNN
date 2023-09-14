@@ -265,6 +265,7 @@ protected:
                              alg_kind::convolution_gemm,
                              alg_kind::convolution_gemm_u8s8s16os16,
                              alg_kind::convolution_gemm_u8s8s16os8,
+                             alg_kind::convolution_gemm_u8s8s16ou8,
                              alg_kind::convolution_gemm_u8s8s32os32,
                              alg_kind::convolution_gemm_u8s8s32os8,
                              alg_kind::convolution_gemm_s8s8s32os32,

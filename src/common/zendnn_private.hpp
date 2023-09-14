@@ -910,6 +910,37 @@ extern "C"
     const int scale_size
     );
 
+    void zenConvolution2Dbase_LPGEMM1x1_u8s8s16ou8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    uint8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int* zero_point_dst,
+    const int scale_size
+    );
+
     void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(
     zendnnEnv zenEnvObj,
     const int16_t *in_layer,

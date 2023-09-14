@@ -56,7 +56,7 @@ status_t conv_desc_init(convolution_desc_t *conv_desc, prop_kind_t prop_kind,
                       convolution_gemm_u8s8s32os8, convolution_gemm_s8s8s32os32,
                       convolution_gemm_s8s8s32os8, convolution_gemm_s8s8s16os16,
                       convolution_gemm_s8s8s16os8, convolution_gemm_bf16bf16f32of32,
-                      convolution_gemm_bf16bf16f32obf16);
+                      convolution_gemm_bf16bf16f32obf16, convolution_gemm_u8s8s16ou8);
     if (!args_ok) return invalid_arguments;
 
     if (padding_r == nullptr) padding_r = padding_l;

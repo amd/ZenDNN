@@ -88,7 +88,7 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32(
     const int filter_offset,
     const int total_filters
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32, no_of_images=", batchsize,
@@ -115,15 +115,24 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os32(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_u8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -235,7 +244,7 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8(
     const int *zero_point_dst,
     const int out_scale_size
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8, no_of_images=", batchsize,
@@ -264,16 +273,25 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s32os8(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_u8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -406,7 +424,7 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s32os32(
     const int filter_offset,
     const int total_filters
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_s8s8s32os32, no_of_images=", batchsize,
@@ -433,16 +451,25 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s32os32(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_s8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -555,7 +582,7 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s32os8(
     const int *zero_point_dst,
     const int out_scale_size
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_s8s8s32os8, no_of_images=", batchsize,
@@ -582,16 +609,25 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s32os8(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s32os32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_s8s8s32os32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -722,7 +758,7 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s16os16(
     const int filter_offset,
     const int total_filters
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_s8s8s32os32, no_of_images=", batchsize,
@@ -749,16 +785,25 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s16os16(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_s8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -871,7 +916,7 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s16os8(
     const int *zero_point_dst,
     const int out_scale_size
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_s8s8s16os8, no_of_images=", batchsize,
@@ -898,16 +943,25 @@ void zenConvolution2Dbase_LPGEMM1x1_s8s8s16os8(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_s8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -1043,7 +1097,7 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s16(
     const int filter_offset,
     const int total_filters
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_u8s8s16, no_of_images=", batchsize,
@@ -1070,16 +1124,25 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s16(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_u8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -1190,7 +1253,7 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(
     const int *zero_point_dst,
     const int out_scale_size
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8, no_of_images=", batchsize,
@@ -1217,16 +1280,25 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map.find(key_obj);
     if (found_obj == conv_weight_caching_map.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s16os16('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                 no_of_filter, ldb);
+        aocl_reorder_u8s8s16os16(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map[key_obj] = b_reorder;
     }
@@ -1319,6 +1391,189 @@ void zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(
 #endif
 }
 
+// zenConvolution2Dbase_LPGEMM1x1_u8s8s16ou8
+// Modification of zenConvolution2Dbase() to support LPGEMM (u8, s8, s16, u8)
+// Input is in u8, Filter is in s8
+// Accumulation is in s16 and Output is in u8
+//This implementation is based on im2row and gemm(BLIS) where im2row is performed on all the input
+//images/featureMap followed by gemm call to blis which computes the feature map for all the images
+//and then add bias value on it.
+//I/p and o/p format will be NHWC and filter format is HWCN
+//Multi thread parallization happen at OMP level in embarrassingly parallel manner for im2row, gemm and bias operation
+//internally these operations runs sequntially....we call it threading outside operation
+void zenConvolution2Dbase_LPGEMM1x1_u8s8s16ou8(
+    zendnnEnv zenEnvObj,
+    const uint8_t *in_layer,
+    const int images,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    uint8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool relu,
+    const float *scale,
+    const float *elementwise_input,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    const int *zero_point_dst,
+    const int out_scale_size
+) {
+
+#ifdef ZENDNN_ENABLE_LPGEMM
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+    int batchsize = images;
+    zendnnInfo(ZENDNN_ALGOLOG,
+               "zenConvolution2Dbase_LPGEMM1x1_u8s8s16ou8, no_of_images=", batchsize,
+               " channels=", channels, " height=", height, " width=", width,
+               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+               " pad_t=", pad_t, " pad_l=", pad_l,
+               " pad_b=", pad_b, " pad_r=", pad_r,
+               " stride_h=", stride_h, " stride_w=",stride_w);
+
+    const char transa = 'n', transb = 'n';
+    int32_t alpha = 1, beta = 0, ldc = no_of_filter;
+    dim_t lda = channels*kernel_h*kernel_w, ldb = no_of_filter;
+    char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
+
+    Key_conv key_obj;
+    key_obj.m = images * out_height * out_width;
+    key_obj.n = no_of_filter;
+    key_obj.k = channels * kernel_h * kernel_w;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+    key_obj.weights = filter;
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = channels*kernel_h*kernel_w;
+    const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
+
+    // finds object in map
+    auto found_obj = conv_weight_caching_map.find(key_obj);
+    if (found_obj == conv_weight_caching_map.end()) {
+
+        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s16os16(
+                                          order, trans,
+                                          reorder_param0, reorder_param1, reorder_param2);
+        int8_t *b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_u8s8s16os16(
+            order, trans,
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
+        //Create new entry
+        conv_weight_caching_map[key_obj] = b_reorder;
+    }
+
+    aocl_post_op *post_ops = NULL;
+    // By default, scale postop is always enabled.
+    // Check if Bias and ReLU postops are required.
+    int postop_count = 1;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        if (bias != NULL) {
+            // Add bias postop
+            // Bias is of type int16 (accumulation type)
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            int bias_size = no_of_filter * sizeof(int16_t);
+            post_ops->bias.bias = (int16_t *) malloc(bias_size);
+            if (post_ops->bias.bias != NULL) {
+                memcpy(post_ops->bias.bias, bias, bias_size);
+            }
+        }
+        if (relu) {
+            // Add ReLU postop
+            dim_t eltwise_index = 0;
+            post_ops->seq_vector[post_op_i++] = ELTWISE;
+            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
+                                    aocl_post_op_eltwise));
+            (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
+            (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
+            (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
+            (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
+            (post_ops->eltwise + eltwise_index)->algo.algo_type = RELU;
+        }
+
+        // Add scale postop
+        post_ops->seq_vector[post_op_i++] = SCALE;
+        post_ops->sum.is_power_of_2 = FALSE;
+        post_ops->sum.buff = NULL;
+        // TODO: Zero-point not support in LPGEMM
+        // Placeholder for zero-point
+        post_ops->sum.zero_point = malloc(no_of_filter * sizeof(uint8_t));
+        uint8_t *temp_zp = (uint8_t *)post_ops->sum.zero_point;
+        uint8_t zero_point_temp = ((uint8_t *)zero_point_dst)[0];
+        for (int i=0; i<no_of_filter; ++i) {
+            temp_zp[i] = zero_point_temp;
+        }
+        int scale_size = no_of_filter * sizeof(float);
+        post_ops->sum.scale_factor = malloc(scale_size);
+        float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
+        if (out_scale_size > 1) {
+            for (int i=0; i<no_of_filter; ++i) {
+                temp_dscale_ptr[i] = (float)scale[i];
+            }
+        }
+        else {
+            for (int i=0; i<no_of_filter; ++i) {
+                temp_dscale_ptr[i] = (float)scale[0];
+            }
+        }
+        post_ops->seq_length = postop_count;
+    }
+
+    aocl_gemm_u8s8s16ou8(storage, transa, transb, images * out_height*out_width,
+                         no_of_filter,
+                         channels*kernel_h*kernel_w, alpha, in_layer,
+                         lda, mem_format_a, conv_weight_caching_map[key_obj], ldb,
+                         mem_format_b, beta, out_layer,
+                         ldc, post_ops);
+
+    // Free memory for postops.
+    if (bias != NULL) {
+        free(post_ops->bias.bias);
+    }
+    if (relu) {
+        free(post_ops->eltwise);
+    }
+    // Scale postop is always enabled so deleted directly.
+    free(post_ops->sum.scale_factor);
+    free(post_ops->seq_vector);
+    free(post_ops);
+#endif
+#endif
+}
+
 // zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32
 // Modification of zenConvolution2Dbase() to support LPGEMM (bf16, bf16, f32)
 // Input is in bf16, Filter is in bf16
@@ -1357,7 +1612,7 @@ void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(
     const int filter_offset,
     const int total_filters
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32, no_of_images=", batchsize,
@@ -1384,16 +1639,25 @@ void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32of32(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map_s16.find(key_obj);
     if (found_obj == conv_weight_caching_map_s16.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int16_t *b_reorder = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_bf16bf16f32of32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                     no_of_filter, ldb);
+        aocl_reorder_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map_s16[key_obj] = b_reorder;
     }
@@ -1506,7 +1770,7 @@ void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16(
     const int *zero_point_dst,
     const int out_scale_size
 ) {
-#ifdef ZENDNN_ENABLE_LPGEMM_CONV
+#ifdef ZENDNN_ENABLE_LPGEMM
     int batchsize = images;
     zendnnInfo(ZENDNN_ALGOLOG,
                "zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16, no_of_images=", batchsize,
@@ -1533,16 +1797,25 @@ void zenConvolution2Dbase_LPGEMM1x1_bf16bf16f32obf16(
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = channels*kernel_h*kernel_w;
     const dim_t reorder_param2 = no_of_filter;
+    const char order = 'r';
+    const char trans = 'n';
 
     // finds object in map
     auto found_obj = conv_weight_caching_map_s16.find(key_obj);
     if (found_obj == conv_weight_caching_map_s16.end()) {
 
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                          order, trans,
+#endif
                                           reorder_param0, reorder_param1, reorder_param2);
         int16_t *b_reorder = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_bf16bf16f32of32('B', filter, b_reorder, channels*kernel_h*kernel_w,
-                                     no_of_filter, ldb);
+        aocl_reorder_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+            order, trans,
+#endif
+            'B', filter, b_reorder, channels*kernel_h*kernel_w,
+            no_of_filter, ldb);
         //Create new entry
         conv_weight_caching_map_s16[key_obj] = b_reorder;
     }
@@ -4918,6 +5191,52 @@ void zenConvolution2D_u8s8s16os8(
 
     zendnnEnv zenEnvObj = readEnv();
     zenConvolution2Dbase_LPGEMM1x1_u8s8s16os8(zenEnvObj, in_layer, batchsize,
+            channels, height, width, filter,
+            no_of_filter,
+            kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
+            bias /*NULL*/,
+            out_layer, out_height, out_width, reluFused /*0*/ /*relu*/,
+            output_scales /*scale*/,
+            NULL/*elementwise*/,
+            concat, filter_offset, total_filters, zero_point_dst, scale_size);
+}
+
+void zenConvolution2D_u8s8s16ou8(
+    const uint8_t *in_layer,
+    const int batchsize,
+    const int channels,
+    const int height,
+    const int width,
+    const int8_t *filter,
+    const int no_of_filter,
+    const int kernel_h,
+    const int kernel_w,
+    const int pad_t,
+    const int pad_l,
+    const int pad_b,
+    const int pad_r,
+    const int stride_h,
+    const int stride_w,
+    int16_t *bias,
+    uint8_t *out_layer,
+    const int out_height,
+    const int out_width,
+    const bool concat,
+    const int filter_offset,
+    const int total_filters,
+    bool reluFused,
+    float *output_scales,
+    const int *zero_point_dst,
+    const int scale_size
+) {
+    if ((in_layer == NULL)|| (filter == NULL) || (out_layer == NULL)) {
+        zendnnError(ZENDNN_ALGOLOG,
+                    "zenConvolution2D Memory is not defined for in_layer or filter or out_layer");
+        return;
+    }
+
+    zendnnEnv zenEnvObj = readEnv();
+    zenConvolution2Dbase_LPGEMM1x1_u8s8s16ou8(zenEnvObj, in_layer, batchsize,
             channels, height, width, filter,
             no_of_filter,
             kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w,
