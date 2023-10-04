@@ -572,7 +572,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
         unsigned long k = K_Array[i];
 
         for (int j=0; j<group_size[i]; j++) {
-            zenMatMul_gemm(zenEnvObj, 0, Layout, transpose_input, transpose_filter,
+            zenMatmulSplit(zenEnvObj, 0, Layout, transpose_input, transpose_filter,
                            m, k, n, alpha_Array[i],
                            A_Array[grp_start + j], lda_Array[i],
                            B_Array[grp_start + j], ldb_Array[i],
@@ -744,12 +744,12 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
 #if 0
                 //TODO: Pass one parameter for omp_set_max_active_levels in zenMatmulSplit
                 //Need to add this in zendnnEnv class
-                zenMatMul_gemm(zenEnvObj, 0, Layout, transpose_input, transpose_filter, m, k, n,
-                               alpha_Array[i],
-                               A_Array[grp_start + threadOffset], lda_Array[i],
-                               B_Array[grp_start + threadOffset], ldb_Array[i], NULL,
-                               false, false, beta_Array[i], C_Array[grp_start + threadOffset],
-                               ldc_Array[i]);                      
+                zenMatmulSplit(zenEnvObj, 0, Layout, transpose_input, transpose_filter, m, k, n,
+                               alpha_Array[i]
+                               A_Array[i] + (A_offset*threadOffset), lda_Array[i],
+                               B_Array[i] + (B_offset*threadOffset), ldb_Array[i], NULL,
+                               false, false, beta_Array[i], C_Array[i] + (C_offset*threadOffset),
+                               ldc_Array[i]);
 #else
                 omp_set_max_active_levels(1);
                 cblas_sgemm(Layout ? CblasRowMajor : CblasColMajor,
@@ -784,12 +784,13 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
 // TODO: Add support for Primitive caching
 void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
                              bool TransA, bool TransB, int *M_Array,
-                             int *N_Array, int *K_Array,
-                             const float **A_Array,
-                             const float **B_Array,
-                             float **C_Array,
-                             int *group_size, bool is_mul_add,
-                             const float **Add_Array, float mul_node, int batch_size) {
+                             int *N_Array, int *K_Array, const float *alpha_Array,
+                             const float **A_Array, int *lda_Array,
+                             const float **B_Array, int *ldb_Array, const float *beta_Array,
+                             float **C_Array, int *ldc_Array,
+                             int group_count, int *group_size, bool is_mul_add,
+                             const float **Add_Array, float mul_node, int batch_size,
+                             const float **bias, const bool relu, const int gelu) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -950,11 +951,11 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
 #else
     if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
         zenBatchMatMulPrimitive(zenEnvObj, Layout, TransA, TransB,
-                                M_Array, N_Array, K_Array,
-                                A_Array, B_Array,
-                                C_Array,
-                                group_size, is_mul_add, Add_Array,
-                                mul_node, batch_size);
+                                M_Array, N_Array, K_Array, alpha_Array,
+                                A_Array, lda_Array, B_Array, ldb_Array,
+                                beta_Array, C_Array, ldc_Array,
+                                group_count, group_size, is_mul_add, Add_Array,
+                                mul_node, batch_size, bias, relu, gelu);
     }
     else {
         //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
@@ -1040,14 +1041,61 @@ void zenMatmulSplit(
     // more than 1, then thread_qty is set to 1.
     unsigned int l2_num_threads = 1;
 
-    if (transpose_input) {
-        l2_num_threads = thread_qty;
-        thread_qty = 1;
-        omp_set_max_active_levels(2);
-    } else {
+
+    //Experimental version for auto tuner
+    // Nested Parallelism is disabled
+    if (auto_tuner ||
+            zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
         l2_num_threads = 1;
         thread_qty = zenEnvObj.omp_num_threads;
         omp_set_max_active_levels(1);
+    }
+    else {
+
+#if BLIS_EXPERT
+        //If M, N and K >=1024, NORMAL path of BLIS give optimal performance. This is
+        //based on heuristic with different model and different BS
+        //blis_m_kernel and blis_n_kernel is choosen based on the BLIS mxn kernel(6x16).
+        //For optimal performance a thread need to work with atleast m=6 and n=16
+        //for mxn kernel. if m/6 < n/16, there is no benifit in splitting m, as it will
+        //make more skinny matix sizes.
+        //If (m < 6 || n < 16), there is no benefit of splitting,
+        //as residual kernel will be called instead of optimal 6x16 kernel
+        //Zen2 has 16 registers which can store 128 floats, BLIS uses
+        //96(6x16=12 ymm registers) for output and 32 floats (4 ymm  registers)
+        //are used to load A and B
+        //TODO: check 1024 value with SSP64 or more than 32 threads
+        int blis_m_kernel = 6;
+        int blis_n_kernel = 16;
+        if ((m/blis_m_kernel < n/blis_n_kernel) || (m >=BLIS_NORMAL_PATH1 &&
+                n>=BLIS_NORMAL_PATH1 &&  k>=BLIS_NORMAL_PATH1) || (m >BLIS_NORMAL_PATH2 ||
+                        n >BLIS_NORMAL_PATH2)) {
+            l2_num_threads = thread_qty;
+        }
+        else {
+            //If m is large enough to accomodate total threads*6, then go for split.
+            if (m > (thread_qty*blis_m_kernel)) {
+                l2_num_threads = 1;
+            }
+            else { // create nested parallelism
+                //TODO: Need to check below code with nested parallelism model
+                //temp = ((m%BLIS_KERNEL_DIMS_M)==0?m/BLIS_KERNEL_DIMS_M:
+                //              ((m/BLIS_KERNEL_DIMS_M)+1));
+                //l2_num_threads = thread_qty/(temp);
+                l2_num_threads = thread_qty;
+            }
+        }
+        thread_qty = (thread_qty%l2_num_threads)==0?(thread_qty/l2_num_threads):
+                     (thread_qty/l2_num_threads)+1;
+        omp_set_max_active_levels(2);
+#else
+        //UnOptimized path, added to support CBLAS interface
+        //TODO: Check if this can be removed completely
+        l2_num_threads = thread_qty;
+        thread_qty = 1;
+        omp_set_max_active_levels(2);
+#endif
+
     }
 
     float *data_col = NULL;
