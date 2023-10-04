@@ -89,7 +89,7 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 
 #Find the last digit of EPYC model number
 EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, 4);}')
-ZNVER=znver4 #Default value
+ZNVER=znver2 #Default value
 
 ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
 	ZNVER=znver3 #For Milan
@@ -151,7 +151,7 @@ endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) -mavx512f
+	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
 else
 	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
 endif
@@ -298,11 +298,6 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
-	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_benchmark $(INCDIRS) \
-                -Itests/api_tests tests/api_tests/zendnn_embedding_bag_benchmark.cpp -L_out/lib -lamdZenDNN \
-                -L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
-                $(CK_LINK_FLAGS)
-
 
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \

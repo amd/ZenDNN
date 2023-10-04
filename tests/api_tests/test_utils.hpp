@@ -45,7 +45,7 @@ inline zendnn::engine::kind parse_engine_kind(
     if (argc == 1) {
         return zendnn::engine::kind::cpu;
     }
-    else if (argc <= extra_args + 5) {
+    else if (argc <= extra_args + 2) {
         std::string engine_kind_str = argv[1];
         // Checking the engine type, i.e. CPU or GPU
         if (engine_kind_str == "cpu") {

@@ -21,261 +21,11 @@
 
 #include <immintrin.h>
 
-#define ZEN_MM_PS_STRIDE        (8)
-#define ZEN_MM_PS_STRIDE1       (16)
+#define ZEN_MM_PS_STRIDE    (8)
 
 //
 // define a class for vectors longer than that can be accomodated by AVX2 registers
 //
-template<uint32_t DIM=1>
-struct zenmmAVX512_ext_ps_1 {
-
-    zenmmAVX512_ext_ps_1() {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_setzero_ps();
-        }
-    }
-
-    inline void setzero_ps() {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_setzero_ps();
-        }
-    };
-
-    inline void load_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void fetch_add_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_add_ps(_mm512_load_ps(mem), v[i]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-
-    inline void fetch_fmadd_ps(float const *mem, const float mfactor) {
-        __m512 mm = _mm512_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[i]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-
-    };
-
-    inline void fetch_max_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_max_ps(_mm512_load_ps(mem), v[i]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void store_ps(float *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            _mm512_store_ps(mem,v[i]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void scale_store_ps(float *mem, const float mfactor) {
-        __m512 mm = _mm512_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_mul_ps(v[i], mm);
-            _mm512_store_ps(mem,v[i]);
-        }
-    };
-
-  private:
-    __m512           v[DIM];
-    const uint32_t   unroll_factor = DIM;
-};
-
-
-template<uint32_t DIM=8>
-struct zenmmAVX512_ext_ps_2 {
-
-    static_assert(!(DIM & 0x07), "zenmm_ext_ps: DIM needs to be multiple of 8");
-
-    zenmmAVX512_ext_ps_2() {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_setzero_ps();
-            v[offset + 1] = _mm512_setzero_ps();
-            v[offset + 2] = _mm512_setzero_ps();
-            v[offset + 3] = _mm512_setzero_ps();
-            v[offset + 4] = _mm512_setzero_ps();
-            v[offset + 5] = _mm512_setzero_ps();
-            v[offset + 6] = _mm512_setzero_ps();
-            v[offset + 7] = _mm512_setzero_ps();
-        }
-    }
-
-    inline void setzero_ps() {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_setzero_ps();
-            v[offset + 1] = _mm512_setzero_ps();
-            v[offset + 2] = _mm512_setzero_ps();
-            v[offset + 3] = _mm512_setzero_ps();
-            v[offset + 4] = _mm512_setzero_ps();
-            v[offset + 5] = _mm512_setzero_ps();
-            v[offset + 6] = _mm512_setzero_ps();
-            v[offset + 7] = _mm512_setzero_ps();
-        }
-    };
-
-    inline void load_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_load_ps(mem);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void fetch_add_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 0]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 1]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 2]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 3]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 4]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 5]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 6]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 7]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-
-    inline void fetch_fmadd_ps(float const *mem, const float mfactor) {
-        __m512 mm = _mm512_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 0]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 1]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 2]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 3]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 4]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 5]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 6]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 7]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-
-    };
-
-    inline void fetch_max_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 0]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 1]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 2]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 3]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 4]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 5]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 6]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 7]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void store_ps(float *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            _mm512_store_ps(mem,v[offset +0]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +1]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +2]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +3]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +4]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +5]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +6]);
-            mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +7]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-    inline void scale_store_ps(float *mem, const float mfactor) {
-        __m512 mm = _mm512_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
-            const uint32_t offset = (i << 3);
-            v[offset +0] = _mm512_mul_ps(v[offset +0], mm);
-            _mm512_store_ps(mem,v[offset +0]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +1] = _mm512_mul_ps(v[offset +1], mm);
-            _mm512_store_ps(mem,v[offset +1]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +2] = _mm512_mul_ps(v[offset +2], mm);
-            _mm512_store_ps(mem,v[offset +2]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +3] = _mm512_mul_ps(v[offset +3], mm);
-            _mm512_store_ps(mem,v[offset +3]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +4] = _mm512_mul_ps(v[offset +4], mm);
-            _mm512_store_ps(mem,v[offset +4]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +5] = _mm512_mul_ps(v[offset +5], mm);
-            _mm512_store_ps(mem,v[offset +5]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +6] = _mm512_mul_ps(v[offset +6], mm);
-            _mm512_store_ps(mem,v[offset +6]);
-            mem += ZEN_MM_PS_STRIDE1;
-            v[offset +7] = _mm512_mul_ps(v[offset +7], mm);
-            _mm512_store_ps(mem,v[offset +7]);
-            mem += ZEN_MM_PS_STRIDE1;
-        }
-    };
-
-  private:
-    __m512           v[DIM];
-    const uint32_t   unroll_factor = (DIM >> 3);
-};
-
 
 template<uint32_t DIM=8>
 struct zenmm_ext_ps {
@@ -283,7 +33,7 @@ struct zenmm_ext_ps {
     static_assert(!(DIM & 0x07), "zenmm_ext_ps: DIM needs to be multiple of 8");
 
     zenmm_ext_ps() {
-        for (auto i = 0; i< unroll_factor; ++i) {
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_setzero_ps();
             v[offset + 1] = _mm256_setzero_ps();
@@ -296,8 +46,8 @@ struct zenmm_ext_ps {
         }
     }
 
-    inline void setzero_ps() {
-        for (auto i = 0; i< unroll_factor; ++i) {
+    inline void setzero_ps(){
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_setzero_ps();
             v[offset + 1] = _mm256_setzero_ps();
@@ -310,8 +60,8 @@ struct zenmm_ext_ps {
         }
     };
 
-    inline void load_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
+    inline void load_ps(float const* mem){
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_load_ps(mem);
             mem += ZEN_MM_PS_STRIDE;
@@ -332,8 +82,8 @@ struct zenmm_ext_ps {
         }
     };
 
-    inline void fetch_add_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
+    inline void fetch_add_ps(float const* mem){
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_add_ps(_mm256_load_ps(mem), v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE;
@@ -355,9 +105,9 @@ struct zenmm_ext_ps {
     };
 
 
-    inline void fetch_fmadd_ps(float const *mem, const float mfactor) {
+    inline void fetch_fmadd_ps(float const* mem, const float mfactor) {
         __m256 mm = _mm256_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_fmadd_ps(_mm256_load_ps(mem), mm, v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE;
@@ -379,8 +129,8 @@ struct zenmm_ext_ps {
 
     };
 
-    inline void fetch_max_ps(float const *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
+    inline void fetch_max_ps(float const* mem){
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset + 0] = _mm256_max_ps(_mm256_load_ps(mem), v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE;
@@ -401,8 +151,8 @@ struct zenmm_ext_ps {
         }
     };
 
-    inline void store_ps(float *mem) {
-        for (auto i = 0; i< unroll_factor; ++i) {
+    inline void store_ps(float* mem) {
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             _mm256_store_ps(mem,v[offset +0]);
             mem += ZEN_MM_PS_STRIDE;
@@ -423,9 +173,9 @@ struct zenmm_ext_ps {
         }
     };
 
-    inline void scale_store_ps(float *mem, const float mfactor) {
+    inline void scale_store_ps(float* mem, const float mfactor) {
         __m256 mm = _mm256_set1_ps(mfactor);
-        for (auto i = 0; i< unroll_factor; ++i) {
+        for (auto i = 0; i< unroll_factor; ++i ) {
             const uint32_t offset = (i << 3);
             v[offset +0] = _mm256_mul_ps(v[offset +0], mm);
             _mm256_store_ps(mem,v[offset +0]);
@@ -454,7 +204,7 @@ struct zenmm_ext_ps {
         }
     };
 
-  private:
+private:
     __m256           v[DIM];
     const uint32_t   unroll_factor = (DIM >> 3);
 };
@@ -462,10 +212,4 @@ struct zenmm_ext_ps {
 using zenmm_ext_ps64=zenmm_ext_ps<8>;
 using zenmm_ext_ps128=zenmm_ext_ps<16>;
 
-using zenmmAVX512_ext_ps16=zenmmAVX512_ext_ps_1<1>;
-using zenmmAVX512_ext_ps32=zenmmAVX512_ext_ps_1<2>;
-using zenmmAVX512_ext_ps64=zenmmAVX512_ext_ps_1<4>;
-using zenmmAVX512_ext_ps128=zenmmAVX512_ext_ps_2<8>;
-using zenmmAVX512_ext_ps256=zenmmAVX512_ext_ps_2<16>;
-using zenmmAVX512_ext_ps512=zenmmAVX512_ext_ps_2<32>;
 #endif
