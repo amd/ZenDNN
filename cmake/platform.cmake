@@ -188,7 +188,7 @@ endmacro()
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND WIN32)
     #set(NOMINMAX TRUE)
     #add_definitions_with_host_compiler(-D_CRT_SECURE_NO_WARNINGS)
-    append(CMAKE_CCXX_FLAGS "/arch:AVX512")
+    append(CMAKE_CCXX_FLAGS "/arch:AVX2")
     append(CMAKE_CCXX_FLAGS "/MP")
 endif()
 
