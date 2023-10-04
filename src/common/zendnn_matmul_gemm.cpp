@@ -66,6 +66,8 @@ void zenMatMul_gemm_blocked(
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
+#if USE_CUSTOM_BLIS
+    zendnnVerbose(ZENDNN_PROFLOG,"Custom blis is used");
     Key_matmul key_obj;
     key_obj.transpose_input = transpose_input;
     key_obj.transpose_weights = transpose_filter;
@@ -98,55 +100,6 @@ void zenMatMul_gemm_blocked(
         //Create new entry
         matmul_weight_caching_map[key_obj] = reorder_filter;
     }
-
-    int postop_count = 0;
-    if (bias != NULL) {
-        ++postop_count;
-    }
-    if (relu) {
-        ++postop_count;
-    }
-
-    // Create postop for LPGEMM
-    // Order of postops: BIAS -> RELU -> SCALE
-    if (postop_count > 0) {
-        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
-        dim_t max_post_ops_seq_length = postop_count;
-        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
-                               sizeof(AOCL_POST_OP_TYPE));
-
-        // Iterate through each postop, check and add it if needed.
-        int post_op_i = 0;
-        if (bias != NULL) {
-            // Add bias postop
-            // Bias is of type int16 (accumulation type)
-            post_ops->seq_vector[post_op_i++] = BIAS;
-            int bias_size = n * sizeof(float);
-            post_ops->bias.bias = (float *) malloc(bias_size);
-            if (post_ops->bias.bias != NULL) {
-                memcpy(post_ops->bias.bias, bias, bias_size);
-            }
-        }
-        if (relu) {
-            // Add ReLU postop
-            dim_t eltwise_index = 0;
-            post_ops->seq_vector[post_op_i++] = ELTWISE;
-            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                    aocl_post_op_eltwise));
-            (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-            (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-            (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
-            (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-            (post_ops->eltwise + eltwise_index)->algo.algo_type = RELU;
-        }
-
-        //TBD
-        //Gelu-Tanh and Gelu-erf post-ops
-        //Scale post-op
-
-        post_ops->seq_length = postop_count;
-    }
-
     //Perform MatMul using AMD BLIS
     aocl_gemm_f32f32f32of32(Layout? CblasRowMajor : CblasColMajor,
                             transpose_input ? CblasTrans : CblasNoTrans,
@@ -155,25 +108,24 @@ void zenMatMul_gemm_blocked(
                             beta,
                             output, ldc,
                             post_ops);
-
-    if (gelu) {
+#else
+    zendnnVerbose(ZENDNN_PROFLOG,"Custom blis is not used");
+    //Perform MatMul using AMD BLIS
+    cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
+                transpose_input ? CblasTrans : CblasNoTrans,
+                transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
+                input, lda, filter, ldb, beta, output, ldc);
+#endif
+    /*
+    if (bias || relu || gelu) {
         zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                    ldc, 0,
-                   NULL, false, gelu, NULL,
+                   bias, relu, gelu, NULL,
                    thread_qty);
     }
+    */
 
-    // Free memory for postops.
-    if (bias != NULL) {
-        free(post_ops->bias.bias);
-    }
-    if (relu) {
-        free(post_ops->eltwise);
-    }
-    if (postop_count > 0) {
-        free(post_ops->seq_vector);
-        free(post_ops);
-    }
+
 }
 
 void zenMatMul_gemm(
@@ -234,6 +186,12 @@ void zenMatMul_gemm(
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
                                output, ldc);
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                       ldc, 0,
+                       bias, relu, gelu, NULL,
+                       thread_qty);
+        }
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
@@ -805,30 +763,14 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
     long N = N_Array[0];
     long K = K_Array[0];
 
-    memory::dims src_dims = (group_size[0] == 1) ? (memory::dims) {
-        M, K
-} :
-    (memory::dims) {
-        batch_size, group_size[0]/batch_size, M, K
-    };
-    memory::dims weight_dims = (group_size[0] == 1) ? (memory::dims) {
-        K, N
-} :
-    (memory::dims) {
-        batch_size, group_size[0]/batch_size, K, N
-    };
-    memory::dims dst_dims = (group_size[0] == 1) ? (memory::dims) {
-        M, N
-} :
-    (memory::dims) {
-        batch_size, group_size[0]/batch_size, M, N
-    };
-    memory::dims bias_dims = (group_size[0] == 1) ? (memory::dims) {
-        1, N
-} :
-    (memory::dims) {
-        1, 1, 1, N
-    };
+    memory::dims src_dims = (group_size[0] == 1) ? (memory::dims) {M, K} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, M, K};
+    memory::dims weight_dims = (group_size[0] == 1) ? (memory::dims) {K, N} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, K, N};
+    memory::dims dst_dims = (group_size[0] == 1) ? (memory::dims) {M, N} :
+      (memory::dims) {batch_size, group_size[0]/batch_size, M, N};
+    memory::dims bias_dims = (group_size[0] == 1) ? (memory::dims) {1, N} :
+      (memory::dims) {1, 1, 1, N};
 
     memory::desc src_md = memory::desc({src_dims}, dt::f32,
                                        (group_size[0] == 1) ? tag::ab : tag::abcd);
@@ -879,7 +821,7 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
         postop_memory2 =
         memory({{add_dims}, dt::f32, tag::abcd}, eng, add_arr);
 
-        net_args.push_back({
+        net_args.push_back( {
             {ZENDNN_ARG_SRC, src_memory},
             {ZENDNN_ARG_WEIGHTS, user_weights_memory},
             {ZENDNN_ARG_DST, dst_memory},
@@ -1135,7 +1077,6 @@ void zenMatmulSplit(
         unsigned long gemmRows = m_per_thread;
 
         if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM2) {
-
 #if BLIS_EXPERT
             if (transpose_input)
                 bli_obj_create_with_attached_buffer(blis_obj.dt, gemmRows,
@@ -1171,30 +1112,12 @@ void zenMatmulSplit(
                         alpha, input + inputOffset, lda, filter, ldb, beta,
                         output + outputOffset, ldc);
 #endif
-
-            //Below Bias and activation code can be eliminated if not required
-            unsigned long biasOffset = outputOffset;
-            if (bias || relu || gelu) {
-                zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
-                           ldc, biasOffset,
-                           bias, relu, gelu, NULL,
-                           l2_num_threads);
-            }
         }
         else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
-
             zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
                          gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
                          ldb, beta, output+outputOffset, ldc);
 
-            //Below Bias and activation code can be eliminated if not required
-            unsigned long biasOffset = outputOffset;
-            if (bias || relu || gelu) {
-                zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
-                           ldc, biasOffset,
-                           bias, relu, gelu, NULL,
-                           l2_num_threads);
-            }
         }
         else {
             zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout,
@@ -1203,5 +1126,13 @@ void zenMatmulSplit(
                                    ldb, bias, relu, gelu, beta, output+outputOffset, ldc);
         }
 
+        //Below Bias and activation code can be eliminated if not required
+        unsigned long biasOffset = outputOffset;
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
+                       ldc, biasOffset,
+                       bias, relu, gelu, NULL,
+                       l2_num_threads);
+        }
     }
 }
