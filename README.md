@@ -60,8 +60,10 @@ The latest information on the ZenDNN release and installers is available on AMD.
 This release of ZenDNN supports the following Operating Systems (OS) and compilers:
 ## OS
 * Ubuntu® 22.04 LTS and later
-* Red Hat® Enterprise Linux® (RHEL) 9.0 and later
-* CentOS Stream 9 and later
+* Red Hat® Enterprise Linux® (RHEL) 9.1 and later
+* SLES15 SP5 and later
+* PyTorch v1.13 wheel files are supported on Anolis OS 8.8
+* Supported on Windows with ONNX Runtime v1.15.1 only (Beta release)
 ## Compilers
 * GCC 9.3 and later
 
