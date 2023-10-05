@@ -39,34 +39,32 @@ enum ZendnnLogModule {
     ZENDNN_TESTLOG,
     ZENDNN_PROFLOG,
     ZENDNN_FWKLOG,
-    ZENDNN_PERFLOG,
     ZENDNN_NUM_LOG_MODULES
 };
 
 struct ZendnnLogState {
     ZendnnLogState(cn::steady_clock::time_point startTime):startTime_(startTime) {
-        moduleNames_[ZENDNN_ALGOLOG]  = "ALGO";
-        moduleNames_[ZENDNN_CORELOG]  = "CORE";
-        moduleNames_[ZENDNN_APILOG]   = "API";
-        moduleNames_[ZENDNN_TESTLOG]  = "TEST";
-        moduleNames_[ZENDNN_PROFLOG]  = "PROF";
-        moduleNames_[ZENDNN_FWKLOG]   = "FWK";
-        moduleNames_[ZENDNN_PERFLOG]  = "PERF";
+      moduleNames_[ZENDNN_ALGOLOG]  = "ALGO";
+      moduleNames_[ZENDNN_CORELOG]  = "CORE";
+      moduleNames_[ZENDNN_APILOG]   = "API";
+      moduleNames_[ZENDNN_TESTLOG]  = "TEST";
+      moduleNames_[ZENDNN_PROFLOG]  = "PROF";
+      moduleNames_[ZENDNN_FWKLOG]   = "FWK";
 
 
-        static_assert(ZENDNN_NUM_LOG_MODULES == 7,
-                      "Need to update moduleNames_ initialization");
+      static_assert(ZENDNN_NUM_LOG_MODULES == 6,
+		    "Need to update moduleNames_ initialization");
 
-        for (int mod = 0; mod < ZENDNN_NUM_LOG_MODULES; mod++) {
-            auto name = moduleNames_.at(mod);
-            int lvl = zendnnGetLogLevel(name);
-            //std::cout << "mod: " << mod << "\n";
-            //std::cout << "name: " << name << "\n";
-            //std::cout << "lvl: " << lvl << "\n";
-            moduleLevels_.at(mod) = lvl;
-        }
+      for (int mod = 0; mod < ZENDNN_NUM_LOG_MODULES; mod++) {
+	auto name = moduleNames_.at(mod);
+	int lvl = zendnnGetLogLevel(name);
+	//std::cout << "mod: " << mod << "\n";
+	//std::cout << "name: " << name << "\n";
+	//std::cout << "lvl: " << lvl << "\n";
+	moduleLevels_.at(mod) = lvl;
+      }
 
-        log = &std::cout;
+      log = &std::cout;
 
     }
     cn::steady_clock::time_point startTime_;
