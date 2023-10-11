@@ -107,7 +107,12 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, 4);}')
 ZNVER=znver2 #Default value
 
-ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
+AVX512_EB_EN=0
+ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "4"
+	AVX512_EB_EN=1
+	AVX512_FLAG=-mavx512f
+	ZNVER=znver4 #For Genoa
+else ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
 	ZNVER=znver3 #For Milan
 endif
 
@@ -118,7 +123,7 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
-	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
 	else
@@ -130,7 +135,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 -DAVX512_EB_EN=$(AVX512_EB_EN)
 endif #AOCC
 else #RELEASE = 1
 ifeq ($(AOCC), 0)
@@ -140,9 +145,9 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -fPIC -fopenmp
 	ifeq ($(LPGEMM), 1)
-	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE)
+	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	else
-	     COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	     COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	endif
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=znver2
@@ -155,7 +160,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE)
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN)
 endif #AOCC
 endif #RELEASE = 1
 
@@ -167,9 +172,9 @@ endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
+	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE) $(AVX512_FLAG)
 else
-	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
+	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE) $(AVX512_FLAG)
 endif
 
 # https://github.com/mapbox/cpp/issues/37
@@ -314,6 +319,11 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_benchmark $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_embedding_bag_benchmark.cpp -L_out/lib -lamdZenDNN \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+                $(CK_LINK_FLAGS)
+
 
 
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)

@@ -109,14 +109,8 @@ class zendnnEnv {
     //initializing ZenDNNEnv values.
     zendnnEnv() {
         omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
-        if (getenv("ZEN_NUM_THREADS")) {
-            zen_num_threads = atoi(getenv("ZEN_NUM_THREADS"));
-            //Overriding OMP_NUM_THREADS if ZEN_NUM_THREADS is exported
-            omp_num_threads = zen_num_threads;
-        }
-        else {
-            zen_num_threads = 1;
-        }
+        zen_num_threads = zendnn_getenv_int("ZEN_NUM_THREADS", 1);
+
         //ZENDNN_GEMM_ALGO is to enable specific GEMM ALGO.
         //Currently ZenDNN support three ALGO path for GEMM execution
         // If value is set to 0, library decide the optimal path
