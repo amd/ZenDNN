@@ -73,6 +73,22 @@ else
 	LIBM_ENABLE:= -DLIBM_ENABLE=0
 endif
 
+#Set uProf path
+ifeq "$(ZENDNN_ENABLE_UPROF)" "1"
+	UPROF_PATH:=$(UPROF_INSTALL_PATH)
+	UPROF_INCLUDE_PATH:= -I$(UPROF_PATH)/include
+	UPROF_LIB_PATH:= -L$(UPROF_PATH)/lib/x64
+	UPROF_ENABLE:= -DUPROF_ENABLE=1
+	UPROF_LINK:= -lAMDProfileController
+	CXX_UPROF_LINK:= -Wl,--whole-archive $(UPROF_PATH)/lib/x64/libAMDProfileController.a -Wl,--no-whole-archive
+else
+	UPROF_PATH:=
+	UPROF_INCLUDE_PATH:=
+	UPROF_LIB_PATH:=
+	UPROF_ENABLE:= -DUPROF_ENABLE=0
+	CXX_UPROF_LINK :=
+endif
+
 ifeq "$(ZENDNN_TF_USE_CUSTOM_BLIS)" "1"
 	USE_CUSTOM_BLIS:= -DUSE_CUSTOM_BLIS=1
 else
@@ -151,9 +167,9 @@ endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
+	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 else
-	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS)
+	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 endif
 
 # https://github.com/mapbox/cpp/issues/37
@@ -171,7 +187,7 @@ TESTDIR  := tests
 ZENDNN_GIT_ROOT := $(shell pwd)
 
 INCDIRS  := -Iinc -Isrc -Isrc/common -Isrc/cpu \
-	-I$(BLIS_INC_PATH) $(LIBM_INCLUDE_PATH) \
+	-I$(BLIS_INC_PATH) $(LIBM_INCLUDE_PATH) $(UPROF_INCLUDE_PATH)\
 	$(CK_INCLUDES)
 
 EXECUTABLE_SO := $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT)
@@ -218,7 +234,7 @@ build_ar : $(EXECUTABLE_ARCHIVE)
 #$@ => $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT) => $(ZENDNN_GIT_ROOT)/_out/lib/libamdZenDNN.so
 #$^ => $(OBJS)
 $(EXECUTABLE_SO): $(OBJECT_FILES)
-	$(CXX) $(CXXLINK) -o $@ $^
+	$(CXX) $(CXXLINK) $(CXX_UPROF_LINK) -o $@ $^
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#Automatic-Variables
 	@echo "Build successful (shared)!"
 
@@ -235,7 +251,7 @@ $(OBJECT_FILES): $(OUTDIR)/$(OBJDIR)/%.o: %.cpp
 	@# ^^^ Your terminology is weird: you "compile a .cpp file" to create a .o file.
 	@mkdir -p $(@D)
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#index-_0024_0028_0040D_0029
-	$(CXX) $(CXXFLAGS) $(COMMONFLAGS) $(INCDIRS) $< -o $@
+	$(CXX) $(CXXFLAGS) $(COMMONFLAGS) $(INCDIRS) $(UPROF_LIB_PATH) $(UPROF_LINK) $< -o $@
 	@# ^^^ Use $(CFLAGS), not $(LDFLAGS), when compiling.
 
 clean:
@@ -298,6 +314,7 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
+
 
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
