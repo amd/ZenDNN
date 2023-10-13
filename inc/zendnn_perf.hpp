@@ -14,6 +14,7 @@
 * limitations under the License.
 *
 *******************************************************************************/
+#ifndef _WIN32
 
 #ifndef ZENDNN_PERF_HPP
 #define ZENDNN_PERF_HPP
@@ -439,4 +440,5 @@ double single_event::read_event() {
 std::string single_event::get_error_msg() {
     return error_msg;
 }
+#endif
 #endif

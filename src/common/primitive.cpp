@@ -39,11 +39,13 @@
 #include "stream.hpp"
 #include "utils.hpp"
 #include "zendnn_logging.hpp"
-#include "zendnn_perf.hpp"
 #include "common/zendnn_private.hpp"
 
+#ifndef _WIN32
+#include "zendnn_perf.hpp"
 #if UPROF_ENABLE
     #include <AMDProfileController.h>
+#endif
 #endif
 
 using namespace zendnn;
@@ -166,7 +168,7 @@ status_t primitive_execute(
         zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
                    primitive_iface->pd()->info(), ",", duration_ms, ",ms");
     }
-
+#ifndef _WIN32
     else if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 2) {
         stream->wait();
 
@@ -217,6 +219,7 @@ status_t primitive_execute(
         zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
                    primitive_iface->pd()->info(), ",", duration_ms, ",ms");
     }
+#endif    
 #endif    
     else {
         status = stream->enqueue_primitive(primitive_iface, ctx);
