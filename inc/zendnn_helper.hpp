@@ -136,7 +136,7 @@ class zendnnEnv {
         // 1 (Graph level Memory Reuse)
         // 2 (Node level Memory Reuse)
         zenEnableMemPool = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
-        if (zenEnableMemPool > 2) {
+        if (zenEnableMemPool > 3) {
             zenEnableMemPool = 1;
         }
         zenEnableTFOpts = zendnn_getenv_int("TF_ENABLE_ZENDNN_OPTS", 1);
