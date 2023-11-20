@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <array>
 #include <chrono>
+#include <mutex>
 #include "zendnnLogLevel.hpp"
 
 //#define LOG_LEVEL_DEFAULT LOG_LEVEL_WARNING
@@ -74,6 +75,7 @@ struct ZendnnLogState {
     std::array<const char *, ZENDNN_NUM_LOG_MODULES> moduleNames_;
     std::ofstream logFIle;
     std::ostream *log;
+    std::mutex    logMutex_;
     //std::ios iosDefaultState;
 };
 
@@ -112,7 +114,10 @@ _zendnnLogMessage(LogLevel level, ZendnnLogModule mod, Ts... vs) {
                   logLevelStr.c_str(),
                   secs);
 
-    _zendnnLogMessageR(logState, logHdr, vs...);
+    {
+        std::lock_guard<std::mutex> lk{logState->logMutex_};
+        _zendnnLogMessageR(logState, logHdr, vs...);
+    }
 }
 
 #define zendnnLogAtLevel(mod, level, ...) do {                  \
