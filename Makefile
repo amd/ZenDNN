@@ -177,9 +177,9 @@ endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE) $(AVX512_FLAG)
+	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 else
-	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE) $(AVX512_FLAG)
+	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 endif
 
 # https://github.com/mapbox/cpp/issues/37
@@ -254,6 +254,10 @@ $(EXECUTABLE_ARCHIVE): $(OBJECT_FILES)
 	$(AR_COMMAND) $@ $^
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#Automatic-Variables
 	@echo "Build successful (archive)!"
+
+ifeq ($(AVX512_EB_EN), 1)
+$(OUTDIR)/$(OBJDIR)/src/cpu/avx512_embedding_bag.o: CXX += $(AVX512_FLAG)
+endif
 
 # http://www.gnu.org/software/make/manual/make.html#Static-Pattern
 $(OBJECT_FILES): $(OUTDIR)/$(OBJDIR)/%.o: %.cpp

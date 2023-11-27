@@ -24,7 +24,7 @@
 #include "common/type_helpers.hpp"
 #include "cpu/cpu_primitive.hpp"
 #include "cpu/simple_q10n.hpp"
-#include "cpu/zen_avx_utils.hpp"
+#include "cpu/zen_avx512_utils.hpp"
 #include "zendnn_logging.hpp"
 #include "cpu/avx512_embedding_bag.hpp"
 #include <vector>
