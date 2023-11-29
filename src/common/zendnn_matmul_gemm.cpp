@@ -963,7 +963,9 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                       B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
                       group_count, group_size);
 #else
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+    if (0) {
+    //if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        //Todo: Fix the BatchedMatMul Primitive    
         zenBatchMatMulPrimitive(zenEnvObj, Layout, TransA, TransB,
                                 M_Array, N_Array, K_Array,
                                 A_Array, B_Array,
