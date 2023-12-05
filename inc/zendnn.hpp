@@ -46,20 +46,20 @@
 // gcc < 5 does not define __cpp_exceptions but __EXCEPTIONS,
 // Microsoft C++ Compiler does not provide an option to disable exceptions
 #ifndef ZENDNN_ENABLE_EXCEPTIONS
-#if __cpp_exceptions || __EXCEPTIONS \
+    #if __cpp_exceptions || __EXCEPTIONS \
         || (defined(_MSC_VER) && !defined(__clang__))
-#define ZENDNN_ENABLE_EXCEPTIONS 1
-#else
-#define ZENDNN_ENABLE_EXCEPTIONS 0
-#endif
+        #define ZENDNN_ENABLE_EXCEPTIONS 1
+    #else
+        #define ZENDNN_ENABLE_EXCEPTIONS 0
+    #endif
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
-#define ZENDNN_TRAP() __builtin_trap()
+    #define ZENDNN_TRAP() __builtin_trap()
 #elif defined(__INTEL_COMPILER) || defined(_MSC_VER)
-#define ZENDNN_TRAP() __debugbreak()
+    #define ZENDNN_TRAP() __debugbreak()
 #else
-#error "unknown compiler"
+    #error "unknown compiler"
 #endif
 
 #if ZENDNN_ENABLE_EXCEPTIONS
@@ -99,7 +99,9 @@ struct error : public std::exception {
         : status(status), message(message) {}
 
     /// Returns the explanatory string.
-    const char *what() const noexcept override { return message; }
+    const char *what() const noexcept override {
+        return message;
+    }
 
     /// A convenience function for wrapping calls to C API functions. Checks
     /// the return status and throws an zendnn::error in case of failure.
@@ -107,17 +109,20 @@ struct error : public std::exception {
     /// @param status The error status returned by a C API function.
     /// @param message The error message.
     static void wrap_c_api(zendnn_status_t status, const char *message) {
-        if (status != zendnn_success) ZENDNN_THROW_ERROR(status, message);
+        if (status != zendnn_success) {
+            ZENDNN_THROW_ERROR(status, message);
+        }
     }
 };
 
 /// @cond DO_NOT_DOCUMENT_THIS
 template <typename T>
 void validate_container_size(const T &v, const char *error_message,
-        int min_size = 1, int max_size = -1) {
+                             int min_size = 1, int max_size = -1) {
     const int size = (int)v.size();
-    if (size < min_size || (max_size >= 0 && size > max_size))
+    if (size < min_size || (max_size >= 0 && size > max_size)) {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, error_message);
+    }
 }
 /// @endcond
 
@@ -140,15 +145,21 @@ struct handle_traits {};
 ///
 template <typename T, typename traits = handle_traits<T>>
 struct handle {
-private:
-    static zendnn_status_t dummy_destructor(T) { return zendnn_success; }
+  private:
+    static zendnn_status_t dummy_destructor(T) {
+        return zendnn_success;
+    }
     std::shared_ptr<typename std::remove_pointer<T>::type> data_ {0};
 
-protected:
-    bool operator==(const T other) const { return other == data_.get(); }
-    bool operator!=(const T other) const { return !(*this == other); }
+  protected:
+    bool operator==(const T other) const {
+        return other == data_.get();
+    }
+    bool operator!=(const T other) const {
+        return !(*this == other);
+    }
 
-public:
+  public:
     /// Constructs an empty handle object.
     ///
     /// @warning
@@ -172,7 +183,9 @@ public:
     /// @param t The C API handle to wrap.
     /// @param weak A flag specifying whether to construct a weak wrapper;
     ///     defaults to @c false.
-    explicit handle(T t, bool weak = false) { reset(t, weak); }
+    explicit handle(T t, bool weak = false) {
+        reset(t, weak);
+    }
 
     /// Resets the handle wrapper objects to wrap a new C API handle.
     ///
@@ -192,7 +205,7 @@ public:
         T result = data_.get();
         if (allow_empty == false && result == nullptr)
             ZENDNN_THROW_ERROR(
-                    zendnn_invalid_arguments, "object is not initialized");
+                zendnn_invalid_arguments, "object is not initialized");
         return result;
     }
 
@@ -200,12 +213,16 @@ public:
     /// and returns `nullptr` if the object is empty.
     ///
     /// @returns The underlying C API handle.
-    explicit operator T() const { return get(true); }
+    explicit operator T() const {
+        return get(true);
+    }
 
     /// Checks whether the object is not empty.
     ///
     /// @returns Whether the object is not empty.
-    explicit operator bool() const { return get(true) != nullptr; }
+    explicit operator bool() const {
+        return get(true) != nullptr;
+    }
 
     /// Equality operator.
     ///
@@ -223,7 +240,9 @@ public:
     /// @returns @c true if this and the other handle wrapper manage different
     ///     underlying C API handles, and @c false otherwise. Empty handle
     ///     objects are considered to be equal.
-    bool operator!=(const handle &other) const { return !(*this == other); }
+    bool operator!=(const handle &other) const {
+        return !(*this == other);
+    }
 };
 
 /// @cond DO_NOT_DOCUMENT_THIS
@@ -261,6 +280,40 @@ struct handle_traits<zendnn_primitive_desc_iterator_t> {
 struct stream;
 struct memory;
 struct primitive_desc;
+
+//Embedding bag op API Call
+void zendnn_embedding_bag_lib(const memory &z_input, const memory &z_indices,
+                              const memory &z_offsets,
+                              const bool &z_scale_grad_by_freq,
+                              const int32_t &z_mode, const bool &z_sparse,
+                              const memory &z_per_sample_weights_opt,
+                              const bool &z_per_sample_weights_defined,
+                              const bool &z_include_last_offset, const int32_t &z_padding_idx,
+                              memory &z_destination, int thread_qty=1);
+
+//Group embedding bag op API Call
+void zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
+                                  std::vector <memory> &z_indices,std::vector <memory> &z_offsets,
+                                  std::vector <int32_t> &z_scale_grad_by_freq, std::vector <int32_t> &z_modes,
+                                  std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
+                                  std::vector <int32_t> &z_per_sample_weights_defined,
+                                  std::vector <int32_t> &z_include_last_offset,
+                                  std::vector <int32_t> &z_padding_idx,
+                                  std::vector <memory> &z_destination, int thread_qty=1);
+
+//Embedding op API Call
+void zendnn_embedding_lib(const memory &z_input, const memory &z_indices,
+                          const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
+                          const bool  &z_sparse,
+                          memory &z_destination, int thread_qty=1);
+
+//Group Embedding op API Call
+void zendnn_grp_embedding_lib(std::vector <memory> &z_input,
+                              std::vector <memory> &z_indices,
+                              std::vector <int32_t> &z_padding_idx, std::vector <int32_t> &z_scale_grad_by_freq,
+                              std::vector <int32_t> &z_sparse,
+                              std::vector <memory> &z_destination, int thread_qty=1);
+
 
 /// @addtogroup zendnn_api_primitives Primitives
 /// Compute primitives
@@ -341,7 +394,7 @@ struct primitive : public handle<zendnn_primitive_t> {
     /// @param c_pd C API primitive descriptor.
     /// @param cache_blob Cache blob.
     primitive(const_zendnn_primitive_desc_t c_pd,
-            const std::vector<uint8_t> &cache_blob);
+              const std::vector<uint8_t> &cache_blob);
 
     /// Constructs a primitive from a primitive descriptor.
     ///
@@ -387,7 +440,7 @@ struct primitive : public handle<zendnn_primitive_t> {
     ///     as the primitive.
     /// @param args Arguments map.
     void execute(const stream &astream,
-            const std::unordered_map<int, memory> &args) const;
+                 const std::unordered_map<int, memory> &args) const;
 };
 
 /// Converts primitive kind enum value from C++ API to C API type.
@@ -401,7 +454,7 @@ inline zendnn_primitive_kind_t convert_to_c(primitive::kind akind) {
 const_zendnn_primitive_desc_t primitive::get_primitive_desc() const {
     const_zendnn_primitive_desc_t pd;
     error::wrap_c_api(zendnn_primitive_get_primitive_desc(get(), &pd),
-            "could not get a primitive descriptor from a primitive");
+                      "could not get a primitive descriptor from a primitive");
     return pd;
 }
 
@@ -411,20 +464,20 @@ zendnn::primitive::kind primitive::get_kind() const {
     // returns a C type.
     zendnn_primitive_kind_t kind;
     error::wrap_c_api(zendnn_primitive_desc_query(
-                              pd, zendnn_query_primitive_kind, 0, (void *)&kind),
-            "could not get a primitive kind from a primitive descriptor");
+                          pd, zendnn_query_primitive_kind, 0, (void *)&kind),
+                      "could not get a primitive kind from a primitive descriptor");
     return static_cast<zendnn::primitive::kind>(kind);
 }
 
 std::vector<uint8_t> primitive::get_cache_blob() const {
     size_t size;
     error::wrap_c_api(zendnn_primitive_get_cache_blob(get(), &size, nullptr),
-            "could not get cache blob size from a primitive");
+                      "could not get cache blob size from a primitive");
 
     std::vector<uint8_t> cache_blob(size);
     error::wrap_c_api(
-            zendnn_primitive_get_cache_blob(get(), &size, cache_blob.data()),
-            "could not get a cache blob from a primitive");
+        zendnn_primitive_get_cache_blob(get(), &size, cache_blob.data()),
+        "could not get a cache blob from a primitive");
     return cache_blob;
 }
 
@@ -1029,8 +1082,8 @@ struct engine : public handle<zendnn_engine_t> {
         zendnn_engine_t engine;
         zendnnInfo(ZENDNN_APILOG, "CPU Engine create");
         error::wrap_c_api(
-                zendnn_engine_create(&engine, convert_to_c(akind), index),
-                "could not create an engine");
+            zendnn_engine_create(&engine, convert_to_c(akind), index),
+            "could not create an engine");
         reset(engine);
     }
 
@@ -1041,9 +1094,9 @@ struct engine : public handle<zendnn_engine_t> {
     engine(const handle<zendnn_primitive_desc_t> &pd) {
         zendnn_engine_t c_engine;
         error::wrap_c_api(
-                zendnn_primitive_desc_query(pd.get(),
-                        zendnn::convert_to_c(zendnn::query::engine), 0, &c_engine),
-                "could not get an engine from a primitive_desc");
+            zendnn_primitive_desc_query(pd.get(),
+                                        zendnn::convert_to_c(zendnn::query::engine), 0, &c_engine),
+            "could not get an engine from a primitive_desc");
         reset(c_engine, true);
     }
 
@@ -1052,7 +1105,7 @@ struct engine : public handle<zendnn_engine_t> {
     kind get_kind() const {
         zendnn_engine_kind_t kind;
         error::wrap_c_api(zendnn_engine_get_kind(get(), &kind),
-                "could not get kind of an engine");
+                          "could not get kind of an engine");
         return static_cast<engine::kind>(kind);
     }
 
@@ -1066,7 +1119,7 @@ struct engine : public handle<zendnn_engine_t> {
         return query(pd, zendnn::query::engine);
     }
 
-private:
+  private:
     static zendnn_engine_kind_t convert_to_c(kind akind) {
         return static_cast<zendnn_engine_kind_t>(akind);
     }
@@ -1075,8 +1128,8 @@ private:
     static engine query(const primitive_desc &pd, zendnn::query what) {
         zendnn_engine_t c_engine;
         error::wrap_c_api(zendnn_primitive_desc_query(pd.get(),
-                                  zendnn::convert_to_c(what), 0, &c_engine),
-                "could not get an engine from a primitive_desc");
+                          zendnn::convert_to_c(what), 0, &c_engine),
+                          "could not get an engine from a primitive_desc");
         return engine(c_engine, true);
     }
 };
@@ -1135,8 +1188,8 @@ struct stream : public handle<zendnn_stream_t> {
         zendnn_stream_t stream;
         zendnnInfo(ZENDNN_APILOG, "CPU Stream create");
         error::wrap_c_api(zendnn_stream_create(&stream, aengine.get(),
-                                  static_cast<zendnn_stream_flags_t>(aflags)),
-                "could not create a stream");
+                                               static_cast<zendnn_stream_flags_t>(aflags)),
+                          "could not create a stream");
         reset(stream);
     }
 
@@ -1144,7 +1197,7 @@ struct stream : public handle<zendnn_stream_t> {
     engine get_engine() const {
         zendnn_engine_t c_engine;
         error::wrap_c_api(zendnn_stream_get_engine(get(), &c_engine),
-                "could not get an engine from a stream object");
+                          "could not get an engine from a stream object");
         return engine(c_engine, true);
     }
 
@@ -1152,7 +1205,7 @@ struct stream : public handle<zendnn_stream_t> {
     /// @returns The stream itself.
     stream &wait() {
         error::wrap_c_api(
-                zendnn_stream_wait(get()), "could not wait on a stream");
+            zendnn_stream_wait(get()), "could not wait on a stream");
         return *this;
     }
 };
@@ -1251,7 +1304,7 @@ struct memory : public handle<zendnn_memory_t> {
     template <typename T>
     static void validate_dims(const std::vector<T> &v, int min_size = 0) {
         validate_container_size(
-                v, "dimensions are invalid", min_size, ZENDNN_MAX_NDIMS);
+            v, "dimensions are invalid", min_size, ZENDNN_MAX_NDIMS);
     }
 
     /// Data type specification.
@@ -2503,17 +2556,17 @@ struct memory : public handle<zendnn_memory_t> {
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
         desc(const dims &adims, data_type adata_type, format_tag aformat_tag,
-                bool allow_empty = false)
+             bool allow_empty = false)
             : data() {
             validate_dims(adims);
             zendnnInfo(ZENDNN_APILOG, "Memory create");
             zendnn_status_t status = zendnn_memory_desc_init_by_tag(&data,
-                    (int)adims.size(), adims.data(), convert_to_c(adata_type),
-                    convert_to_c(aformat_tag));
+                                     (int)adims.size(), adims.data(), convert_to_c(adata_type),
+                                     convert_to_c(aformat_tag));
             if (!allow_empty)
                 error::wrap_c_api(status,
-                        "could not construct a memory descriptor using a "
-                        "format tag");
+                                  "could not construct a memory descriptor using a "
+                                  "format tag");
         }
 
         /// Constructs a memory descriptor by strides.
@@ -2532,18 +2585,20 @@ struct memory : public handle<zendnn_memory_t> {
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
         desc(const dims &adims, data_type adata_type, const dims &strides,
-                bool allow_empty = false)
+             bool allow_empty = false)
             : data() {
             validate_dims(adims);
-            if (!strides.empty()) validate_dims(strides, (int)adims.size());
+            if (!strides.empty()) {
+                validate_dims(strides, (int)adims.size());
+            }
             zendnnInfo(ZENDNN_APILOG, "Memory create - strides");
             zendnn_status_t status = zendnn_memory_desc_init_by_strides(&data,
-                    (int)adims.size(), adims.data(), convert_to_c(adata_type),
-                    strides.empty() ? nullptr : &strides[0]);
+                                     (int)adims.size(), adims.data(), convert_to_c(adata_type),
+                                     strides.empty() ? nullptr : &strides[0]);
             if (!allow_empty)
                 error::wrap_c_api(status,
-                        "could not construct a memory descriptor using "
-                        "strides");
+                                  "could not construct a memory descriptor using "
+                                  "strides");
         }
 
         /// Constructs a memory descriptor from a C API data structure.
@@ -2563,14 +2618,15 @@ struct memory : public handle<zendnn_memory_t> {
         ///     and defaults to false.
         /// @returns A memory descriptor for the region.
         desc submemory_desc(const dims &adims, const dims &offsets,
-                bool allow_empty = false) const {
+                            bool allow_empty = false) const {
             validate_dims(adims, data.ndims);
             validate_dims(offsets, data.ndims);
             zendnn_memory_desc_t sub_md = zendnn_memory_desc_t();
             zendnn_status_t status = zendnn_memory_desc_init_submemory(
-                    &sub_md, &data, adims.data(), offsets.data());
-            if (!allow_empty)
+                                         &sub_md, &data, adims.data(), offsets.data());
+            if (!allow_empty) {
                 error::wrap_c_api(status, "could not construct a sub-memory");
+            }
             return desc(sub_md);
         }
 
@@ -2619,13 +2675,15 @@ struct memory : public handle<zendnn_memory_t> {
         ///     and defaults to false.
         /// @returns A new memory descriptor with new dimensions.
         desc reshape(const dims &adims, bool allow_empty = false) const {
-            if (data.ndims) validate_dims(adims, 1);
+            if (data.ndims) {
+                validate_dims(adims, 1);
+            }
             zendnn_memory_desc_t out_md = zendnn_memory_desc_t();
             zendnn_status_t status = zendnn_memory_desc_reshape(
-                    &out_md, &data, (int)adims.size(), adims.data());
+                                         &out_md, &data, (int)adims.size(), adims.data());
             if (!allow_empty)
                 error::wrap_c_api(
-                        status, "could not reshape a memory descriptor");
+                    status, "could not reshape a memory descriptor");
             return desc(out_md);
         }
 
@@ -2667,14 +2725,14 @@ struct memory : public handle<zendnn_memory_t> {
         ///     and defaults to false.
         /// @returns A new memory descriptor with new dimensions.
         desc permute_axes(const std::vector<int> &permutation,
-                bool allow_empty = false) const {
+                          bool allow_empty = false) const {
             validate_dims(permutation, data.ndims);
             zendnn_memory_desc_t out_md = zendnn_memory_desc_t();
             zendnn_status_t status = zendnn_memory_desc_permute_axes(
-                    &out_md, &data, permutation.data());
+                                         &out_md, &data, permutation.data());
             if (!allow_empty)
                 error::wrap_c_api(status,
-                        "could not permute axes of a memory descriptor");
+                                  "could not permute axes of a memory descriptor");
             return desc(out_md);
         }
 
@@ -2696,12 +2754,16 @@ struct memory : public handle<zendnn_memory_t> {
         /// @returns The number of bytes required to allocate a memory buffer
         ///     for the memory object described by this memory descriptor
         ///     including the padding area.
-        size_t get_size() const { return zendnn_memory_desc_get_size(&data); }
+        size_t get_size() const {
+            return zendnn_memory_desc_get_size(&data);
+        }
 
         /// Checks whether the memory descriptor is zero (empty).
         /// @returns @c true if the memory descriptor describes an empty
         ///     memory and @c false otherwise.
-        bool is_zero() const { return data.ndims == 0; }
+        bool is_zero() const {
+            return data.ndims == 0;
+        }
 
         /// An equality operator.
         /// @param other Another memory descriptor.
@@ -2715,12 +2777,16 @@ struct memory : public handle<zendnn_memory_t> {
         /// @param other Another memory descriptor.
         /// @returns Whether this and the other memory descriptors describe
         ///     different memory.
-        bool operator!=(const desc &other) const { return !operator==(other); }
+        bool operator!=(const desc &other) const {
+            return !operator==(other);
+        }
 
         /// Checks whether the object is not empty.
         ///
         /// @returns Whether the object is not empty.
-        explicit operator bool() const { return data.ndims != 0; }
+        explicit operator bool() const {
+            return data.ndims != 0;
+        }
     };
 
     /// Default constructor.
@@ -2751,8 +2817,8 @@ struct memory : public handle<zendnn_memory_t> {
     memory(const desc &md, const engine &aengine, void *handle) {
         zendnn_memory_t result;
         error::wrap_c_api(
-                zendnn_memory_create(&result, &md.data, aengine.get(), handle),
-                "could not create a memory object");
+            zendnn_memory_create(&result, &md.data, aengine.get(), handle),
+            "could not create a memory object");
         reset(result);
     }
 
@@ -2769,7 +2835,7 @@ struct memory : public handle<zendnn_memory_t> {
     desc get_desc() const {
         const zendnn_memory_desc_t *cdesc;
         error::wrap_c_api(zendnn_memory_get_memory_desc(get(), &cdesc),
-                "could not get a memory descriptor from a memory object");
+                          "could not get a memory descriptor from a memory object");
         return desc(*cdesc);
     }
 
@@ -2777,7 +2843,7 @@ struct memory : public handle<zendnn_memory_t> {
     engine get_engine() const {
         zendnn_engine_t c_engine;
         error::wrap_c_api(zendnn_memory_get_engine(get(), &c_engine),
-                "could not get an engine from a memory object");
+                          "could not get an engine from a memory object");
         return engine(c_engine, true);
     }
 
@@ -2788,7 +2854,7 @@ struct memory : public handle<zendnn_memory_t> {
     void *get_data_handle() const {
         void *handle;
         error::wrap_c_api(zendnn_memory_get_data_handle(get(), &handle),
-                "could not get a native handle from a memory object");
+                          "could not get a native handle from a memory object");
         return handle;
     }
 
@@ -2822,8 +2888,8 @@ struct memory : public handle<zendnn_memory_t> {
     /// @param astream Stream to use to execute padding in.
     void set_data_handle(void *handle, const stream &astream) const {
         error::wrap_c_api(zendnn_memory_set_data_handle_v2(
-                                  get(), handle, astream.get(true)),
-                "could not set native handle of a memory object");
+                              get(), handle, astream.get(true)),
+                          "could not set native handle of a memory object");
     }
 
     /// Sets the underlying memory buffer.
@@ -2838,8 +2904,8 @@ struct memory : public handle<zendnn_memory_t> {
     ///     allocated.
     void set_data_handle(void *handle) const {
         error::wrap_c_api(
-                zendnn_memory_set_data_handle_v2(get(), handle, nullptr),
-                "could not set native handle of a memory object");
+            zendnn_memory_set_data_handle_v2(get(), handle, nullptr),
+            "could not set native handle of a memory object");
     }
 
     /// Maps a memory object and returns a host-side pointer to a memory
@@ -2867,7 +2933,7 @@ struct memory : public handle<zendnn_memory_t> {
     T *map_data() const {
         void *mapped_ptr;
         error::wrap_c_api(zendnn_memory_map_data(get(), &mapped_ptr),
-                "could not map memory object data");
+                          "could not map memory object data");
         return static_cast<T *>(mapped_ptr);
     }
 
@@ -2883,7 +2949,7 @@ struct memory : public handle<zendnn_memory_t> {
     ///     #zendnn::memory::map_data().
     void unmap_data(void *mapped_ptr) const {
         error::wrap_c_api(zendnn_memory_unmap_data(get(), mapped_ptr),
-                "could not unmap memory object data");
+                          "could not unmap memory object data");
     }
 
     static zendnn_data_type_t convert_to_c(data_type adata_type) {
@@ -2953,21 +3019,23 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     post_ops() {
         zendnn_post_ops_t result;
         error::wrap_c_api(
-                zendnn_post_ops_create(&result), "could not create post-ops");
+            zendnn_post_ops_create(&result), "could not create post-ops");
         reset(result);
     }
 
     /// Returns the number of post-ops entries.
-    int len() const { return zendnn_post_ops_len(get()); }
+    int len() const {
+        return zendnn_post_ops_len(get());
+    }
 
     /// Returns the primitive kind of post-op at entry with a certain index.
     /// @param index Index of the post-op to return the kind for.
     /// @returns Primitive kind of the post-op at the specified index.
     primitive::kind kind(int index) const {
         error::wrap_c_api(index < len() ? zendnn_success : zendnn_invalid_arguments,
-                "post-ops index is out of range");
+                          "post-ops index is out of range");
         return static_cast<primitive::kind>(
-                zendnn_post_ops_get_kind(get(), index));
+                   zendnn_post_ops_get_kind(get(), index));
     }
 
     /// Appends an accumulation (sum) post-op. Prior to accumulating the
@@ -2999,14 +3067,14 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scale Scaling factor.
     /// @param data_type Data type.
     void append_sum(float scale = 1.f,
-            memory::data_type data_type = memory::data_type::undef) {
+                    memory::data_type data_type = memory::data_type::undef) {
         if (data_type == memory::data_type::undef)
             error::wrap_c_api(zendnn_post_ops_append_sum(get(), scale),
-                    "could not append a sum post-op");
+                              "could not append a sum post-op");
         else
             error::wrap_c_api(zendnn_post_ops_append_sum_v2(get(), scale,
-                                      memory::convert_to_c(data_type)),
-                    "could not append a sum post-op");
+                              memory::convert_to_c(data_type)),
+                              "could not append a sum post-op");
     }
 
     /// Appends an accumulation (sum) post-op. Prior to accumulating the
@@ -3039,10 +3107,10 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param zero_point Zero point.
     /// @param data_type Data type.
     void append_sum(float scale, int32_t zero_point,
-            memory::data_type data_type = memory::data_type::undef) {
+                    memory::data_type data_type = memory::data_type::undef) {
         error::wrap_c_api(zendnn_post_ops_append_sum_v3(get(), scale, zero_point,
-                                  memory::convert_to_c(data_type)),
-                "could not append a sum post-op");
+                          memory::convert_to_c(data_type)),
+                          "could not append a sum post-op");
     }
 
     /// Returns the parameters of an accumulation (sum) post-op.
@@ -3051,7 +3119,7 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scale Scaling factor of the sum post-op.
     void get_params_sum(int index, float &scale) const {
         error::wrap_c_api(zendnn_post_ops_get_params_sum(get(), index, &scale),
-                "could not get parameters of a sum post-op");
+                          "could not get parameters of a sum post-op");
     }
 
     /// Returns the parameters of an accumulation (sum) post-op.
@@ -3060,11 +3128,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scale Scaling factor of the sum post-op.
     /// @param data_type Data type of the sum post-op.
     void get_params_sum(
-            int index, float &scale, memory::data_type &data_type) const {
+        int index, float &scale, memory::data_type &data_type) const {
         zendnn_data_type_t c_data_type;
         error::wrap_c_api(zendnn_post_ops_get_params_sum_v2(
-                                  get(), index, &scale, &c_data_type),
-                "could not get parameters of a sum post-op");
+                              get(), index, &scale, &c_data_type),
+                          "could not get parameters of a sum post-op");
         data_type = static_cast<memory::data_type>(c_data_type);
     }
 
@@ -3075,11 +3143,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param zero_point Single scalar int32_t value of zeropoint.
     /// @param data_type Data type of the sum post-op.
     void get_params_sum(int index, float &scale, int32_t &zero_point,
-            memory::data_type &data_type) const {
+                        memory::data_type &data_type) const {
         zendnn_data_type_t c_data_type;
         error::wrap_c_api(zendnn_post_ops_get_params_sum_v3(get(), index, &scale,
-                                  &zero_point, &c_data_type),
-                "could not get parameters of a sum post-op");
+                          &zero_point, &c_data_type),
+                          "could not get parameters of a sum post-op");
         data_type = static_cast<memory::data_type>(c_data_type);
     }
 
@@ -3097,10 +3165,10 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param alpha Alpha parameter for the elementwise algorithm.
     /// @param beta Beta parameter for the elementwise algorithm.
     void append_eltwise(
-            float scale, algorithm aalgorithm, float alpha, float beta) {
+        float scale, algorithm aalgorithm, float alpha, float beta) {
         error::wrap_c_api(zendnn_post_ops_append_eltwise(get(), scale,
-                                  convert_to_c(aalgorithm), alpha, beta),
-                "could not append an elementwise post-op");
+                          convert_to_c(aalgorithm), alpha, beta),
+                          "could not append an elementwise post-op");
     }
 
     /// Returns parameters of an elementwise post-op.
@@ -3111,11 +3179,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param alpha Output alpha parameter for the elementwise algorithm.
     /// @param beta Output beta parameter for the elementwise algorithm.
     void get_params_eltwise(int index, float &scale, algorithm &aalgorithm,
-            float &alpha, float &beta) const {
+                            float &alpha, float &beta) const {
         zendnn_alg_kind_t c_alg;
         error::wrap_c_api(zendnn_post_ops_get_params_eltwise(
-                                  get(), index, &scale, &c_alg, &alpha, &beta),
-                "could not get parameters of an elementwise post-op");
+                              get(), index, &scale, &c_alg, &alpha, &beta),
+                          "could not get parameters of an elementwise post-op");
         aalgorithm = static_cast<zendnn::algorithm>(c_alg);
     }
 
@@ -3150,18 +3218,18 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scales Output pointer to a constant array of float scaling
     ///     factors.
     void append_dw(memory::data_type weights_data_type,
-            memory::data_type bias_data_type, memory::data_type dst_data_type,
-            memory::dim kernel_size, memory::dim stride_size,
-            memory::dim padding_l_size, int mask,
-            const std::vector<float> &scales) {
+                   memory::data_type bias_data_type, memory::data_type dst_data_type,
+                   memory::dim kernel_size, memory::dim stride_size,
+                   memory::dim padding_l_size, int mask,
+                   const std::vector<float> &scales) {
 
         error::wrap_c_api(zendnn_post_ops_append_dw(get(),
-                                  memory::convert_to_c(weights_data_type),
-                                  memory::convert_to_c(bias_data_type),
-                                  memory::convert_to_c(dst_data_type),
-                                  kernel_size, stride_size, padding_l_size,
-                                  scales.size(), mask, scales.data()),
-                "could not append depthwise post-op");
+                          memory::convert_to_c(weights_data_type),
+                          memory::convert_to_c(bias_data_type),
+                          memory::convert_to_c(dst_data_type),
+                          kernel_size, stride_size, padding_l_size,
+                          scales.size(), mask, scales.data()),
+                          "could not append depthwise post-op");
     }
 
     /// Returns the parameters of an depthwise post-op with stride 1.
@@ -3179,10 +3247,10 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scales Output pointer to a constant array of float scaling
     ///     factors.
     void get_params_dw(int index, memory::data_type &weights_data_type,
-            memory::data_type &bias_data_type, memory::data_type &dst_data_type,
-            memory::dim &kernel_size, memory::dim &stride_size,
-            memory::dim &padding_l_size, int &mask,
-            std::vector<float> &scales) const {
+                       memory::data_type &bias_data_type, memory::data_type &dst_data_type,
+                       memory::dim &kernel_size, memory::dim &stride_size,
+                       memory::dim &padding_l_size, int &mask,
+                       std::vector<float> &scales) const {
 
         zendnn_data_type_t c_weights_data_type;
         zendnn_data_type_t c_bias_data_type;
@@ -3194,11 +3262,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
         int c_mask;
         const float *c_scales;
         error::wrap_c_api(
-                zendnn_post_ops_get_params_dw(get(), index, &c_weights_data_type,
-                        &c_bias_data_type, &c_dst_data_type, &c_kernel_size,
-                        &c_stride_size, &c_padding_l_size, &count, &c_mask,
-                        &c_scales),
-                "could not get parameters of depthwise post-op");
+            zendnn_post_ops_get_params_dw(get(), index, &c_weights_data_type,
+                                          &c_bias_data_type, &c_dst_data_type, &c_kernel_size,
+                                          &c_stride_size, &c_padding_l_size, &count, &c_mask,
+                                          &c_scales),
+            "could not get parameters of depthwise post-op");
 
         weights_data_type = static_cast<memory::data_type>(c_weights_data_type);
         bias_data_type = static_cast<memory::data_type>(c_bias_data_type);
@@ -3209,8 +3277,9 @@ struct post_ops : public handle<zendnn_post_ops_t> {
         scales.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
+        for (zendnn_dim_t c = 0; c < count; ++c) {
             scales[c] = c_scales[c];
+        }
         return;
     }
 
@@ -3243,11 +3312,11 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scales Output pointer to a constant array of float scaling
     ///     factors.
     void append_dw_k3s1p1(memory::data_type weights_data_type,
-            memory::data_type bias_data_type, memory::data_type dst_data_type,
-            int mask, const std::vector<float> &scales) {
+                          memory::data_type bias_data_type, memory::data_type dst_data_type,
+                          int mask, const std::vector<float> &scales) {
 
         append_dw(weights_data_type, bias_data_type, dst_data_type, 3, 1, 1,
-                mask, scales);
+                  mask, scales);
     }
 
     /// Returns the parameters of an depthwise post-op with stride 1.
@@ -3265,14 +3334,14 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scales Output pointer to a constant array of float scaling
     ///     factors.
     void get_params_dw_k3s1p1(int index, memory::data_type &weights_data_type,
-            memory::data_type &bias_data_type, memory::data_type &dst_data_type,
-            int &mask, std::vector<float> &scales) const {
+                              memory::data_type &bias_data_type, memory::data_type &dst_data_type,
+                              int &mask, std::vector<float> &scales) const {
 
         memory::dim kernel_size;
         memory::dim stride_size;
         memory::dim padding_l_size;
         get_params_dw(index, weights_data_type, bias_data_type, dst_data_type,
-                kernel_size, stride_size, padding_l_size, mask, scales);
+                      kernel_size, stride_size, padding_l_size, mask, scales);
     }
 
     /// Appends a depthwise post-op convolution with stride 2.
@@ -3309,10 +3378,10 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @returns #zendnn_success on success and a status describing the error
     ///     otherwise
     void append_dw_k3s2p1(memory::data_type weights_data_type,
-            memory::data_type bias_data_type, memory::data_type dst_data_type,
-            int mask, const std::vector<float> &scales) {
+                          memory::data_type bias_data_type, memory::data_type dst_data_type,
+                          int mask, const std::vector<float> &scales) {
         append_dw(weights_data_type, bias_data_type, dst_data_type, 3, 2, 1,
-                mask, scales);
+                  mask, scales);
     }
 
     /// Returns the parameters of an depthwise post-op with stride 2.
@@ -3330,14 +3399,14 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param scales Output pointer to a constant array of float scaling
     ///     factors.
     void get_params_dw_k3s2p1(int index, memory::data_type &weights_data_type,
-            memory::data_type &bias_data_type, memory::data_type &dst_data_type,
-            int &mask, std::vector<float> &scales) const {
+                              memory::data_type &bias_data_type, memory::data_type &dst_data_type,
+                              int &mask, std::vector<float> &scales) const {
 
         memory::dim kernel_size;
         memory::dim stride_size;
         memory::dim padding_l_size;
         get_params_dw(index, weights_data_type, bias_data_type, dst_data_type,
-                kernel_size, stride_size, padding_l_size, mask, scales);
+                      kernel_size, stride_size, padding_l_size, mask, scales);
     }
 
     /// Appends a binary post-op.
@@ -3356,8 +3425,8 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param src1_desc Memory descriptor of a second operand.
     void append_binary(algorithm aalgorithm, const memory::desc &src1_desc) {
         error::wrap_c_api(zendnn_post_ops_append_binary(get(),
-                                  convert_to_c(aalgorithm), &src1_desc.data),
-                "could not append a binary post-op");
+                          convert_to_c(aalgorithm), &src1_desc.data),
+                          "could not append a binary post-op");
     }
 
     /// Returns the parameters of a binary post-op.
@@ -3366,12 +3435,12 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param aalgorithm Output binary algorithm kind.
     /// @param src1_desc Output memory descriptor of a second operand.
     void get_params_binary(
-            int index, algorithm &aalgorithm, memory::desc &src1_desc) const {
+        int index, algorithm &aalgorithm, memory::desc &src1_desc) const {
         zendnn_alg_kind_t c_alg;
         const zendnn_memory_desc_t *data;
         error::wrap_c_api(
-                zendnn_post_ops_get_params_binary(get(), index, &c_alg, &data),
-                "could not get parameters of a binary post-op");
+            zendnn_post_ops_get_params_binary(get(), index, &c_alg, &data),
+            "could not get parameters of a binary post-op");
         aalgorithm = static_cast<zendnn::algorithm>(c_alg);
         src1_desc.data = *data;
     }
@@ -3429,7 +3498,7 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     ///     for the whole output tensor.
     void append_prelu(int mask) {
         error::wrap_c_api(zendnn_post_ops_append_prelu(get(), mask),
-                "could not append a prelu post-op");
+                          "could not append a prelu post-op");
     }
 
     /// Returns the parameters of a prelu post-op.
@@ -3438,7 +3507,7 @@ struct post_ops : public handle<zendnn_post_ops_t> {
     /// @param maks Weights mask of prelu post-op.
     void get_params_prelu(int index, int &mask) const {
         error::wrap_c_api(zendnn_post_ops_get_params_prelu(get(), index, &mask),
-                "could not get parameters of a binary post-op");
+                          "could not get parameters of a binary post-op");
     }
 };
 
@@ -3461,7 +3530,7 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     primitive_attr() {
         zendnn_primitive_attr_t result;
         error::wrap_c_api(zendnn_primitive_attr_create(&result),
-                "could not create primitive attribute");
+                          "could not create primitive attribute");
         reset(result);
     }
 
@@ -3477,7 +3546,7 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     fpmath_mode get_fpmath_mode() const {
         zendnn_fpmath_mode_t result;
         error::wrap_c_api(zendnn_primitive_attr_get_fpmath_mode(get(), &result),
-                "could not get fpmath mode primitive attribute");
+                          "could not get fpmath mode primitive attribute");
         return fpmath_mode(result);
     }
 
@@ -3486,16 +3555,16 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     /// @param mode Specified fpmath mode.
     void set_fpmath_mode(fpmath_mode mode) {
         error::wrap_c_api(zendnn_primitive_attr_set_fpmath_mode(
-                                  get(), zendnn::convert_to_c(mode)),
-                "could not set fpmath mode primitive attribute");
+                              get(), zendnn::convert_to_c(mode)),
+                          "could not set fpmath mode primitive attribute");
     }
 
     /// Returns the scratchpad mode.
     scratchpad_mode get_scratchpad_mode() const {
         zendnn_scratchpad_mode_t result;
         error::wrap_c_api(
-                zendnn_primitive_attr_get_scratchpad_mode(get(), &result),
-                "could not get scratchpad mode primitive attribute");
+            zendnn_primitive_attr_get_scratchpad_mode(get(), &result),
+            "could not get scratchpad mode primitive attribute");
         return scratchpad_mode(result);
     }
 
@@ -3504,8 +3573,8 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     /// @param mode Specified scratchpad mode.
     void set_scratchpad_mode(scratchpad_mode mode) {
         error::wrap_c_api(zendnn_primitive_attr_set_scratchpad_mode(
-                                  get(), zendnn::convert_to_c(mode)),
-                "could not set scratchpad mode primitive attribute");
+                              get(), zendnn::convert_to_c(mode)),
+                          "could not set scratchpad mode primitive attribute");
     }
 
     /// Returns output scaling factors correspondence mask and values.
@@ -3522,13 +3591,14 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         int c_mask;
         const float *c_scales;
         error::wrap_c_api(zendnn_primitive_attr_get_output_scales(
-                                  get(), &count, &c_mask, &c_scales),
-                "could not get output scales primitive attribute");
+                              get(), &count, &c_mask, &c_scales),
+                          "could not get output scales primitive attribute");
         scales.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
+        for (zendnn_dim_t c = 0; c < count; ++c) {
             scales[c] = c_scales[c];
+        }
     }
 
     /// Sets output scaling factors correspondence mask and values.
@@ -3575,9 +3645,9 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     argument with index #ZENDNN_ARG_ATTR_OUTPUT_SCALES.
     void set_output_scales(int mask, const std::vector<float> &scales) {
         error::wrap_c_api(
-                zendnn_primitive_attr_set_output_scales(
-                        get(), (zendnn_dim_t)scales.size(), mask, scales.data()),
-                "could not set output scales primitive attribute");
+            zendnn_primitive_attr_set_output_scales(
+                get(), (zendnn_dim_t)scales.size(), mask, scales.data()),
+            "could not set output scales primitive attribute");
     }
 
     /// Returns scaling factors correspondence mask and values for a given
@@ -3596,13 +3666,14 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         int c_mask;
         const float *c_scales;
         error::wrap_c_api(zendnn_primitive_attr_get_scales(
-                                  get(), arg, &count, &c_mask, &c_scales),
-                "could not get scales primitive attributes");
+                              get(), arg, &count, &c_mask, &c_scales),
+                          "could not get scales primitive attributes");
         scales.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
+        for (zendnn_dim_t c = 0; c < count; ++c) {
             scales[c] = c_scales[c];
+        }
     }
 
     /// Sets scaling factors for primitive operations for a given memory
@@ -3623,9 +3694,9 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     \f$scales.size() = \prod\limits_{d \in mask} argument.dims[d].\f$
     void set_scales(int arg, int mask, const std::vector<float> &scales) {
         error::wrap_c_api(
-                zendnn_primitive_attr_set_scales(get(), arg,
-                        (zendnn_dim_t)scales.size(), mask, scales.data()),
-                "could not set scales primitive attribute");
+            zendnn_primitive_attr_set_scales(get(), arg,
+                                             (zendnn_dim_t)scales.size(), mask, scales.data()),
+            "could not set scales primitive attribute");
     }
 
     /// Returns zero points correspondence mask and values.
@@ -3639,18 +3710,19 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     mask to 0 to use a common zero point for the whole output tensor.
     /// @param zero_points Output vector of zero points.
     void get_zero_points(
-            int arg, int &mask, std::vector<int32_t> &zero_points) const {
+        int arg, int &mask, std::vector<int32_t> &zero_points) const {
         zendnn_dim_t count;
         int c_mask;
         const int32_t *c_zero_points;
         error::wrap_c_api(zendnn_primitive_attr_get_zero_points(
-                                  get(), arg, &count, &c_mask, &c_zero_points),
-                "could not get zero points primitive attribute");
+                              get(), arg, &count, &c_mask, &c_zero_points),
+                          "could not get zero points primitive attribute");
         zero_points.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; ++c)
+        for (zendnn_dim_t c = 0; c < count; ++c) {
             zero_points[c] = c_zero_points[c];
+        }
     }
 
     /// Sets zero points for primitive operations for a given memory argument.
@@ -3674,11 +3746,11 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     execution time as an argument with index
     ///     #ZENDNN_ARG_ATTR_ZERO_POINTS.
     void set_zero_points(
-            int arg, int mask, const std::vector<int32_t> &zero_points) {
+        int arg, int mask, const std::vector<int32_t> &zero_points) {
         error::wrap_c_api(zendnn_primitive_attr_set_zero_points(get(), arg,
-                                  (zendnn_dim_t)zero_points.size(), mask,
-                                  zero_points.data()),
-                "could not set zero points primitive attribute");
+                          (zendnn_dim_t)zero_points.size(), mask,
+                          zero_points.data()),
+                          "could not set zero points primitive attribute");
     }
 
     /// Returns post-ops previously set via set_post_ops().
@@ -3688,7 +3760,7 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         post_ops result;
         const_zendnn_post_ops_t c_result;
         error::wrap_c_api(zendnn_primitive_attr_get_post_ops(get(), &c_result),
-                "could not get post-ops primitive attribute");
+                          "could not get post-ops primitive attribute");
         result.reset(const_cast<zendnn_post_ops_t>(c_result), true);
         return result;
     }
@@ -3703,7 +3775,7 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     /// @param ops Post-ops object to copy post-ops from.
     void set_post_ops(const post_ops ops) {
         error::wrap_c_api(zendnn_primitive_attr_set_post_ops(get(), ops.get()),
-                "could not set post-ops primitive attribute");
+                          "could not set post-ops primitive attribute");
     }
 
     /// Sets quantization scale and shift parameters for RNN data tensors.
@@ -3741,9 +3813,9 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     /// @param shift The value to shift the data by.
     void set_rnn_data_qparams(float scale, float shift) {
         error::wrap_c_api(
-                zendnn_primitive_attr_set_rnn_data_qparams(get(), scale, shift),
-                "could not set RNN data quantization parameters primitive "
-                "attribute");
+            zendnn_primitive_attr_set_rnn_data_qparams(get(), scale, shift),
+            "could not set RNN data quantization parameters primitive "
+            "attribute");
     }
 
     /// Returns the quantization scale and shift parameters for RNN data
@@ -3758,9 +3830,9 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     void get_rnn_data_qparams(float &scale, float &shift) {
         float c_scale, c_shift;
         error::wrap_c_api(zendnn_primitive_attr_get_rnn_data_qparams(
-                                  get(), &c_scale, &c_shift),
-                "could not set RNN data quantization parameters primitive "
-                "attribute");
+                              get(), &c_scale, &c_shift),
+                          "could not set RNN data quantization parameters primitive "
+                          "attribute");
         scale = c_scale;
         shift = c_shift;
     }
@@ -3793,9 +3865,9 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     create a primitive descriptor.
     void set_rnn_weights_qparams(int mask, const std::vector<float> &scales) {
         error::wrap_c_api(zendnn_primitive_attr_set_rnn_weights_qparams(get(),
-                                  (int)scales.size(), mask, scales.data()),
-                "could not set RNN weights quantization parameters primitive "
-                "attribute");
+                          (int)scales.size(), mask, scales.data()),
+                          "could not set RNN weights quantization parameters primitive "
+                          "attribute");
     }
 
     /// Returns the quantization scaling factors for RNN projection weights
@@ -3822,14 +3894,15 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         int c_mask;
         const float *c_scales;
         error::wrap_c_api(zendnn_primitive_attr_get_rnn_weights_qparams(
-                                  get(), &count, &c_mask, &c_scales),
-                "could not get primitive RNN weights quantization "
-                "parameters attributes");
+                              get(), &count, &c_mask, &c_scales),
+                          "could not get primitive RNN weights quantization "
+                          "parameters attributes");
         scales.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; c++)
+        for (zendnn_dim_t c = 0; c < count; c++) {
             scales[c] = c_scales[c];
+        }
     }
 
     /// Sets quantization scaling factors for RNN projection weights tensors.
@@ -3859,12 +3932,12 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     Violations can only be detected when the attributes are used to
     ///     create a primitive descriptor.
     void set_rnn_weights_projection_qparams(
-            int mask, const std::vector<float> &scales) {
+        int mask, const std::vector<float> &scales) {
         error::wrap_c_api(
-                zendnn_primitive_attr_set_rnn_weights_projection_qparams(
-                        get(), (int)scales.size(), mask, scales.data()),
-                "could not set primitive RNN weights projection quantization "
-                "parameters attributes");
+            zendnn_primitive_attr_set_rnn_weights_projection_qparams(
+                get(), (int)scales.size(), mask, scales.data()),
+            "could not set primitive RNN weights projection quantization "
+            "parameters attributes");
     }
 
     /// Returns the quantization scaling factors for RNN projection weights
@@ -3887,20 +3960,21 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     Violations can only be detected when the attributes are used to
     ///     create a primitive descriptor.
     void get_rnn_weights_projection_qparams(
-            int &mask, std::vector<float> &scales) {
+        int &mask, std::vector<float> &scales) {
         zendnn_dim_t count;
         int c_mask;
         const float *c_scales;
         error::wrap_c_api(
-                zendnn_primitive_attr_get_rnn_weights_projection_qparams(
-                        get(), &count, &c_mask, &c_scales),
-                "could not get primitive RNN weights projection quantization "
-                "parameters attributes");
+            zendnn_primitive_attr_get_rnn_weights_projection_qparams(
+                get(), &count, &c_mask, &c_scales),
+            "could not get primitive RNN weights projection quantization "
+            "parameters attributes");
         scales.resize(count);
 
         mask = c_mask;
-        for (zendnn_dim_t c = 0; c < count; c++)
+        for (zendnn_dim_t c = 0; c < count; c++) {
             scales[c] = c_scales[c];
+        }
     }
 };
 
@@ -3918,16 +3992,18 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
 
     /// Returns the engine of the primitive descriptor.
     /// @returns The engine of the primitive descriptor.
-    engine get_engine() const { return engine::query(*this); }
+    engine get_engine() const {
+        return engine::query(*this);
+    }
 
     /// Returns implementation name.
     /// @returns The implementation name.
     const char *impl_info_str() const {
         const char *res;
         error::wrap_c_api(zendnn_primitive_desc_query(
-                                  get(), zendnn_query_impl_info_str, 0, &res),
-                "could not retrieve implementation info string from a "
-                "primitive descriptor");
+                              get(), zendnn_query_impl_info_str, 0, &res),
+                          "could not retrieve implementation info string from a "
+                          "primitive descriptor");
         return res;
     }
 
@@ -3937,7 +4013,7 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     memory::dim query_s64(query what) const {
         memory::dim res;
         zendnn_status_t status = zendnn_primitive_desc_query(
-                get(), zendnn::convert_to_c(what), 0, &res);
+                                     get(), zendnn::convert_to_c(what), 0, &res);
         return status == zendnn_success ? res : 0;
     }
 
@@ -3957,16 +4033,18 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     ///     parameter of the specified kind or index.
     memory::desc query_md(query what, int idx = 0) const {
         std::vector<query> valid_q {query::src_md, query::diff_src_md,
-                query::weights_md, query::diff_weights_md, query::dst_md,
-                query::diff_dst_md, query::workspace_md, query::scratchpad_md,
-                query::exec_arg_md};
+                                    query::weights_md, query::diff_weights_md, query::dst_md,
+                                    query::diff_dst_md, query::workspace_md, query::scratchpad_md,
+                                    query::exec_arg_md};
         if (!std::any_of(valid_q.cbegin(), valid_q.cend(),
-                    [=](query q) { return what == q; }))
-            ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
-                    "memory descriptor query is invalid");
+        [=](query q) {
+        return what == q;
+    }))
+        ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
+                           "memory descriptor query is invalid");
 
         const zendnn_memory_desc_t *cdesc = zendnn_primitive_desc_query_md(
-                get(), zendnn::convert_to_c(what), idx);
+                                                get(), zendnn::convert_to_c(what), idx);
         return cdesc ? memory::desc(*cdesc) : memory::desc();
     }
 
@@ -4031,37 +4109,49 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     /// @returns Source memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     source parameter.
-    memory::desc src_desc() const { return src_desc(0); }
+    memory::desc src_desc() const {
+        return src_desc(0);
+    }
 
     /// Returns a destination memory descriptor.
     /// @returns Destination memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     destination parameter.
-    memory::desc dst_desc() const { return dst_desc(0); }
+    memory::desc dst_desc() const {
+        return dst_desc(0);
+    }
 
     /// Returns a weights memory descriptor.
     /// @returns Weights memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     weights parameter.
-    memory::desc weights_desc() const { return weights_desc(0); }
+    memory::desc weights_desc() const {
+        return weights_desc(0);
+    }
 
     /// Returns a diff source memory descriptor.
     /// @returns Diff source memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     diff source memory with.
-    memory::desc diff_src_desc() const { return diff_src_desc(0); }
+    memory::desc diff_src_desc() const {
+        return diff_src_desc(0);
+    }
 
     /// Returns a diff destination memory descriptor.
     /// @returns Diff destination memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     diff destination parameter.
-    memory::desc diff_dst_desc() const { return diff_dst_desc(0); }
+    memory::desc diff_dst_desc() const {
+        return diff_dst_desc(0);
+    }
 
     /// Returns a diff weights memory descriptor.
     /// @returns Diff weights memory descriptor.
     /// @returns A zero memory descriptor if the primitive does not have a
     ///     diff weights parameter.
-    memory::desc diff_weights_desc() const { return diff_weights_desc(0); }
+    memory::desc diff_weights_desc() const {
+        return diff_weights_desc(0);
+    }
 
     /// Returns the workspace memory descriptor.
     /// @returns Workspace memory descriptor.
@@ -4085,10 +4175,10 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     engine scratchpad_engine() const {
         zendnn_engine_t c_engine;
         error::wrap_c_api(zendnn_primitive_desc_query(get(),
-                                  zendnn::convert_to_c(query::scratchpad_engine),
-                                  0, &c_engine),
-                "could not retrieve scratchpad engine from a primitive "
-                "descriptor");
+                          zendnn::convert_to_c(query::scratchpad_engine),
+                          0, &c_engine),
+                          "could not retrieve scratchpad engine from a primitive "
+                          "descriptor");
         return engine(c_engine, true);
     }
 
@@ -4097,10 +4187,10 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     primitive_attr get_primitive_attr() const {
         const_zendnn_primitive_attr_t const_c_attr;
         error::wrap_c_api(zendnn_primitive_desc_get_attr(get(), &const_c_attr),
-                "could not get attributes from a primitive descriptor");
+                          "could not get attributes from a primitive descriptor");
         zendnn_primitive_attr_t c_attr;
         error::wrap_c_api(zendnn_primitive_attr_clone(&c_attr, const_c_attr),
-                "could not clone primitive attributes");
+                          "could not clone primitive attributes");
         return primitive_attr(c_attr);
     }
 
@@ -4109,8 +4199,8 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
     zendnn::primitive::kind get_kind() const {
         zendnn_primitive_kind_t kind;
         error::wrap_c_api(zendnn_primitive_desc_query(get(),
-                                  zendnn_query_primitive_kind, 0, (void *)&kind),
-                "could not get primitive kind from a primitive descriptor");
+                          zendnn_query_primitive_kind, 0, (void *)&kind),
+                          "could not get primitive kind from a primitive descriptor");
         return static_cast<zendnn::primitive::kind>(kind);
     }
 
@@ -4120,27 +4210,27 @@ struct primitive_desc_base : public handle<zendnn_primitive_desc_t> {
         zendnn_dim_t count;
         const uint8_t *c_id;
         error::wrap_c_api(
-                zendnn_primitive_desc_query(get(),
-                        zendnn::convert_to_c(query::cache_blob_id_size_s64), 0,
-                        (void *)&count),
-                "could not get size of cache blob ID from a primitive "
-                "descriptor");
+            zendnn_primitive_desc_query(get(),
+                                        zendnn::convert_to_c(query::cache_blob_id_size_s64), 0,
+                                        (void *)&count),
+            "could not get size of cache blob ID from a primitive "
+            "descriptor");
         error::wrap_c_api(zendnn_primitive_desc_query(get(),
-                                  zendnn::convert_to_c(query::cache_blob_id), 0,
-                                  (void **)&c_id),
-                "could not get cache blob ID from a primitive descriptor");
+                          zendnn::convert_to_c(query::cache_blob_id), 0,
+                          (void **)&c_id),
+                          "could not get cache blob ID from a primitive descriptor");
         std::vector<uint8_t> id(c_id, c_id + count);
         return id;
     }
 
-protected:
+  protected:
     /// Resets the value of the handle to a clone of a C API primitive
     /// descriptor.
     /// @param pd A C API primitive descriptor to clone.
     void reset_with_clone(const_zendnn_primitive_desc_t pd) {
         zendnn_primitive_desc_t new_pd;
         error::wrap_c_api(zendnn_primitive_desc_clone(&new_pd, pd),
-                "could not clone a primitive descriptor");
+                          "could not clone a primitive descriptor");
         reset(new_pd);
     }
 
@@ -4158,7 +4248,7 @@ protected:
     /// @param pd C API primitive descriptor to clone.
     /// @param prim_kind Expected primitive kind.
     primitive_desc_base(
-            zendnn_primitive_desc_t pd, zendnn::primitive::kind prim_kind)
+        zendnn_primitive_desc_t pd, zendnn::primitive::kind prim_kind)
         : primitive_desc_base(pd, prim_kind, zendnn::prop_kind::undef) {}
 
     /// Constructs a primitive descriptor base object from a clone of a C API
@@ -4173,7 +4263,7 @@ protected:
     /// @param prim_kind Expected primitive kind.
     /// @param aprop_kind Expected propagation kind.
     primitive_desc_base(zendnn_primitive_desc_t pd,
-            zendnn::primitive::kind prim_kind, zendnn::prop_kind aprop_kind)
+                        zendnn::primitive::kind prim_kind, zendnn::prop_kind aprop_kind)
         : primitive_desc_base(pd, prim_kind, aprop_kind, aprop_kind) {}
 
     /// Constructs a primitive descriptor base object from a clone of a C API
@@ -4190,10 +4280,12 @@ protected:
     /// @param prop_kind2 Expected propagation kind (option 2). This value is
     ///     checked if the check with @p prop_kind1 fails.
     primitive_desc_base(zendnn_primitive_desc_t pd,
-            zendnn::primitive::kind prim_kind, zendnn::prop_kind prop_kind1,
-            zendnn::prop_kind prop_kind2) {
+                        zendnn::primitive::kind prim_kind, zendnn::prop_kind prop_kind1,
+                        zendnn::prop_kind prop_kind2) {
         // It is OK to pass an empty primitive descriptor
-        if (pd == nullptr) return;
+        if (pd == nullptr) {
+            return;
+        }
 
         zendnn_status_t rc;
 
@@ -4204,36 +4296,36 @@ protected:
         // Check that primitive kind matches
         zendnn_primitive_kind_t pd_kind;
         rc = zendnn_primitive_desc_query(
-                pd, zendnn_query_primitive_kind, 0, (void *)&pd_kind);
+                 pd, zendnn_query_primitive_kind, 0, (void *)&pd_kind);
         error::wrap_c_api(
-                rc, "could not get primitive kind from a primitive descriptor");
+            rc, "could not get primitive kind from a primitive descriptor");
         if (pd_kind != c_prim_kind)
             ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
-                    "primitive descriptor operation kind mismatch");
+                               "primitive descriptor operation kind mismatch");
 
         // Check that propagation kind matches
         zendnn_prop_kind_t pd_prop_kind;
         rc = zendnn_primitive_desc_query(
-                pd, zendnn_query_prop_kind, 0, (void *)&pd_prop_kind);
+                 pd, zendnn_query_prop_kind, 0, (void *)&pd_prop_kind);
 
         // Something went wrong
         if (rc != zendnn_success && rc != zendnn_unimplemented)
             ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
-                    "could not get propagation kind from the primitive "
-                    "descriptor");
+                               "could not get propagation kind from the primitive "
+                               "descriptor");
 
         // Everything is fine
         if ((rc == zendnn_unimplemented && c_prop_kind1 == zendnn_prop_kind_undef)
                 || (rc == zendnn_success
-                        && (pd_prop_kind == c_prop_kind1
-                                || pd_prop_kind == c_prop_kind2))) {
+                    && (pd_prop_kind == c_prop_kind1
+                        || pd_prop_kind == c_prop_kind2))) {
             reset_with_clone(pd);
             return;
         }
 
         // We could get the propagation kind but there is a mismatch
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
-                "primitive descriptor propagation kind mismatch");
+                           "primitive descriptor propagation kind mismatch");
     }
 
     using base = primitive_desc_base;
@@ -4277,17 +4369,17 @@ struct reorder : public primitive {
         ///     object will be produced. This flag is optional and defaults to
         ///     false.
         primitive_desc(const engine &src_engine, const memory::desc &src_md,
-                const engine &dst_engine, const memory::desc &dst_md,
-                const primitive_attr &attr = primitive_attr(),
-                bool allow_empty = false) {
+                       const engine &dst_engine, const memory::desc &dst_md,
+                       const primitive_attr &attr = primitive_attr(),
+                       bool allow_empty = false) {
             zendnn_primitive_desc_t result;
             zendnn_status_t status = zendnn_reorder_primitive_desc_create(&result,
-                    &src_md.data, src_engine.get(), &dst_md.data,
-                    dst_engine.get(), attr.get());
+                                     &src_md.data, src_engine.get(), &dst_md.data,
+                                     dst_engine.get(), attr.get());
             if (!allow_empty)
                 error::wrap_c_api(status,
-                        "could not create a primitive descriptor for a reorder "
-                        "primitive");
+                                  "could not create a primitive descriptor for a reorder "
+                                  "primitive");
             reset(status == zendnn_success ? result : zendnn_primitive_desc_t());
         }
 
@@ -4303,18 +4395,18 @@ struct reorder : public primitive {
         ///     object will be produced. This flag is optional and defaults to
         ///     false.
         primitive_desc(const memory &src, const memory &dst,
-                const primitive_attr &attr = primitive_attr(),
-                bool allow_empty = false) {
+                       const primitive_attr &attr = primitive_attr(),
+                       bool allow_empty = false) {
             zendnn_primitive_desc_t result;
             auto src_md = src.get_desc();
             auto dst_md = dst.get_desc();
             zendnn_status_t status = zendnn_reorder_primitive_desc_create(&result,
-                    &src_md.data, src.get_engine().get(), &dst_md.data,
-                    dst.get_engine().get(), attr.get());
+                                     &src_md.data, src.get_engine().get(), &dst_md.data,
+                                     dst.get_engine().get(), attr.get());
             if (!allow_empty)
                 error::wrap_c_api(status,
-                        "could not create a primitive descriptor for a reorder "
-                        "primitive");
+                                  "could not create a primitive descriptor for a reorder "
+                                  "primitive");
             reset(status == zendnn_success ? result : zendnn_primitive_desc_t());
         }
 
@@ -4338,10 +4430,14 @@ struct reorder : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -4393,11 +4489,12 @@ struct reorder : public primitive {
 
 /// @cond DO_NOT_DOCUMENT_THIS
 inline std::vector<zendnn_memory_desc_t> convert_to_c(
-        const std::vector<memory::desc> &mems) {
+    const std::vector<memory::desc> &mems) {
     std::vector<zendnn_memory_desc_t> c_mems;
     c_mems.reserve(mems.size());
-    for (const auto &s : mems)
+    for (const auto &s : mems) {
         c_mems.push_back(s.data);
+    }
     return c_mems;
 }
 /// @endcond
@@ -4422,17 +4519,17 @@ struct concat : public primitive {
         /// @param aengine Engine to perform the operation on.
         /// @param attr Primitive attributes to use (optional).
         primitive_desc(const memory::desc &dst, int concat_dimension,
-                const std::vector<memory::desc> &srcs, const engine &aengine,
-                const primitive_attr &attr = primitive_attr()) {
+                       const std::vector<memory::desc> &srcs, const engine &aengine,
+                       const primitive_attr &attr = primitive_attr()) {
             auto c_srcs = convert_to_c(srcs);
 
             zendnn_primitive_desc_t result;
             error::wrap_c_api(
-                    zendnn_concat_primitive_desc_create(&result, &dst.data,
-                            (int)c_srcs.size(), concat_dimension, c_srcs.data(),
-                            attr.get(), aengine.get()),
-                    "could not create a primitive descriptor for a concat "
-                    "primitive");
+                zendnn_concat_primitive_desc_create(&result, &dst.data,
+                                                    (int)c_srcs.size(), concat_dimension, c_srcs.data(),
+                                                    attr.get(), aengine.get()),
+                "could not create a primitive descriptor for a concat "
+                "primitive");
             reset(result);
         }
 
@@ -4449,17 +4546,17 @@ struct concat : public primitive {
         /// @param aengine Engine to perform the operation on.
         /// @param attr Primitive attributes to use (optional).
         primitive_desc(int concat_dimension,
-                const std::vector<memory::desc> &srcs, const engine &aengine,
-                const primitive_attr &attr = primitive_attr()) {
+                       const std::vector<memory::desc> &srcs, const engine &aengine,
+                       const primitive_attr &attr = primitive_attr()) {
             auto c_api_srcs = convert_to_c(srcs);
 
             zendnn_primitive_desc_t result;
             error::wrap_c_api(
-                    zendnn_concat_primitive_desc_create(&result, nullptr,
-                            (int)c_api_srcs.size(), concat_dimension,
-                            c_api_srcs.data(), attr.get(), aengine.get()),
-                    "could not create a primitive descriptor for a concat "
-                    "primitive");
+                zendnn_concat_primitive_desc_create(&result, nullptr,
+                                                    (int)c_api_srcs.size(), concat_dimension,
+                                                    c_api_srcs.data(), attr.get(), aengine.get()),
+                "could not create a primitive descriptor for a concat "
+                "primitive");
             reset(result);
         }
 
@@ -4471,10 +4568,14 @@ struct concat : public primitive {
             : primitive_desc_base(pd, zendnn::primitive::kind::concat) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc(int)const
-        memory::desc src_desc(int idx = 0) const { return base::src_desc(idx); }
+        memory::desc src_desc(int idx = 0) const {
+            return base::src_desc(idx);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -4519,22 +4620,22 @@ struct sum : public primitive {
         /// @param aengine Engine to perform the operation on.
         /// @param attr Primitive attributes to use (optional).
         primitive_desc(const memory::desc &dst,
-                const std::vector<float> &scales,
-                const std::vector<memory::desc> &srcs, const engine &aengine,
-                const primitive_attr &attr = primitive_attr()) {
+                       const std::vector<float> &scales,
+                       const std::vector<memory::desc> &srcs, const engine &aengine,
+                       const primitive_attr &attr = primitive_attr()) {
             validate_container_size(scales,
-                    "counts of scales and sources are not equal",
-                    (int)srcs.size(), (int)srcs.size());
+                                    "counts of scales and sources are not equal",
+                                    (int)srcs.size(), (int)srcs.size());
 
             auto c_api_srcs = convert_to_c(srcs);
 
             zendnn_primitive_desc_t result;
             error::wrap_c_api(
-                    zendnn_sum_primitive_desc_create(&result, &dst.data,
-                            (int)c_api_srcs.size(), scales.data(),
-                            c_api_srcs.data(), attr.get(), aengine.get()),
-                    "could not create a primitive descriptor for a sum "
-                    "primitive");
+                zendnn_sum_primitive_desc_create(&result, &dst.data,
+                                                 (int)c_api_srcs.size(), scales.data(),
+                                                 c_api_srcs.data(), attr.get(), aengine.get()),
+                "could not create a primitive descriptor for a sum "
+                "primitive");
             reset(result);
         }
 
@@ -4549,20 +4650,20 @@ struct sum : public primitive {
         /// @param aengine Engine on which to perform the operation.
         /// @param attr Primitive attributes to use (optional).
         primitive_desc(const std::vector<float> &scales,
-                const std::vector<memory::desc> &srcs, const engine &aengine,
-                const primitive_attr &attr = primitive_attr()) {
+                       const std::vector<memory::desc> &srcs, const engine &aengine,
+                       const primitive_attr &attr = primitive_attr()) {
             validate_container_size(scales,
-                    "counts of scales and sources are not equal",
-                    (int)srcs.size(), (int)srcs.size());
+                                    "counts of scales and sources are not equal",
+                                    (int)srcs.size(), (int)srcs.size());
 
             auto c_api_srcs = convert_to_c(srcs);
             zendnn_primitive_desc_t result;
             error::wrap_c_api(
-                    zendnn_sum_primitive_desc_create(&result, nullptr,
-                            (int)c_api_srcs.size(), scales.data(),
-                            c_api_srcs.data(), attr.get(), aengine.get()),
-                    "could not create a primitive descriptor for a sum "
-                    "primitive");
+                zendnn_sum_primitive_desc_create(&result, nullptr,
+                                                 (int)c_api_srcs.size(), scales.data(),
+                                                 c_api_srcs.data(), attr.get(), aengine.get()),
+                "could not create a primitive descriptor for a sum "
+                "primitive");
             reset(result);
         }
 
@@ -4574,10 +4675,14 @@ struct sum : public primitive {
             : primitive_desc_base(pd, zendnn::primitive::kind::sum) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc(int)const
-        memory::desc src_desc(int idx = 0) const { return base::src_desc(idx); }
+        memory::desc src_desc(int idx = 0) const {
+            return base::src_desc(idx);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -4629,15 +4734,15 @@ struct primitive_desc : public primitive_desc_base {
     ///     object will be produced. This flag is optional and defaults to
     ///     false.
     primitive_desc(const_zendnn_op_desc_t desc, const primitive_attr *attr,
-            const engine &aengine, const_zendnn_primitive_desc_t hint_fwd_pd,
-            bool allow_empty = false)
+                   const engine &aengine, const_zendnn_primitive_desc_t hint_fwd_pd,
+                   bool allow_empty = false)
         : allow_empty_(allow_empty) {
         zendnn_primitive_desc_iterator_t iterator = nullptr;
         zendnn_status_t status = zendnn_primitive_desc_iterator_create(&iterator,
-                desc, attr ? attr->get() : nullptr, aengine.get(), hint_fwd_pd);
+                                 desc, attr ? attr->get() : nullptr, aengine.get(), hint_fwd_pd);
         if (!allow_empty)
             error::wrap_c_api(
-                    status, "could not create a primitive descriptor iterator");
+                status, "could not create a primitive descriptor iterator");
         pd_iterator.reset(iterator);
         fetch_impl();
     }
@@ -4648,24 +4753,26 @@ struct primitive_desc : public primitive_desc_base {
     ///     reached, and the primitive descriptor itself is kept unchanged
     bool next_impl() {
         zendnn_status_t status
-                = zendnn_primitive_desc_iterator_next(pd_iterator.get());
-        if (status == zendnn_iterator_ends) return false;
+            = zendnn_primitive_desc_iterator_next(pd_iterator.get());
+        if (status == zendnn_iterator_ends) {
+            return false;
+        }
         error::wrap_c_api(
-                status, "could not advance a primitive descriptor iterator");
+            status, "could not advance a primitive descriptor iterator");
         fetch_impl();
         return true;
     }
 
-private:
+  private:
     bool allow_empty_ = false;
     handle<zendnn_primitive_desc_iterator_t> pd_iterator;
     void fetch_impl() {
         zendnn_primitive_desc_t pd = zendnn_primitive_desc_iterator_fetch(
-                pd_iterator.get(allow_empty_));
+                                         pd_iterator.get(allow_empty_));
         error::wrap_c_api(pd != nullptr || allow_empty_ ? zendnn_success
-                                                        : zendnn_out_of_memory,
-                "could not fetch a primitive descriptor from a primitive "
-                "descriptor iterator");
+                          : zendnn_out_of_memory,
+                          "could not fetch a primitive descriptor from a primitive "
+                          "descriptor iterator");
         reset(pd);
     }
 };
@@ -4719,22 +4826,22 @@ struct convolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &bias_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &bias_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create - bias");
             error::wrap_c_api(
-                    zendnn_convolution_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &weights_desc.data, &bias_desc.data, &dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a convolution forward "
-                    "propagation primitive");
+                zendnn_convolution_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &weights_desc.data, &bias_desc.data, &dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a convolution forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for a convolution forward propagation
@@ -4766,21 +4873,21 @@ struct convolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             zendnnInfo(ZENDNN_APILOG, "Covolution forward desc create - no bias");
             error::wrap_c_api(
-                    zendnn_convolution_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &weights_desc.data, nullptr, &dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a convolution forward "
-                    "propagation primitive");
+                zendnn_convolution_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &weights_desc.data, nullptr, &dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a convolution forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for a dilated convolution forward
@@ -4816,22 +4923,22 @@ struct convolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &bias_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &dilates,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &bias_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &dilates,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_dilated_convolution_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &weights_desc.data, &bias_desc.data,
-                                      &dst_desc.data, &strides[0], &dilates[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated convolution "
-                    "forward propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), &src_desc.data,
+                              &weights_desc.data, &bias_desc.data,
+                              &dst_desc.data, &strides[0], &dilates[0],
+                              &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a dilated convolution "
+                              "forward propagation primitive");
         }
 
         /// Constructs a descriptor for a dilated convolution forward
@@ -4865,22 +4972,22 @@ struct convolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_dilated_convolution_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &weights_desc.data, nullptr,
-                                      &dst_desc.data, &strides[0], &dilates[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated convolution "
-                    "forward propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), &src_desc.data,
+                              &weights_desc.data, nullptr,
+                              &dst_desc.data, &strides[0], &dilates[0],
+                              &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a dilated convolution "
+                              "forward propagation primitive");
         }
 
         /// Initializes a descriptor for convolution forward propagation with
@@ -4960,11 +5067,11 @@ struct convolution_forward : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {
             zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - no attr");
-            }
+        }
 
         /// Constructs a primitive descriptor for a convolution forward
         /// propagation primitive.
@@ -4978,11 +5085,11 @@ struct convolution_forward : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {
-             zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - attr");
-            }
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {
+            zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - attr");
+        }
 
         /// Constructs a primitive descriptor for a convolution forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -4992,25 +5099,33 @@ struct convolution_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::convolution,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {
             zendnnInfo(ZENDNN_APILOG, "Convolution primitive descriptor create - C API");
-            }
+        }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// Returns the bias memory descriptor.
         /// @returns The bias memory descriptor.
         /// @returns A zero memory descriptor of the primitive does not have a
         ///     bias parameter.
-        memory::desc bias_desc() const { return base::weights_desc(1); }
+        memory::desc bias_desc() const {
+            return base::weights_desc(1);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -5028,7 +5143,7 @@ struct convolution_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     convolution_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -5065,19 +5180,19 @@ struct convolution_backward_data : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_convolution_backward_data_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &weights_desc.data, &diff_dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a convolution backward "
-                    "propagation primitive");
+                zendnn_convolution_backward_data_desc_init(&data,
+                        convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &weights_desc.data, &diff_dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a convolution backward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for dilated convolution backward
@@ -5108,22 +5223,22 @@ struct convolution_backward_data : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(dilates, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_convolution_backward_data_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &weights_desc.data, &diff_dst_desc.data,
-                            &strides[0], &dilates[0], &padding_l[0],
-                            &padding_r[0]),
-                    "could not create a descriptor for a dilated convolution "
-                    "backward propagation primitive");
+                zendnn_dilated_convolution_backward_data_desc_init(&data,
+                        convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &weights_desc.data, &diff_dst_desc.data,
+                        &strides[0], &dilates[0], &padding_l[0],
+                        &padding_r[0]),
+                "could not create a descriptor for a dilated convolution "
+                "backward propagation primitive");
         }
     };
 
@@ -5146,10 +5261,10 @@ struct convolution_backward_data : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const convolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const convolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a convolution backward
         /// propagation primitive.
@@ -5166,11 +5281,11 @@ struct convolution_backward_data : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const convolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const convolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a convolution backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -5180,16 +5295,22 @@ struct convolution_backward_data : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::convolution,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -5206,7 +5327,7 @@ struct convolution_backward_data : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     convolution_backward_data(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -5244,21 +5365,21 @@ struct convolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_convolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, &diff_bias_desc.data,
-                            &diff_dst_desc.data, &strides[0], &padding_l[0],
-                            &padding_r[0]),
-                    "could not create a descriptor for a convolution weights "
-                    "update primitive");
+                zendnn_convolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, &diff_bias_desc.data,
+                        &diff_dst_desc.data, &strides[0], &padding_l[0],
+                        &padding_r[0]),
+                "could not create a descriptor for a convolution weights "
+                "update primitive");
         }
 
         /// Constructs a descriptor for a convolution weights gradient primitive
@@ -5287,19 +5408,19 @@ struct convolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_convolution_backward_weights_desc_init(&data,
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &diff_weights_desc.data, nullptr,
-                                      &diff_dst_desc.data, &strides[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a convolution weights "
-                    "update primitive");
+                              convert_to_c(aalgorithm), &src_desc.data,
+                              &diff_weights_desc.data, nullptr,
+                              &diff_dst_desc.data, &strides[0],
+                              &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a convolution weights "
+                              "update primitive");
         }
 
         /// Constructs a descriptor for a dilated convolution weights gradient
@@ -5332,23 +5453,23 @@ struct convolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_convolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, &diff_bias_desc.data,
-                            &diff_dst_desc.data, &strides[0], &dilates[0],
-                            &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated convolution "
-                    "weights gradient primitive");
+                zendnn_dilated_convolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, &diff_bias_desc.data,
+                        &diff_dst_desc.data, &strides[0], &dilates[0],
+                        &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a dilated convolution "
+                "weights gradient primitive");
         }
 
         /// Constructs a descriptor for a dilated convolution weights gradient
@@ -5379,22 +5500,22 @@ struct convolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_convolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, nullptr,
-                            &diff_dst_desc.data, &strides[0], &dilates[0],
-                            &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated convolution "
-                    "weights gradient primitive");
+                zendnn_dilated_convolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, nullptr,
+                        &diff_dst_desc.data, &strides[0], &dilates[0],
+                        &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a dilated convolution "
+                "weights gradient primitive");
         }
     };
 
@@ -5416,10 +5537,10 @@ struct convolution_backward_weights : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const convolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const convolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a convolution weights gradient
         /// primitive.
@@ -5435,11 +5556,11 @@ struct convolution_backward_weights : public primitive {
         ///     an empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const convolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const convolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a convolution weights gradient
         /// primitive from a C API primitive descriptor that must have a
@@ -5449,10 +5570,12 @@ struct convolution_backward_weights : public primitive {
         ///     gradient primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::convolution,
-                    zendnn::prop_kind::backward_weights) {}
+                                     zendnn::prop_kind::backward_weights) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_weights_desc()const
         memory::desc diff_weights_desc() const {
@@ -5460,7 +5583,9 @@ struct convolution_backward_weights : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// Returns the diff bias memory descriptor.
         /// @returns The diff bias memory descriptor.
@@ -5484,7 +5609,7 @@ struct convolution_backward_weights : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     convolution_backward_weights(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -5534,21 +5659,21 @@ struct deconvolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &bias_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &bias_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_deconvolution_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &weights_desc.data, &bias_desc.data, &dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a deconvolution forward "
-                    "propagation primitive");
+                zendnn_deconvolution_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &weights_desc.data, &bias_desc.data, &dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a deconvolution forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for a deconvolution forward propagation
@@ -5579,20 +5704,20 @@ struct deconvolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_deconvolution_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &weights_desc.data, nullptr, &dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a deconvolution forward "
-                    "propagation primitive");
+                zendnn_deconvolution_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &weights_desc.data, nullptr, &dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a deconvolution forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for a dilated deconvolution forward
@@ -5627,22 +5752,22 @@ struct deconvolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &bias_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &dilates,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &bias_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &dilates,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_dilated_deconvolution_forward_desc_init(
-                                      &data, zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &weights_desc.data, &bias_desc.data,
-                                      &dst_desc.data, &strides[0], &dilates[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated deconvolution "
-                    "forward propagation primitive");
+                                  &data, zendnn::convert_to_c(aprop_kind),
+                                  convert_to_c(aalgorithm), &src_desc.data,
+                                  &weights_desc.data, &bias_desc.data,
+                                  &dst_desc.data, &strides[0], &dilates[0],
+                                  &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a dilated deconvolution "
+                              "forward propagation primitive");
         }
 
         /// Constructs a descriptor for a dilated deconvolution forward
@@ -5675,22 +5800,22 @@ struct deconvolution_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &weights_desc,
+             const memory::desc &dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_dilated_deconvolution_forward_desc_init(
-                                      &data, zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &weights_desc.data, nullptr,
-                                      &dst_desc.data, &strides[0], &dilates[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated deconvolution "
-                    "forward propagation primitive");
+                                  &data, zendnn::convert_to_c(aprop_kind),
+                                  convert_to_c(aalgorithm), &src_desc.data,
+                                  &weights_desc.data, nullptr,
+                                  &dst_desc.data, &strides[0], &dilates[0],
+                                  &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a dilated deconvolution "
+                              "forward propagation primitive");
         }
     };
 
@@ -5710,9 +5835,9 @@ struct deconvolution_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution forward
         /// propagation primitive.
@@ -5726,9 +5851,9 @@ struct deconvolution_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -5738,20 +5863,28 @@ struct deconvolution_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::deconvolution,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::convolution_forward::primitive_desc::bias_desc()const
-        memory::desc bias_desc() const { return base::weights_desc(1); }
+        memory::desc bias_desc() const {
+            return base::weights_desc(1);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -5768,7 +5901,7 @@ struct deconvolution_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     deconvolution_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -5803,19 +5936,19 @@ struct deconvolution_backward_data : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_deconvolution_backward_data_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &weights_desc.data, &diff_dst_desc.data,
-                            &strides[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a deconvolution "
-                    "backward propagation primitive");
+                zendnn_deconvolution_backward_data_desc_init(&data,
+                        convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &weights_desc.data, &diff_dst_desc.data,
+                        &strides[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a deconvolution "
+                "backward propagation primitive");
         }
 
         /// Constructs a descriptor for a dilated deconvolution backward
@@ -5845,22 +5978,22 @@ struct deconvolution_backward_data : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(dilates, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_deconvolution_backward_data_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &weights_desc.data, &diff_dst_desc.data,
-                            &strides[0], &dilates[0], &padding_l[0],
-                            &padding_r[0]),
-                    "could not create a descriptor for a dilated deconvolution "
-                    "backward propagation primitive");
+                zendnn_dilated_deconvolution_backward_data_desc_init(&data,
+                        convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &weights_desc.data, &diff_dst_desc.data,
+                        &strides[0], &dilates[0], &padding_l[0],
+                        &padding_r[0]),
+                "could not create a descriptor for a dilated deconvolution "
+                "backward propagation primitive");
         }
     };
 
@@ -5883,10 +6016,10 @@ struct deconvolution_backward_data : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const deconvolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const deconvolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution backward
         /// propagation primitive.
@@ -5903,11 +6036,11 @@ struct deconvolution_backward_data : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const deconvolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const deconvolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -5917,16 +6050,22 @@ struct deconvolution_backward_data : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::deconvolution,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -5943,7 +6082,7 @@ struct deconvolution_backward_data : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     deconvolution_backward_data(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -5980,21 +6119,21 @@ struct deconvolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_deconvolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, &diff_bias_desc.data,
-                            &diff_dst_desc.data, &strides[0], &padding_l[0],
-                            &padding_r[0]),
-                    "could not create a descriptor for a deconvolution weights "
-                    "update primitive");
+                zendnn_deconvolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, &diff_bias_desc.data,
+                        &diff_dst_desc.data, &strides[0], &padding_l[0],
+                        &padding_r[0]),
+                "could not create a descriptor for a deconvolution weights "
+                "update primitive");
         }
 
         /// Constructs a descriptor for a deconvolution weights gradient
@@ -6022,19 +6161,19 @@ struct deconvolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_deconvolution_backward_weights_desc_init(
-                                      &data, convert_to_c(aalgorithm),
-                                      &src_desc.data, &diff_weights_desc.data,
-                                      nullptr, &diff_dst_desc.data, &strides[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a deconvolution weights "
-                    "update primitive");
+                                  &data, convert_to_c(aalgorithm),
+                                  &src_desc.data, &diff_weights_desc.data,
+                                  nullptr, &diff_dst_desc.data, &strides[0],
+                                  &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a deconvolution weights "
+                              "update primitive");
         }
 
         /// Constructs a descriptor for a dilated deconvolution weights gradient
@@ -6066,23 +6205,23 @@ struct deconvolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_deconvolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, &diff_bias_desc.data,
-                            &diff_dst_desc.data, &strides[0], &dilates[0],
-                            &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated deconvolution "
-                    "weights gradient primitive");
+                zendnn_dilated_deconvolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, &diff_bias_desc.data,
+                        &diff_dst_desc.data, &strides[0], &dilates[0],
+                        &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a dilated deconvolution "
+                "weights gradient primitive");
         }
 
         /// Constructs a descriptor for a dilated deconvolution weights gradient
@@ -6112,22 +6251,22 @@ struct deconvolution_backward_weights : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &dilates, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &dilates, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(dilates, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_dilated_deconvolution_backward_weights_desc_init(&data,
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &diff_weights_desc.data, nullptr,
-                            &diff_dst_desc.data, &strides[0], &dilates[0],
-                            &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a dilated deconvolution "
-                    "weights gradient primitive");
+                zendnn_dilated_deconvolution_backward_weights_desc_init(&data,
+                        convert_to_c(aalgorithm), &src_desc.data,
+                        &diff_weights_desc.data, nullptr,
+                        &diff_dst_desc.data, &strides[0], &dilates[0],
+                        &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a dilated deconvolution "
+                "weights gradient primitive");
         }
     };
 
@@ -6150,10 +6289,10 @@ struct deconvolution_backward_weights : public primitive {
         ///     an empty object will be produced.  This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const deconvolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const deconvolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution weights
         /// update primitive.
@@ -6170,11 +6309,11 @@ struct deconvolution_backward_weights : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const deconvolution_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const deconvolution_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a deconvolution weights
         /// gradient primitive from a C API primitive descriptor that must
@@ -6184,10 +6323,12 @@ struct deconvolution_backward_weights : public primitive {
         ///     gradient primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::deconvolution,
-                    zendnn::prop_kind::backward_weights) {}
+                                     zendnn::prop_kind::backward_weights) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_weights_desc()const
         memory::desc diff_weights_desc() const {
@@ -6195,7 +6336,9 @@ struct deconvolution_backward_weights : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::convolution_backward_weights::primitive_desc::diff_bias_desc()const
         memory::desc diff_bias_desc() const {
@@ -6217,7 +6360,7 @@ struct deconvolution_backward_weights : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     deconvolution_backward_weights(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6252,14 +6395,14 @@ struct lrn_forward : public primitive {
         /// @param beta The beta regularization parameter.
         /// @param k The k regularization parameter.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &data_desc, memory::dim local_size,
-                float alpha, float beta, float k = 1.f) {
+             const memory::desc &data_desc, memory::dim local_size,
+             float alpha, float beta, float k = 1.f) {
             error::wrap_c_api(zendnn_lrn_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &data_desc.data,
-                                      local_size, alpha, beta, k),
-                    "could not create a descriptor for a lrn forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), &data_desc.data,
+                              local_size, alpha, beta, k),
+                              "could not create a descriptor for a lrn forward "
+                              "propagation primitive");
         }
     };
 
@@ -6278,9 +6421,9 @@ struct lrn_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LRN forward propagation
         /// primitive.
@@ -6293,9 +6436,9 @@ struct lrn_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LRN forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -6305,17 +6448,23 @@ struct lrn_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::lrn,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6331,7 +6480,7 @@ struct lrn_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lrn_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6354,14 +6503,14 @@ struct lrn_backward : public primitive {
         /// @param beta The beta regularization parameter.
         /// @param k The k regularization parameter.
         desc(algorithm aalgorithm, const memory::desc &data_desc,
-                const memory::desc &diff_data_desc, memory::dim local_size,
-                float alpha, float beta, float k = 1.f) {
+             const memory::desc &diff_data_desc, memory::dim local_size,
+             float alpha, float beta, float k = 1.f) {
             error::wrap_c_api(
-                    zendnn_lrn_backward_desc_init(&data, convert_to_c(aalgorithm),
-                            &diff_data_desc.data, &data_desc.data, local_size,
-                            alpha, beta, k),
-                    "could not create a descriptor for a lrn backward "
-                    "propagation primitive");
+                zendnn_lrn_backward_desc_init(&data, convert_to_c(aalgorithm),
+                                              &diff_data_desc.data, &data_desc.data, local_size,
+                                              alpha, beta, k),
+                "could not create a descriptor for a lrn backward "
+                "propagation primitive");
         }
     };
 
@@ -6383,10 +6532,10 @@ struct lrn_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const lrn_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const lrn_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LRN backward propagation
         /// primitive.
@@ -6402,11 +6551,11 @@ struct lrn_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const lrn_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const lrn_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LRN backward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -6416,16 +6565,22 @@ struct lrn_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::lrn,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6441,7 +6596,7 @@ struct lrn_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lrn_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6486,20 +6641,20 @@ struct pooling_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &kernel,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &kernel,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(kernel, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_pooling_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &src_desc.data,
-                                      &dst_desc.data, &strides[0], &kernel[0],
-                                      &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a pooling forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), &src_desc.data,
+                              &dst_desc.data, &strides[0], &kernel[0],
+                              &padding_l[0], &padding_r[0]),
+                              "could not create a descriptor for a pooling forward "
+                              "propagation primitive");
         }
     };
 
@@ -6518,9 +6673,9 @@ struct pooling_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling forward
         /// propagation primitive.
@@ -6533,9 +6688,9 @@ struct pooling_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -6545,17 +6700,23 @@ struct pooling_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::pooling,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6571,7 +6732,7 @@ struct pooling_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     pooling_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6603,20 +6764,20 @@ struct pooling_backward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &kernel, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &kernel, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(kernel, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_pooling_backward_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &diff_dst_desc.data, &strides[0], &kernel[0],
-                            &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a pooling backward "
-                    "propagation primitive");
+                zendnn_pooling_backward_desc_init(&data,
+                                                  convert_to_c(aalgorithm), &diff_src_desc.data,
+                                                  &diff_dst_desc.data, &strides[0], &kernel[0],
+                                                  &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a pooling backward "
+                "propagation primitive");
         }
     };
 
@@ -6638,10 +6799,10 @@ struct pooling_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const pooling_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const pooling_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling backward
         /// propagation primitive.
@@ -6657,11 +6818,11 @@ struct pooling_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const pooling_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const pooling_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -6671,16 +6832,22 @@ struct pooling_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::pooling,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6696,7 +6863,7 @@ struct pooling_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     pooling_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6742,14 +6909,14 @@ struct eltwise_forward : public primitive {
         /// @param beta The beta parameter for the elementwise operation.
         ///     Specific meaning depends on the algorithm.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &data_desc, float alpha = 0,
-                float beta = 0) {
+             const memory::desc &data_desc, float alpha = 0,
+             float beta = 0) {
             error::wrap_c_api(zendnn_eltwise_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      zendnn::convert_to_c(aalgorithm),
-                                      &data_desc.data, alpha, beta),
-                    "could not create a descriptor for an eltwise forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              zendnn::convert_to_c(aalgorithm),
+                              &data_desc.data, alpha, beta),
+                              "could not create a descriptor for an eltwise forward "
+                              "propagation primitive");
         }
     };
 
@@ -6769,9 +6936,9 @@ struct eltwise_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an elementwise forward
         /// propagation primitive.
@@ -6785,9 +6952,9 @@ struct eltwise_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an eltwise forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -6797,14 +6964,18 @@ struct eltwise_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::eltwise,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6820,7 +6991,7 @@ struct eltwise_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     eltwise_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6842,14 +7013,14 @@ struct eltwise_backward : public primitive {
         /// @param beta The beta parameter for the elementwise operation.
         ///     Specific meaning depends on the algorithm.
         desc(algorithm aalgorithm, const memory::desc &diff_data_desc,
-                const memory::desc &data_desc, float alpha = 0,
-                float beta = 0) {
+             const memory::desc &data_desc, float alpha = 0,
+             float beta = 0) {
             error::wrap_c_api(
-                    zendnn_eltwise_backward_desc_init(&data,
-                            zendnn::convert_to_c(aalgorithm),
-                            &diff_data_desc.data, &data_desc.data, alpha, beta),
-                    "could not create a descriptor for an eltwise backward "
-                    "propagation primitive");
+                zendnn_eltwise_backward_desc_init(&data,
+                                                  zendnn::convert_to_c(aalgorithm),
+                                                  &diff_data_desc.data, &data_desc.data, alpha, beta),
+                "could not create a descriptor for an eltwise backward "
+                "propagation primitive");
         }
     };
 
@@ -6872,10 +7043,10 @@ struct eltwise_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const eltwise_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const eltwise_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an elementwise backward
         /// propagation primitive.
@@ -6892,11 +7063,11 @@ struct eltwise_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const eltwise_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const eltwise_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an eltwise backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -6906,16 +7077,22 @@ struct eltwise_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::eltwise,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -6931,7 +7108,7 @@ struct eltwise_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     eltwise_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -6963,12 +7140,12 @@ struct softmax_forward : public primitive {
         /// @param data_desc Source and destination memory descriptor.
         /// @param softmax_axis Axis over which softmax is computed.
         desc(prop_kind aprop_kind, const memory::desc &data_desc,
-                int softmax_axis) {
+             int softmax_axis) {
             error::wrap_c_api(zendnn_softmax_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &data_desc.data, softmax_axis),
-                    "could not create a descriptor for a softmax forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &data_desc.data, softmax_axis),
+                              "could not create a descriptor for a softmax forward "
+                              "propagation primitive");
         }
     };
 
@@ -6988,9 +7165,9 @@ struct softmax_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax forward
         /// propagation primitive.
@@ -7004,9 +7181,9 @@ struct softmax_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7016,14 +7193,18 @@ struct softmax_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7039,7 +7220,7 @@ struct softmax_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     softmax_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7060,12 +7241,12 @@ struct softmax_backward : public primitive {
         /// @param data_desc Destination memory descriptor.
         /// @param softmax_axis Axis over which softmax is computed.
         desc(const memory::desc &diff_data_desc, const memory::desc &data_desc,
-                int softmax_axis) {
+             int softmax_axis) {
             error::wrap_c_api(
-                    zendnn_softmax_backward_desc_init(&data, &diff_data_desc.data,
-                            &data_desc.data, softmax_axis),
-                    "could not create a descriptor for a softmax backward "
-                    "propagation primitive");
+                zendnn_softmax_backward_desc_init(&data, &diff_data_desc.data,
+                                                  &data_desc.data, softmax_axis),
+                "could not create a descriptor for a softmax backward "
+                "propagation primitive");
         }
     };
 
@@ -7088,10 +7269,10 @@ struct softmax_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const softmax_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const softmax_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax backward
         /// propagation primitive.
@@ -7108,11 +7289,11 @@ struct softmax_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const softmax_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const softmax_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7122,16 +7303,22 @@ struct softmax_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7147,7 +7334,7 @@ struct softmax_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     softmax_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7183,15 +7370,15 @@ struct softmax_v2_forward : public primitive {
         /// @param dst_desc Destination memory descriptor.
         /// @param softmax_axis Axis over which softmax is computed.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &dst_desc,
-                int softmax_axis) {
+             const memory::desc &src_desc, const memory::desc &dst_desc,
+             int softmax_axis) {
             error::wrap_c_api(
-                    zendnn_softmax_v2_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(aalgorithm), &src_desc.data,
-                            &dst_desc.data, softmax_axis),
-                    "could not create a descriptor for a softmax forward "
-                    "propagation primitive");
+                zendnn_softmax_v2_forward_desc_init(&data,
+                                                    zendnn::convert_to_c(aprop_kind),
+                                                    zendnn::convert_to_c(aalgorithm), &src_desc.data,
+                                                    &dst_desc.data, softmax_axis),
+                "could not create a descriptor for a softmax forward "
+                "propagation primitive");
         }
     };
 
@@ -7211,9 +7398,9 @@ struct softmax_v2_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax forward
         /// propagation primitive.
@@ -7227,9 +7414,9 @@ struct softmax_v2_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7239,14 +7426,18 @@ struct softmax_v2_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax_v2,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7262,7 +7453,7 @@ struct softmax_v2_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     softmax_v2_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7286,14 +7477,14 @@ struct softmax_v2_backward : public primitive {
         /// @param dst_desc Destination memory descriptor.
         /// @param softmax_axis Axis over which softmax is computed.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &diff_dst_desc, const memory::desc &dst_desc,
-                int softmax_axis) {
+             const memory::desc &diff_dst_desc, const memory::desc &dst_desc,
+             int softmax_axis) {
             error::wrap_c_api(
-                    zendnn_softmax_v2_backward_desc_init(&data,
-                            zendnn::convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &diff_dst_desc.data, &dst_desc.data, softmax_axis),
-                    "could not create a descriptor for a softmax backward "
-                    "propagation primitive");
+                zendnn_softmax_v2_backward_desc_init(&data,
+                        zendnn::convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &diff_dst_desc.data, &dst_desc.data, softmax_axis),
+                "could not create a descriptor for a softmax backward "
+                "propagation primitive");
         }
     };
 
@@ -7316,10 +7507,10 @@ struct softmax_v2_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const softmax_v2_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const softmax_v2_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax backward
         /// propagation primitive.
@@ -7336,11 +7527,11 @@ struct softmax_v2_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const softmax_v2_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const softmax_v2_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a softmax backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7350,16 +7541,22 @@ struct softmax_v2_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::softmax_v2,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7375,7 +7572,7 @@ struct softmax_v2_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     softmax_v2_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7407,12 +7604,12 @@ struct logsoftmax_forward : public primitive {
         /// @param data_desc Source and destination memory descriptor.
         /// @param logsoftmax_axis Axis over which softmax is computed.
         desc(prop_kind aprop_kind, const memory::desc &data_desc,
-                int logsoftmax_axis) {
+             int logsoftmax_axis) {
             error::wrap_c_api(zendnn_logsoftmax_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &data_desc.data, logsoftmax_axis),
-                    "could not create a descriptor for a logsoftmax forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &data_desc.data, logsoftmax_axis),
+                              "could not create a descriptor for a logsoftmax forward "
+                              "propagation primitive");
         }
     };
 
@@ -7432,9 +7629,9 @@ struct logsoftmax_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a logsoftmax forward
         /// propagation primitive.
@@ -7448,9 +7645,9 @@ struct logsoftmax_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a logsoftmax forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7460,18 +7657,22 @@ struct logsoftmax_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    // Logsoftmax and softmax share the implementation and
-                    // currently report the same primitive kind. Hence this
-                    // must be softmax and not logsoftmax.
-                    zendnn::primitive::kind::softmax,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     // Logsoftmax and softmax share the implementation and
+                                     // currently report the same primitive kind. Hence this
+                                     // must be softmax and not logsoftmax.
+                                     zendnn::primitive::kind::softmax,
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7488,7 +7689,7 @@ struct logsoftmax_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     logsoftmax_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7509,12 +7710,12 @@ struct logsoftmax_backward : public primitive {
         /// @param data_desc Destination memory descriptor.
         /// @param logsoftmax_axis Axis over which softmax is computed.
         desc(const memory::desc &diff_data_desc, const memory::desc &data_desc,
-                int logsoftmax_axis) {
+             int logsoftmax_axis) {
             error::wrap_c_api(zendnn_logsoftmax_backward_desc_init(&data,
-                                      &diff_data_desc.data, &data_desc.data,
-                                      logsoftmax_axis),
-                    "could not create a descriptor for a logsoftmax backward "
-                    "propagation primitive");
+                              &diff_data_desc.data, &data_desc.data,
+                              logsoftmax_axis),
+                              "could not create a descriptor for a logsoftmax backward "
+                              "propagation primitive");
         }
     };
 
@@ -7537,10 +7738,10 @@ struct logsoftmax_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const logsoftmax_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const logsoftmax_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a logsoftmax backward
         /// propagation primitive.
@@ -7557,11 +7758,11 @@ struct logsoftmax_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const logsoftmax_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const logsoftmax_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a logsoftmax backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -7571,20 +7772,26 @@ struct logsoftmax_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    // Logsoftmax and softmax share the implementation and
-                    // currently report the same primitive kind. Hence this
-                    // must be softmax and not logsoftmax.
-                    zendnn::primitive::kind::softmax,
-                    zendnn::prop_kind::backward_data) {}
+                                     // Logsoftmax and softmax share the implementation and
+                                     // currently report the same primitive kind. Hence this
+                                     // must be softmax and not logsoftmax.
+                                     zendnn::primitive::kind::softmax,
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7601,7 +7808,7 @@ struct logsoftmax_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     logsoftmax_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7649,13 +7856,13 @@ struct batch_normalization_forward : public primitive {
         /// @param flags Batch normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &data_desc, float epsilon,
-                normalization_flags flags) {
+             normalization_flags flags) {
             error::wrap_c_api(
-                    zendnn_batch_normalization_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind), &data_desc.data,
-                            epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a batch normalization "
-                    "forward propagation primitive");
+                zendnn_batch_normalization_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind), &data_desc.data,
+                        epsilon, convert_to_c(flags)),
+                "could not create a descriptor for a batch normalization "
+                "forward propagation primitive");
         }
     };
 
@@ -7676,9 +7883,9 @@ struct batch_normalization_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a batch normalization forward
         /// propagation primitive.
@@ -7692,9 +7899,9 @@ struct batch_normalization_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a batch normalization
         /// forward propagation primitive from a C API primitive descriptor
@@ -7704,31 +7911,43 @@ struct batch_normalization_forward : public primitive {
         ///     forward propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    zendnn::primitive::kind::batch_normalization,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::primitive::kind::batch_normalization,
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
 
         /// Returns memory descriptor for mean.
         /// @returns Memory descriptor for mean.
-        memory::desc mean_desc() const { return stat_desc(mean); }
+        memory::desc mean_desc() const {
+            return stat_desc(mean);
+        }
 
         /// Returns memory descriptor for variance.
         /// @returns Memory descriptor for variance.
-        memory::desc variance_desc() const { return stat_desc(var); }
+        memory::desc variance_desc() const {
+            return stat_desc(var);
+        }
 
-    private:
+      private:
         enum {
             mean = 1,
             var = 2,
@@ -7736,15 +7955,15 @@ struct batch_normalization_forward : public primitive {
         memory::desc stat_desc(int kind) const {
             zendnn_batch_normalization_desc_t *p;
             error::wrap_c_api(
-                    zendnn_primitive_desc_query(get(),
-                            zendnn::convert_to_c(query::batch_normalization_d), 0,
-                            &p),
-                    "could not retrieve a descriptor from a primitive "
-                    "descriptor for batch normalization forward propagation "
-                    "primitive");
+                zendnn_primitive_desc_query(get(),
+                                            zendnn::convert_to_c(query::batch_normalization_d), 0,
+                                            &p),
+                "could not retrieve a descriptor from a primitive "
+                "descriptor for batch normalization forward propagation "
+                "primitive");
             return query_md(p->flags & zendnn_use_global_stats ? query::src_md
-                                                             : query::dst_md,
-                    kind);
+                            : query::dst_md,
+                            kind);
         }
     };
 
@@ -7762,7 +7981,7 @@ struct batch_normalization_forward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     batch_normalization_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7785,14 +8004,14 @@ struct batch_normalization_backward : public primitive {
         /// @param flags Batch normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &diff_data_desc,
-                const memory::desc &data_desc, float epsilon,
-                normalization_flags flags) {
+             const memory::desc &data_desc, float epsilon,
+             normalization_flags flags) {
             error::wrap_c_api(zendnn_batch_normalization_backward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &diff_data_desc.data, &data_desc.data,
-                                      epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a batch normalization "
-                    "backward propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &diff_data_desc.data, &data_desc.data,
+                              epsilon, convert_to_c(flags)),
+                              "could not create a descriptor for a batch normalization "
+                              "backward propagation primitive");
         }
     };
 
@@ -7816,10 +8035,10 @@ struct batch_normalization_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const batch_normalization_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const batch_normalization_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a batch normalization backward
         /// propagation primitive.
@@ -7836,11 +8055,11 @@ struct batch_normalization_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const batch_normalization_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const batch_normalization_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a batch normalization
         /// backward propagation primitive from a C API primitive descriptor
@@ -7850,24 +8069,34 @@ struct batch_normalization_backward : public primitive {
         ///     backward propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    zendnn::primitive::kind::batch_normalization,
-                    zendnn::prop_kind::backward, zendnn::prop_kind::backward_data) {
+                                     zendnn::primitive::kind::batch_normalization,
+                                     zendnn::prop_kind::backward, zendnn::prop_kind::backward_data) {
         }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_weights_desc()const
         memory::desc diff_weights_desc() const {
@@ -7875,7 +8104,9 @@ struct batch_normalization_backward : public primitive {
         }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::mean_desc()const
-        memory::desc mean_desc() const { return query_md(query::src_md, 1); }
+        memory::desc mean_desc() const {
+            return query_md(query::src_md, 1);
+        }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::variance_desc()const
         memory::desc variance_desc() const {
@@ -7883,7 +8114,9 @@ struct batch_normalization_backward : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -7900,7 +8133,7 @@ struct batch_normalization_backward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     batch_normalization_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -7944,14 +8177,14 @@ struct layer_normalization_forward : public primitive {
         /// @param flags Layer normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &data_desc,
-                const memory::desc &stat_desc, float epsilon,
-                normalization_flags flags) {
+             const memory::desc &stat_desc, float epsilon,
+             normalization_flags flags) {
             error::wrap_c_api(
-                    zendnn_layer_normalization_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind), &data_desc.data,
-                            &stat_desc.data, epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a layer normalization "
-                    "forward propagation primitive");
+                zendnn_layer_normalization_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind), &data_desc.data,
+                        &stat_desc.data, epsilon, convert_to_c(flags)),
+                "could not create a descriptor for a layer normalization "
+                "forward propagation primitive");
         }
 
         /// Constructs a descriptor for layer normalization forward
@@ -7965,13 +8198,13 @@ struct layer_normalization_forward : public primitive {
         /// @param flags Layer normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &data_desc, float epsilon,
-                normalization_flags flags) {
+             normalization_flags flags) {
             error::wrap_c_api(
-                    zendnn_layer_normalization_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind), &data_desc.data,
-                            nullptr, epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a layer normalization "
-                    "forward propagation primitive");
+                zendnn_layer_normalization_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind), &data_desc.data,
+                        nullptr, epsilon, convert_to_c(flags)),
+                "could not create a descriptor for a layer normalization "
+                "forward propagation primitive");
         }
     };
 
@@ -7992,9 +8225,9 @@ struct layer_normalization_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a layer normalization forward
         /// propagation primitive.
@@ -8008,9 +8241,9 @@ struct layer_normalization_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a layer normalization
         /// forward propagation primitive from a C API primitive descriptor
@@ -8020,29 +8253,41 @@ struct layer_normalization_forward : public primitive {
         ///     forward propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    zendnn::primitive::kind::layer_normalization,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::primitive::kind::layer_normalization,
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::mean_desc()const
-        memory::desc mean_desc() const { return stat_desc(mean); }
+        memory::desc mean_desc() const {
+            return stat_desc(mean);
+        }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::variance_desc()const
-        memory::desc variance_desc() const { return stat_desc(var); }
+        memory::desc variance_desc() const {
+            return stat_desc(var);
+        }
 
-    private:
+      private:
         enum {
             mean = 1,
             var = 2,
@@ -8050,15 +8295,15 @@ struct layer_normalization_forward : public primitive {
         memory::desc stat_desc(int kind) const {
             zendnn_layer_normalization_desc_t *p;
             error::wrap_c_api(
-                    zendnn_primitive_desc_query(get(),
-                            zendnn::convert_to_c(query::layer_normalization_d), 0,
-                            &p),
-                    "could not retrieve a descriptor from a primitive "
-                    "descriptor for layer normalization forward propagation "
-                    "primitive");
+                zendnn_primitive_desc_query(get(),
+                                            zendnn::convert_to_c(query::layer_normalization_d), 0,
+                                            &p),
+                "could not retrieve a descriptor from a primitive "
+                "descriptor for layer normalization forward propagation "
+                "primitive");
             return query_md(p->flags & zendnn_use_global_stats ? query::src_md
-                                                             : query::dst_md,
-                    kind);
+                            : query::dst_md,
+                            kind);
         }
     };
 
@@ -8076,7 +8321,7 @@ struct layer_normalization_forward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     layer_normalization_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -8100,15 +8345,15 @@ struct layer_normalization_backward : public primitive {
         /// @param flags Layer normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &diff_data_desc,
-                const memory::desc &data_desc, const memory::desc &stat_desc,
-                float epsilon, normalization_flags flags) {
+             const memory::desc &data_desc, const memory::desc &stat_desc,
+             float epsilon, normalization_flags flags) {
             error::wrap_c_api(
-                    zendnn_layer_normalization_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            &diff_data_desc.data, &data_desc.data,
-                            &stat_desc.data, epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a batch normalization "
-                    "backward propagation primitive");
+                zendnn_layer_normalization_backward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        &diff_data_desc.data, &data_desc.data,
+                        &stat_desc.data, epsilon, convert_to_c(flags)),
+                "could not create a descriptor for a batch normalization "
+                "backward propagation primitive");
         }
 
         /// Constructs a descriptor for layer normalization backward
@@ -8124,14 +8369,14 @@ struct layer_normalization_backward : public primitive {
         /// @param flags Layer normalization flags (@ref
         ///     zendnn::normalization_flags).
         desc(prop_kind aprop_kind, const memory::desc &diff_data_desc,
-                const memory::desc &data_desc, float epsilon,
-                normalization_flags flags) {
+             const memory::desc &data_desc, float epsilon,
+             normalization_flags flags) {
             error::wrap_c_api(zendnn_layer_normalization_backward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &diff_data_desc.data, &data_desc.data,
-                                      nullptr, epsilon, convert_to_c(flags)),
-                    "could not create a descriptor for a batch normalization "
-                    "backward propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &diff_data_desc.data, &data_desc.data,
+                              nullptr, epsilon, convert_to_c(flags)),
+                              "could not create a descriptor for a batch normalization "
+                              "backward propagation primitive");
         }
     };
 
@@ -8155,10 +8400,10 @@ struct layer_normalization_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const layer_normalization_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const layer_normalization_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a layer normalization backward
         /// propagation primitive.
@@ -8175,11 +8420,11 @@ struct layer_normalization_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const layer_normalization_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const layer_normalization_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a layer normalization
         /// backward propagation primitive from a C API primitive descriptor
@@ -8189,24 +8434,34 @@ struct layer_normalization_backward : public primitive {
         ///     backward propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd,
-                    zendnn::primitive::kind::layer_normalization,
-                    zendnn::prop_kind::backward, zendnn::prop_kind::backward_data) {
+                                     zendnn::primitive::kind::layer_normalization,
+                                     zendnn::prop_kind::backward, zendnn::prop_kind::backward_data) {
         }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_weights_desc()const
         memory::desc diff_weights_desc() const {
@@ -8214,7 +8469,9 @@ struct layer_normalization_backward : public primitive {
         }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::mean_desc()const
-        memory::desc mean_desc() const { return query_md(query::src_md, 1); }
+        memory::desc mean_desc() const {
+            return query_md(query::src_md, 1);
+        }
 
         /// @copydoc zendnn::batch_normalization_forward::primitive_desc::variance_desc()const
         memory::desc variance_desc() const {
@@ -8222,7 +8479,9 @@ struct layer_normalization_backward : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -8239,7 +8498,7 @@ struct layer_normalization_backward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     layer_normalization_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -8274,14 +8533,14 @@ struct inner_product_forward : public primitive {
         /// @param bias_desc Memory descriptor for bias.
         /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
-                const memory::desc &weights_desc, const memory::desc &bias_desc,
-                const memory::desc &dst_desc) {
+             const memory::desc &weights_desc, const memory::desc &bias_desc,
+             const memory::desc &dst_desc) {
             error::wrap_c_api(zendnn_inner_product_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &src_desc.data, &weights_desc.data,
-                                      &bias_desc.data, &dst_desc.data),
-                    "could not create a descriptor for an inner product "
-                    "forward propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &src_desc.data, &weights_desc.data,
+                              &bias_desc.data, &dst_desc.data),
+                              "could not create a descriptor for an inner product "
+                              "forward propagation primitive");
         }
 
         /// Constructs a descriptor for an inner product forward propagation
@@ -8298,14 +8557,14 @@ struct inner_product_forward : public primitive {
         /// @param weights_desc Memory descriptor for weights.
         /// @param dst_desc Memory descriptor for dst.
         desc(prop_kind aprop_kind, const memory::desc &src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &dst_desc) {
+             const memory::desc &weights_desc,
+             const memory::desc &dst_desc) {
             error::wrap_c_api(
-                    zendnn_inner_product_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind), &src_desc.data,
-                            &weights_desc.data, nullptr, &dst_desc.data),
-                    "could not create a descriptor for an inner product "
-                    "forward propagation primitive");
+                zendnn_inner_product_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind), &src_desc.data,
+                        &weights_desc.data, nullptr, &dst_desc.data),
+                "could not create a descriptor for an inner product "
+                "forward propagation primitive");
         }
     };
 
@@ -8325,9 +8584,9 @@ struct inner_product_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product forward
         /// propagation primitive.
@@ -8341,9 +8600,9 @@ struct inner_product_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -8353,20 +8612,28 @@ struct inner_product_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::inner_product,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::convolution_forward::primitive_desc::bias_desc()const
-        memory::desc bias_desc() const { return base::weights_desc(1); }
+        memory::desc bias_desc() const {
+            return base::weights_desc(1);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -8383,7 +8650,7 @@ struct inner_product_forward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     inner_product_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -8404,13 +8671,13 @@ struct inner_product_backward_data : public primitive {
         /// @param weights_desc Memory descriptor for weights.
         /// @param diff_dst_desc Memory descriptor for diff dst.
         desc(const memory::desc &diff_src_desc,
-                const memory::desc &weights_desc,
-                const memory::desc &diff_dst_desc) {
+             const memory::desc &weights_desc,
+             const memory::desc &diff_dst_desc) {
             error::wrap_c_api(zendnn_inner_product_backward_data_desc_init(&data,
-                                      &diff_src_desc.data, &weights_desc.data,
-                                      &diff_dst_desc.data),
-                    "could not create a descriptor for an inner product "
-                    "backward propagation primitive");
+                              &diff_src_desc.data, &weights_desc.data,
+                              &diff_dst_desc.data),
+                              "could not create a descriptor for an inner product "
+                              "backward propagation primitive");
         }
     };
 
@@ -8434,10 +8701,10 @@ struct inner_product_backward_data : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const inner_product_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const inner_product_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product backward
         /// propagation primitive.
@@ -8454,11 +8721,11 @@ struct inner_product_backward_data : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const inner_product_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const inner_product_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -8468,16 +8735,22 @@ struct inner_product_backward_data : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::inner_product,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
-        memory::desc weights_desc() const { return base::weights_desc(0); }
+        memory::desc weights_desc() const {
+            return base::weights_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -8494,7 +8767,7 @@ struct inner_product_backward_data : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     inner_product_backward_data(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -8516,15 +8789,15 @@ struct inner_product_backward_weights : public primitive {
         /// @param diff_bias_desc Memory descriptor for diff bias.
         /// @param diff_dst_desc Memory descriptor for diff dst.
         desc(const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_desc) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_desc) {
             error::wrap_c_api(
-                    zendnn_inner_product_backward_weights_desc_init(&data,
-                            &src_desc.data, &diff_weights_desc.data,
-                            &diff_bias_desc.data, &diff_dst_desc.data),
-                    "could not create a descriptor for an inner product "
-                    "weights gradient primitive");
+                zendnn_inner_product_backward_weights_desc_init(&data,
+                        &src_desc.data, &diff_weights_desc.data,
+                        &diff_bias_desc.data, &diff_dst_desc.data),
+                "could not create a descriptor for an inner product "
+                "weights gradient primitive");
         }
 
         /// Constructs a descriptor for an inner product descriptor weights
@@ -8538,14 +8811,14 @@ struct inner_product_backward_weights : public primitive {
         /// @param diff_weights_desc Memory descriptor for diff weights.
         /// @param diff_dst_desc Memory descriptor for diff dst.
         desc(const memory::desc &src_desc,
-                const memory::desc &diff_weights_desc,
-                const memory::desc &diff_dst_desc) {
+             const memory::desc &diff_weights_desc,
+             const memory::desc &diff_dst_desc) {
             error::wrap_c_api(
-                    zendnn_inner_product_backward_weights_desc_init(&data,
-                            &src_desc.data, &diff_weights_desc.data, nullptr,
-                            &diff_dst_desc.data),
-                    "could not create a descriptor for an inner product "
-                    "weights gradient primitive");
+                zendnn_inner_product_backward_weights_desc_init(&data,
+                        &src_desc.data, &diff_weights_desc.data, nullptr,
+                        &diff_dst_desc.data),
+                "could not create a descriptor for an inner product "
+                "weights gradient primitive");
         }
     };
 
@@ -8568,10 +8841,10 @@ struct inner_product_backward_weights : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const inner_product_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const inner_product_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product weights
         /// update primitive.
@@ -8588,11 +8861,11 @@ struct inner_product_backward_weights : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const inner_product_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const inner_product_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an inner product weights
         /// update primitive from a C API primitive descriptor that must
@@ -8602,10 +8875,12 @@ struct inner_product_backward_weights : public primitive {
         ///     gradient primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::inner_product,
-                    zendnn::prop_kind::backward_weights) {}
+                                     zendnn::prop_kind::backward_weights) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_weights_desc()const
         memory::desc diff_weights_desc() const {
@@ -8613,7 +8888,9 @@ struct inner_product_backward_weights : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::convolution_backward_weights::primitive_desc::diff_bias_desc()const
         memory::desc diff_bias_desc() const {
@@ -8635,7 +8912,7 @@ struct inner_product_backward_weights : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     inner_product_backward_weights(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -8664,7 +8941,7 @@ struct rnn_primitive_desc_base : public primitive_desc {
     /// @param aprop_kind Expected propagation kind.
     /// @param cell_kind Expected cell kind.
     rnn_primitive_desc_base(zendnn_primitive_desc_t pd,
-            zendnn::prop_kind aprop_kind, zendnn::algorithm cell_kind)
+                            zendnn::prop_kind aprop_kind, zendnn::algorithm cell_kind)
         : rnn_primitive_desc_base(pd, aprop_kind, aprop_kind, cell_kind) {}
 
     /// Returns source layer memory descriptor.
@@ -8755,7 +9032,7 @@ struct rnn_primitive_desc_base : public primitive_desc {
     /// @returns Diff AUGRU attention memory descriptor.
     memory::desc diff_augru_attention_desc() const {
         return base::query_md(
-                query::exec_arg_md, ZENDNN_ARG_DIFF_AUGRU_ATTENTION);
+                   query::exec_arg_md, ZENDNN_ARG_DIFF_AUGRU_ATTENTION);
     }
 
     /// Returns diff source iteration memory descriptor.
@@ -8788,14 +9065,14 @@ struct rnn_primitive_desc_base : public primitive_desc {
     /// @returns Diff weights peephole memory descriptor.
     memory::desc diff_weights_peephole_desc() const {
         return base::query_md(
-                query::exec_arg_md, ZENDNN_ARG_DIFF_WEIGHTS_PEEPHOLE);
+                   query::exec_arg_md, ZENDNN_ARG_DIFF_WEIGHTS_PEEPHOLE);
     }
 
     /// Returns diff weights projection memory descriptor.
     /// @returns Diff weights projection memory descriptor.
     memory::desc diff_weights_projection_desc() const {
         return base::query_md(
-                query::exec_arg_md, ZENDNN_ARG_DIFF_WEIGHTS_PROJECTION);
+                   query::exec_arg_md, ZENDNN_ARG_DIFF_WEIGHTS_PROJECTION);
     }
 
     /// Returns diff bias memory descriptor.
@@ -8826,7 +9103,7 @@ struct rnn_primitive_desc_base : public primitive_desc {
         return base::query_md(query::exec_arg_md, ZENDNN_ARG_DIFF_DST_ITER_C);
     }
 
-protected:
+  protected:
     using rnn_base = rnn_primitive_desc_base;
 
     // (Deliberately not using doxygen comments)
@@ -8842,28 +9119,28 @@ protected:
     // @param prop_kind2 Expected propagation kind.
     // @param cell_kind Expected cell kind.
     rnn_primitive_desc_base(zendnn_primitive_desc_t pd,
-            zendnn::prop_kind prop_kind1, zendnn::prop_kind prop_kind2,
-            zendnn::algorithm cell_kind) {
+                            zendnn::prop_kind prop_kind1, zendnn::prop_kind prop_kind2,
+                            zendnn::algorithm cell_kind) {
         zendnn_rnn_desc_t *rnn_d;
         zendnn_status_t rc;
         rc = zendnn_primitive_desc_query(pd, zendnn_query_rnn_d, 0, &rnn_d);
         error::wrap_c_api(rc,
-                "could not retrieve a descriptor from a primitive descriptor "
-                "for an RNN primitive");
+                          "could not retrieve a descriptor from a primitive descriptor "
+                          "for an RNN primitive");
 
         zendnn_prop_kind_t c_prop_kind1 = convert_to_c(prop_kind1);
         zendnn_prop_kind_t c_prop_kind2 = convert_to_c(prop_kind2);
         zendnn_alg_kind_t c_cell_kind = convert_to_c(cell_kind);
 
         bool ok = rnn_d->primitive_kind == zendnn_rnn
-                && (rnn_d->prop_kind == c_prop_kind1
-                        || rnn_d->prop_kind == c_prop_kind2)
-                && rnn_d->cell_kind == c_cell_kind;
+                  && (rnn_d->prop_kind == c_prop_kind1
+                      || rnn_d->prop_kind == c_prop_kind2)
+                  && rnn_d->cell_kind == c_cell_kind;
 
         if (!ok)
             ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
-                    "mismatch between expected and provided descriptors for an "
-                    "RNN primitive");
+                               "mismatch between expected and provided descriptors for an "
+                               "RNN primitive");
 
         reset_with_clone(pd);
     }
@@ -8916,26 +9193,26 @@ struct vanilla_rnn_forward : public primitive {
         ///     #zendnn::algorithm::eltwise_relu.
         /// @param beta Unused.
         desc(prop_kind aprop_kind, algorithm activation,
-                rnn_direction direction, const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef, float alpha = 0.0f,
-                float beta = 0.0f) {
+             rnn_direction direction, const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef, float alpha = 0.0f,
+             float beta = 0.0f) {
             error::wrap_c_api(
-                    zendnn_vanilla_rnn_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(activation),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            zendnn::convert_to_c(flags), alpha, beta),
-                    "could not create a descriptor for a vanilla RNN forward "
-                    "propagation primitive");
+                zendnn_vanilla_rnn_forward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        zendnn::convert_to_c(activation),
+                        zendnn::convert_to_c(direction), &src_layer_desc.data,
+                        &src_iter_desc.data, &weights_layer_desc.data,
+                        &weights_iter_desc.data, &bias_desc.data,
+                        &dst_layer_desc.data, &dst_iter_desc.data,
+                        zendnn::convert_to_c(flags), alpha, beta),
+                "could not create a descriptor for a vanilla RNN forward "
+                "propagation primitive");
         }
     };
 
@@ -8955,9 +9232,9 @@ struct vanilla_rnn_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a vanilla RNN forward
         /// propagation primitive.
@@ -8971,9 +9248,9 @@ struct vanilla_rnn_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a vanilla RNN forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -8983,8 +9260,8 @@ struct vanilla_rnn_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::vanilla_rnn) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::vanilla_rnn) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -8992,7 +9269,9 @@ struct vanilla_rnn_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -9005,7 +9284,9 @@ struct vanilla_rnn_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -9013,7 +9294,9 @@ struct vanilla_rnn_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -9035,7 +9318,7 @@ struct vanilla_rnn_forward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     vanilla_rnn_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -9098,37 +9381,37 @@ struct vanilla_rnn_backward : public primitive {
         ///     #zendnn::algorithm::eltwise_relu.
         /// @param beta Unused.
         desc(prop_kind aprop_kind, algorithm activation,
-                rnn_direction direction, const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef, float alpha = 0.0f,
-                float beta = 0.0f) {
+             rnn_direction direction, const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef, float alpha = 0.0f,
+             float beta = 0.0f) {
             error::wrap_c_api(
-                    zendnn_vanilla_rnn_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(activation),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            zendnn::convert_to_c(flags), alpha, beta),
-                    "could not create a descriptor for a vanilla RNN backward "
-                    "propagation primitive");
+                zendnn_vanilla_rnn_backward_desc_init(&data,
+                        zendnn::convert_to_c(aprop_kind),
+                        zendnn::convert_to_c(activation),
+                        zendnn::convert_to_c(direction), &src_layer_desc.data,
+                        &src_iter_desc.data, &weights_layer_desc.data,
+                        &weights_iter_desc.data, &bias_desc.data,
+                        &dst_layer_desc.data, &dst_iter_desc.data,
+                        &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                        &diff_weights_layer_desc.data,
+                        &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                        &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                        zendnn::convert_to_c(flags), alpha, beta),
+                "could not create a descriptor for a vanilla RNN backward "
+                "propagation primitive");
         }
     };
 
@@ -9151,10 +9434,10 @@ struct vanilla_rnn_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const vanilla_rnn_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const vanilla_rnn_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a vanilla RNN backward
         /// propagation primitive.
@@ -9171,11 +9454,11 @@ struct vanilla_rnn_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const vanilla_rnn_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const vanilla_rnn_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a vanilla RNN backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -9185,7 +9468,7 @@ struct vanilla_rnn_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
-                    zendnn::algorithm::vanilla_rnn) {}
+                                      zendnn::algorithm::vanilla_rnn) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -9193,7 +9476,9 @@ struct vanilla_rnn_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -9206,7 +9491,9 @@ struct vanilla_rnn_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -9214,7 +9501,9 @@ struct vanilla_rnn_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -9271,7 +9560,7 @@ struct vanilla_rnn_backward : public primitive {
     ///     propagation primitive.
     /// @param cache_blob Cache blob.
     vanilla_rnn_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -9330,30 +9619,30 @@ struct lstm_forward : public primitive {
         ///     cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &weights_peephole_desc,
-                const memory::desc &weights_projection_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &weights_peephole_desc,
+             const memory::desc &weights_projection_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_forward_desc_init_v3(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &weights_peephole_desc.data,
-                            &weights_projection_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &dst_iter_c_desc.data, zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM forward "
-                    "propagation primitive");
+                zendnn_lstm_forward_desc_init_v3(&data,
+                                                 zendnn::convert_to_c(aprop_kind),
+                                                 zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                 &src_iter_desc.data, &src_iter_c_desc.data,
+                                                 &weights_layer_desc.data, &weights_iter_desc.data,
+                                                 &weights_peephole_desc.data,
+                                                 &weights_projection_desc.data, &bias_desc.data,
+                                                 &dst_layer_desc.data, &dst_iter_desc.data,
+                                                 &dst_iter_c_desc.data, zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for an LSTM (with or without peephole)
@@ -9398,28 +9687,28 @@ struct lstm_forward : public primitive {
         ///     cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &weights_peephole_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &weights_peephole_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_forward_desc_init_v2(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &weights_peephole_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &dst_iter_c_desc.data, zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM forward "
-                    "propagation primitive");
+                zendnn_lstm_forward_desc_init_v2(&data,
+                                                 zendnn::convert_to_c(aprop_kind),
+                                                 zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                 &src_iter_desc.data, &src_iter_c_desc.data,
+                                                 &weights_layer_desc.data, &weights_iter_desc.data,
+                                                 &weights_peephole_desc.data, &bias_desc.data,
+                                                 &dst_layer_desc.data, &dst_iter_desc.data,
+                                                 &dst_iter_c_desc.data, zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM forward "
+                "propagation primitive");
         }
 
         /// Constructs a descriptor for an LSTM forward propagation primitive.
@@ -9459,27 +9748,27 @@ struct lstm_forward : public primitive {
         ///     cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, &dst_iter_c_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM forward "
-                    "propagation primitive");
+                zendnn_lstm_forward_desc_init(&data,
+                                              zendnn::convert_to_c(aprop_kind),
+                                              zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                              &src_iter_desc.data, &src_iter_c_desc.data,
+                                              &weights_layer_desc.data, &weights_iter_desc.data,
+                                              &bias_desc.data, &dst_layer_desc.data,
+                                              &dst_iter_desc.data, &dst_iter_c_desc.data,
+                                              zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM forward "
+                "propagation primitive");
         }
     };
 
@@ -9498,9 +9787,9 @@ struct lstm_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LSTM forward propagation
         /// primitive.
@@ -9513,9 +9802,9 @@ struct lstm_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LSTM forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -9525,8 +9814,8 @@ struct lstm_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::vanilla_lstm) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::vanilla_lstm) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -9534,7 +9823,9 @@ struct lstm_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
         memory::desc src_iter_c_desc() const {
@@ -9562,7 +9853,9 @@ struct lstm_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -9570,7 +9863,9 @@ struct lstm_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
         memory::desc dst_iter_c_desc() const {
@@ -9596,7 +9891,7 @@ struct lstm_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lstm_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -9682,51 +9977,51 @@ struct lstm_backward : public primitive {
         ///     output recurrent cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &weights_peephole_desc,
-                const memory::desc &weights_projection_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_src_iter_c_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_weights_peephole_desc,
-                const memory::desc &diff_weights_projection_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                const memory::desc &diff_dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &weights_peephole_desc,
+             const memory::desc &weights_projection_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_src_iter_c_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_weights_peephole_desc,
+             const memory::desc &diff_weights_projection_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             const memory::desc &diff_dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_backward_desc_init_v3(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &weights_peephole_desc.data,
-                            &weights_projection_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &dst_iter_c_desc.data, &diff_src_layer_desc.data,
-                            &diff_src_iter_desc.data,
-                            &diff_src_iter_c_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data,
-                            &diff_weights_peephole_desc.data,
-                            &diff_weights_projection_desc.data,
-                            &diff_bias_desc.data, &diff_dst_layer_desc.data,
-                            &diff_dst_iter_desc.data,
-                            &diff_dst_iter_c_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM backward "
-                    "propagation primitive");
+                zendnn_lstm_backward_desc_init_v3(&data,
+                                                  zendnn::convert_to_c(aprop_kind),
+                                                  zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                  &src_iter_desc.data, &src_iter_c_desc.data,
+                                                  &weights_layer_desc.data, &weights_iter_desc.data,
+                                                  &weights_peephole_desc.data,
+                                                  &weights_projection_desc.data, &bias_desc.data,
+                                                  &dst_layer_desc.data, &dst_iter_desc.data,
+                                                  &dst_iter_c_desc.data, &diff_src_layer_desc.data,
+                                                  &diff_src_iter_desc.data,
+                                                  &diff_src_iter_c_desc.data,
+                                                  &diff_weights_layer_desc.data,
+                                                  &diff_weights_iter_desc.data,
+                                                  &diff_weights_peephole_desc.data,
+                                                  &diff_weights_projection_desc.data,
+                                                  &diff_bias_desc.data, &diff_dst_layer_desc.data,
+                                                  &diff_dst_iter_desc.data,
+                                                  &diff_dst_iter_c_desc.data,
+                                                  zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM backward "
+                "propagation primitive");
         }
 
         /// Constructs an LSTM (with or without peephole) descriptor for
@@ -9794,47 +10089,47 @@ struct lstm_backward : public primitive {
         ///     output recurrent cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &weights_peephole_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_src_iter_c_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_weights_peephole_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                const memory::desc &diff_dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &weights_peephole_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_src_iter_c_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_weights_peephole_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             const memory::desc &diff_dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_backward_desc_init_v2(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &weights_peephole_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &dst_iter_c_desc.data, &diff_src_layer_desc.data,
-                            &diff_src_iter_desc.data,
-                            &diff_src_iter_c_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data,
-                            &diff_weights_peephole_desc.data,
-                            &diff_bias_desc.data, &diff_dst_layer_desc.data,
-                            &diff_dst_iter_desc.data,
-                            &diff_dst_iter_c_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM backward "
-                    "propagation primitive");
+                zendnn_lstm_backward_desc_init_v2(&data,
+                                                  zendnn::convert_to_c(aprop_kind),
+                                                  zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                  &src_iter_desc.data, &src_iter_c_desc.data,
+                                                  &weights_layer_desc.data, &weights_iter_desc.data,
+                                                  &weights_peephole_desc.data, &bias_desc.data,
+                                                  &dst_layer_desc.data, &dst_iter_desc.data,
+                                                  &dst_iter_c_desc.data, &diff_src_layer_desc.data,
+                                                  &diff_src_iter_desc.data,
+                                                  &diff_src_iter_c_desc.data,
+                                                  &diff_weights_layer_desc.data,
+                                                  &diff_weights_iter_desc.data,
+                                                  &diff_weights_peephole_desc.data,
+                                                  &diff_bias_desc.data, &diff_dst_layer_desc.data,
+                                                  &diff_dst_iter_desc.data,
+                                                  &diff_dst_iter_c_desc.data,
+                                                  zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM backward "
+                "propagation primitive");
         }
 
         /// Constructs an LSTM descriptor for backward propagation using @p
@@ -9893,42 +10188,42 @@ struct lstm_backward : public primitive {
         ///     output recurrent cell state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &src_iter_c_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &dst_iter_c_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_src_iter_c_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                const memory::desc &diff_dst_iter_c_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &src_iter_c_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &dst_iter_c_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_src_iter_c_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             const memory::desc &diff_dst_iter_c_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lstm_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &src_iter_c_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, &dst_iter_c_desc.data,
-                            &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                            &diff_src_iter_c_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            &diff_dst_iter_c_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LSTM backward "
-                    "propagation primitive");
+                zendnn_lstm_backward_desc_init(&data,
+                                               zendnn::convert_to_c(aprop_kind),
+                                               zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                               &src_iter_desc.data, &src_iter_c_desc.data,
+                                               &weights_layer_desc.data, &weights_iter_desc.data,
+                                               &bias_desc.data, &dst_layer_desc.data,
+                                               &dst_iter_desc.data, &dst_iter_c_desc.data,
+                                               &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                                               &diff_src_iter_c_desc.data,
+                                               &diff_weights_layer_desc.data,
+                                               &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                                               &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                                               &diff_dst_iter_c_desc.data,
+                                               zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LSTM backward "
+                "propagation primitive");
         }
     };
 
@@ -9950,10 +10245,10 @@ struct lstm_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const lstm_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const lstm_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LSTM backward propagation
         /// primitive.
@@ -9969,11 +10264,11 @@ struct lstm_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const lstm_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const lstm_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LSTM backward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -9983,7 +10278,7 @@ struct lstm_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
-                    zendnn::algorithm::vanilla_lstm) {}
+                                      zendnn::algorithm::vanilla_lstm) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -9991,7 +10286,9 @@ struct lstm_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
         memory::desc src_iter_c_desc() const {
@@ -10019,7 +10316,9 @@ struct lstm_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -10027,7 +10326,9 @@ struct lstm_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
         memory::desc dst_iter_c_desc() const {
@@ -10108,7 +10409,7 @@ struct lstm_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lstm_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -10151,24 +10452,24 @@ struct gru_forward : public primitive {
         ///     hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_gru_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for a GRU forward "
-                    "propagation primitive");
+                zendnn_gru_forward_desc_init(&data,
+                                             zendnn::convert_to_c(aprop_kind),
+                                             zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                             &src_iter_desc.data, &weights_layer_desc.data,
+                                             &weights_iter_desc.data, &bias_desc.data,
+                                             &dst_layer_desc.data, &dst_iter_desc.data,
+                                             zendnn::convert_to_c(flags)),
+                "could not create a descriptor for a GRU forward "
+                "propagation primitive");
         }
     };
 
@@ -10187,9 +10488,9 @@ struct gru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a GRU forward propagation
         /// primitive.
@@ -10202,9 +10503,9 @@ struct gru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a GRU forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -10214,8 +10515,8 @@ struct gru_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::vanilla_gru) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::vanilla_gru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -10223,7 +10524,9 @@ struct gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -10236,7 +10539,9 @@ struct gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -10244,7 +10549,9 @@ struct gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -10265,7 +10572,7 @@ struct gru_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     gru_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -10320,35 +10627,35 @@ struct gru_backward : public primitive {
         ///     recurrent hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_gru_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for a GRU backward "
-                    "propagation primitive");
+                zendnn_gru_backward_desc_init(&data,
+                                              zendnn::convert_to_c(aprop_kind),
+                                              zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                              &src_iter_desc.data, &weights_layer_desc.data,
+                                              &weights_iter_desc.data, &bias_desc.data,
+                                              &dst_layer_desc.data, &dst_iter_desc.data,
+                                              &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                                              &diff_weights_layer_desc.data,
+                                              &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                                              &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                                              zendnn::convert_to_c(flags)),
+                "could not create a descriptor for a GRU backward "
+                "propagation primitive");
         }
     };
 
@@ -10370,10 +10677,10 @@ struct gru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const gru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const gru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a GRU backward propagation
         /// primitive.
@@ -10389,11 +10696,11 @@ struct gru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const gru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const gru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a GRU backward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -10403,7 +10710,7 @@ struct gru_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
-                    zendnn::algorithm::vanilla_gru) {}
+                                      zendnn::algorithm::vanilla_gru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -10411,7 +10718,9 @@ struct gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -10424,7 +10733,9 @@ struct gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -10432,7 +10743,9 @@ struct gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -10488,7 +10801,7 @@ struct gru_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     gru_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -10532,24 +10845,24 @@ struct lbr_gru_forward : public primitive {
         ///     hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lbr_gru_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LBR GRU forward "
-                    "propagation primitive");
+                zendnn_lbr_gru_forward_desc_init(&data,
+                                                 zendnn::convert_to_c(aprop_kind),
+                                                 zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                 &src_iter_desc.data, &weights_layer_desc.data,
+                                                 &weights_iter_desc.data, &bias_desc.data,
+                                                 &dst_layer_desc.data, &dst_iter_desc.data,
+                                                 zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LBR GRU forward "
+                "propagation primitive");
         }
     };
 
@@ -10569,9 +10882,9 @@ struct lbr_gru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a LBR GRU forward
         /// propagation primitive.
@@ -10585,9 +10898,9 @@ struct lbr_gru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a LBR GRU forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -10597,8 +10910,8 @@ struct lbr_gru_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::lbr_gru) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::lbr_gru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -10606,7 +10919,9 @@ struct lbr_gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -10619,7 +10934,9 @@ struct lbr_gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -10627,7 +10944,9 @@ struct lbr_gru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -10648,7 +10967,7 @@ struct lbr_gru_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lbr_gru_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -10704,35 +11023,35 @@ struct lbr_gru_backward : public primitive {
         ///     recurrent hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lbr_gru_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &weights_layer_desc.data,
-                            &weights_iter_desc.data, &bias_desc.data,
-                            &dst_layer_desc.data, &dst_iter_desc.data,
-                            &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LBR GRU backward "
-                    "propagation primitive");
+                zendnn_lbr_gru_backward_desc_init(&data,
+                                                  zendnn::convert_to_c(aprop_kind),
+                                                  zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                  &src_iter_desc.data, &weights_layer_desc.data,
+                                                  &weights_iter_desc.data, &bias_desc.data,
+                                                  &dst_layer_desc.data, &dst_iter_desc.data,
+                                                  &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                                                  &diff_weights_layer_desc.data,
+                                                  &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                                                  &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                                                  zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LBR GRU backward "
+                "propagation primitive");
         }
     };
 
@@ -10755,10 +11074,10 @@ struct lbr_gru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const lbr_gru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const lbr_gru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LBR GRU backward
         /// propagation primitive.
@@ -10775,11 +11094,11 @@ struct lbr_gru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const lbr_gru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const lbr_gru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a LBR GRU backward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -10789,7 +11108,7 @@ struct lbr_gru_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(
-                    pd, zendnn::prop_kind::backward, zendnn::algorithm::lbr_gru) {}
+                  pd, zendnn::prop_kind::backward, zendnn::algorithm::lbr_gru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -10797,7 +11116,9 @@ struct lbr_gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::weights_layer_desc()const
         memory::desc weights_layer_desc() const {
@@ -10810,7 +11131,9 @@ struct lbr_gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -10818,7 +11141,9 @@ struct lbr_gru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -10874,7 +11199,7 @@ struct lbr_gru_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lbr_gru_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -10919,25 +11244,25 @@ struct augru_forward : public primitive {
         ///     hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &attention_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &attention_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_augru_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &attention_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an AUGRU forward "
-                    "propagation primitive");
+                zendnn_augru_forward_desc_init(&data,
+                                               zendnn::convert_to_c(aprop_kind),
+                                               zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                               &src_iter_desc.data, &attention_desc.data,
+                                               &weights_layer_desc.data, &weights_iter_desc.data,
+                                               &bias_desc.data, &dst_layer_desc.data,
+                                               &dst_iter_desc.data, zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an AUGRU forward "
+                "propagation primitive");
         }
     };
 
@@ -10956,9 +11281,9 @@ struct augru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an AUGRU forward propagation
         /// primitive.
@@ -10971,9 +11296,9 @@ struct augru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an AUGRU forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -10983,8 +11308,8 @@ struct augru_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::vanilla_augru) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::vanilla_augru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -10992,7 +11317,9 @@ struct augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
         memory::desc attention_desc() const {
@@ -11010,7 +11337,9 @@ struct augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -11018,7 +11347,9 @@ struct augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -11039,7 +11370,7 @@ struct augru_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     augru_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11097,38 +11428,38 @@ struct augru_backward : public primitive {
         ///     recurrent hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &attention_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_attention_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &attention_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_attention_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_augru_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &attention_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, &diff_src_layer_desc.data,
-                            &diff_src_iter_desc.data, &diff_attention_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an AUGRU backward "
-                    "propagation primitive");
+                zendnn_augru_backward_desc_init(&data,
+                                                zendnn::convert_to_c(aprop_kind),
+                                                zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                &src_iter_desc.data, &attention_desc.data,
+                                                &weights_layer_desc.data, &weights_iter_desc.data,
+                                                &bias_desc.data, &dst_layer_desc.data,
+                                                &dst_iter_desc.data, &diff_src_layer_desc.data,
+                                                &diff_src_iter_desc.data, &diff_attention_desc.data,
+                                                &diff_weights_layer_desc.data,
+                                                &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                                                &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                                                zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an AUGRU backward "
+                "propagation primitive");
         }
     };
 
@@ -11150,10 +11481,10 @@ struct augru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const augru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const augru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an AUGRU backward propagation
         /// primitive.
@@ -11169,11 +11500,11 @@ struct augru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const augru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const augru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an AUGRU backward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -11183,7 +11514,7 @@ struct augru_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
-                    zendnn::algorithm::vanilla_augru) {}
+                                      zendnn::algorithm::vanilla_augru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -11191,7 +11522,9 @@ struct augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
         memory::desc attention_desc() const {
@@ -11209,7 +11542,9 @@ struct augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -11217,7 +11552,9 @@ struct augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -11278,7 +11615,7 @@ struct augru_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     augru_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11323,25 +11660,25 @@ struct lbr_augru_forward : public primitive {
         ///     hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &attention_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &attention_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lbr_augru_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &attention_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LBR AUGRU forward "
-                    "propagation primitive");
+                zendnn_lbr_augru_forward_desc_init(&data,
+                                                   zendnn::convert_to_c(aprop_kind),
+                                                   zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                   &src_iter_desc.data, &attention_desc.data,
+                                                   &weights_layer_desc.data, &weights_iter_desc.data,
+                                                   &bias_desc.data, &dst_layer_desc.data,
+                                                   &dst_iter_desc.data, zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LBR AUGRU forward "
+                "propagation primitive");
         }
     };
 
@@ -11361,9 +11698,9 @@ struct lbr_augru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LBR AUGRU forward
         /// propagation primitive.
@@ -11377,9 +11714,9 @@ struct lbr_augru_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : rnn_primitive_desc_base(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an LBR AUGRU forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -11389,8 +11726,8 @@ struct lbr_augru_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference,
-                    zendnn::algorithm::lbr_augru) {}
+                                      zendnn::prop_kind::forward_inference,
+                                      zendnn::algorithm::lbr_augru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -11398,7 +11735,9 @@ struct lbr_augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
         memory::desc attention_desc() const {
@@ -11416,7 +11755,9 @@ struct lbr_augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -11424,7 +11765,9 @@ struct lbr_augru_forward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -11445,7 +11788,7 @@ struct lbr_augru_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lbr_augru_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11504,38 +11847,38 @@ struct lbr_augru_backward : public primitive {
         ///     recurrent hidden state vector.
         /// @param flags Unused.
         desc(prop_kind aprop_kind, rnn_direction direction,
-                const memory::desc &src_layer_desc,
-                const memory::desc &src_iter_desc,
-                const memory::desc &attention_desc,
-                const memory::desc &weights_layer_desc,
-                const memory::desc &weights_iter_desc,
-                const memory::desc &bias_desc,
-                const memory::desc &dst_layer_desc,
-                const memory::desc &dst_iter_desc,
-                const memory::desc &diff_src_layer_desc,
-                const memory::desc &diff_src_iter_desc,
-                const memory::desc &diff_attention_desc,
-                const memory::desc &diff_weights_layer_desc,
-                const memory::desc &diff_weights_iter_desc,
-                const memory::desc &diff_bias_desc,
-                const memory::desc &diff_dst_layer_desc,
-                const memory::desc &diff_dst_iter_desc,
-                rnn_flags flags = rnn_flags::undef) {
+             const memory::desc &src_layer_desc,
+             const memory::desc &src_iter_desc,
+             const memory::desc &attention_desc,
+             const memory::desc &weights_layer_desc,
+             const memory::desc &weights_iter_desc,
+             const memory::desc &bias_desc,
+             const memory::desc &dst_layer_desc,
+             const memory::desc &dst_iter_desc,
+             const memory::desc &diff_src_layer_desc,
+             const memory::desc &diff_src_iter_desc,
+             const memory::desc &diff_attention_desc,
+             const memory::desc &diff_weights_layer_desc,
+             const memory::desc &diff_weights_iter_desc,
+             const memory::desc &diff_bias_desc,
+             const memory::desc &diff_dst_layer_desc,
+             const memory::desc &diff_dst_iter_desc,
+             rnn_flags flags = rnn_flags::undef) {
             error::wrap_c_api(
-                    zendnn_lbr_augru_backward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            zendnn::convert_to_c(direction), &src_layer_desc.data,
-                            &src_iter_desc.data, &attention_desc.data,
-                            &weights_layer_desc.data, &weights_iter_desc.data,
-                            &bias_desc.data, &dst_layer_desc.data,
-                            &dst_iter_desc.data, &diff_src_layer_desc.data,
-                            &diff_src_iter_desc.data, &diff_attention_desc.data,
-                            &diff_weights_layer_desc.data,
-                            &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                            &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                            zendnn::convert_to_c(flags)),
-                    "could not create a descriptor for an LBR AUGRU backward "
-                    "propagation primitive");
+                zendnn_lbr_augru_backward_desc_init(&data,
+                                                    zendnn::convert_to_c(aprop_kind),
+                                                    zendnn::convert_to_c(direction), &src_layer_desc.data,
+                                                    &src_iter_desc.data, &attention_desc.data,
+                                                    &weights_layer_desc.data, &weights_iter_desc.data,
+                                                    &bias_desc.data, &dst_layer_desc.data,
+                                                    &dst_iter_desc.data, &diff_src_layer_desc.data,
+                                                    &diff_src_iter_desc.data, &diff_attention_desc.data,
+                                                    &diff_weights_layer_desc.data,
+                                                    &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                                                    &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                                                    zendnn::convert_to_c(flags)),
+                "could not create a descriptor for an LBR AUGRU backward "
+                "propagation primitive");
         }
     };
 
@@ -11558,10 +11901,10 @@ struct lbr_augru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const lbr_augru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const lbr_augru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LBR AUGRU backward
         /// propagation primitive.
@@ -11578,11 +11921,11 @@ struct lbr_augru_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const lbr_augru_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const lbr_augru_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : rnn_primitive_desc_base(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                      hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for an LBR AUGRU backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -11592,7 +11935,7 @@ struct lbr_augru_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : rnn_primitive_desc_base(pd, zendnn::prop_kind::backward,
-                    zendnn::algorithm::lbr_augru) {}
+                                      zendnn::algorithm::lbr_augru) {}
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_layer_desc()const
         memory::desc src_layer_desc() const {
@@ -11600,7 +11943,9 @@ struct lbr_augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::src_iter_desc()const
-        memory::desc src_iter_desc() const { return rnn_base::src_iter_desc(); }
+        memory::desc src_iter_desc() const {
+            return rnn_base::src_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::attention_desc()const
         memory::desc attention_desc() const {
@@ -11618,7 +11963,9 @@ struct lbr_augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::bias_desc()const
-        memory::desc bias_desc() const { return rnn_base::bias_desc(); }
+        memory::desc bias_desc() const {
+            return rnn_base::bias_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_layer_desc()const
         memory::desc dst_layer_desc() const {
@@ -11626,7 +11973,9 @@ struct lbr_augru_backward : public primitive {
         }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::dst_iter_desc()const
-        memory::desc dst_iter_desc() const { return rnn_base::dst_iter_desc(); }
+        memory::desc dst_iter_desc() const {
+            return rnn_base::dst_iter_desc();
+        }
 
         /// @copydoc zendnn::rnn_primitive_desc_base::workspace_desc()const
         memory::desc workspace_desc() const {
@@ -11687,7 +12036,7 @@ struct lbr_augru_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     lbr_augru_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11717,12 +12066,12 @@ struct shuffle_forward : public primitive {
         /// @param axis The axis along which the data is shuffled.
         /// @param group_size Shuffle group size.
         desc(prop_kind aprop_kind, const memory::desc &data_desc, int axis,
-                int group_size) {
+             int group_size) {
             error::wrap_c_api(zendnn_shuffle_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &data_desc.data, axis, group_size),
-                    "could not create a descriptor for a shuffle forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &data_desc.data, axis, group_size),
+                              "could not create a descriptor for a shuffle forward "
+                              "propagation primitive");
         }
     };
 
@@ -11743,10 +12092,10 @@ struct shuffle_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const primitive_attr &attr = primitive_attr(),
-                bool allow_empty = false)
+                       const primitive_attr &attr = primitive_attr(),
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a shuffle forward propagation
         /// primitive from a C API primitive descriptor that must have a
@@ -11756,14 +12105,18 @@ struct shuffle_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::shuffle,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -11779,7 +12132,7 @@ struct shuffle_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     shuffle_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11799,9 +12152,9 @@ struct shuffle_backward : public primitive {
         /// @param group_size Shuffle group size.
         desc(const memory::desc &diff_data_desc, int axis, int group_size) {
             error::wrap_c_api(zendnn_shuffle_backward_desc_init(&data,
-                                      &diff_data_desc.data, axis, group_size),
-                    "could not create a descriptor for a shuffle backward "
-                    "propagation primitive");
+                              &diff_data_desc.data, axis, group_size),
+                              "could not create a descriptor for a shuffle backward "
+                              "propagation primitive");
         }
     };
 
@@ -11825,11 +12178,11 @@ struct shuffle_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const shuffle_forward::primitive_desc &hint_fwd_pd,
-                const primitive_attr &attr = primitive_attr(),
-                bool allow_empty = false)
+                       const shuffle_forward::primitive_desc &hint_fwd_pd,
+                       const primitive_attr &attr = primitive_attr(),
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a shuffle backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -11839,13 +12192,17 @@ struct shuffle_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::shuffle,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -11861,7 +12218,7 @@ struct shuffle_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     shuffle_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -11893,12 +12250,12 @@ struct binary : public primitive {
         /// @param src1 Memory descriptor for source tensor #1.
         /// @param dst Memory descriptor for destination tensor.
         desc(algorithm aalgorithm, const memory::desc &src0,
-                const memory::desc &src1, const memory::desc &dst) {
+             const memory::desc &src1, const memory::desc &dst) {
             error::wrap_c_api(
-                    zendnn_binary_desc_init(&data, zendnn::convert_to_c(aalgorithm),
-                            &src0.data, &src1.data, &dst.data),
-                    "could not create a descriptor for a binary operation "
-                    "primitive");
+                zendnn_binary_desc_init(&data, zendnn::convert_to_c(aalgorithm),
+                                        &src0.data, &src1.data, &dst.data),
+                "could not create a descriptor for a binary operation "
+                "primitive");
         }
     };
 
@@ -11917,9 +12274,9 @@ struct binary : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an elementwise binary operator
         /// primitive.
@@ -11932,9 +12289,9 @@ struct binary : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a binary primitive from a C
         /// API primitive descriptor that must have a matching kind.
@@ -11944,16 +12301,24 @@ struct binary : public primitive {
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::binary) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc(int)const
-        memory::desc src_desc(int idx = 0) const { return base::src_desc(idx); }
+        memory::desc src_desc(int idx = 0) const {
+            return base::src_desc(idx);
+        }
 
         /// Returns the memory descriptor for source #0.
-        memory::desc src0_desc() const { return base::src_desc(0); }
+        memory::desc src0_desc() const {
+            return base::src_desc(0);
+        }
 
         /// Returns the memory descriptor for source #1.
-        memory::desc src1_desc() const { return base::src_desc(1); }
+        memory::desc src1_desc() const {
+            return base::src_desc(1);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -11996,12 +12361,12 @@ struct matmul : public primitive {
         /// @param weights_desc Memory descriptor for weights (matrix B).
         /// @param dst_desc Memory descriptor for destination (matrix C).
         desc(const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &dst_desc) {
+             const memory::desc &dst_desc) {
             zendnnInfo(ZENDNN_APILOG, "matmul desc create - no bias");
             error::wrap_c_api(
-                    zendnn_matmul_desc_init(&data, &src_desc.data,
-                            &weights_desc.data, nullptr, &dst_desc.data),
-                    "could not create a descriptor for a matmul primitive");
+                zendnn_matmul_desc_init(&data, &src_desc.data,
+                                        &weights_desc.data, nullptr, &dst_desc.data),
+                "could not create a descriptor for a matmul primitive");
         }
 
         /// Constructs a descriptor for a matmul primitive.
@@ -12011,12 +12376,12 @@ struct matmul : public primitive {
         /// @param dst_desc Memory descriptor for destination (matrix C).
         /// @param bias_desc Memory descriptor for bias.
         desc(const memory::desc &src_desc, const memory::desc &weights_desc,
-                const memory::desc &bias_desc, const memory::desc &dst_desc) {
+             const memory::desc &bias_desc, const memory::desc &dst_desc) {
             zendnnInfo(ZENDNN_APILOG, "matmul desc create - bias");
             error::wrap_c_api(zendnn_matmul_desc_init(&data, &src_desc.data,
-                                      &weights_desc.data, &bias_desc.data,
-                                      &dst_desc.data),
-                    "could not create a descriptor for a matmul primitive");
+                              &weights_desc.data, &bias_desc.data,
+                              &dst_desc.data),
+                              "could not create a descriptor for a matmul primitive");
         }
     };
 
@@ -12034,11 +12399,11 @@ struct matmul : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - no attr");
-            }
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {
+            zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - no attr");
+        }
 
         /// Constructs a primitive descriptor for a matmul primitive.
         ///
@@ -12050,11 +12415,11 @@ struct matmul : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - attr");
-            }
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {
+            zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - attr");
+        }
 
         /// Constructs a primitive descriptor for a matmul primitive from a C
         /// API primitive descriptor that must have a matching kind.
@@ -12062,11 +12427,13 @@ struct matmul : public primitive {
         /// @param pd C API primitive descriptor for a matmul primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::matmul) {
-                zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - C API");
-            }
+            zendnnInfo(ZENDNN_APILOG, "matmul primitive_desc create - C API");
+        }
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return query_md(query::src_md, 0); }
+        memory::desc src_desc() const {
+            return query_md(query::src_md, 0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::weights_desc()const
         memory::desc weights_desc() const {
@@ -12079,7 +12446,9 @@ struct matmul : public primitive {
         }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return query_md(query::dst_md, 0); }
+        memory::desc dst_desc() const {
+            return query_md(query::dst_md, 0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12089,7 +12458,7 @@ struct matmul : public primitive {
     /// @param pd Primitive descriptor for a matmul primitive.
     matmul(const primitive_desc &pd) : primitive(pd) {
         zendnnInfo(ZENDNN_APILOG, "matmul primitive create");
-		}
+    }
 
     /// Constructs a matmul primitive from a cache blob.
     /// @param pd Primitive descriptor for a matmul primitive.
@@ -12132,12 +12501,12 @@ struct resampling_forward : public primitive {
         /// @param src_desc Source memory descriptor.
         /// @param dst_desc Destination memory descriptor.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &dst_desc) {
+             const memory::desc &src_desc, const memory::desc &dst_desc) {
             error::wrap_c_api(zendnn_resampling_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), nullptr,
-                                      &src_desc.data, &dst_desc.data),
-                    "could not create a resampling forward descriptor");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), nullptr,
+                              &src_desc.data, &dst_desc.data),
+                              "could not create a resampling forward descriptor");
         }
 
         /// Constructs a descriptor for a resampling forward propagation
@@ -12152,14 +12521,14 @@ struct resampling_forward : public primitive {
         /// @param factors Vector of scaling factors for spatial dimension.
         /// @param src_desc Source memory descriptor.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const std::vector<float> &factors,
-                const memory::desc &src_desc) {
+             const std::vector<float> &factors,
+             const memory::desc &src_desc) {
             memory::validate_dims(factors, src_desc.data.ndims - 2);
             error::wrap_c_api(zendnn_resampling_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), &factors[0],
-                                      &src_desc.data, nullptr),
-                    "could not create a resampling forward descriptor");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), &factors[0],
+                              &src_desc.data, nullptr),
+                              "could not create a resampling forward descriptor");
         }
 
         /// Constructs a descriptor for a resampling forward propagation
@@ -12179,15 +12548,16 @@ struct resampling_forward : public primitive {
         /// @param src_desc Source memory descriptor.
         /// @param dst_desc Destination memory descriptor.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const std::vector<float> &factors, const memory::desc &src_desc,
-                const memory::desc &dst_desc) {
-            if (!factors.empty())
+             const std::vector<float> &factors, const memory::desc &src_desc,
+             const memory::desc &dst_desc) {
+            if (!factors.empty()) {
                 memory::validate_dims(factors, src_desc.data.ndims - 2);
+            }
             error::wrap_c_api(zendnn_resampling_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      convert_to_c(aalgorithm), factors.data(),
-                                      &src_desc.data, &dst_desc.data),
-                    "could not create a resampling forward descriptor");
+                              zendnn::convert_to_c(aprop_kind),
+                              convert_to_c(aalgorithm), factors.data(),
+                              &src_desc.data, &dst_desc.data),
+                              "could not create a resampling forward descriptor");
         }
     };
 
@@ -12207,9 +12577,9 @@ struct resampling_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a resampling forward
         /// propagation primitive.
@@ -12223,9 +12593,9 @@ struct resampling_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a resampling forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -12235,14 +12605,18 @@ struct resampling_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::resampling,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12259,7 +12633,7 @@ struct resampling_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     resampling_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12278,11 +12652,11 @@ struct resampling_backward : public primitive {
         /// @param diff_src_desc Diff source memory descriptor.
         /// @param diff_dst_desc Diff destination memory descriptor.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &diff_dst_desc) {
+             const memory::desc &diff_dst_desc) {
             error::wrap_c_api(zendnn_resampling_backward_desc_init(&data,
-                                      convert_to_c(aalgorithm), nullptr,
-                                      &diff_src_desc.data, &diff_dst_desc.data),
-                    "could not create a resampling backward data descriptor");
+                              convert_to_c(aalgorithm), nullptr,
+                              &diff_src_desc.data, &diff_dst_desc.data),
+                              "could not create a resampling backward data descriptor");
         }
 
         /// Constructs a descriptor for resampling backward propagation
@@ -12295,14 +12669,15 @@ struct resampling_backward : public primitive {
         /// @param diff_src_desc Diff source memory descriptor.
         /// @param diff_dst_desc Diff destination memory descriptor.
         desc(algorithm aalgorithm, const std::vector<float> &factors,
-                const memory::desc &diff_src_desc,
-                const memory::desc &diff_dst_desc) {
-            if (!factors.empty())
+             const memory::desc &diff_src_desc,
+             const memory::desc &diff_dst_desc) {
+            if (!factors.empty()) {
                 memory::validate_dims(factors, diff_src_desc.data.ndims - 2);
+            }
             error::wrap_c_api(zendnn_resampling_backward_desc_init(&data,
-                                      convert_to_c(aalgorithm), factors.data(),
-                                      &diff_src_desc.data, &diff_dst_desc.data),
-                    "could not create a resampling backward data descriptor");
+                              convert_to_c(aalgorithm), factors.data(),
+                              &diff_src_desc.data, &diff_dst_desc.data),
+                              "could not create a resampling backward data descriptor");
         }
     };
 
@@ -12325,10 +12700,10 @@ struct resampling_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const resampling_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const resampling_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a resampling backward
         /// propagation primitive.
@@ -12345,11 +12720,11 @@ struct resampling_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const resampling_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const resampling_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a resampling backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -12359,13 +12734,17 @@ struct resampling_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::resampling,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12382,7 +12761,7 @@ struct resampling_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     resampling_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12429,23 +12808,23 @@ struct pooling_v2_forward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(prop_kind aprop_kind, algorithm aalgorithm,
-                const memory::desc &src_desc, const memory::desc &dst_desc,
-                const memory::dims &strides, const memory::dims &kernel,
-                const memory::dims &dilation, const memory::dims &padding_l,
-                const memory::dims &padding_r) {
+             const memory::desc &src_desc, const memory::desc &dst_desc,
+             const memory::dims &strides, const memory::dims &kernel,
+             const memory::dims &dilation, const memory::dims &padding_l,
+             const memory::dims &padding_r) {
             memory::validate_dims(strides, src_desc.data.ndims - 2);
             memory::validate_dims(kernel, src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, src_desc.data.ndims - 2);
             memory::validate_dims(dilation, src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_pooling_v2_forward_desc_init(&data,
-                            zendnn::convert_to_c(aprop_kind),
-                            convert_to_c(aalgorithm), &src_desc.data,
-                            &dst_desc.data, &strides[0], &kernel[0],
-                            &dilation[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a pooling forward "
-                    "propagation primitive");
+                zendnn_pooling_v2_forward_desc_init(&data,
+                                                    zendnn::convert_to_c(aprop_kind),
+                                                    convert_to_c(aalgorithm), &src_desc.data,
+                                                    &dst_desc.data, &strides[0], &kernel[0],
+                                                    &dilation[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a pooling forward "
+                "propagation primitive");
         }
     };
 
@@ -12465,9 +12844,9 @@ struct pooling_v2_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling v2
         /// (dilated pooling) forward
@@ -12481,9 +12860,9 @@ struct pooling_v2_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling v2
         /// (dilated pooling) forward
@@ -12494,17 +12873,23 @@ struct pooling_v2_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::pooling_v2,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12522,7 +12907,7 @@ struct pooling_v2_forward : public primitive {
     /// (dilated pooling) forward propagation primitive.
     /// @param cache_blob Cache blob.
     pooling_v2_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12556,21 +12941,21 @@ struct pooling_v2_backward : public primitive {
         /// @param padding_r Vector of padding values for high indices for
         ///     each spatial dimension `([[back,] bottom,] right)`.
         desc(algorithm aalgorithm, const memory::desc &diff_src_desc,
-                const memory::desc &diff_dst_desc, const memory::dims &strides,
-                const memory::dims &kernel, const memory::dims &dilation,
-                const memory::dims &padding_l, const memory::dims &padding_r) {
+             const memory::desc &diff_dst_desc, const memory::dims &strides,
+             const memory::dims &kernel, const memory::dims &dilation,
+             const memory::dims &padding_l, const memory::dims &padding_r) {
             memory::validate_dims(strides, diff_src_desc.data.ndims - 2);
             memory::validate_dims(kernel, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_l, diff_src_desc.data.ndims - 2);
             memory::validate_dims(padding_r, diff_src_desc.data.ndims - 2);
             memory::validate_dims(dilation, diff_src_desc.data.ndims - 2);
             error::wrap_c_api(
-                    zendnn_pooling_v2_backward_desc_init(&data,
-                            convert_to_c(aalgorithm), &diff_src_desc.data,
-                            &diff_dst_desc.data, &strides[0], &kernel[0],
-                            &dilation[0], &padding_l[0], &padding_r[0]),
-                    "could not create a descriptor for a pooling backward "
-                    "propagation primitive");
+                zendnn_pooling_v2_backward_desc_init(&data,
+                        convert_to_c(aalgorithm), &diff_src_desc.data,
+                        &diff_dst_desc.data, &strides[0], &kernel[0],
+                        &dilation[0], &padding_l[0], &padding_r[0]),
+                "could not create a descriptor for a pooling backward "
+                "propagation primitive");
         }
     };
 
@@ -12594,10 +12979,10 @@ struct pooling_v2_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const pooling_v2_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const pooling_v2_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling v2
         /// (dilated pooling) backward
@@ -12614,11 +12999,11 @@ struct pooling_v2_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const pooling_v2_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const pooling_v2_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a pooling v2
         /// (dilated pooling) backward
@@ -12629,16 +13014,22 @@ struct pooling_v2_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::pooling_v2,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::workspace_desc()const
-        memory::desc workspace_desc() const { return base::workspace_desc(); }
+        memory::desc workspace_desc() const {
+            return base::workspace_desc();
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12656,7 +13047,7 @@ struct pooling_v2_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     pooling_v2_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12686,12 +13077,12 @@ struct prelu_forward : public primitive {
         /// @param data_desc Source and destination memory descriptors.
         /// @param weight_desc Alpha parameters memory descriptor.
         desc(prop_kind aprop_kind, const memory::desc &data_desc,
-                const memory::desc &weight_desc) {
+             const memory::desc &weight_desc) {
             error::wrap_c_api(zendnn_prelu_forward_desc_init(&data,
-                                      zendnn::convert_to_c(aprop_kind),
-                                      &data_desc.data, &weight_desc.data),
-                    "could not create a descriptor for a prelu forward "
-                    "propagation primitive");
+                              zendnn::convert_to_c(aprop_kind),
+                              &data_desc.data, &weight_desc.data),
+                              "could not create a descriptor for a prelu forward "
+                              "propagation primitive");
         }
     };
 
@@ -12711,9 +13102,9 @@ struct prelu_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a PReLU forward
         /// propagation primitive.
@@ -12727,9 +13118,9 @@ struct prelu_forward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a prelu forward
         /// propagation primitive from a C API primitive descriptor that must
@@ -12739,14 +13130,18 @@ struct prelu_forward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::prelu,
-                    zendnn::prop_kind::forward_training,
-                    zendnn::prop_kind::forward_inference) {}
+                                     zendnn::prop_kind::forward_training,
+                                     zendnn::prop_kind::forward_inference) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12762,7 +13157,7 @@ struct prelu_forward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     prelu_forward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12781,14 +13176,14 @@ struct prelu_backward : public primitive {
         ///     descriptors.
         /// @param diff_weights_desc Diff alpha parameters memory descriptor.
         desc(const memory::desc &data_desc, const memory::desc &weight_desc,
-                const memory::desc &diff_data_desc,
-                const memory::desc &diff_weights_desc) {
+             const memory::desc &diff_data_desc,
+             const memory::desc &diff_weights_desc) {
             error::wrap_c_api(
-                    zendnn_prelu_backward_desc_init(&data, &data_desc.data,
-                            &weight_desc.data, &diff_data_desc.data,
-                            &diff_weights_desc.data),
-                    "could not create a descriptor for a prelu backward "
-                    "propagation primitive");
+                zendnn_prelu_backward_desc_init(&data, &data_desc.data,
+                                                &weight_desc.data, &diff_data_desc.data,
+                                                &diff_weights_desc.data),
+                "could not create a descriptor for a prelu backward "
+                "propagation primitive");
         }
     };
 
@@ -12811,10 +13206,10 @@ struct prelu_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                const prelu_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const prelu_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, nullptr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a PReLU backward
         /// propagation primitive.
@@ -12831,11 +13226,11 @@ struct prelu_backward : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine,
-                const prelu_forward::primitive_desc &hint_fwd_pd,
-                bool allow_empty = false)
+                       const engine &aengine,
+                       const prelu_forward::primitive_desc &hint_fwd_pd,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(&adesc.data, &attr, aengine,
-                    hint_fwd_pd.get(), allow_empty) {}
+                                     hint_fwd_pd.get(), allow_empty) {}
 
         /// Constructs a primitive descriptor for a prelu backward
         /// propagation primitive from a C API primitive descriptor that must
@@ -12845,16 +13240,22 @@ struct prelu_backward : public primitive {
         ///     propagation primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::prelu,
-                    zendnn::prop_kind::backward_data) {}
+                                     zendnn::prop_kind::backward_data) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_src_desc()const
-        memory::desc diff_src_desc() const { return base::diff_src_desc(0); }
+        memory::desc diff_src_desc() const {
+            return base::diff_src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::diff_dst_desc()const
-        memory::desc diff_dst_desc() const { return base::diff_dst_desc(0); }
+        memory::desc diff_dst_desc() const {
+            return base::diff_dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -12870,7 +13271,7 @@ struct prelu_backward : public primitive {
     ///     primitive.
     /// @param cache_blob Cache blob.
     prelu_backward(
-            const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
         : primitive(pd, cache_blob) {}
 };
 
@@ -12912,11 +13313,11 @@ struct reduction : public primitive {
         /// @param src_desc Source memory descriptor.
         /// @param dst_desc Destination memory descriptor.
         desc(algorithm aalgorithm, const memory::desc &src_desc,
-                const memory::desc &dst_desc, float p, float eps) {
+             const memory::desc &dst_desc, float p, float eps) {
             error::wrap_c_api(
-                    zendnn_reduction_desc_init(&data, convert_to_c(aalgorithm),
-                            &src_desc.data, &dst_desc.data, p, eps),
-                    "could not create a reduction descriptor");
+                zendnn_reduction_desc_init(&data, convert_to_c(aalgorithm),
+                                           &src_desc.data, &dst_desc.data, p, eps),
+                "could not create a reduction descriptor");
         }
     };
 
@@ -12934,9 +13335,9 @@ struct reduction : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a reduction primitive.
         ///
@@ -12948,9 +13349,9 @@ struct reduction : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for a reduction primitive from a C
         /// API primitive descriptor that must have a matching kind.
@@ -12960,10 +13361,14 @@ struct reduction : public primitive {
             : zendnn::primitive_desc(pd, zendnn::primitive::kind::reduction) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return base::src_desc(0); }
+        memory::desc src_desc() const {
+            return base::src_desc(0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return base::dst_desc(0); }
+        memory::desc dst_desc() const {
+            return base::dst_desc(0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
@@ -13030,20 +13435,20 @@ struct embedding_bag : public primitive {
              int32_t            padding_idx,
              uint32_t           scatter_stride,
              uint32_t           scatter_offset) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   &weights_desc.data,
-                                                   &dst_desc.data,
-                                                   padding_idx,
-                                                   scatter_stride,
-                                                   scatter_offset),
-                    "could not create an embedding_bag descriptor:1");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               &weights_desc.data,
+                                               &dst_desc.data,
+                                               padding_idx,
+                                               scatter_stride,
+                                               scatter_offset),
+                "could not create an embedding_bag descriptor:1");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13075,20 +13480,20 @@ struct embedding_bag : public primitive {
              int32_t            padding_idx,
              uint32_t           scatter_stride,
              uint32_t           scatter_offset) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   nullptr,
-                                                   &dst_desc.data,
-                                                   padding_idx,
-                                                   scatter_stride,
-                                                   scatter_offset),
-                    "could not create an embedding_bag descriptor:1");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               nullptr,
+                                               &dst_desc.data,
+                                               padding_idx,
+                                               scatter_stride,
+                                               scatter_offset),
+                "could not create an embedding_bag descriptor:1");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13119,19 +13524,19 @@ struct embedding_bag : public primitive {
              const memory::desc &weights_desc,
              const memory::desc &dst_desc,
              int32_t            padding_idx) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   &weights_desc.data,
-                                                   &dst_desc.data,
-                                                   padding_idx,
-                                                   1,0),
-                    "could not create an embedding_bag descriptor:2");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               &weights_desc.data,
+                                               &dst_desc.data,
+                                               padding_idx,
+                                               1,0),
+                "could not create an embedding_bag descriptor:2");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13160,19 +13565,19 @@ struct embedding_bag : public primitive {
              const memory::desc &offsets_desc,
              const memory::desc &dst_desc,
              int32_t            padding_idx) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   nullptr,
-                                                   &dst_desc.data,
-                                                   padding_idx,
-                                                   1,0),
-                    "could not create an embedding_bag descriptor:3");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               nullptr,
+                                               &dst_desc.data,
+                                               padding_idx,
+                                               1,0),
+                "could not create an embedding_bag descriptor:3");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13202,18 +13607,18 @@ struct embedding_bag : public primitive {
              const memory::desc &offsets_desc,
              const memory::desc &weights_desc,
              const memory::desc &dst_desc) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   &weights_desc.data,
-                                                   &dst_desc.data,
-                                                   -1,1,0),
-                    "could not create an embedding_bag descriptor:4");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               &weights_desc.data,
+                                               &dst_desc.data,
+                                               -1,1,0),
+                "could not create an embedding_bag descriptor:4");
         }
 
         /// Constructs a descriptor for an embedding_bag primitive using
@@ -13240,18 +13645,18 @@ struct embedding_bag : public primitive {
              const memory::desc &indices_desc,
              const memory::desc &offsets_desc,
              const memory::desc &dst_desc) {
-             error::wrap_c_api(
-                    zendnn_embedding_bag_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   num_threads,
-                                                   &input_desc.data,
-                                                   &indices_desc.data,
-                                                   &offsets_desc.data,
-                                                   nullptr,
-                                                   &dst_desc.data,
-                                                   -1,1,0),
-                    "could not create an embedding_bag descriptor:5");
+            error::wrap_c_api(
+                zendnn_embedding_bag_desc_init(&data,
+                                               convert_to_c(aprop_kind),
+                                               convert_to_c(aalgorithm),
+                                               num_threads,
+                                               &input_desc.data,
+                                               &indices_desc.data,
+                                               &offsets_desc.data,
+                                               nullptr,
+                                               &dst_desc.data,
+                                               -1,1,0),
+                "could not create an embedding_bag descriptor:5");
 
         }
     };
@@ -13270,9 +13675,9 @@ struct embedding_bag : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const engine &aengine,
-                bool allow_empty = false)
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, nullptr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an embedding_bag primitive.
         ///
@@ -13284,16 +13689,16 @@ struct embedding_bag : public primitive {
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
         primitive_desc(const desc &adesc, const primitive_attr &attr,
-                const engine &aengine, bool allow_empty = false)
+                       const engine &aengine, bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an embedding_bag primitive
         /// from a C API primitive descriptor that must have a matching kind.
         ///
         /// @param pd C API primitive descriptor for a embedding_bag primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
-          : zendnn::primitive_desc(pd, zendnn::primitive::kind::embedding_bag){}
+            : zendnn::primitive_desc(pd, zendnn::primitive::kind::embedding_bag) {}
 
     };
 
@@ -13353,14 +13758,14 @@ inline const version_t *version() {
 inline fpmath_mode get_default_fpmath_mode() {
     zendnn_fpmath_mode_t mode;
     error::wrap_c_api(zendnn_get_default_fpmath_mode(&mode),
-            "could not get a default fpmath mode");
+                      "could not get a default fpmath mode");
     return static_cast<fpmath_mode>(mode);
 }
 
 /// @copydoc zendnn_set_default_fpmath_mode()
 inline status set_default_fpmath_mode(fpmath_mode mode) {
     return static_cast<status>(
-            zendnn_set_default_fpmath_mode(convert_to_c(mode)));
+               zendnn_set_default_fpmath_mode(convert_to_c(mode)));
 }
 
 /// @copydoc zendnn_set_jit_dump()
@@ -13407,7 +13812,7 @@ enum class cpu_isa {
 /// @copydoc zendnn_set_max_cpu_isa()
 inline status set_max_cpu_isa(cpu_isa isa) {
     return static_cast<status>(
-            zendnn_set_max_cpu_isa(static_cast<zendnn_cpu_isa_t>(isa)));
+               zendnn_set_max_cpu_isa(static_cast<zendnn_cpu_isa_t>(isa)));
 }
 
 /// @copydoc zendnn_get_effective_cpu_isa()
@@ -13426,7 +13831,7 @@ enum class cpu_isa_hints {
 /// @copydoc zendnn_set_cpu_isa_hints()
 inline status set_cpu_isa_hints(cpu_isa_hints isa_hints) {
     return static_cast<status>(zendnn_set_cpu_isa_hints(
-            static_cast<zendnn_cpu_isa_hints_t>(isa_hints)));
+                                   static_cast<zendnn_cpu_isa_hints_t>(isa_hints)));
 }
 
 /// @copydoc zendnn_get_cpu_isa_hints()
@@ -13447,14 +13852,14 @@ inline cpu_isa_hints get_cpu_isa_hints() {
 inline int get_primitive_cache_capacity() {
     int result = 0;
     error::wrap_c_api(zendnn_get_primitive_cache_capacity(&result),
-            "could not get primitive cache capacity");
+                      "could not get primitive cache capacity");
     return result;
 }
 
 /// @copydoc zendnn_set_primitive_cache_capacity(int capacity)
 inline void set_primitive_cache_capacity(int capacity) {
     error::wrap_c_api(zendnn_set_primitive_cache_capacity(capacity),
-            "could not set primitive cache capacity");
+                      "could not set primitive cache capacity");
 }
 
 /// @} zendnn_api_primitive_cache
@@ -13468,28 +13873,30 @@ inline void set_primitive_cache_capacity(int capacity) {
 
 /// @copydoc zendnn_sgemm()
 inline status sgemm(char transa, char transb, zendnn_dim_t M, zendnn_dim_t N,
-        zendnn_dim_t K, float alpha, const float *A, zendnn_dim_t lda,
-        const float *B, zendnn_dim_t ldb, float beta, float *C, zendnn_dim_t ldc) {
+                    zendnn_dim_t K, float alpha, const float *A, zendnn_dim_t lda,
+                    const float *B, zendnn_dim_t ldb, float beta, float *C, zendnn_dim_t ldc) {
     return static_cast<status>(zendnn_sgemm(
-            transa, transb, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc));
+                                   transa, transb, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc));
 }
 
 /// @copydoc zendnn_gemm_u8s8s32()
-inline status gemm_u8s8s32(char transa, char transb, char offsetc, zendnn_dim_t M,
-        zendnn_dim_t N, zendnn_dim_t K, float alpha, const uint8_t *A,
-        zendnn_dim_t lda, uint8_t ao, const int8_t *B, zendnn_dim_t ldb, int8_t bo,
-        float beta, int32_t *C, zendnn_dim_t ldc, const int32_t *co) {
+inline status gemm_u8s8s32(char transa, char transb, char offsetc,
+                           zendnn_dim_t M,
+                           zendnn_dim_t N, zendnn_dim_t K, float alpha, const uint8_t *A,
+                           zendnn_dim_t lda, uint8_t ao, const int8_t *B, zendnn_dim_t ldb, int8_t bo,
+                           float beta, int32_t *C, zendnn_dim_t ldc, const int32_t *co) {
     return static_cast<status>(zendnn_gemm_u8s8s32(transa, transb, offsetc, M, N,
-            K, alpha, A, lda, ao, B, ldb, bo, beta, C, ldc, co));
+                               K, alpha, A, lda, ao, B, ldb, bo, beta, C, ldc, co));
 }
 
 /// @copydoc zendnn_gemm_s8s8s32()
-inline status gemm_s8s8s32(char transa, char transb, char offsetc, zendnn_dim_t M,
-        zendnn_dim_t N, zendnn_dim_t K, float alpha, const int8_t *A,
-        zendnn_dim_t lda, int8_t ao, const int8_t *B, zendnn_dim_t ldb, int8_t bo,
-        float beta, int32_t *C, zendnn_dim_t ldc, const int32_t *co) {
+inline status gemm_s8s8s32(char transa, char transb, char offsetc,
+                           zendnn_dim_t M,
+                           zendnn_dim_t N, zendnn_dim_t K, float alpha, const int8_t *A,
+                           zendnn_dim_t lda, int8_t ao, const int8_t *B, zendnn_dim_t ldb, int8_t bo,
+                           float beta, int32_t *C, zendnn_dim_t ldc, const int32_t *co) {
     return static_cast<status>(zendnn_gemm_s8s8s32(transa, transb, offsetc, M, N,
-            K, alpha, A, lda, ao, B, ldb, bo, beta, C, ldc, co));
+                               K, alpha, A, lda, ao, B, ldb, bo, beta, C, ldc, co));
 }
 
 /// @} zendnn_api_blas
@@ -13500,36 +13907,36 @@ inline status gemm_s8s8s32(char transa, char transb, char offsetc, zendnn_dim_t 
 inline primitive::primitive(const_zendnn_primitive_desc_t c_pd) {
     zendnn_primitive_t result;
     error::wrap_c_api(zendnn_primitive_create(&result, c_pd),
-            "could not create a primitive");
+                      "could not create a primitive");
     reset(result);
 }
 
 inline primitive::primitive(const_zendnn_primitive_desc_t c_pd,
-        const std::vector<uint8_t> &cache_blob) {
+                            const std::vector<uint8_t> &cache_blob) {
     zendnn_primitive_t result;
     size_t size = cache_blob.size();
     const uint8_t *cache_blob_data = cache_blob.data();
     error::wrap_c_api(zendnn_primitive_create_from_cache_blob(
-                              &result, c_pd, size, cache_blob_data),
-            "could not create a primitive from a cache blob");
+                          &result, c_pd, size, cache_blob_data),
+                      "could not create a primitive from a cache blob");
     reset(result);
 }
 
 inline primitive::primitive(const primitive_desc &pd) : primitive(pd.get()) {}
 inline primitive::primitive(
-        const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
+    const primitive_desc &pd, const std::vector<uint8_t> &cache_blob)
     : primitive(pd.get(), cache_blob) {}
 
 inline void primitive::execute(const stream &astream,
-        const std::unordered_map<int, memory> &args) const {
+                               const std::unordered_map<int, memory> &args) const {
     std::vector<zendnn_exec_arg_t> c_args;
     c_args.reserve(args.size());
     for (const auto &a : args)
         c_args.push_back({a.first, a.second.get(true)});
 
     error::wrap_c_api(zendnn_primitive_execute(get(), astream.get(),
-                              (int)c_args.size(), c_args.data()),
-            "could not execute a primitive");
+                      (int)c_args.size(), c_args.data()),
+                      "could not execute a primitive");
 }
 
 /// @endcond
