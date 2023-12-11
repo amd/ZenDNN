@@ -385,8 +385,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         post_ops->sum.buff = NULL;
         post_ops->sum.zero_point = NULL;
 
-        post_ops->sum.scale_factor = malloc(n* sizeof(float));
-        post_ops->sum.zero_point = malloc(n * sizeof(int16_t));
+        post_ops->sum.scale_factor = malloc(sizeof(float));
+        post_ops->sum.zero_point = malloc(sizeof(int16_t));
 
         if (post_ops->sum.scale_factor == NULL || post_ops->sum.zero_point == NULL) {
             zendnnError(ZENDNN_ALGOLOG,
@@ -394,20 +394,11 @@ void zenMatMul_gemm_bf16bf16f32obf16(
             return;
         }
 
+        //SCALE
         float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
         int16_t *temp_dzero_point_ptr = (int16_t *)post_ops->sum.zero_point;
-        if (out_scale_size > 1) {
-            for (int i=0; i<n; ++i) {
-                temp_dscale_ptr[i] = 1.0f;
-                temp_dzero_point_ptr[i] = 0;
-            }
-        }
-        else {
-            for (int i=0; i<n; ++i) {
-                temp_dscale_ptr[i] = (float)scale[0];
-                temp_dzero_point_ptr[i] = 0;
-            }
-        }
+        temp_dscale_ptr[0] = (float)scale[0];
+        temp_dzero_point_ptr[0] = 0;
 
         post_ops->seq_length = postop_count;
     }
@@ -482,7 +473,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
 
-    unsigned int algoType = zendnn::zendnn_getenv_int("ZENDNN_BLIS_MATMUL_BF16",0);
+    unsigned int algoType = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_BF16",0);
     if (algoType == 0) {
         return status::unimplemented;
     }
@@ -639,7 +630,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                   " transA: ", transA, " transB: ", transB,
                   " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
                   " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
-                  " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", "Graph count:",
+                  " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", " Graph count:",
                   graph_exe_count);
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
 
