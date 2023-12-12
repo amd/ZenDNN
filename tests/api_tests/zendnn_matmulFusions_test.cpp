@@ -84,7 +84,7 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
     if (fusion=="kBiasAddWithAdd"
             || fusion=="kBiasAddWithAddAndRelu") {
         printf("Dst Data Added in zendnn dst_mem\n");
-        write_to_zendnn_memory(bias_array.data(), dst_mem);
+        write_to_zendnn_memory(dst_data_buff.data(), dst_mem);
     }
     // Create operation descriptor
     auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
@@ -139,6 +139,7 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
     engine_stream.wait();
     // Read data from memory object's handle.
     read_from_zendnn_memory(dst_data.data(), dst_mem);
+#if 0
     std::ofstream fout(fusion+"_dst.txt");
     fout<<std::setprecision(10);
     for (auto &x: dst_data) {
@@ -146,6 +147,7 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
     }
     fout<<"\n";
     fout.close();
+#endif
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D ends");
 }
 
