@@ -295,7 +295,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
 
         if (post_ops == NULL) {
-            zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating post ops");
+            zendnnError(ZENDNN_ALGOLOG,
+                        " ZenDNN BF16 MatMul, Memory Error while allocating post ops");
             return;
 
         }
@@ -304,7 +305,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                sizeof(AOCL_POST_OP_TYPE));
 
         if (post_ops->seq_vector == NULL) {
-            zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating sequence vector");
+            zendnnError(ZENDNN_ALGOLOG,
+                        " ZenDNN BF16 MatMul, Memory Error while allocating sequence vector");
             return;
         }
         // Iterate through each postop, check and add it if needed.
@@ -329,7 +331,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                     aocl_post_op_eltwise));
 
             if (post_ops->eltwise == NULL) {
-            	zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
+                zendnnError(ZENDNN_ALGOLOG,
+                            " ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
                 return;
             }
             (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
@@ -345,7 +348,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
             post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
                                     aocl_post_op_eltwise));
             if (post_ops->eltwise == NULL) {
-            	zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
+                zendnnError(ZENDNN_ALGOLOG,
+                            " ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
                 return;
             }
             (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
@@ -361,7 +365,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
             post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
                                     aocl_post_op_eltwise));
             if (post_ops->eltwise == NULL) {
-            	zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
+                zendnnError(ZENDNN_ALGOLOG,
+                            " ZenDNN BF16 MatMul, Memory Error while allocating eltwise");
                 return;
             }
             (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
@@ -384,7 +389,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         post_ops->sum.zero_point = malloc(n * sizeof(int16_t));
 
         if (post_ops->sum.scale_factor == NULL || post_ops->sum.zero_point == NULL) {
-            zendnnError(ZENDNN_ALGOLOG," ZenDNN BF16 MatMul, Memory Error while allocating scale factor or zero point");
+            zendnnError(ZENDNN_ALGOLOG,
+                        " ZenDNN BF16 MatMul, Memory Error while allocating scale factor or zero point");
             return;
         }
 
@@ -674,7 +680,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 #endif //ZENDNN_ENABLE
 
     // Free memory if bias memory is allocated
-    if (bias_dt = data_type::bf16 && bias!=NULL) {
+    if (bias_dt == data_type::bf16 && bias!=NULL) {
         free(bias_f32);
     }
     return status::success;

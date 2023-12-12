@@ -185,8 +185,7 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
     zendnn::stream engine_stream(eng);
 
     // Tensor dimensions.
-    const memory::dim MB = 3, // batch size
-                      M = 128, K = 256, N = 512;
+    const memory::dim M = 128, K = 256, N = 512;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -303,16 +302,30 @@ int main(int argc, char **argv) {
         post_op = std::stoi(std::string(argv[2]));
     }
     //Setting Primitive Cache capacity to 0.
+#ifdef _WIN32
+    _putenv_s("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0");
+#else
     setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
+#endif
 
     std::vector<float> brgemm, zen_aocl;
     matmul_example_3D(post_op);
+
     //Enable BLIS path
+#ifdef _WIN32
+    _putenv_s("ZENDNN_BLIS_MATMUL_BF16","1");
+#else
     setenv("ZENDNN_BLIS_MATMUL_BF16","1",1);
+#endif
     zen_aocl = matmul_example_2D(f32_flag, post_op);
 
     //Disable BLIS path
+#ifdef _WIN32
+    _putenv_s("ZENDNN_BLIS_MATMUL_BF16","0");
+#else
     setenv("ZENDNN_BLIS_MATMUL_BF16","0",1);
+#endif
+
     brgemm = matmul_example_2D(f32_flag, post_op);
     //Compare the brgemm and blis
     auto rc = compare_vectors(
