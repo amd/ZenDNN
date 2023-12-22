@@ -313,17 +313,17 @@ int main(int argc, char **argv) {
 
     //Enable BLIS path
 #ifdef _WIN32
-    _putenv_s("ZENDNN_MATMUL_BF16","1");
+    _putenv_s("ZENDNN_MATMUL_BF16","2");
 #else
-    setenv("ZENDNN_MATMUL_BF16","1",1);
+    setenv("ZENDNN_MATMUL_BF16","2",1);
 #endif
     zen_aocl = matmul_example_2D(f32_flag, post_op);
 
     //Disable BLIS path
 #ifdef _WIN32
-    _putenv_s("ZENDNN_MATMUL_BF16","0");
+    _putenv_s("ZENDNN_MATMUL_BF16","1");
 #else
-    setenv("ZENDNN_MATMUL_BF16","0",1);
+    setenv("ZENDNN_MATMUL_BF16","1",1);
 #endif
 
     brgemm = matmul_example_2D(f32_flag, post_op);

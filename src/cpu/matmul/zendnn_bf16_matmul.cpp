@@ -473,8 +473,9 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
 
-    unsigned int algoType = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_BF16",0);
-    if (algoType == 0) {
+    //Return unimplemented if BF16 algo NOT set to AOCL_GEMM (2)
+    zendnnEnv zenEnvObj = readEnv();
+    if (zenEnvObj.zenBF16GEMMalgo != zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM) {
         return status::unimplemented;
     }
 
