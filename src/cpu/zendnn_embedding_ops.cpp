@@ -24,27 +24,10 @@ namespace zendnn {
 void zendnn_embedding_bag_exec(
     const memory &z_input, const memory &z_indices, const memory &z_offsets,
     const int32_t &scale_grad_by_freq,
-    const int32_t &mode, const int32_t &sparse, const memory &z_per_sample_weights,
+    const algorithm &z_algorithm, const int32_t &sparse, const memory &z_per_sample_weights,
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
     int op_num_threads=1) {
-
-    //figure out the mode
-    algorithm z_algorithm;
-    switch (mode) {
-    case 0:
-        z_algorithm = algorithm::embedding_bag_sum;
-        break;
-    case 1:
-        z_algorithm = algorithm::embedding_bag_mean;
-        break;
-    case 2:
-        z_algorithm = algorithm::embedding_bag_max;
-        break;
-    default:
-        z_algorithm = algorithm::embedding_bag_sum;
-        break;
-    }
 
     engine eng;
     stream s;
@@ -153,10 +136,10 @@ void zendnn_embedding_exec(
 //API call to perform embedding lookups on bags of indices and then optionally apply
 // a reduction opration(such as sum, mean or max) on the embedding within each bag.
 
-void zendnn_embedding_bag_lib(const memory &z_input, const memory &z_indices,
+void zendnn_custom_op::zendnn_embedding_bag_lib(const memory &z_input, const memory &z_indices,
                               const memory &z_offsets,
                               const bool &z_scale_grad_by_freq,
-                              const int32_t &z_mode, const bool &z_sparse,
+                              const algorithm &z_mode, const bool &z_sparse,
                               const memory &z_per_sample_weights_opt,
                               const bool &z_per_sample_weights_defined,
                               const bool &z_include_last_offset, const int32_t &z_padding_idx,
@@ -171,9 +154,9 @@ void zendnn_embedding_bag_lib(const memory &z_input, const memory &z_indices,
         z_padding_idx, z_destination);
 }
 
-void zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
+void zendnn_custom_op::zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
                                   std::vector <memory> &z_indices, std::vector <memory> &z_offsets,
-                                  std::vector <int32_t> &z_scale_grad_by_freq, std::vector <int32_t> &z_modes,
+                                  std::vector <int32_t> &z_scale_grad_by_freq, std::vector <algorithm> &z_modes,
                                   std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
                                   std::vector <int32_t> &z_per_sample_weights_defined,
                                   std::vector <int32_t> &z_include_last_offset,
@@ -191,7 +174,7 @@ void zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
 
 //API call to perform just embedding lookup where each input index corresponds to single embedding.
 
-void zendnn_embedding_lib(const memory &z_input,const memory &z_indices,
+void zendnn_custom_op::zendnn_embedding_lib(const memory &z_input,const memory &z_indices,
                           const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                           const bool &z_sparse,
                           memory &z_destination, int thread_qty) {
@@ -202,7 +185,7 @@ void zendnn_embedding_lib(const memory &z_input,const memory &z_indices,
         z_destination);
 }
 
-void zendnn_grp_embedding_lib(std::vector <memory> &z_input,
+void zendnn_custom_op::zendnn_grp_embedding_lib(std::vector <memory> &z_input,
                               std::vector <memory> &z_indices,
                               std::vector <int32_t> &z_padding_idx,
                               std::vector <int32_t> &z_scale_grad_by_freq,
