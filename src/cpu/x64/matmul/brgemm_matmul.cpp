@@ -20,7 +20,6 @@
 *******************************************************************************/
 
 #include "common/c_types_map.hpp"
-#include "common/zendnn_private.hpp"
 #include "common/zendnn_thread.hpp"
 #include "common/memory_tracking.hpp"
 #include "common/tag_traits.hpp"
@@ -87,10 +86,6 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
                     dst_dt)
             && attr()->post_ops_.check_sum_consistent_dt(dst_dt)
             && check_attr_oscale() && check_attr_zero_points() && check_bias();
-
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_brgemm = false;
-
     if (!ok) return status::unimplemented;
 
     CHECK(init_brgemm_matmul_conf(isa, bgmmc_, *desc(), src_md_, weights_md_,

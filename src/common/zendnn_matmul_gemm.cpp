@@ -285,7 +285,12 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
         {ZENDNN_ARG_WEIGHTS, user_weights_memory},
         {ZENDNN_ARG_DST, dst_memory}});
-
+    // cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
+    //         TransA ? CblasTrans : CblasNoTrans,
+    //         TransB ? CblasTrans : CblasNoTrans, M, N, K, alpha,
+    //         in_arr, lda, filt_arr, ldb, beta, C_Array, ldc);
+    // zendnn_sgemm(TransA ? 'T' : 'N', TransB ? 'T' : 'N',
+    //         M, N, K, alpha, in_arr, lda, filt_arr, ldb, beta, C_Array, ldc);
     assert(net.size() == net_args.size() && "something is missing");
     for (size_t i = 0; i < net.size(); ++i) {
         net.at(i).execute(engine_stream, net_args.at(i));
@@ -321,10 +326,6 @@ void zenMatMul_gemm(
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
     //MatMul with pipelining
-
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_log = true;
-
     if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM1) {
         //Perform MatMul using AMD BLIS
         cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
@@ -357,8 +358,8 @@ void zenMatMul_gemm(
                                output, ldc);
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
-        obj.is_brgemm = true;
-        zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n, k,
+        zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
+                           k,
                            input, filter, output, alpha, beta, lda, ldb, ldc);
         if (bias || relu || gelu) {
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
@@ -457,8 +458,6 @@ void zenMatMul_gemm_wrapper(
                   " relu=", relu, " gelu=", gelu,
                   " algo_type=", algo_type,
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (algo_type == 4) obj.is_log = false;
 }
 
 void zenMatMul(
@@ -1053,8 +1052,6 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     float **C_Array, int *ldc_Array, int group_count, int *group_size,
                     bool is_mul_add, const float **Add_Array, float mul_node,
                     int batch_size, const float **bias, const bool relu, const int gelu) {
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_brgemm = true;
 
     zendnnEnv zenEnvObj = readEnv();
 

@@ -72,9 +72,6 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
         return status::unimplemented;
     }
 
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm) return status::unimplemented;
-
     if (!ok) {
         return status::unimplemented;
     }

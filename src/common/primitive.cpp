@@ -42,10 +42,10 @@
 #include "common/zendnn_private.hpp"
 
 #ifndef _WIN32
-    #include "zendnn_perf.hpp"
-    #if UPROF_ENABLE
-        #include <AMDProfileController.h>
-    #endif
+#include "zendnn_perf.hpp"
+#if UPROF_ENABLE
+    #include <AMDProfileController.h>
+#endif
 #endif
 
 using namespace zendnn;
@@ -165,11 +165,8 @@ status_t primitive_execute(
             stamp = "," + std::to_string(start_ms);
         }
 
-        zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-        if (obj.is_log) {
-            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
-                       primitive_iface->pd()->info(), ",", duration_ms, ",ms");
-        }
+        zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
+                   primitive_iface->pd()->info(), ",", duration_ms, ",ms");
     }
 #ifndef _WIN32
     else if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 2) {
@@ -201,14 +198,11 @@ status_t primitive_execute(
             stamp = "," + std::to_string(start_ms);
         }
         //PERF PROFILE
-        zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-        if (obj.is_log) {
-            zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_execute,",
-                       primitive_iface->pd()->info(),",",duration_ms, ",ms",",",ipc.event_in,":",
-                       ipc_val," , ",llc.event_in,":",llc_val);
-        }
+        zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_execute,",
+                   primitive_iface->pd()->info(),",",duration_ms, ",ms",",",ipc.event_in,":",
+                   ipc_val," , ",llc.event_in,":",llc_val);
     }
-#if UPROF_ENABLE
+#if UPROF_ENABLE    
     else if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 3) {
         stream->wait();
         double start_ms = get_msec();
@@ -222,14 +216,11 @@ status_t primitive_execute(
             stamp = "," + std::to_string(start_ms);
         }
 
-        zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-        if (obj.is_log) {
-            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
-                       primitive_iface->pd()->info(), ",", duration_ms, ",ms");
-        }
+        zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
+                   primitive_iface->pd()->info(), ",", duration_ms, ",ms");
     }
-#endif
-#endif
+#endif    
+#endif    
     else {
         status = stream->enqueue_primitive(primitive_iface, ctx);
     }
