@@ -732,7 +732,7 @@ class zendnn_custom_op {
 
   public:
 //Embedding bag op API Call
-    static void zendnn_embedding_bag_lib(const memory &z_input,
+    static void zendnn_embedding_bag(const memory &z_input,
                                          const memory &z_indices,
                                          const memory &z_offsets,
                                          const bool &z_scale_grad_by_freq,
@@ -743,7 +743,7 @@ class zendnn_custom_op {
                                          memory &z_destination, int thread_qty=1);
 
 //Group embedding bag op API Call
-    static void zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
+    static void zendnn_grp_embedding_bag(std::vector <memory> &z_input,
             std::vector <memory> &z_indices,std::vector <memory> &z_offsets,
             std::vector <int32_t> &z_scale_grad_by_freq, std::vector <algorithm> &z_modes,
             std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
@@ -753,13 +753,13 @@ class zendnn_custom_op {
             std::vector <memory> &z_destination, int thread_qty=1);
 
 //Embedding op API Call
-    static void zendnn_embedding_lib(const memory &z_input, const memory &z_indices,
+    static void zendnn_embedding(const memory &z_input, const memory &z_indices,
                                      const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                                      const bool  &z_sparse,
                                      memory &z_destination, int thread_qty=1);
 
 //Group Embedding op API Call
-    static void zendnn_grp_embedding_lib(std::vector <memory> &z_input,
+    static void zendnn_grp_embedding(std::vector <memory> &z_input,
                                          std::vector <memory> &z_indices,
                                          std::vector <int32_t> &z_padding_idx,
                                          std::vector <int32_t> &z_scale_grad_by_freq,

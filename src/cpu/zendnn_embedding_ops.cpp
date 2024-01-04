@@ -136,7 +136,7 @@ void zendnn_embedding_exec(
 //API call to perform embedding lookups on bags of indices and then optionally apply
 // a reduction opration(such as sum, mean or max) on the embedding within each bag.
 
-void zendnn_custom_op::zendnn_embedding_bag_lib(const memory &z_input, const memory &z_indices,
+void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input, const memory &z_indices,
                               const memory &z_offsets,
                               const bool &z_scale_grad_by_freq,
                               const algorithm &z_mode, const bool &z_sparse,
@@ -154,7 +154,7 @@ void zendnn_custom_op::zendnn_embedding_bag_lib(const memory &z_input, const mem
         z_padding_idx, z_destination);
 }
 
-void zendnn_custom_op::zendnn_grp_embedding_bag_lib(std::vector <memory> &z_input,
+void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                                   std::vector <memory> &z_indices, std::vector <memory> &z_offsets,
                                   std::vector <int32_t> &z_scale_grad_by_freq, std::vector <algorithm> &z_modes,
                                   std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
@@ -174,7 +174,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag_lib(std::vector <memory> &z_inpu
 
 //API call to perform just embedding lookup where each input index corresponds to single embedding.
 
-void zendnn_custom_op::zendnn_embedding_lib(const memory &z_input,const memory &z_indices,
+void zendnn_custom_op::zendnn_embedding(const memory &z_input,const memory &z_indices,
                           const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                           const bool &z_sparse,
                           memory &z_destination, int thread_qty) {
@@ -185,7 +185,7 @@ void zendnn_custom_op::zendnn_embedding_lib(const memory &z_input,const memory &
         z_destination);
 }
 
-void zendnn_custom_op::zendnn_grp_embedding_lib(std::vector <memory> &z_input,
+void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
                               std::vector <memory> &z_indices,
                               std::vector <int32_t> &z_padding_idx,
                               std::vector <int32_t> &z_scale_grad_by_freq,
