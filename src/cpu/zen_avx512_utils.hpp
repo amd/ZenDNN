@@ -46,14 +46,14 @@ struct zenmmAVX512_ext_ps_1 {
 
     inline void load_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_load_ps(mem);
+            v[i] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
 
     inline void fetch_add_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_add_ps(_mm512_load_ps(mem), v[i]);
+            v[i] = _mm512_add_ps(_mm512_loadu_ps(mem), v[i]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -62,7 +62,7 @@ struct zenmmAVX512_ext_ps_1 {
     inline void fetch_fmadd_ps(float const *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[i]);
+            v[i] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[i]);
             mem += ZEN_MM_PS_STRIDE1;
         }
 
@@ -70,14 +70,14 @@ struct zenmmAVX512_ext_ps_1 {
 
     inline void fetch_max_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
-            v[i] = _mm512_max_ps(_mm512_load_ps(mem), v[i]);
+            v[i] = _mm512_max_ps(_mm512_loadu_ps(mem), v[i]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
 
     inline void store_ps(float *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
-            _mm512_store_ps(mem,v[i]);
+            _mm512_storeu_ps(mem,v[i]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -86,7 +86,7 @@ struct zenmmAVX512_ext_ps_1 {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_mul_ps(v[i], mm);
-            _mm512_store_ps(mem,v[i]);
+            _mm512_storeu_ps(mem,v[i]);
         }
     };
 
@@ -132,21 +132,21 @@ struct zenmmAVX512_ext_ps_2 {
     inline void load_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_load_ps(mem);
+            v[offset + 0] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_load_ps(mem);
+            v[offset + 1] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_load_ps(mem);
+            v[offset + 2] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_load_ps(mem);
+            v[offset + 3] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_load_ps(mem);
+            v[offset + 4] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_load_ps(mem);
+            v[offset + 5] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_load_ps(mem);
+            v[offset + 6] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_load_ps(mem);
+            v[offset + 7] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -154,21 +154,21 @@ struct zenmmAVX512_ext_ps_2 {
     inline void fetch_add_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 0]);
+            v[offset + 0] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 1]);
+            v[offset + 1] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 1]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 2]);
+            v[offset + 2] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 2]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 3]);
+            v[offset + 3] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 3]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 4]);
+            v[offset + 4] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 4]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 5]);
+            v[offset + 5] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 5]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 6]);
+            v[offset + 6] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 6]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_add_ps(_mm512_load_ps(mem), v[offset + 7]);
+            v[offset + 7] = _mm512_add_ps(_mm512_loadu_ps(mem), v[offset + 7]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -178,21 +178,21 @@ struct zenmmAVX512_ext_ps_2 {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 0]);
+            v[offset + 0] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 1]);
+            v[offset + 1] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 1]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 2]);
+            v[offset + 2] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 2]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 3]);
+            v[offset + 3] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 3]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 4]);
+            v[offset + 4] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 4]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 5]);
+            v[offset + 5] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 5]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 6]);
+            v[offset + 6] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 6]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_fmadd_ps(_mm512_load_ps(mem), mm, v[offset + 7]);
+            v[offset + 7] = _mm512_fmadd_ps(_mm512_loadu_ps(mem), mm, v[offset + 7]);
             mem += ZEN_MM_PS_STRIDE1;
         }
 
@@ -201,21 +201,21 @@ struct zenmmAVX512_ext_ps_2 {
     inline void fetch_max_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
-            v[offset + 0] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 0]);
+            v[offset + 0] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 0]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 1] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 1]);
+            v[offset + 1] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 1]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 2] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 2]);
+            v[offset + 2] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 2]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 3] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 3]);
+            v[offset + 3] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 3]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 4] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 4]);
+            v[offset + 4] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 4]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 5] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 5]);
+            v[offset + 5] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 5]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 6] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 6]);
+            v[offset + 6] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 6]);
             mem += ZEN_MM_PS_STRIDE1;
-            v[offset + 7] = _mm512_max_ps(_mm512_load_ps(mem), v[offset + 7]);
+            v[offset + 7] = _mm512_max_ps(_mm512_loadu_ps(mem), v[offset + 7]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -223,21 +223,21 @@ struct zenmmAVX512_ext_ps_2 {
     inline void store_ps(float *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
-            _mm512_store_ps(mem,v[offset +0]);
+            _mm512_storeu_ps(mem,v[offset +0]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +1]);
+            _mm512_storeu_ps(mem,v[offset +1]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +2]);
+            _mm512_storeu_ps(mem,v[offset +2]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +3]);
+            _mm512_storeu_ps(mem,v[offset +3]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +4]);
+            _mm512_storeu_ps(mem,v[offset +4]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +5]);
+            _mm512_storeu_ps(mem,v[offset +5]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +6]);
+            _mm512_storeu_ps(mem,v[offset +6]);
             mem += ZEN_MM_PS_STRIDE1;
-            _mm512_store_ps(mem,v[offset +7]);
+            _mm512_storeu_ps(mem,v[offset +7]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
@@ -247,28 +247,28 @@ struct zenmmAVX512_ext_ps_2 {
         for (auto i = 0; i< unroll_factor; ++i) {
             const uint32_t offset = (i << 3);
             v[offset +0] = _mm512_mul_ps(v[offset +0], mm);
-            _mm512_store_ps(mem,v[offset +0]);
+            _mm512_storeu_ps(mem,v[offset +0]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +1] = _mm512_mul_ps(v[offset +1], mm);
-            _mm512_store_ps(mem,v[offset +1]);
+            _mm512_storeu_ps(mem,v[offset +1]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +2] = _mm512_mul_ps(v[offset +2], mm);
-            _mm512_store_ps(mem,v[offset +2]);
+            _mm512_storeu_ps(mem,v[offset +2]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +3] = _mm512_mul_ps(v[offset +3], mm);
-            _mm512_store_ps(mem,v[offset +3]);
+            _mm512_storeu_ps(mem,v[offset +3]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +4] = _mm512_mul_ps(v[offset +4], mm);
-            _mm512_store_ps(mem,v[offset +4]);
+            _mm512_storeu_ps(mem,v[offset +4]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +5] = _mm512_mul_ps(v[offset +5], mm);
-            _mm512_store_ps(mem,v[offset +5]);
+            _mm512_storeu_ps(mem,v[offset +5]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +6] = _mm512_mul_ps(v[offset +6], mm);
-            _mm512_store_ps(mem,v[offset +6]);
+            _mm512_storeu_ps(mem,v[offset +6]);
             mem += ZEN_MM_PS_STRIDE1;
             v[offset +7] = _mm512_mul_ps(v[offset +7], mm);
-            _mm512_store_ps(mem,v[offset +7]);
+            _mm512_storeu_ps(mem,v[offset +7]);
             mem += ZEN_MM_PS_STRIDE1;
         }
     };
