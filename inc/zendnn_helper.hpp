@@ -93,6 +93,14 @@ enum zenConvAlgoType {
     CK = 5
 };
 
+enum zenEBAlgoType {
+    AUTO_ALGO = 0,
+    BATCH_THREADED = 1,
+    TABLE_THREADED = 2,
+    HYBRID_THREADED = 3,
+    CCD_THREADED = 4,
+};
+
 //class to read environment variables for zendnnn
 //In future this will be used with operator memory desc
 class zendnnEnv {
@@ -104,6 +112,7 @@ class zendnnEnv {
     uint    zenEnableMemPool;
     uint    zenLibMemPoolEnable;
     uint    zenEnableTFOpts;
+    uint    zenEBAlgo;
     bool    zenINT8format;
   private:
     //initializing ZenDNNEnv values.
@@ -142,6 +151,13 @@ class zendnnEnv {
         zenEnableTFOpts = zendnn_getenv_int("TF_ENABLE_ZENDNN_OPTS", 1);
         //TODO: Unified FWK and LIB mempool for next release
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
+        //Enabling different threading implementation.
+        zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
+                                      zenEBAlgoType::TABLE_THREADED);
+        if (zenEBAlgo>zenEBAlgoType::CCD_THREADED ||
+                zenEBAlgo<zenEBAlgoType::AUTO_ALGO) {
+            zenEBAlgo = zenEBAlgoType::TABLE_THREADED;
+        }
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
