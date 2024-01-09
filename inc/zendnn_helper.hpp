@@ -195,6 +195,20 @@ class zendnnEnv {
     }
 };
 
+// Singleton class to use data members during execution
+class zendnnOpInfo {
+    private:
+        zendnnOpInfo() : is_brgemm(false), is_log(true) {}
+    public:
+        //Keep tracks if brgemm kernel is required for execution
+        bool is_brgemm;
+        bool is_log;
+        static zendnnOpInfo &ZenDNNOpInfo() {
+            static zendnnOpInfo obj;
+            return obj;
+        }
+};
+
 }
 
 
