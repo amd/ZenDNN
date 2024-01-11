@@ -27,17 +27,10 @@
 #include "zendnn_helper.hpp"
 #include "zendnn_logging.hpp"
 #include <immintrin.h>
+#include <blis.h>
 
 
 float gelu_const = sqrtf(2/M_PI);
-#if LIBM_ENABLE
-extern "C"
-{
-    __m256 amd_vrs8_tanhf(__m256);
-}
-#define LIBM_ENABLE_TANH    1
-#define LIBM_ENABLE_ERF     0
-#endif
 
 #define GELU_VECTOR_ENABLE      1
 
@@ -143,47 +136,15 @@ extern "C"
         tmp[7] = out_layer[offset+c+7]/1.414213; \
     }
 
-#if LIBM_ENABLE_TANH
 #define GELU_TANH_VEC8() \
     { \
-        input_vrs8 = _mm256_loadu_ps(tmp); \
-        result_tanh_vrs8 = amd_vrs8_tanhf(input_vrs8); \
-        _mm256_storeu_ps(tmp, result_tanh_vrs8); \
+        aocl_gelu_tanh_f32(8, tmp, 1); \
     }
-#else
-#define GELU_TANH_VEC8() \
-    { \
-        tmp[0] = tanhf(tmp[0]); \
-        tmp[1] = tanhf(tmp[1]); \
-        tmp[2] = tanhf(tmp[2]); \
-        tmp[3] = tanhf(tmp[3]); \
-        tmp[4] = tanhf(tmp[4]); \
-        tmp[5] = tanhf(tmp[5]); \
-        tmp[6] = tanhf(tmp[6]); \
-        tmp[7] = tanhf(tmp[7]); \
-    }
-#endif
 
-#if LIBM_ENABLE_ERF
 #define GELU_ERF_VEC8() \
     { \
-        input_vrs8 = _mm256_loadu_ps(tmp); \
-        result_erf_vrs8 = amd_vrs8_erff(input_vrs8); \
-        _mm256_storeu_ps(tmp, result_erf_vrs8); \
+        aocl_gelu_erf_f32(8, tmp, 1); \
     }
-#else
-#define GELU_ERF_VEC8() \
-    { \
-        tmp[0] = erff(tmp[0]); \
-        tmp[1] = erff(tmp[1]); \
-        tmp[2] = erff(tmp[2]); \
-        tmp[3] = erff(tmp[3]); \
-        tmp[4] = erff(tmp[4]); \
-        tmp[5] = erff(tmp[5]); \
-        tmp[6] = erff(tmp[6]); \
-        tmp[7] = erff(tmp[7]); \
-    }
-#endif
 
 #define COMPUTE_GELU_TANH_VEC8() \
     { \
