@@ -105,7 +105,8 @@ void zendnn_embedding_exec(
 
     // Assign values in offsets
     int32_t *hndl = static_cast<int32_t *>(z_offsets.get_data_handle());
-    unsigned int nthrds= atoi(getenv("OMP_NUM_THREADS"));
+    zendnnEnv zenEnvObj = readEnv();
+    unsigned int nthrds = zenEnvObj.omp_num_threads;
 
     #pragma omp parallel for num_threads(nthrds)
     for (int j = 0; j < size; ++j) {
