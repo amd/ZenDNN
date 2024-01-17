@@ -740,7 +740,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -777,7 +778,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -814,7 +816,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -851,7 +854,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -888,7 +892,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -925,7 +930,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + indices[i]*width);
                 }
-                sum.scale_store_ps(dst + oi*stride, (1.0/float(olast - ofirst)));
+                float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
+                sum.scale_store_ps(dst + oi*stride, dn);
             }
         }
         return status::success;
@@ -968,7 +974,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
                 for (auto j = 0; j < width; ++j) {
                     sum[j] += input[j + indices[i]*width];
                 }
-            float dn = 1.0/float(olast - ofirst);
+            float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = dn*sum[j];
             }
@@ -1033,7 +1039,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps512 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1077,7 +1085,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps256 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1121,7 +1131,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps128 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1165,7 +1177,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps64 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1209,7 +1223,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps32 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1253,7 +1269,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
                 zenmmAVX512_ext_ps16 sum;
-                sum.load_ps(input + indices[ofirst]*width);
+                if (ofirst!=indsz) {
+                    sum.load_ps(input + indices[ofirst]*width);
+                }
                 for (auto i = ofirst+1; i < olast; ++i) {
                     sum.fetch_max_ps(input + indices[i]*width);
                 }
@@ -1305,7 +1323,9 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #endif
             std::vector<dst_type> sum(width,0.0);
             for (auto j = 0; j < width; ++j) {
-                sum[j]  = input[j + indices[ofirst]*width];
+                if (ofirst!=indsz) {
+                    sum[j]  = input[j + indices[ofirst]*width];
+                }
             }
             for (auto i = ofirst+1; i < olast; ++i)
                 for (auto j = 0; j < width; ++j)
