@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -88,9 +88,6 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
             && attr()->post_ops_.check_sum_consistent_dt(dst_dt)
             && check_attr_oscale() && check_attr_zero_points() && check_bias();
 
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_brgemm = false;
-
     if (!ok) return status::unimplemented;
 
     CHECK(init_brgemm_matmul_conf(isa, bgmmc_, *desc(), src_md_, weights_md_,
@@ -153,6 +150,9 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
 
     auto scratchpad = scratchpad_registry().registrar();
     init_scratchpad(scratchpad, bgmmc_);
+
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    obj.is_brgemm = false;
 
     return status::success;
 }

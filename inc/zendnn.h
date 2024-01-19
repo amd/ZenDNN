@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -340,6 +340,15 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_destroy(zendnn_primitive_attr_t
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_primitive_attr_get_fpmath_mode(
         const_zendnn_primitive_attr_t attr, zendnn_fpmath_mode_t *mode);
+
+/// Sets the AutoTuner enable flag primitive attributes.
+///
+/// @param attr Primitive attributes.
+/// @param bool AutoTuner Flag
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_autoTunerEnable(
+        zendnn_primitive_attr_t attr, bool autoTunerFlag);
 
 /// Sets the floating-point math mode primitive attributes.
 ///

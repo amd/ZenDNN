@@ -250,7 +250,8 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
                         const float *A_Array, const float *B_Array,
                         float *C_Array, const float alpha,
                         const float beta, const int lda, const int ldb,
-                        const int ldc) {
+                        const int ldc, const float *bias, const bool relu,
+                        const int gelu) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -259,9 +260,11 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
 
     float *in_arr = const_cast<float *>(A_Array);
     float *filt_arr = const_cast<float *>(B_Array);
+    float *bias_arr = const_cast<float *>(bias);
 
     memory::dims src_dims = {M, K};
     memory::dims weight_dims = {K, N};
+    memory::dims bias_dims = {1, N};
     memory::dims dst_dims = {M, N};
 
     memory::dims a_strides = TransA ? memory::dims {1, lda} :
@@ -272,34 +275,68 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     memory::desc src_md = memory::desc({src_dims}, dt::f32, a_strides);
     memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::f32,
                                      b_strides);
+    memory::desc bias_md = memory::desc({bias_dims}, dt::f32, tag::ab);
+
     memory::desc dst_md = memory::desc({dst_dims}, dt::f32, {ldc, 1});
 
-    zendnn::memory user_weights_memory, src_memory, dst_memory;
+    zendnn::memory user_weights_memory, src_memory, bias_memory, dst_memory;
     src_memory = memory({{src_dims}, dt::f32, a_strides}, eng, in_arr);
     user_weights_memory = memory({{weight_dims}, dt::f32, b_strides}, eng,
     filt_arr);
+    if (bias) {
+        bias_memory = memory(bias_md, eng, bias_arr);
+    }
     dst_memory = memory({{dst_dims}, dt::f32, memory::dims {ldc, 1}}, eng, C_Array);
 
     primitive_attr matmul_attr;
     zendnn::post_ops post_ops;
+    bool post_attr=false;
     if (alpha != 1.f) {
+        post_attr=true;
         post_ops.append_eltwise(/* mask */ 1, algorithm::eltwise_linear, alpha, 0);
     }
     if (beta != 0.f) {
+        post_attr=true;
         post_ops.append_sum(beta);
     }
-    matmul_attr.set_post_ops(post_ops);
+    int scale = 1;
+    //eltwise post-ops
+    if (relu) {
+        post_attr=true;
+        post_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+    }
+    else if (gelu == 1) {
+        post_attr=true;
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+    }
+    else if (gelu == 2) {
+        post_attr=true;
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, alpha, beta);
+    }
+    if (post_attr) {
+        matmul_attr.set_post_ops(post_ops);
+    }
+    matmul_attr.set_autoTunerEnable(true);
 
-    auto matmul_disc =
-        zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
+    auto matmul_disc = bias?
+                       zendnn::matmul::desc(src_md, matmul_weights_md, bias_md, dst_md):
+                       zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
 
     auto matmul_prim_disc =
         zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
 
     net.push_back(zendnn::matmul(matmul_prim_disc));
-    net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-        {ZENDNN_ARG_WEIGHTS, user_weights_memory},
-        {ZENDNN_ARG_DST, dst_memory}});
+    if (bias) {
+        net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_BIAS, bias_memory},
+            {ZENDNN_ARG_DST, dst_memory}});
+    }
+    else {
+        net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_DST, dst_memory}});
+    }
 
     assert(net.size() == net_args.size() && "something is missing");
     for (size_t i = 0; i < net.size(); ++i) {
@@ -375,13 +412,7 @@ void zenMatMul_gemm(
         obj.is_brgemm = true;
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
-                           input, filter, output, alpha, beta, lda, ldb, ldc);
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty);
-        }
+                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu);
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,

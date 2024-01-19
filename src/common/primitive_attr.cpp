@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -357,6 +357,11 @@ bool post_ops_t::check_sum_consistent_dt(
     return ok;
 }
 
+status_t primitive_attr_t::set_autoTunerEnable(bool autoTunerflag) {
+    autoTunerEnable = autoTunerflag;
+    return success;
+}
+
 status_t primitive_attr_t::set_fpmath_mode(fpmath_mode_t fpmath_mode) {
     auto st = check_fpmath_mode(fpmath_mode);
     if (st == success) fpmath_mode_ = fpmath_mode;
@@ -411,6 +416,10 @@ status_t zendnn_primitive_attr_get_fpmath_mode(
     if (any_null(attr, mode)) return invalid_arguments;
     *mode = attr->fpmath_mode_;
     return success;
+}
+status_t zendnn_primitive_attr_set_autoTunerEnable(
+    primitive_attr_t *attr, bool flag){
+        return attr->set_autoTunerEnable(flag);
 }
 
 status_t zendnn_primitive_attr_set_fpmath_mode(

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@
 using namespace zendnn;
 
 //Total num of algo available
-#define NUM_OF_ALGO 6
+#define NUM_OF_ALGO 5
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
 //CPU information size

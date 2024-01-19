@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -733,38 +733,38 @@ class zendnn_custom_op {
   public:
 //Embedding bag op API Call
     static void zendnn_embedding_bag(const memory &z_input,
-                                         const memory &z_indices,
-                                         const memory &z_offsets,
-                                         const bool &z_scale_grad_by_freq,
-                                         const algorithm &z_mode, const bool &z_sparse,
-                                         const memory &z_per_sample_weights_opt,
-                                         const bool &z_per_sample_weights_defined,
-                                         const bool &z_include_last_offset, const int32_t &z_padding_idx,
-                                         memory &z_destination, int thread_qty=1);
+                                     const memory &z_indices,
+                                     const memory &z_offsets,
+                                     const bool &z_scale_grad_by_freq,
+                                     const algorithm &z_mode, const bool &z_sparse,
+                                     const memory &z_per_sample_weights_opt,
+                                     const bool &z_per_sample_weights_defined,
+                                     const bool &z_include_last_offset, const int32_t &z_padding_idx,
+                                     memory &z_destination, int thread_qty=1);
 
 //Group embedding bag op API Call
     static void zendnn_grp_embedding_bag(std::vector <memory> &z_input,
-            std::vector <memory> &z_indices,std::vector <memory> &z_offsets,
-            std::vector <int32_t> &z_scale_grad_by_freq, std::vector <algorithm> &z_modes,
-            std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
-            std::vector <int32_t> &z_per_sample_weights_defined,
-            std::vector <int32_t> &z_include_last_offset,
-            std::vector <int32_t> &z_padding_idx,
-            std::vector <memory> &z_destination, int thread_qty=1);
+                                         std::vector <memory> &z_indices,std::vector <memory> &z_offsets,
+                                         std::vector <int32_t> &z_scale_grad_by_freq, std::vector <algorithm> &z_modes,
+                                         std::vector <int32_t> &z_sparse, std::vector <memory> &z_per_sample_weights_opt,
+                                         std::vector <int32_t> &z_per_sample_weights_defined,
+                                         std::vector <int32_t> &z_include_last_offset,
+                                         std::vector <int32_t> &z_padding_idx,
+                                         std::vector <memory> &z_destination, int thread_qty=1);
 
 //Embedding op API Call
     static void zendnn_embedding(const memory &z_input, const memory &z_indices,
-                                     const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
-                                     const bool  &z_sparse,
-                                     memory &z_destination, int thread_qty=1);
+                                 const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
+                                 const bool  &z_sparse,
+                                 memory &z_destination, int thread_qty=1);
 
 //Group Embedding op API Call
     static void zendnn_grp_embedding(std::vector <memory> &z_input,
-                                         std::vector <memory> &z_indices,
-                                         std::vector <int32_t> &z_padding_idx,
-                                         std::vector <int32_t> &z_scale_grad_by_freq,
-                                         std::vector <int32_t> &z_sparse,
-                                         std::vector <memory> &z_destination, int thread_qty=1);
+                                     std::vector <memory> &z_indices,
+                                     std::vector <int32_t> &z_padding_idx,
+                                     std::vector <int32_t> &z_scale_grad_by_freq,
+                                     std::vector <int32_t> &z_sparse,
+                                     std::vector <memory> &z_destination, int thread_qty=1);
 
 };
 
@@ -3556,6 +3556,12 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         return fpmath_mode(result);
     }
 
+    /// Sets autoTunerEnable Flag.
+    void set_autoTunerEnable(bool autoTunerFlag) {
+        error::wrap_c_api(zendnn_primitive_attr_set_autoTunerEnable(
+                              get(), autoTunerFlag),
+                          "could not set autoTuner Enable primitive attribute");
+    }
     /// Sets fpmath mode.
     ///
     /// @param mode Specified fpmath mode.

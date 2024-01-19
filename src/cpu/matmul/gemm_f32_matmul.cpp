@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -38,6 +38,7 @@
 #include "cpu/matmul/gemm_f32_matmul.hpp"
 #include "cpu/matmul/matmul_utils.hpp"
 #include "zendnn_logging.hpp"
+#include "common/zendnn_private.hpp"
 
 namespace zendnn {
 namespace impl {
@@ -79,6 +80,8 @@ status_t gemm_f32_matmul_t::pd_t::init(engine_t *engine) {
     nthr_ = zendnn_get_max_threads();
     gemm_based::book_acc_scratchpad(*this, params_, sizeof(acc_data_t), nthr_);
 
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    obj.is_brgemm = false;
     return status::success;
 }
 
