@@ -87,6 +87,7 @@ struct zenmmAVX512_ext_ps_1 {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_mul_ps(v[i], mm);
             _mm512_storeu_ps(mem,v[i]);
+            mem += ZEN_MM_PS_STRIDE1;
         }
     };
 
