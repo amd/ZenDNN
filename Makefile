@@ -94,6 +94,20 @@ else
 	CXX_UPROF_LINK :=
 endif
 
+#Set FBGEMM PATH
+ifeq "$(FBGEMM_ENABLE)" "1"
+	FBGEMM_PATH:= $(FBGEMM_INSTALL_PATH)
+	FBGEMM_INCLUDE_PATH:= -I$(FBGEMM_PATH)/include
+	FBGEMM_LIB_PATH:= -L$(FBGEMM_PATH)/build -lfbgemm
+	USE_FBGEMM:= -DFBGEMM_ENABLE=1
+else
+	FBGEMM_PATH:=
+	FBGEMM_INCLUDE_PATH:=
+	FBGEMM_LIB_PATH:=
+	USE_FBGEMM:= -DFBGEMM_ENABLE=0
+endif
+
+
 ifeq "$(ZENDNN_TF_USE_CUSTOM_BLIS)" "1"
 	USE_CUSTOM_BLIS:= -DUSE_CUSTOM_BLIS=1
 else
@@ -177,7 +191,7 @@ endif
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
+	CXX		 := $(CXX_PREFIX) g++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(USE_FBGEMM) $(UPROF_ENABLE)
 else
 	CXX		 := $(CXX_PREFIX) clang++ $(LIBM_ENABLE) $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 endif
@@ -197,7 +211,8 @@ TESTDIR  := tests
 ZENDNN_GIT_ROOT := $(shell pwd)
 
 INCDIRS  := -Iinc -Isrc -Isrc/common -Isrc/cpu \
-	-I$(BLIS_INC_PATH) $(LIBM_INCLUDE_PATH) $(UPROF_INCLUDE_PATH)\
+	-I$(BLIS_INC_PATH) $(LIBM_INCLUDE_PATH) $(FBGEMM_INCLUDE_PATH) \
+	$(UPROF_INCLUDE_PATH) $(CK_INCLUDES) \
 	$(CK_INCLUDES)
 
 EXECUTABLE_SO := $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT)
@@ -244,7 +259,7 @@ build_ar : $(EXECUTABLE_ARCHIVE)
 #$@ => $(ZENDNN_GIT_ROOT)/$(OUTDIR)/$(LIBDIR)/$(PRODUCT) => $(ZENDNN_GIT_ROOT)/_out/lib/libamdZenDNN.so
 #$^ => $(OBJS)
 $(EXECUTABLE_SO): $(OBJECT_FILES)
-	$(CXX) $(CXXLINK) $(CXX_UPROF_LINK) -o $@ $^
+	$(CXX) $(CXXLINK) $(FBGEMM_LIB_PATH) $(CXX_UPROF_LINK) -o $@ $^
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#Automatic-Variables
 	@echo "Build successful (shared)!"
 
@@ -265,7 +280,7 @@ $(OBJECT_FILES): $(OUTDIR)/$(OBJDIR)/%.o: %.cpp
 	@# ^^^ Your terminology is weird: you "compile a .cpp file" to create a .o file.
 	@mkdir -p $(@D)
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#index-_0024_0028_0040D_0029
-	$(CXX) $(CXXFLAGS) $(COMMONFLAGS) $(INCDIRS) $(UPROF_LIB_PATH) $(UPROF_LINK) $< -o $@
+	$(CXX) $(CXXFLAGS) $(COMMONFLAGS) $(INCDIRS) $(FBGEMM_LIB_PATH) $(UPROF_LIB_PATH) $(UPROF_LINK) $< -o $@
 	@# ^^^ Use $(CFLAGS), not $(LDFLAGS), when compiling.
 
 clean:
@@ -278,67 +293,67 @@ create_dir:
 test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_inference_f32 $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_inference_f32.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param_direct $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param_direct.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_maxpool $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_maxpool.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/ref_avx_conv_param $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/ref_avx_conv_param.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param_fusion $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param_fusion.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_primitive_cache_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_primitive_cache_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmulFusions_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmulFusions_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_gelu_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_gelu_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_bf16_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_bf16_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_maxpool_blocked $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_maxpool_blocked.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_benchmark $(INCDIRS) \
                 -Itests/api_tests tests/api_tests/zendnn_embedding_bag_benchmark.cpp -L_out/lib -lamdZenDNN \
-                -L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
 
 
@@ -346,48 +361,48 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_inference_f32 $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_inference_f32.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param_direct $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param_direct.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_maxpool $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_maxpool.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/ref_avx_conv_param $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/ref_avx_conv_param.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_param_fusion $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_param_fusion.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_conv_primitive_cache_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_primitive_cache_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmulFusions_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmulFusions_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_gelu_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_gelu_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_bf16_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_bf16_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_avx_maxpool_blocked $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_avx_maxpool_blocked.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
-		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH)
+		-L$(BLIS_LIB_PATH) -lblis-mt $(LIBM_LIB_PATH) $(FBGEMM_LIB_PATH)
 
 .PHONY: all build_so test clean

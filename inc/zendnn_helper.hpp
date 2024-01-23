@@ -100,6 +100,11 @@ enum zenConvAlgoType {
 };
 
 enum zenEBAlgoType {
+    EB_OP_FBGEMM=0,
+    EB_OP_ZENDNN=1,
+};
+
+enum zenEBThreadType {
     AUTO_ALGO = 0,
     BATCH_THREADED = 1,
     TABLE_THREADED = 2,
@@ -119,6 +124,7 @@ class zendnnEnv {
     uint    zenEnableMemPool;
     uint    zenLibMemPoolEnable;
     uint    zenEnableTFOpts;
+    uint    zenEBThreadAlgo;
     uint    zenEBAlgo;
     bool    zenINT8format;
   private:
@@ -173,12 +179,19 @@ class zendnnEnv {
         //TODO: Unified FWK and LIB mempool for next release
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //Enabling different threading implementation.
-        zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
-                                      zenEBAlgoType::TABLE_THREADED);
-        if (zenEBAlgo>zenEBAlgoType::CCD_THREADED ||
-                zenEBAlgo<zenEBAlgoType::AUTO_ALGO) {
-            zenEBAlgo = zenEBAlgoType::TABLE_THREADED;
+        zenEBThreadAlgo = zendnn_getenv_int("ZENDNN_EB_THREAD_TYPE",
+                                      zenEBThreadType::TABLE_THREADED);
+        if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED ||
+                zenEBThreadAlgo<zenEBThreadType::AUTO_ALGO) {
+            zenEBThreadAlgo = zenEBThreadType::TABLE_THREADED;
         }
+        zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
+                                    zenEBAlgoType::EB_OP_ZENDNN);
+        if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN ||
+                zenEBAlgo<zenEBAlgoType::EB_OP_FBGEMM) {
+            zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
+        }
+
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
@@ -197,16 +210,16 @@ class zendnnEnv {
 
 // Singleton class to use data members during execution
 class zendnnOpInfo {
-    private:
-        zendnnOpInfo() : is_brgemm(false), is_log(true) {}
-    public:
-        //Keep tracks if brgemm kernel is required for execution
-        bool is_brgemm;
-        bool is_log;
-        static zendnnOpInfo &ZenDNNOpInfo() {
-            static zendnnOpInfo obj;
-            return obj;
-        }
+  private:
+    zendnnOpInfo() : is_brgemm(false), is_log(true) {}
+  public:
+    //Keep tracks if brgemm kernel is required for execution
+    bool is_brgemm;
+    bool is_log;
+    static zendnnOpInfo &ZenDNNOpInfo() {
+        static zendnnOpInfo obj;
+        return obj;
+    }
 };
 
 }

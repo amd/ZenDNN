@@ -21,6 +21,10 @@
 #include <omp.h>
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
+#if FBGEMM_ENABLE
+    #include "fbgemm/FbgemmEmbedding.h"
+    using namespace fbgemm;
+#endif
 namespace zendnn {
 
 void zendnn_embedding_bag_exec(
@@ -32,55 +36,97 @@ void zendnn_embedding_bag_exec(
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
     unsigned int op_num_threads=1) {
 
-    engine eng;
-    stream s;
-    eng=engine(engine::kind::cpu, 0);
-    s=stream(eng);
+    zendnnEnv EnvObj = readEnv();
 
-    embedding_bag::desc pdesc;
-    embedding_bag::primitive_desc pd;
+#if FBGEMM_ENABLE
+    if (EnvObj.zenEBAlgo==zenEBAlgoType::EB_OP_FBGEMM) {
 
-    if (z_per_sample_weights_defined) {
+        float *table_ptr = static_cast<float *>(z_input.get_data_handle());
+        int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
+        int32_t *offsets = static_cast<int32_t *>(z_offsets.get_data_handle());
+        float *output = static_cast<float *>(z_dst.get_data_handle());
+        auto emd_table_dims = z_input.get_desc().dims();
+        auto dim_embedding = emd_table_dims[1];
+        auto num_rows = emd_table_dims[0];
+        int indices_size = z_indices.get_desc().dims()[0];
+        int batch_size = z_offsets.get_desc().dims()[0];;
 
-        // declare embedding bag primitive
-        pdesc = embedding_bag::desc(prop_kind::forward_inference,
-                                    z_algorithm,
-                                    op_num_threads,
-                                    z_input.get_desc(),
-                                    z_indices.get_desc(),
-                                    z_offsets.get_desc(),
-                                    z_per_sample_weights.get_desc(),
-                                    z_dst.get_desc(),
-                                    padding_idx);
+        bool use_weight=false;
+        bool normalize_by_lengths=false;
+        bool prefetch=true;
+        bool is_wt_positional=false;
+        bool use_offsets=true;
+        bool ret;
+        auto kernel = GenerateEmbeddingSpMDM<float, int32_t>(
+                          dim_embedding,
+                          use_weight,
+                          normalize_by_lengths,
+                          prefetch?16:0,
+                          is_wt_positional,
+                          use_offsets);
 
-        pd = embedding_bag::primitive_desc(pdesc, eng);
-
-        embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
-            {ZENDNN_ARG_SRC_1, z_indices},
-            {ZENDNN_ARG_SRC_2, z_offsets},
-            {ZENDNN_ARG_SRC_3, z_per_sample_weights},
-            {ZENDNN_ARG_DST, z_dst}
-        });
+        ret = kernel(
+                  batch_size,
+                  indices_size,
+                  num_rows,
+                  table_ptr,
+                  indices,
+                  (const int *)offsets,
+                  nullptr,
+                  output);
     }
     else {
-        // declare embedding bag primitive
-        pdesc = embedding_bag::desc(prop_kind::forward_inference,
-                                    z_algorithm,
-                                    ZENDNN_EMBED_BAG_THRDS,
-                                    z_input.get_desc(),
-                                    z_indices.get_desc(),
-                                    z_offsets.get_desc(),
-                                    z_dst.get_desc(),
-                                    padding_idx);
+        engine eng;
+        stream s;
+        eng=engine(engine::kind::cpu, 0);
+        s=stream(eng);
 
-        pd = embedding_bag::primitive_desc(pdesc, eng);
+        embedding_bag::desc pdesc;
+        embedding_bag::primitive_desc pd;
 
-        embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
-            {ZENDNN_ARG_SRC_1, z_indices},
-            {ZENDNN_ARG_SRC_2, z_offsets},
-            {ZENDNN_ARG_DST, z_dst}
-        });
+        if (z_per_sample_weights_defined) {
+
+            // declare embedding bag primitive
+            pdesc = embedding_bag::desc(prop_kind::forward_inference,
+                                        z_algorithm,
+                                        op_num_threads,
+                                        z_input.get_desc(),
+                                        z_indices.get_desc(),
+                                        z_offsets.get_desc(),
+                                        z_per_sample_weights.get_desc(),
+                                        z_dst.get_desc(),
+                                        padding_idx);
+
+            pd = embedding_bag::primitive_desc(pdesc, eng);
+
+            embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
+                {ZENDNN_ARG_SRC_1, z_indices},
+                {ZENDNN_ARG_SRC_2, z_offsets},
+                {ZENDNN_ARG_SRC_3, z_per_sample_weights},
+                {ZENDNN_ARG_DST, z_dst}
+            });
+        }
+        else {
+            // declare embedding bag primitive
+            pdesc = embedding_bag::desc(prop_kind::forward_inference,
+                                        z_algorithm,
+                                        ZENDNN_EMBED_BAG_THRDS,
+                                        z_input.get_desc(),
+                                        z_indices.get_desc(),
+                                        z_offsets.get_desc(),
+                                        z_dst.get_desc(),
+                                        padding_idx);
+
+            pd = embedding_bag::primitive_desc(pdesc, eng);
+
+            embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
+                {ZENDNN_ARG_SRC_1, z_indices},
+                {ZENDNN_ARG_SRC_2, z_offsets},
+                {ZENDNN_ARG_DST, z_dst}
+            });
+        }
     }
+#endif
 }
 
 void zendnn_embedding_exec(
@@ -172,7 +218,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
     int num_tables = z_input.size();
 
-    if (zenEnvObj.zenEBAlgo==zenEBAlgoType::CCD_THREADED) {
+    if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::CCD_THREADED) {
         omp_set_max_active_levels(2);
         int ccd_num_threads=CCD_NUM_THREADS;
         unsigned int outer_threads = (eb_thread_qty%ccd_num_threads)==0 ?
@@ -208,7 +254,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         }
     }
     else if (num_tables<eb_thread_qty &&
-             zenEnvObj.zenEBAlgo==zenEBAlgoType::HYBRID_THREADED) {
+             zenEnvObj.zenEBThreadAlgo==zenEBThreadType::HYBRID_THREADED) {
         unsigned int outer_threads = num_tables;
         unsigned int rem = eb_thread_qty%num_tables;
         #pragma omp parallel num_threads(outer_threads)
@@ -228,7 +274,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         }
     }
 
-    else if (zenEnvObj.zenEBAlgo==zenEBAlgoType::BATCH_THREADED) {
+    else if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::BATCH_THREADED) {
         for (int i = 0; i < num_tables; i++) {
             zendnn_embedding_bag_exec(
                 z_input[i], z_indices[i], z_offsets[i],
