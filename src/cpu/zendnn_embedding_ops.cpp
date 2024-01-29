@@ -27,6 +27,65 @@
 #endif
 namespace zendnn {
 
+void zendnn_embedding_bag_kernel(
+    const memory &z_input, const memory &z_indices, const memory &z_offsets,
+    const int32_t &scale_grad_by_freq,
+    const algorithm &z_algorithm, const int32_t &sparse,
+    const memory &z_per_sample_weights,
+    const int32_t &z_per_sample_weights_defined,
+    const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
+    unsigned int op_num_threads) {
+    engine eng;
+    stream s;
+    eng=engine(engine::kind::cpu, 0);
+    s=stream(eng);
+
+    embedding_bag::desc pdesc;
+    embedding_bag::primitive_desc pd;
+
+    if (z_per_sample_weights_defined) {
+
+        // declare embedding bag primitive
+        pdesc = embedding_bag::desc(prop_kind::forward_inference,
+                                    z_algorithm,
+                                    op_num_threads,
+                                    z_input.get_desc(),
+                                    z_indices.get_desc(),
+                                    z_offsets.get_desc(),
+                                    z_per_sample_weights.get_desc(),
+                                    z_dst.get_desc(),
+                                    padding_idx);
+
+        pd = embedding_bag::primitive_desc(pdesc, eng);
+
+        embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
+            {ZENDNN_ARG_SRC_1, z_indices},
+            {ZENDNN_ARG_SRC_2, z_offsets},
+            {ZENDNN_ARG_SRC_3, z_per_sample_weights},
+            {ZENDNN_ARG_DST, z_dst}
+        });
+    }
+    else {
+        // declare embedding bag primitive
+        pdesc = embedding_bag::desc(prop_kind::forward_inference,
+                                    z_algorithm,
+                                    ZENDNN_EMBED_BAG_THRDS,
+                                    z_input.get_desc(),
+                                    z_indices.get_desc(),
+                                    z_offsets.get_desc(),
+                                    z_dst.get_desc(),
+                                    padding_idx);
+
+        pd = embedding_bag::primitive_desc(pdesc, eng);
+
+        embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
+            {ZENDNN_ARG_SRC_1, z_indices},
+            {ZENDNN_ARG_SRC_2, z_offsets},
+            {ZENDNN_ARG_DST, z_dst}
+        });
+    }
+}
+
 void zendnn_embedding_bag_exec(
     const memory &z_input, const memory &z_indices, const memory &z_offsets,
     const int32_t &scale_grad_by_freq,
@@ -76,56 +135,24 @@ void zendnn_embedding_bag_exec(
                   output);
     }
     else {
-        engine eng;
-        stream s;
-        eng=engine(engine::kind::cpu, 0);
-        s=stream(eng);
-
-        embedding_bag::desc pdesc;
-        embedding_bag::primitive_desc pd;
-
-        if (z_per_sample_weights_defined) {
-
-            // declare embedding bag primitive
-            pdesc = embedding_bag::desc(prop_kind::forward_inference,
-                                        z_algorithm,
-                                        op_num_threads,
-                                        z_input.get_desc(),
-                                        z_indices.get_desc(),
-                                        z_offsets.get_desc(),
-                                        z_per_sample_weights.get_desc(),
-                                        z_dst.get_desc(),
-                                        padding_idx);
-
-            pd = embedding_bag::primitive_desc(pdesc, eng);
-
-            embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
-                {ZENDNN_ARG_SRC_1, z_indices},
-                {ZENDNN_ARG_SRC_2, z_offsets},
-                {ZENDNN_ARG_SRC_3, z_per_sample_weights},
-                {ZENDNN_ARG_DST, z_dst}
-            });
-        }
-        else {
-            // declare embedding bag primitive
-            pdesc = embedding_bag::desc(prop_kind::forward_inference,
-                                        z_algorithm,
-                                        ZENDNN_EMBED_BAG_THRDS,
-                                        z_input.get_desc(),
-                                        z_indices.get_desc(),
-                                        z_offsets.get_desc(),
-                                        z_dst.get_desc(),
-                                        padding_idx);
-
-            pd = embedding_bag::primitive_desc(pdesc, eng);
-
-            embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
-                {ZENDNN_ARG_SRC_1, z_indices},
-                {ZENDNN_ARG_SRC_2, z_offsets},
-                {ZENDNN_ARG_DST, z_dst}
-            });
-        }
+        zendnn_embedding_bag_kernel(
+            z_input, z_indices, z_offsets,
+            scale_grad_by_freq, z_algorithm,
+            sparse, z_per_sample_weights,
+            z_per_sample_weights_defined,
+            include_last_offset,
+            padding_idx, z_dst, op_num_threads);
     }
+#else
+    zendnn_embedding_bag_kernel(
+        z_input, z_indices, z_offsets,
+        scale_grad_by_freq, z_algorithm,
+        sparse, z_per_sample_weights,
+        z_per_sample_weights_defined,
+        include_last_offset,
+        padding_idx, z_dst, op_num_threads);
+
+
 #endif
 }
 
