@@ -1084,9 +1084,13 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                       B_Array, ldb_Array, &beta_Array[0], C_Array, ldc_Array,
                       group_count, group_size);
 #else
-    if (0) {
-        //if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
-        //Todo: Fix the BatchedMatMul Primitive
+        bool isAlphaOne = std::all_of(alpha_Array, alpha_Array+group_count, [](int value){ return value == 1.0f;});
+        if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2 &&
+            TransA==false && isAlphaOne && group_count==1){
+        //Todo: Fix the BatchedMatMul Primitive     
+        //Todo: Apply alpha_Array to BatchedMatMul Primitive.
+        //Todo: Add Transpose support for input matrix.
+        //Todo: Add Group_count support with different sizes.
         zenBatchMatMulPrimitive(zenEnvObj, Layout, TransA, TransB,
                                 M_Array, N_Array, K_Array,
                                 A_Array, B_Array,
