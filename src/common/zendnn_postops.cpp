@@ -26,18 +26,10 @@
 #include <time.h>
 #include "zendnn_helper.hpp"
 #include "zendnn_logging.hpp"
-#include <immintrin.h>
+#include <blis.h>
 
 
 float gelu_const = sqrtf(2/M_PI);
-#if LIBM_ENABLE
-extern "C"
-{
-    __m256 amd_vrs8_tanhf(__m256);
-}
-#define LIBM_ENABLE_TANH    1
-#define LIBM_ENABLE_ERF     0
-#endif
 
 #define GELU_VECTOR_ENABLE      1
 
@@ -111,102 +103,14 @@ extern "C"
         out_layer[offset+c+7] = out_layer[offset+c+7]*scale[c+7] + bias[c+7] + elementwise_input[offset+c+7]; \
     }
 
-#define GELU_TANH_INPUT_VEC8() \
-    { \
-        tmp[0] = gelu_const * (out_layer[offset+c] + 0.044715 * \
-                               out_layer[offset+c]*out_layer[offset+c]*out_layer[offset+c]); \
-        tmp[1] = gelu_const * (out_layer[offset+c+1] + 0.044715 * out_layer[offset \
-                               +c+1]*out_layer[offset+c+1]*out_layer[offset+c+1]); \
-        tmp[2] = gelu_const * (out_layer[offset+c+2] + 0.044715 * out_layer[offset \
-                               +c+2]*out_layer[offset+c+2]*out_layer[offset+c+2]); \
-        tmp[3] = gelu_const * (out_layer[offset+c+3] + 0.044715 * out_layer[offset \
-                               +c+3]*out_layer[offset+c+3]*out_layer[offset+c+3]); \
-        tmp[4] = gelu_const * (out_layer[offset+c+4] + 0.044715 * out_layer[offset \
-                               +c+4]*out_layer[offset+c+4]*out_layer[offset+c+4]); \
-        tmp[5] = gelu_const * (out_layer[offset+c+5] + 0.044715 * out_layer[offset \
-                               +c+5]*out_layer[offset+c+5]*out_layer[offset+c+5]); \
-        tmp[6] = gelu_const * (out_layer[offset+c+6] + 0.044715 * out_layer[offset \
-                               +c+6]*out_layer[offset+c+6]*out_layer[offset+c+6]); \
-        tmp[7] = gelu_const * (out_layer[offset+c+7] + 0.044715 * out_layer[offset \
-                               +c+7]*out_layer[offset+c+7]*out_layer[offset+c+7]); \
-    }
-
-#define GELU_ERF_INPUT_VEC8() \
-    { \
-        tmp[0] = out_layer[offset+c]/1.414213; \
-        tmp[1] = out_layer[offset+c+1]/1.414213; \
-        tmp[2] = out_layer[offset+c+2]/1.414213; \
-        tmp[3] = out_layer[offset+c+3]/1.414213; \
-        tmp[4] = out_layer[offset+c+4]/1.414213; \
-        tmp[5] = out_layer[offset+c+5]/1.414213; \
-        tmp[6] = out_layer[offset+c+6]/1.414213; \
-        tmp[7] = out_layer[offset+c+7]/1.414213; \
-    }
-
-#if LIBM_ENABLE_TANH
-#define GELU_TANH_VEC8() \
-    { \
-        input_vrs8 = _mm256_loadu_ps(tmp); \
-        result_tanh_vrs8 = amd_vrs8_tanhf(input_vrs8); \
-        _mm256_storeu_ps(tmp, result_tanh_vrs8); \
-    }
-#else
-#define GELU_TANH_VEC8() \
-    { \
-        tmp[0] = tanhf(tmp[0]); \
-        tmp[1] = tanhf(tmp[1]); \
-        tmp[2] = tanhf(tmp[2]); \
-        tmp[3] = tanhf(tmp[3]); \
-        tmp[4] = tanhf(tmp[4]); \
-        tmp[5] = tanhf(tmp[5]); \
-        tmp[6] = tanhf(tmp[6]); \
-        tmp[7] = tanhf(tmp[7]); \
-    }
-#endif
-
-#if LIBM_ENABLE_ERF
-#define GELU_ERF_VEC8() \
-    { \
-        input_vrs8 = _mm256_loadu_ps(tmp); \
-        result_erf_vrs8 = amd_vrs8_erff(input_vrs8); \
-        _mm256_storeu_ps(tmp, result_erf_vrs8); \
-    }
-#else
-#define GELU_ERF_VEC8() \
-    { \
-        tmp[0] = erff(tmp[0]); \
-        tmp[1] = erff(tmp[1]); \
-        tmp[2] = erff(tmp[2]); \
-        tmp[3] = erff(tmp[3]); \
-        tmp[4] = erff(tmp[4]); \
-        tmp[5] = erff(tmp[5]); \
-        tmp[6] = erff(tmp[6]); \
-        tmp[7] = erff(tmp[7]); \
-    }
-#endif
-
 #define COMPUTE_GELU_TANH_VEC8() \
     { \
-        GELU_TANH_INPUT_VEC8(); \
-        GELU_TANH_VEC8(); \
+        aocl_gelu_tanh_f32(8, out_layer+offset+c, 1); \
     }
 
 #define COMPUTE_GELU_ERF_VEC8() \
     { \
-        GELU_ERF_INPUT_VEC8(); \
-        GELU_ERF_VEC8(); \
-    }
-
-#define COMPUTE_GELU_LAST_VEC8() \
-    { \
-        out_layer[offset+c] = 0.5*out_layer[offset+c]*(1+tmp[0]); \
-        out_layer[offset+c+1] = 0.5*out_layer[offset+c+1]*(1+tmp[1]); \
-        out_layer[offset+c+2] = 0.5*out_layer[offset+c+2]*(1+tmp[2]); \
-        out_layer[offset+c+3] = 0.5*out_layer[offset+c+3]*(1+tmp[3]); \
-        out_layer[offset+c+4] = 0.5*out_layer[offset+c+4]*(1+tmp[4]); \
-        out_layer[offset+c+5] = 0.5*out_layer[offset+c+5]*(1+tmp[5]); \
-        out_layer[offset+c+6] = 0.5*out_layer[offset+c+6]*(1+tmp[6]); \
-        out_layer[offset+c+7] = 0.5*out_layer[offset+c+7]*(1+tmp[7]); \
+        aocl_gelu_erf_f32(8, out_layer+offset+c, 1); \
     }
 
 #define COMPUTE_NONE_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
@@ -257,18 +161,13 @@ extern "C"
 
 #define COMPUTE_GELU_VEC8(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
     { \
-        __m256 input_vrs8, result_tanh_vrs8; \
-        float tmp[8]; \
         unsigned int offset = biasOffset + i; \
         int c = 0; \
         for (c = 0; (c+8) <= no_of_filter; c+=8) { \
-                          \
             compute_postOp##_VEC8(out_layer, scale, bias, elementwise_input, offset, c); \
                                     \
             compute_gelu_type##_VEC8();  \
                                     \
-            COMPUTE_GELU_LAST_VEC8(); \
-                \
         } \
         for( ;c<no_of_filter; c++) \
         { \
