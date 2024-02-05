@@ -263,7 +263,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     char mem_format_a = 'n', mem_format_b = 'r';
 
     // Currently filter caching disabled
-    /*if (found_obj == matmul_weight_caching_map_s16.end()) {
+    if (found_obj == matmul_weight_caching_map_s16.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
         int16_t *reorder_filter = (int16_t *) aligned_alloc(64,
@@ -272,12 +272,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                      n, ldb);
         //Create new entry
         matmul_weight_caching_map_s16[key_obj] = reorder_filter;
-    }*/
-    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                                      order, trans, reorder_param0, reorder_param1, reorder_param2);
-    int16_t *reorder_filter = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-    aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k, n,
-                                 ldb);
+    }
+
     //Post ops addition
     aocl_post_op *post_ops = NULL;
 
@@ -407,14 +403,12 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                transpose_input ? 't' : 'n',
                                transpose_filter ? 't' : 'n', m, n, k, alpha,
                                input, lda, mem_format_a,
-                               reorder_filter/*matmul_weight_caching_map_s16[key_obj]*/, ldb,
+                               matmul_weight_caching_map_s16[key_obj], ldb,
                                mem_format_b,
                                beta,
                                output, ldc,
                                post_ops);
 
-    // Free memory for reorder filter
-    free(reorder_filter);
     // Free memory for postops.
     if (post_ops != NULL) {
         free(post_ops->sum.scale_factor);
