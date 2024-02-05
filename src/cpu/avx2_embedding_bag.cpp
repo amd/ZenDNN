@@ -111,15 +111,6 @@ avx2_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
     params.offset_size       = offsets_mdw.nelems();
     params.indices_size      = indices_mdw.nelems();
 
-    // check if aligned access for avx instructions will be safe
-    if ((128 == params.width) || (64 == params.width)) {
-        if (ALIGNED_AVX2_UNSAFE(params.input)) {
-            zendnnError(ZENDNN_ALGOLOG,
-                        "embedding tables not aligned for avx instructions.");
-            return status::runtime_error;
-        }
-    }
-
     // get rid of excess omp threads if any
     params.dst_size     = dst_mdw.nelems();
 
