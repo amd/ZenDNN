@@ -677,7 +677,7 @@ void zenMatMulWithBias(
     const int ldc
 ) {
     //Check for NULL pointers
-    if ((input == NULL)|| (filter == NULL) || (output == NULL) || (bias == NULL)) {
+    if ((input == NULL)|| (filter == NULL) || (output == NULL)) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenMatMul Memory is not defined for input or filter or output or bias");
         return;

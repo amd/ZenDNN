@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -146,6 +146,7 @@ PKIND_TRAITS_INST(resampling);
 PKIND_TRAITS_INST(reduction);
 /* add new primitive */
 PKIND_TRAITS_INST(embedding_bag);
+PKIND_TRAITS_INST(attention);
 #undef PKIND_TRAITS_INST
 
 } // namespace impl

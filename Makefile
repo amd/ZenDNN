@@ -278,6 +278,10 @@ create_dir:
 	@mkdir -p $(OUTDIR)/$(TESTDIR)
 
 test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_attention_multihead_f32 $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_multihead_attention_f32.cpp -L_out/lib -lamdZenDNN \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
+		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \

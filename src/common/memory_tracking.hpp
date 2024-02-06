@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -276,6 +276,7 @@ enum {
     key_wino_U,
     key_wino_V,
     key_wino_M,
+    key_attention,
     // These two keys should always be the last ones,
     // even though they are not in alphabetical order
     key_nested,

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -198,6 +198,14 @@
 #define REG_EMBEDDING_BAG_P(...) \
     {}
 #endif
+
+#if BUILD_PRIMITIVE_ALL || BUILD_ATTENTION
+#define REG_ATTENTION_P(...) __VA_ARGS__
+#else
+#define REG_ATTENTION_P(...) \
+    {}
+#endif
+
 
 // Primitive CPU ISA section is in src/cpu/platform.hpp
 

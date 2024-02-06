@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -1414,6 +1414,8 @@ typedef enum {
     /* add new primitive */
     /// An embedding bag primitive.
     zendnn_embedding_bag,
+    /// An attention primitive.
+    zendnn_attention,
 
     /// Parameter to allow internal only primitives without undefined behavior.
     /// This parameter is chosen to be valid for so long as sizeof(int) >= 2.
@@ -1597,6 +1599,12 @@ typedef enum {
     zendnn_embedding_bag_sum  = 0x4000,
     zendnn_embedding_bag_mean,
     zendnn_embedding_bag_max,
+    /* add attention primitive algorithms */
+    zendnn_multihead_attention = 0x5000,
+    zendnn_multihead_attention_flash_v1,
+    zendnn_multihead_attention_flash_v2,
+    zendnn_multiquery_attention = 0x6000,
+    zendnn_groupedquery_attention = 0x7000,
 } zendnn_alg_kind_t;
 
 /// Flags for normalization primitives.
@@ -2604,6 +2612,57 @@ typedef struct {
 } zendnn_embedding_bag_desc_t;
 
 /// @} zendnn_api_embedding_bag
+
+/// @addtogroup zendnn_api_attention
+/// @{
+
+/// A descriptor of attention operation.
+typedef struct {
+    /// The kind of primitive. Used for self-identifying the primitive
+    /// descriptor. Must be #zendnn_attention.
+    zendnn_primitive_kind_t primitive_kind;
+
+    /// The kind of propagation. Possible values: #zendnn_forward_inference
+    zendnn_prop_kind_t prop_kind;
+
+    /// The kind of attention algorithm.
+	/// Implements cross, self, (un)masked, single/multihead, encoder & decoder side attention variants.
+	/// Possible values:
+    ///     #zendnn_multihead_attention, #zendnn_multihead_attention_flash_v1, #zendnn_multihead_attention_flash_v2
+    ///     #zendnn_multiquery_attention
+    ///     #zendnn_groupedquery_attention
+    zendnn_alg_kind_t alg_kind;
+
+    /// input memory descriptors.
+    zendnn_memory_desc_t query_desc;
+    zendnn_memory_desc_t key_desc;
+    zendnn_memory_desc_t value_desc;
+
+    /// weights memory descriptor.
+    zendnn_memory_desc_t weights_query_desc;
+    zendnn_memory_desc_t weights_key_desc;
+    zendnn_memory_desc_t weights_value_desc;
+
+    /// bias memory descriptor.
+    zendnn_memory_desc_t bias_query_desc;
+    zendnn_memory_desc_t bias_key_desc;
+    zendnn_memory_desc_t bias_value_desc;
+
+    /// mask memory descriptor.
+    zendnn_memory_desc_t mask_desc;
+
+    /// Destination memory descriptor.
+    zendnn_memory_desc_t dst_desc;
+
+    /// Algorithm specific parameters.
+    float scale; //scale value sqrt(head_size) or anyother custom scales
+    uint32_t  num_heads; //number of attention heads
+    uint32_t  num_threads; // no of parallel threads for openmp
+
+} zendnn_attention_desc_t;
+
+/// @} zendnn_api_attention
+
 /// @} zendnn_api_primitives
 
 /// @addtogroup zendnn_api_engine
@@ -2838,7 +2897,11 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 #define ZENDNN_ARG_WEIGHTS_PROJECTION ZENDNN_ARG_WEIGHTS_3
 
 /// Bias tensor argument.
-#define ZENDNN_ARG_BIAS 41
+#define ZENDNN_ARG_BIAS_0 41
+#define ZENDNN_ARG_BIAS ZENDNN_ARG_BIAS_0
+#define ZENDNN_ARG_BIAS_1 42
+#define ZENDNN_ARG_BIAS_2 43
+#define ZENDNN_ARG_MASK 44
 
 /// Mean values tensor argument.
 #define ZENDNN_ARG_MEAN 49
@@ -3070,6 +3133,7 @@ typedef enum {
     zendnn_query_softmax_v2_d, ///< softmax version 2 descriptor
     /* add new primitive */
     zendnn_query_embedding_bag_d, ///< embedding_bag descriptor
+    zendnn_query_attention_d, ///< attention descriptor
 
     // memory descriptor section
     zendnn_query_some_md = 128, ///< stub

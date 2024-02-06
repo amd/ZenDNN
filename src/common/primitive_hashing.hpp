@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -106,6 +106,7 @@ size_t get_desc_hash(const sum_desc_t &desc);
 size_t get_desc_hash(const zero_pad_desc_t &desc);
 /* add for new primitive */
 size_t get_desc_hash(const embedding_bag_desc_t &desc);
+size_t get_desc_hash(const attention_desc_t &desc);
 
 template <typename T>
 size_t get_array_hash(size_t seed, const T *v, int size) {
@@ -198,6 +199,7 @@ struct hash<zendnn::impl::primitive_hashing::key_t> {
             CASE(zero_pad)
             /* add for new primitive */
             CASE(embedding_bag)
+            CASE(attention)
             default: assert(!"unknown primitive_kind");
         }
             // clang-format on

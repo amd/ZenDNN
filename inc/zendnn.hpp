@@ -343,6 +343,8 @@ struct primitive : public handle<zendnn_primitive_t> {
         /* add new primitive */
         /// An embedding bag primitive.
         embedding_bag = zendnn_embedding_bag,
+        /// Attention primitive.
+        attention = zendnn_attention,
     };
 
     using handle::handle;
@@ -726,6 +728,12 @@ enum class algorithm {
     embedding_bag_sum  = zendnn_embedding_bag_sum,
     embedding_bag_mean = zendnn_embedding_bag_mean,
     embedding_bag_max  = zendnn_embedding_bag_max,
+    /* transformer attention variants */
+    multihead_attention  = zendnn_multihead_attention,
+    multihead_attention_flash_v1 = zendnn_multihead_attention_flash_v1,
+    multihead_attention_flash_v2 = zendnn_multihead_attention_flash_v2,
+    multiquery_attention  = zendnn_multiquery_attention,
+    groupedquery_attention  = zendnn_groupedquery_attention,
 };
 
 class zendnn_custom_op {
@@ -13751,6 +13759,133 @@ struct embedding_bag : public primitive {
 };
 
 /// @} zendnn_api_embedding_bag
+
+/* add new primitive */
+/// @addtogroup zendnn_api_attention Attention
+///
+/// A primitive to perform Attention operation.
+///
+/// @sa @ref dev_guide_attention in developer guide
+///
+/// @{
+
+/// Attention.
+struct attention : public primitive {
+    /// Descriptor for attention.
+    struct desc {
+        zendnn_attention_desc_t data;
+
+        /// Default constructor. Produces an empty object.
+        desc() = default;
+
+        /// Constructs a descriptor for an attention primitive using
+        /// algorithm specific parameters, source and destination memory
+        /// descriptors.
+        ///
+        /// @note
+        ///     Destination memory descriptor may be initialized with
+        ///     #zendnn::memory::format_tag::any value of @p format_tag.
+        ///     The primitive does not allocate memory for output and
+        ///     it should be pre-allocated before calling the primitive.
+        ///
+        /// @param aprop_kind possible value forward_inference
+        /// @param aalgorithm attention algorithm kind. Possible values:
+        ///     #zendnn_multihead_attention, #zendnn_multihead_attention_flash_v1, #zendnn_multihead_attention_flash_v2
+        ///     #zendnn_multiquery_attention
+        ///     #zendnn_groupedquery_attention
+        /// @param query_desc Input memory descriptor.
+        /// @param key_desc Input memory descriptor.
+        /// @param value_desc Input memory descriptor.
+        /// @param weights_query_desc Input memory descriptor.
+        /// @param weights_key_desc Input memory descriptor.
+        /// @param weights_value_desc Input memory descriptor.
+        /// @param bias_query_desc Input memory descriptor.
+        /// @param bias_key_desc Input memory descriptor.
+        /// @param bias_value_desc Input memory descriptor.
+        /// @param mask_desc Input memory descriptor.
+        /// @param dst_desc Destination memory descriptor.
+        /// @param scale Scale factor. sqrt(head_size) or any custom float.
+        /// @param num_heads Number of heads.
+        /// @param num_threads Parallel threads for the primitive (zero for default
+        ///              omp threads)
+        desc(prop_kind aprop_kind, algorithm aalgorithm,
+             const memory::desc &query_desc,
+             const memory::desc &key_desc,
+             const memory::desc &value_desc,
+             const memory::desc &weights_query_desc,
+             const memory::desc &weights_key_desc,
+             const memory::desc &weights_value_desc,
+             const memory::desc &bias_query_desc,
+             const memory::desc &bias_key_desc,
+             const memory::desc &bias_value_desc,
+             const memory::desc &mask_desc,
+             const memory::desc &dst_desc,
+             float scale,
+             uint32_t           num_heads,
+             uint32_t           num_threads) {
+             error::wrap_c_api(
+                    zendnn_attention_desc_init(&data,
+                                                   convert_to_c(aprop_kind),
+                                                   convert_to_c(aalgorithm),
+                                                   &query_desc.data,
+                                                   &key_desc.data,
+                                                   &value_desc.data,
+                                                   &weights_query_desc.data,
+                                                   &weights_key_desc.data,
+                                                   &weights_value_desc.data,
+                                                   &bias_query_desc.data,
+                                                   &bias_key_desc.data,
+                                                   &bias_value_desc.data,
+                                                   &mask_desc.data,
+                                                   &dst_desc.data,
+                                                   scale,
+                                                   num_heads,
+                                                   num_threads),
+                    "could not create an attention descriptor:1");
+        }
+    };
+
+    /// Primitive descriptor for an attention primitive.
+    struct primitive_desc : public zendnn::primitive_desc {
+        /// Default constructor. Produces an empty object.
+        primitive_desc() = default;
+
+        /// Constructs a primitive descriptor for an attention primitive.
+        ///
+        /// @param adesc Descriptor for an attention primitive.
+        /// @param aengine Engine to use.
+        /// @param allow_empty A flag signifying whether construction is
+        ///     allowed to fail without throwing an exception. In this case an
+        ///     empty object will be produced. This flag is optional and
+        ///     defaults to false.
+        primitive_desc(const desc &adesc, const primitive_attr &attr, const engine &aengine,
+                bool allow_empty = false)
+            : zendnn::primitive_desc(
+                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+
+        /// Constructs a primitive descriptor for an attention primitive
+        /// from a C API primitive descriptor that must have a matching kind.
+        ///
+        /// @param pd C API primitive descriptor for a attention primitive.
+        primitive_desc(zendnn_primitive_desc_t pd)
+          : zendnn::primitive_desc(pd, zendnn::primitive::kind::attention){}
+
+        /// @copydoc zendnn::primitive_desc_base::src_desc()const
+        memory::desc src_desc() const { return query_md(query::src_md, 0); }
+
+        /// @copydoc zendnn::primitive_desc_base::dst_desc()const
+        memory::desc dst_desc() const { return query_md(query::dst_md, 0); }
+    };
+
+    /// Default constructor. Produces an empty object.
+    attention() = default;
+
+    /// Constructs an attention primitive.
+    /// @param pd Primitive descriptor for an attention primitive.
+    attention(const primitive_desc &pd) : primitive(pd) {}
+};
+
+/// @} zendnn_api_attention
 
 /// @} zendnn_api_primitives
 

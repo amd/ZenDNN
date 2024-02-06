@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -74,6 +74,7 @@ DECLARE_IMPL_LIST(shuffle);
 DECLARE_IMPL_LIST(softmax_v2);
 /* add new primitive */
 DECLARE_IMPL_LIST(embedding_bag);
+DECLARE_IMPL_LIST(attention);
 
 #undef DECLARE_IMPL_LIST
 
@@ -114,6 +115,7 @@ public:
             CASE(softmax_v2);
             /* add new primitive */
             CASE(embedding_bag);
+            CASE(attention);
             default: assert(!"unknown primitive kind"); return empty_list;
         }
 #undef CASE

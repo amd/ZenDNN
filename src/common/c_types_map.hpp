@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -166,6 +166,12 @@ const alg_kind_t softmax_log = zendnn_softmax_log;
 const alg_kind_t embedding_bag_sum  = zendnn_embedding_bag_sum;
 const alg_kind_t embedding_bag_mean = zendnn_embedding_bag_mean;
 const alg_kind_t embedding_bag_max  = zendnn_embedding_bag_max;
+/* add attention primitive algorithms kinds */
+const alg_kind_t multihead_attention  = zendnn_multihead_attention;
+const alg_kind_t multihead_attention_flash_v1  = zendnn_multihead_attention_flash_v1;
+const alg_kind_t multihead_attention_flash_v2  = zendnn_multihead_attention_flash_v2;
+const alg_kind_t multiquery_attention  = zendnn_multiquery_attention;
+const alg_kind_t groupedquery_attention  = zendnn_groupedquery_attention;
 } // namespace alg_kind
 
 using data_type_t = zendnn_data_type_t;
@@ -1276,6 +1282,7 @@ const primitive_kind_t reduction = zendnn_reduction;
 const primitive_kind_t softmax_v2 = zendnn_softmax_v2;
 /* add new primitive */
 const primitive_kind_t embedding_bag = zendnn_embedding_bag;
+const primitive_kind_t attention = zendnn_attention;
 
 // Internal only primitive kinds.
 const primitive_kind_t internal_only_start = (primitive_kind_t)(1 << 12);
@@ -1331,6 +1338,7 @@ const query_t reduction_d = zendnn_query_reduction_d;
 const query_t softmax_v2_d = zendnn_query_softmax_v2_d;
 /* add new primitive */
 const query_t embedding_bag_d = zendnn_query_embedding_bag_d;
+const query_t attention_d = zendnn_query_attention_d;
 
 const query_t some_md = zendnn_query_some_md;
 const query_t src_md = zendnn_query_src_md;
@@ -1377,6 +1385,7 @@ using rnn_direction_t = zendnn_rnn_direction_t;
 using rnn_desc_t = zendnn_rnn_desc_t;
 /* add new primitive */
 using embedding_bag_desc_t = zendnn_embedding_bag_desc_t;
+using attention_desc_t = zendnn_attention_desc_t;
 
 /* Internal type, declared in gemm_types.hpp */
 using gemm_desc_t = zendnn_gemm_desc_t;
@@ -1418,6 +1427,7 @@ struct op_desc_t {
         reduction_desc_t reduction;
         /* add new primitive */
         embedding_bag_desc_t embedding_bag;
+        attention_desc_t attention;
     };
 
 #define DECL_CTOR_AND_CONVERTERS(c_type) \

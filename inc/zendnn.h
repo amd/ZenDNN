@@ -3828,6 +3828,64 @@ zendnn_embedding_bag_desc_init(zendnn_embedding_bag_desc_t *desc,
                                uint32_t scatter_offset);
 /// @} zendnn_api_embedding_bag
 
+/* add new primitive */
+
+/// @addtogroup zendnn_api_attention Attention
+/// @{
+
+/// Initializes a descriptor for an attention primitive.
+///
+/// @note
+///     Destination memory descriptor is allowed to be initialized with
+///     #zendnn_format_tag_any or with format_kind set to
+///     #zendnn_format_kind_any. The attention primitive does not
+///     allocate memory to destination and it should be pre-allocated.
+///
+/// @param desc Output descriptor for an attention primitive
+/// @param prop_kind Propagation kind. currently only forward_inference is
+///     supported.
+/// @param alg_kind attention algorithm kind. Possible values:
+///     #zendnn_multihead_attention, #zendnn_multihead_attention_flash_v1, #zendnn_multihead_attention_flash_v2
+///     #zendnn_multiquery_attention
+///     #zendnn_groupedquery_attention
+/// @param query_desc Input memory descriptor.
+/// @param key_desc Input memory descriptor.
+/// @param value_desc Input memory descriptor.
+/// @param weights_query_desc Input memory descriptor.
+/// @param weights_key_desc Input memory descriptor.
+/// @param weights_value_desc Input memory descriptor.
+/// @param bias_query_desc Input memory descriptor.
+/// @param bias_key_desc Input memory descriptor.
+/// @param bias_value_desc Input memory descriptor.
+/// @param mask_desc Input memory descriptor.
+/// @param dst_desc Destination memory descriptor.
+/// @param scale Scale factor. sqrt(head_size) or any custom float.
+/// @param num_heads Number of heads.
+/// @param num_threads Parallel threads for the primitive (zero for default
+///              omp threads)
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+///
+zendnn_status_t ZENDNN_API
+zendnn_attention_desc_init(zendnn_attention_desc_t *desc,
+                           zendnn_prop_kind_t prop_kind,
+                           zendnn_alg_kind_t alg_kind,
+                           const zendnn_memory_desc_t *query_desc,
+                           const zendnn_memory_desc_t *key_desc,
+                           const zendnn_memory_desc_t *value_desc,
+                           const zendnn_memory_desc_t *weights_query_desc,
+                           const zendnn_memory_desc_t *weights_key_desc,
+                           const zendnn_memory_desc_t *weights_value_desc,
+                           const zendnn_memory_desc_t *bias_query_desc,
+                           const zendnn_memory_desc_t *bias_key_desc,
+                           const zendnn_memory_desc_t *bias_value_desc,
+                           const zendnn_memory_desc_t *mask_desc,
+                           const zendnn_memory_desc_t *dst_desc,
+                           float scale,
+                           uint32_t num_heads,
+                           uint32_t num_threads);
+/// @} zendnn_api_attention
+
 /// @} zendnn_api_primitives
 
 /// @addtogroup zendnn_api_engine

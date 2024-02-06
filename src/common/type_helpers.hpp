@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -638,6 +638,28 @@ inline bool operator==(const embedding_bag_desc_t &lhs, const embedding_bag_desc
             && COMPARE_DESC_MEMBERS(dst_desc)
             && COMPARE_DESC_MEMBERS(padding_idx)
             && COMPARE_DESC_MEMBERS(is_weights)
+            && COMPARE_DESC_MEMBERS(num_threads);
+
+      return ret;
+}
+
+inline bool operator==(const attention_desc_t &lhs, const attention_desc_t &rhs){
+    bool ret = COMPARE_DESC_MEMBERS(primitive_kind)
+            && COMPARE_DESC_MEMBERS(prop_kind)
+            && COMPARE_DESC_MEMBERS(alg_kind)
+            && COMPARE_DESC_MEMBERS(query_desc)
+            && COMPARE_DESC_MEMBERS(key_desc)
+            && COMPARE_DESC_MEMBERS(value_desc)
+            && COMPARE_DESC_MEMBERS(weights_query_desc)
+            && COMPARE_DESC_MEMBERS(weights_key_desc)
+            && COMPARE_DESC_MEMBERS(weights_value_desc)
+            && COMPARE_DESC_MEMBERS(bias_query_desc)
+            && COMPARE_DESC_MEMBERS(bias_key_desc)
+            && COMPARE_DESC_MEMBERS(bias_value_desc)
+            && COMPARE_DESC_MEMBERS(mask_desc)
+            && COMPARE_DESC_MEMBERS(dst_desc)
+            && COMPARE_DESC_MEMBERS(scale)
+            && COMPARE_DESC_MEMBERS(num_heads)
             && COMPARE_DESC_MEMBERS(num_threads);
 
       return ret;

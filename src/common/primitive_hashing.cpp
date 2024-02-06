@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -113,6 +113,7 @@ bool key_t::operator==(const key_t &rhs) const {
             CASE(sum)
             CASE(zero_pad)
             CASE(embedding_bag)
+            CASE(attention)
             default: assert(!"unknown primitive kind");
         }
 #undef CASE
@@ -706,6 +707,30 @@ size_t get_desc_hash(const embedding_bag_desc_t &desc) {
     seed = hash_combine(seed, get_md_hash(desc.dst_desc));
 
     seed = hash_combine(seed, static_cast<size_t>(desc.padding_idx));
+
+    return seed;
+}
+
+size_t get_desc_hash(const attention_desc_t &desc) {
+    size_t seed = 0;
+    // Kinds
+    seed = hash_combine(seed, static_cast<size_t>(desc.primitive_kind));
+    seed = hash_combine(seed, static_cast<size_t>(desc.alg_kind));
+    // Memory descriptors
+    seed = hash_combine(seed, get_md_hash(desc.query_desc));
+    seed = hash_combine(seed, get_md_hash(desc.key_desc));
+    seed = hash_combine(seed, get_md_hash(desc.value_desc));
+    seed = hash_combine(seed, get_md_hash(desc.weights_query_desc));
+    seed = hash_combine(seed, get_md_hash(desc.weights_key_desc));
+    seed = hash_combine(seed, get_md_hash(desc.weights_value_desc));
+    seed = hash_combine(seed, get_md_hash(desc.bias_query_desc));
+    seed = hash_combine(seed, get_md_hash(desc.bias_key_desc));
+    seed = hash_combine(seed, get_md_hash(desc.bias_value_desc));
+    seed = hash_combine(seed, get_md_hash(desc.mask_desc));
+    seed = hash_combine(seed, get_md_hash(desc.dst_desc));
+
+    seed = hash_combine(seed, static_cast<size_t>(desc.num_heads));
+    seed = hash_combine(seed, static_cast<size_t>(desc.num_threads));
 
     return seed;
 }

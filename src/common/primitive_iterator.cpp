@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -46,7 +46,7 @@ status_t zendnn_primitive_desc_iterator_create(
             batch_normalization, binary, convolution, deconvolution, eltwise,
             gemm, inner_product, layer_normalization, lrn, logsoftmax, matmul,
             pooling, pooling_v2, prelu, reduction, resampling, rnn, shuffle,
-            softmax, softmax_v2, embedding_bag);
+            softmax, softmax_v2, embedding_bag, attention);
     if (!known_primitive_kind) return invalid_arguments;
 
     auto it = new primitive_desc_iterator_t(engine, op_desc, attr,
