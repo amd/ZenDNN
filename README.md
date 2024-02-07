@@ -117,21 +117,11 @@ Complete the following steps to setup the GCC compiled AOCL-LibM library:
     tar -xvf aocl-libm-linux-gcc-3.1.0.tar.gz
     cd amd-libm
     ```
-This will set up the environment for AOCL-LibM path:
-```bash
-export ZENDNN_LIBM_PATH=$(pwd)
-```
-For example:
-```bash
-export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
-```
 
-
-The bashrc file can be edited to setup ZENDNN_BLIS_PATH and ZENDNN_LIBM_PATH environment path.
-For example, in the case of GCC compiled AOCL-BLIS and AOCL-LibM:
+The bashrc file can be edited to setup ZENDNN_BLIS_PATH environment path.
+For example, in the case of GCC compiled AOCL-BLIS:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
-export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
 ```
 
 # Composable Kernel Library Installation
@@ -203,11 +193,10 @@ cd ZenDNN
 ```
 
 ## GCC compiler
-**ZENDNN_BLIS_PATH** and **ZENDNN_LIBM_PATH** should be defined.
+**ZENDNN_BLIS_PATH** should be defined.
 example:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
-export ZENDNN_LIBM_PATH=/home/<user-id>/my_work/aocl-linux-gcc-3.1.0/amd-libm
 make clean
 source scripts/zendnn_build.sh gcc
 ```

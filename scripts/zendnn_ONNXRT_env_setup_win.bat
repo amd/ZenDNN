@@ -161,10 +161,6 @@ echo ZENDNN_PRIMITIVE_CACHE_CAPACITY:%ZENDNN_PRIMITIVE_CACHE_CAPACITY%
 set ZENDNN_PRIMITIVE_LOG_ENABLE=0
 echo ZENDNN_PRIMITIVE_LOG_ENABLE:%ZENDNN_PRIMITIVE_LOG_ENABLE%
 
-:: Enable LIBM, By default, its disabled
-set ZENDNN_ENABLE_LIBM=0
-echo ZENDNN_ENABLE_LIBM:%ZENDNN_ENABLE_LIBM%
-
 :: Flags for optimized execution of ONNXRT model
 :: Convolution Direct Algo with Blocked inputs and filter
 set ZENDNN_CONV_ALGO=3

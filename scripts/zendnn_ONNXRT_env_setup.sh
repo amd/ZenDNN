@@ -277,28 +277,8 @@ echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
 export ZENDNN_PRIMITIVE_LOG_ENABLE=0
 echo "ZENDNN_PRIMITIVE_LOG_ENABLE: $ZENDNN_PRIMITIVE_LOG_ENABLE"
 
-# Enable LIBM, By default, its disabled
-export ZENDNN_ENABLE_LIBM=0
-echo "ZENDNN_ENABLE_LIBM=$ZENDNN_ENABLE_LIBM"
-
-#check if ZENDNN_LIBM_PATH is defined, otherwise return error
-if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
-then
-    if [ -z "$ZENDNN_LIBM_PATH" ];
-    then
-        echo "Error: Environment variable ZENDNN_LIBM_PATH needs to be set"
-        return
-    else
-        echo "ZENDNN_LIBM_PATH: $ZENDNN_LIBM_PATH"
-    fi
-fi
-
 # Export PATH and LD_LIBRARY_PATH for ZenDNN
 export PATH=$PATH:$ZENDNN_GIT_ROOT/_out/tests
-if [ "$ZENDNN_ENABLE_LIBM" = "1" ];
-then
-    export LD_LIBRARY_PATH=$ZENDNN_LIBM_PATH/lib/:$LD_LIBRARY_PATH
-fi
 
 export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
 

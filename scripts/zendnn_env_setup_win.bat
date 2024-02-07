@@ -92,10 +92,6 @@ echo "ZENDNN_TF_CONV_ADD_FUSION_SAFE=%ZENDNN_TF_CONV_ADD_FUSION_SAFE%"
 set TF_ZEN_PRIMITIVE_REUSE_DISABLE=FALSE
 echo "TF_ZEN_PRIMITIVE_REUSE_DISABLE=%TF_ZEN_PRIMITIVE_REUSE_DISABLE%"
 
-:: Disable LIBM, By default, its enabled
-set ZENDNN_ENABLE_LIBM=1
-echo "ZENDNN_ENABLE_LIBM=%ZENDNN_ENABLE_LIBM%"
-
 :: Set the no. of InterOp threads, Default is set to 1
 set ZENDNN_TF_INTEROP_THREADS=1
 echo "ZENDNN_TF_INTEROP_THREADS=%ZENDNN_TF_INTEROP_THREADS%"
@@ -173,14 +169,6 @@ if defined ZENDNN_BLIS_PATH (
 ) else (
     echo "ZENDNN_BLIS_PATH: %ZENDNN_BLIS_PATH%"
 )
-
-::check if ZENDNN_LIBM_PATH is defined, otherwise return Error
-::if defined ZENDNN_LIBM_PATH (
-::    echo "Error: Environment variable ZENDNN_LIBM_PATH needs to be set"
-::) else (
-::    echo "ZENDNN_LIBM_PATH: %ZENDNN_LIBM_PATH%"
-::)
-
 
 set TF_GIT_ROOT=%ZENDNN_PARENT_FOLDER%/tensorflow
 echo "TF_GIT_ROOT: %TF_GIT_ROOT%"

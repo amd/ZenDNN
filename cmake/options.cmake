@@ -320,9 +320,6 @@ set(ZENDNN_BLAS_VENDOR "NONE" CACHE STRING
     "Use an external BLAS library. Valid values:
       - NONE (default)
         Use in-house implementation.
-      - MKL
-        Intel Math Kernel Library (Intel MKL)
-        (https://software.intel.com/content/www/us/en/develop/tools/math-kernel-library.html)
       - OPENBLAS
         (https://www.openblas.net)
       - ARMPL
@@ -356,10 +353,6 @@ option(ZENDNN_DIRECT_CONV_ENABLE "Enables ZENDNN_DIRECT_CONV specifc code." ON)
 
 option(ZENDNN_BLOCKED_POOLING_ENABLE "Enables ZENDNN_BLOCKED_POOLING specifc
     code." ON)
-option(ZENDNN_LIBM_ENABLE "Enables ZenDNN LibM specific code specifc
-    code." ON)
 option(ZENDNN_USE_LOCAL_BLIS "Use locally installed BLIS.
     export ZENDNN_BLIS_PATH to use it." ON)
 option(ZENDNN_ENABLE_LPGEMM "Enable ZENDNN_ENABLE_LPGEMM for Zendnn." OFF)
-option(ZENDNN_USE_LOCAL_LIBM "Use locally installed LIBM.
-    export ZENDNN_LIBM_PATH to use it." ON)

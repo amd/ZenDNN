@@ -67,11 +67,6 @@ append(CMAKE_CXX_FLAGS "${CMAKE_TEST_CCXX_NOWARN_FLAGS}")
 
 append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
 
-#if(NOT ZENDNN_CPU_RUNTIME STREQUAL "NONE" AND NOT ZENDNN_ENABLE_STACK_CHECKER)
-#    find_libm(LIBM)
-#    register_exe(api-c api.c "test" "${LIBM}")
-#endif()
-
 #if(NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND (UNIX OR MINGW))
 #    get_directory_property(include_dirs INCLUDE_DIRECTORIES)
 #    set(test_c_symbols "${CMAKE_CURRENT_BINARY_DIR}/test_c_symbols.c")
