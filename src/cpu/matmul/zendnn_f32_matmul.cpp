@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -105,6 +105,7 @@ bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
             }
         }
         if (!mdw.matches_tag(zendnn::impl::format_tag::ab) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::ba) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abc) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abcd) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abcde) &&
