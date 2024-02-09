@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -32,8 +32,6 @@
 
 #include "cpu/cpu_embedding_bag_pd.hpp"
 
-#define  ALIGNED_AVX2_UNSAFE(addr)   ((uint64_t)(addr) & 0x3F)
-
 namespace zendnn {
 namespace impl {
 namespace cpu {
@@ -48,6 +46,7 @@ struct emb_params_t {
     uint32_t        nthr;
     uint32_t        scatter_stride;
     uint32_t        scatter_offset;
+    bool            include_last_offset;
     void            *input;
     void            *indices;
     void            *offsets;
@@ -66,7 +65,7 @@ struct avx2_embedding_bag_t : public primitive_t {
         DECLARE_COMMON_PD_T("avx2:any", avx2_embedding_bag_t);
 
         status_t init(engine_t *engine) {
-            if(! platform::has_data_type_support(data_type)) {
+            if (! platform::has_data_type_support(data_type)) {
                 return status::unimplemented;
             }
 
@@ -89,7 +88,7 @@ struct avx2_embedding_bag_t : public primitive_t {
     // exec() override from primitive_t
     status_t execute(const exec_ctx_t &ctx) const override;
 
-private:
+  private:
     const pd_t *pd() const {
         return (const pd_t *)primitive_t::pd().get();
     }

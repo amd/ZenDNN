@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -70,8 +70,8 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
     // of embedding_bag_desc_t for scatter_offset
     auto bags           = offsets_desc->dims[0];
     auto embedding_dim  = input_desc->dims[1];
-
-    if ((dst_desc->dims[0] < bags*scatter_stride) || (dst_desc->dims[1] != embedding_dim)) {
+    if ((dst_desc->dims[0] < (bags-1)*scatter_stride) ||
+            (dst_desc->dims[1] != embedding_dim)) {
         return invalid_arguments;
     }
 
@@ -98,7 +98,8 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
     if (nullptr != weights_desc) {
         emd.is_weights = true;
         emd.weights_desc = *weights_desc;
-    } else {
+    }
+    else {
         emd.weights_desc = memory_desc_t();
     }
 
@@ -106,7 +107,7 @@ zendnn_embedding_bag_desc_init(embedding_bag_desc_t *desc,
     zendnn::zendnnEnv zenEnvObj = readEnv();
     if (num_threads) {
         emd.num_threads = num_threads < zenEnvObj.omp_num_threads ?
-                            num_threads : zenEnvObj.omp_num_threads;
+                          num_threads : zenEnvObj.omp_num_threads;
     }
     else {
         emd.num_threads = zenEnvObj.omp_num_threads;

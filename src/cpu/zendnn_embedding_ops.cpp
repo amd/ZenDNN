@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "zendnn_helper.hpp"
 #include <vector>
 #include <omp.h>
+#include <string.h>
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
 #if FBGEMM_ENABLE
@@ -103,6 +104,7 @@ void zendnn_embedding_bag_exec(
         float *table_ptr = static_cast<float *>(z_input.get_data_handle());
         int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
         int32_t *offsets = static_cast<int32_t *>(z_offsets.get_data_handle());
+
         float *output = static_cast<float *>(z_dst.get_data_handle());
         auto emd_table_dims = z_input.get_desc().dims();
         auto dim_embedding = emd_table_dims[1];
@@ -124,15 +126,34 @@ void zendnn_embedding_bag_exec(
                           is_wt_positional,
                           use_offsets);
 
-        ret = kernel(
-                  batch_size,
-                  indices_size,
-                  num_rows,
-                  table_ptr,
-                  indices,
-                  (const int *)offsets,
-                  nullptr,
-                  output);
+        if (include_last_offset==0) {
+            int32_t *fbgemm_offsets = new int32_t[batch_size+1];
+            memcpy(fbgemm_offsets, offsets, batch_size * sizeof(int32_t));
+            fbgemm_offsets[batch_size]=indices_size;
+
+            ret = kernel(
+                      batch_size,
+                      indices_size,
+                      num_rows,
+                      table_ptr,
+                      indices,
+                      (const int *)fbgemm_offsets,
+                      nullptr,
+                      output);
+
+            delete[] fbgemm_offsets;
+        }
+        else {
+            ret = kernel(
+                      batch_size,
+                      indices_size,
+                      num_rows,
+                      table_ptr,
+                      indices,
+                      (const int *)offsets,
+                      nullptr,
+                      output);
+        }
     }
     else {
         zendnn_embedding_bag_kernel(

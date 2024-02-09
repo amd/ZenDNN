@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,8 +36,6 @@
 
 #include "cpu/cpu_embedding_bag_pd.hpp"
 #include "cpu/avx2_embedding_bag.hpp"
-
-#define  ALIGNED_AVX512_UNSAFE(addr)   ((uint64_t)(addr) & 0x3F)
 
 namespace zendnn {
 namespace impl {

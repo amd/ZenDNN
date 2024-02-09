@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -110,10 +110,13 @@ avx2_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
 
     params.offset_size       = offsets_mdw.nelems();
     params.indices_size      = indices_mdw.nelems();
+    params.include_last_offset=0;
+    if (dst_mdw.dims()[0]<params.offset_size) {
+        params.include_last_offset=1;
+    }
 
     // get rid of excess omp threads if any
     params.dst_size     = dst_mdw.nelems();
-
     if (params.offset_size < params.nthr) {
         params.nthr = params.offset_size;
     }
@@ -135,17 +138,20 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
 
     const int32_t      &width          = params.width;
     const int32_t      &indsz          = params.indices_size;
-    const int32_t      &offsz          = params.offset_size;
+    int32_t            offsz           = params.offset_size;
     const int32_t      &dstsz          = params.dst_size;
     const indices_type &padidx         = params.padidx;
     const uint32_t     &nthr           = params.nthr;
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
-
+    const bool         &include_last_offset = params.include_last_offset;
 
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+    if (include_last_offset==1) {
+        offsz-=1;
+    }
 
     // fast path for common cases of width 128 and 64
     if (128 == width) {
@@ -153,7 +159,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -168,7 +180,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -186,7 +204,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -201,7 +225,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -219,7 +249,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
@@ -238,7 +274,13 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
@@ -247,7 +289,10 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
                 }
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
+
             }
+
+
         }
     }
 
@@ -270,16 +315,19 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
 
     const int32_t      &width    = params.width;
     const int32_t      &indsz    = params.indices_size;
-    const int32_t      &offsz    = params.offset_size;
+    int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
     const indices_type &padidx   = params.padidx;
     const uint32_t     &nthr     = params.nthr;
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
-
+    const bool         &include_last_offset = params.include_last_offset;
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+    if (include_last_offset==1) {
+        offsz-=1;
+    }
 
     // fast path for common cases of width 128 and 64
     if (128 == width) {
@@ -287,7 +335,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -302,7 +356,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -320,7 +380,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -335,7 +401,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -352,7 +424,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
@@ -371,7 +449,13 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
@@ -401,16 +485,19 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
 
     const int32_t      &width    = params.width;
     const int32_t      &indsz    = params.indices_size;
-    const int32_t      &offsz    = params.offset_size;
+    int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
     const indices_type &padidx   = params.padidx;
     const uint32_t     &nthr     = params.nthr;
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
-
+    const bool         &include_last_offset = params.include_last_offset;
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+    if (include_last_offset==1) {
+        offsz-=1;
+    }
 
     // fast path for common cases of width 128 and 64
     if (128 == width) {
@@ -418,7 +505,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 int32_t         count = 0;
@@ -435,7 +528,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -454,7 +553,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64  sum;
                 int32_t         count = 0;
@@ -471,7 +576,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
@@ -490,7 +601,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             int32_t               count = 0;
@@ -513,7 +630,13 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
@@ -544,16 +667,19 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
     const int32_t      &width    = params.width;
     const int32_t      &indsz    = params.indices_size;
-    const int32_t      &offsz    = params.offset_size;
+    int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
     const indices_type &padidx   = params.padidx;
     const uint32_t     &nthr     = params.nthr;
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
-
+    const bool         &include_last_offset = params.include_last_offset;
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+    if (include_last_offset==1) {
+        offsz-=1;
+    }
 
     // fast path for common cases of width 128 and 64
     if (128 == width) {
@@ -561,7 +687,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 int32_t         nfirst = ofirst;
@@ -585,7 +717,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps128 sum;
                 if (ofirst!=indsz) {
@@ -607,7 +745,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 int32_t        nfirst = ofirst;
@@ -631,7 +775,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                auto olast=0;
+                if (include_last_offset==0) {
+                    olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+                }
+                else {
+                    olast  = offsets[oi+1];
+                }
 
                 zenmm_ext_ps64 sum;
                 if (ofirst!=indsz) {
@@ -653,7 +803,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             int32_t               nfirst = ofirst;
@@ -685,7 +841,13 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            auto olast=0;
+            if (include_last_offset==0) {
+                olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
+            }
+            else {
+                olast  = offsets[oi+1];
+            }
 
             std::vector<dst_type> sum(width,0.0);
             for (auto j = 0; j < width; ++j) {
