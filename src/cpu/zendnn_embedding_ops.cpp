@@ -70,7 +70,7 @@ void zendnn_embedding_bag_kernel(
         // declare embedding bag primitive
         pdesc = embedding_bag::desc(prop_kind::forward_inference,
                                     z_algorithm,
-                                    ZENDNN_EMBED_BAG_THRDS,
+                                    op_num_threads,
                                     z_input.get_desc(),
                                     z_indices.get_desc(),
                                     z_offsets.get_desc(),
@@ -104,13 +104,13 @@ void zendnn_embedding_bag_exec(
         float *table_ptr = static_cast<float *>(z_input.get_data_handle());
         int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
         int32_t *offsets = static_cast<int32_t *>(z_offsets.get_data_handle());
+        float *output    = static_cast<float *>(z_dst.get_data_handle());
 
-        float *output = static_cast<float *>(z_dst.get_data_handle());
         auto emd_table_dims = z_input.get_desc().dims();
-        auto dim_embedding = emd_table_dims[1];
-        auto num_rows = emd_table_dims[0];
-        int indices_size = z_indices.get_desc().dims()[0];
-        int batch_size = z_offsets.get_desc().dims()[0];;
+        auto dim_embedding  = emd_table_dims[1];
+        auto num_rows       = emd_table_dims[0];
+        int indices_size    = z_indices.get_desc().dims()[0];
+        int batch_size      = z_offsets.get_desc().dims()[0];;
 
         bool use_weight=false;
         bool normalize_by_lengths=false;
@@ -177,60 +177,6 @@ void zendnn_embedding_bag_exec(
 #endif
 }
 
-void zendnn_embedding_exec(
-    const memory &z_input, const memory &z_indices,
-    const int32_t &padding_idx, const int32_t &scale_grad_by_freq,
-    const int32_t &z_sparse, memory &z_dst, int op_num_threads=1) {
-
-    algorithm z_algorithm = algorithm::embedding_bag_sum;
-
-    engine eng;
-    stream s;
-    eng=engine(engine::kind::cpu, 0);
-    s=stream(eng);
-
-    const auto &mem = z_indices;
-    int size = static_cast<int>(memory::desc(mem.get_desc()).get_size()/sizeof(
-                                    int32_t));
-    // Create offset memory
-    auto z_offsets = memory({{size},
-        memory::data_type::s32,
-        memory::format_tag::a}, eng);
-
-    // Assign values in offsets
-    int32_t *hndl = static_cast<int32_t *>(z_offsets.get_data_handle());
-    zendnnEnv zenEnvObj = readEnv();
-    unsigned int nthrds = zenEnvObj.omp_num_threads;
-
-    #pragma omp parallel for num_threads(nthrds)
-    for (int j = 0; j < size; ++j) {
-        hndl[j] = j;
-    }
-
-//TODO New constructor need to be defined for embedding op
-
-    embedding_bag::desc pdesc;
-    embedding_bag::primitive_desc pd;
-
-    // declare embedding bag primitive
-    pdesc = embedding_bag::desc(prop_kind::forward_inference,
-                                z_algorithm,
-                                ZENDNN_EMBED_BAG_THRDS,
-                                z_input.get_desc(),
-                                z_indices.get_desc(),
-                                z_offsets.get_desc(),
-                                z_dst.get_desc(),
-                                padding_idx);
-
-    pd = embedding_bag::primitive_desc(pdesc, eng);
-
-    embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
-        {ZENDNN_ARG_SRC_1, z_indices},
-        {ZENDNN_ARG_SRC_2, z_offsets},
-        {ZENDNN_ARG_DST, z_dst}
-    });
-}
-
 //API call to perform embedding lookups on bags of indices and then optionally apply
 // a reduction opration(such as sum, mean or max) on the embedding within each bag.
 
@@ -244,13 +190,16 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
         const bool &z_include_last_offset, const int32_t &z_padding_idx,
         memory &z_destination, int thread_qty) {
 
+    zendnnEnv zenEnvObj = readEnv();
+    unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
+
     zendnn_embedding_bag_exec(
         z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
         z_mode,
         static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
         static_cast<int32_t>(z_per_sample_weights_defined),
         static_cast<int32_t>(z_include_last_offset),
-        z_padding_idx, z_destination);
+        z_padding_idx, z_destination, eb_thread_qty);
 }
 
 void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
@@ -329,7 +278,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq[i], z_modes[i],
                 z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
                 z_include_last_offset[i],
-                z_padding_idx[i], z_destination[i]);
+                z_padding_idx[i], z_destination[i], eb_thread_qty);
         }
 
     }
@@ -350,7 +299,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset]);
+                    z_padding_idx[threadOffset], z_destination[threadOffset], 1);
             }
         }
 
@@ -365,10 +314,37 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
                                         const bool &z_sparse,
                                         memory &z_destination, int thread_qty) {
 
-    zendnn_embedding_exec(
-        z_input, z_indices, z_padding_idx, static_cast<int32_t>(z_scale_grad_by_freq),
-        static_cast<int32_t>(z_sparse),
-        z_destination);
+    int indices_size = z_indices.get_desc().dims()[0];
+    int32_t z_per_sample_weights_defined=0;
+    int32_t z_include_last_offset=0;
+
+    engine eng;
+    eng=engine(engine::kind::cpu, 0);
+    auto z_offsets=memory({{indices_size},
+        memory::data_type::s32,
+        memory::format_tag::a}, eng);
+    int32_t *hndl = static_cast<int32_t *>(z_offsets.get_data_handle());
+
+    zendnnEnv zenEnvObj = readEnv();
+    unsigned int num_thread = zenEnvObj.omp_num_threads;
+
+    #pragma omp parallel for num_threads(num_thread)
+    for (int k = 0; k < indices_size; k++) {
+        hndl[k] = k;
+    }
+
+    algorithm z_mode=algorithm::embedding_bag_sum;
+    auto z_per_sample_weights_opt=memory({{indices_size},
+        memory::data_type::s32,
+        memory::format_tag::a}, eng, nullptr);
+
+    zendnn_embedding_bag_exec(
+        z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
+        z_mode,
+        static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
+        static_cast<int32_t>(z_per_sample_weights_defined),
+        static_cast<int32_t>(z_include_last_offset),
+        z_padding_idx, z_destination, num_thread);
 }
 
 void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
@@ -378,12 +354,44 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         std::vector <int32_t> &z_sparse,
         std::vector <memory> &z_destination, int thread_qty) {
 
+    int num_eb_ops = z_input.size();
+    std::vector <memory> z_offsets(num_eb_ops);
+    std::vector <algorithm> z_modes(num_eb_ops);
+    std::vector <memory> z_per_sample_weights_opt(num_eb_ops);
+    std::vector <int32_t> z_per_sample_weights_defined(num_eb_ops,0);
+    std::vector <int32_t> z_include_last_offset(num_eb_ops,0);
 
-    for (int i = 0; i < z_input.size(); i++) {
-        zendnn_embedding_exec(
-            z_input[i], z_indices[i], z_padding_idx[i], z_scale_grad_by_freq[i],
-            z_sparse[i], z_destination[i]);
+    zendnnEnv zenEnvObj = readEnv();
+    unsigned int num_thread = zenEnvObj.omp_num_threads;
+    engine eng;
+    eng=engine(engine::kind::cpu, 0);
+
+    #pragma omp parallel for num_threads(num_thread)
+    for (int i = 0; i <  num_eb_ops; i++) {
+
+        int indices_size = z_indices[i].get_desc().dims()[0];
+        z_offsets[i] = memory({{indices_size},
+            memory::data_type::s32,
+            memory::format_tag::a}, eng);
+        int32_t *hndl = static_cast<int32_t *>(z_offsets[i].get_data_handle());
+
+        for (int k = 0; k < indices_size; k++) {
+            hndl[k] = k;
+        }
+
+        z_per_sample_weights_opt[i] = memory({{indices_size},
+            memory::data_type::s32,
+            memory::format_tag::a}, eng, nullptr);
+
+        z_modes[i]=algorithm::embedding_bag_sum;
     }
+
+    zendnn_custom_op::zendnn_grp_embedding_bag(
+        z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
+        z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
+        z_include_last_offset, z_padding_idx, z_destination, thread_qty);
+
+
 }
 }//ZenDNN
 

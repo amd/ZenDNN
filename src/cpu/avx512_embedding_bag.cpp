@@ -94,10 +94,6 @@ avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
     params.scatter_stride = pd()->desc()->scatter_stride;
     params.scatter_offset = pd()->desc()->scatter_offset;
 
-    //Overriding threads with OMP_NUM_THREADS
-    zendnnEnv zenEnvObj = readEnv();
-    params.nthr = zenEnvObj.zen_num_threads;
-
     // get the tensors
     params.input =
         static_cast<void *>(ctx.host_ptr(ZENDNN_ARG_SRC_0));
