@@ -116,6 +116,7 @@ avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
     params.width             = input_dims[1];
     params.offset_size       = offsets_mdw.nelems();
     params.indices_size      = indices_mdw.nelems();
+    params.include_last_offset=0;
     if (dst_mdw.dims()[0]<params.offset_size) {
         params.include_last_offset=1;
     }
