@@ -34,86 +34,56 @@ float gelu_const = sqrtf(2/M_PI);
 #define GELU_VECTOR_ENABLE      1
 
 #if GELU_VECTOR_ENABLE
-    #define COMPUTE_GELU    COMPUTE_GELU_VEC8
-    #define COMPUTE_GELU_TANH   COMPUTE_GELU_TANH_VEC8
-    #define COMPUTE_GELU_ERF    COMPUTE_GELU_ERF_VEC8
+    #define COMPUTE_GELU    COMPUTE_GELU_VEC16
+    #define COMPUTE_GELU_TANH   COMPUTE_GELU_TANH_VEC16
+    #define COMPUTE_GELU_ERF    COMPUTE_GELU_ERF_VEC16
 #else
     #define COMPUTE_GELU    COMPUTE_GELU_VEC1
     #define COMPUTE_GELU_TANH   COMPUTE_GELU_TANH_VEC1
     #define COMPUTE_GELU_ERF    COMPUTE_GELU_ERF_VEC1
 #endif
 
-#define COMPUTE_BIAS_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + bias[c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + bias[c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + bias[c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + bias[c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + bias[c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + bias[c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + bias[c+7]; \
+        for(int i=0;i<16;++i) \
+        out_layer[offset+c+i] = out_layer[offset+c+i] + bias[c+i]; \
     }
 
-#define COMPUTE_SCALE_BIAS_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_SCALE_BIAS_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1]*scale[c+1] + bias[c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2]*scale[c+2] + bias[c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3]*scale[c+3] + bias[c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4]*scale[c+4] + bias[c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5]*scale[c+5] + bias[c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6]*scale[c+6] + bias[c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7]*scale[c+7] + bias[c+7]; \
+        for(int i=0;i<16;++i) \
+        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + bias[c+i]; \
     }
 
-#define COMPUTE_ADD_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + elementwise_input[offset+c+7]; \
+        for(int i=0;i<16;++i) \
+        out_layer[offset+c+i] = out_layer[offset+c+i] + elementwise_input[offset + c + i]; \
     }
 
-#define COMPUTE_BIAS_ADD_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1] + bias[c+1] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2] + bias[c+2] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3] + bias[c+3] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4] + bias[c+4] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5] + bias[c+5] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6] + bias[c+6] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7] + bias[c+7] + elementwise_input[offset+c+7]; \
+        for(int i=0;i<16;++i) \
+        out_layer[offset+c+i] = out_layer[offset+c+i] + bias[c+i] + elementwise_input[offset + c + i]; \
+}
+
+#define COMPUTE_SCALE_BIAS_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+    { \
+        for(int i=0;i<16;++i) \
+        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + bias[c+i] + elementwise_input[offset + c + i]; \
     }
 
-#define COMPUTE_SCALE_BIAS_ADD_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_GELU_TANH_VEC16() \
     { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c] + elementwise_input[offset + c]; \
-        out_layer[offset+c+1] = out_layer[offset+c+1]*scale[c+1] + bias[c+1] + elementwise_input[offset+c+1]; \
-        out_layer[offset+c+2] = out_layer[offset+c+2]*scale[c+2] + bias[c+2] + elementwise_input[offset+c+2]; \
-        out_layer[offset+c+3] = out_layer[offset+c+3]*scale[c+3] + bias[c+3] + elementwise_input[offset+c+3]; \
-        out_layer[offset+c+4] = out_layer[offset+c+4]*scale[c+4] + bias[c+4] + elementwise_input[offset+c+4]; \
-        out_layer[offset+c+5] = out_layer[offset+c+5]*scale[c+5] + bias[c+5] + elementwise_input[offset+c+5]; \
-        out_layer[offset+c+6] = out_layer[offset+c+6]*scale[c+6] + bias[c+6] + elementwise_input[offset+c+6]; \
-        out_layer[offset+c+7] = out_layer[offset+c+7]*scale[c+7] + bias[c+7] + elementwise_input[offset+c+7]; \
+        aocl_gelu_tanh_f32(16, out_layer+offset+c, 1); \
     }
 
-#define COMPUTE_GELU_TANH_VEC8() \
+#define COMPUTE_GELU_ERF_VEC16() \
     { \
-        aocl_gelu_tanh_f32(8, out_layer+offset+c, 1); \
+        aocl_gelu_erf_f32(16, out_layer+offset+c, 1); \
     }
 
-#define COMPUTE_GELU_ERF_VEC8() \
-    { \
-        aocl_gelu_erf_f32(8, out_layer+offset+c, 1); \
-    }
-
-#define COMPUTE_NONE_VEC8(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_NONE_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
     { \
     }
 
@@ -159,14 +129,14 @@ float gelu_const = sqrtf(2/M_PI);
     { \
     }
 
-#define COMPUTE_GELU_VEC8(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
+#define COMPUTE_GELU_VEC16(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
     { \
         unsigned int offset = biasOffset + i; \
         int c = 0; \
-        for (c = 0; (c+8) <= no_of_filter; c+=8) { \
-            compute_postOp##_VEC8(out_layer, scale, bias, elementwise_input, offset, c); \
+        for (c = 0; (c+16) <= no_of_filter; c+=16) { \
+            compute_postOp##_VEC16(out_layer, scale, bias, elementwise_input, offset, c); \
                                     \
-            compute_gelu_type##_VEC8();  \
+            compute_gelu_type##_VEC16();  \
                                     \
         } \
         for( ;c<no_of_filter; c++) \
