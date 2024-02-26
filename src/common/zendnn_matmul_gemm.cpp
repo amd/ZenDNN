@@ -43,6 +43,10 @@ extern int graph_exe_count;
 std::unordered_map<Key_matmul, const float * >
 matmul_weight_caching_map;
 
+//Map for weight caching(reordered memory) for JIT Primitive
+std::unordered_map<Key_matmul, zendnn::memory >
+matmul_weight_caching_map_jit_kernel;
+
 void zenMatMul_gemm_blocked(
     zendnnEnv zenEnvObj,
     const bool auto_tuner,
@@ -79,6 +83,7 @@ void zenMatMul_gemm_blocked(
         key_obj.ldb = ldb;
         key_obj.ldc = ldc;
         key_obj.weights = filter;
+        key_obj.thread_count = thread_qty;
 
         //finds object in map
         auto found_obj = matmul_weight_caching_map.find(key_obj);
@@ -255,6 +260,21 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
+    Key_matmul key_obj;
+    key_obj.transpose_input = TransA;
+    key_obj.transpose_weights = TransB;
+    key_obj.m = M;
+    key_obj.k = K;
+    key_obj.n = N;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+    key_obj.weights = B_Array;
+    key_obj.thread_count = zenEnvObj.omp_num_threads;
+
+    //finds object in map
+    auto found_obj = matmul_weight_caching_map_jit_kernel.find(key_obj);
+
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
 
@@ -262,31 +282,27 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     float *filt_arr = const_cast<float *>(B_Array);
     float *bias_arr = const_cast<float *>(bias);
 
+    //memory dims
     memory::dims src_dims = {M, K};
     memory::dims weight_dims = {K, N};
     memory::dims bias_dims = {1, N};
     memory::dims dst_dims = {M, N};
 
+    //strides
     memory::dims a_strides = TransA ? memory::dims {1, lda} :
                              memory::dims {lda, 1};
     memory::dims b_strides = TransB ? memory::dims {1, ldb} :
                              memory::dims {ldb, 1};
 
+    //memory descriptors
     memory::desc src_md = memory::desc({src_dims}, dt::f32, a_strides);
     memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::f32,
                                      b_strides);
+    memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::f32,
+            tag::any);
     memory::desc bias_md = memory::desc({bias_dims}, dt::f32, tag::ab);
 
     memory::desc dst_md = memory::desc({dst_dims}, dt::f32, {ldc, 1});
-
-    zendnn::memory user_weights_memory, src_memory, bias_memory, dst_memory;
-    src_memory = memory({{src_dims}, dt::f32, a_strides}, eng, in_arr);
-    user_weights_memory = memory({{weight_dims}, dt::f32, b_strides}, eng,
-    filt_arr);
-    if (bias) {
-        bias_memory = memory(bias_md, eng, bias_arr);
-    }
-    dst_memory = memory({{dst_dims}, dt::f32, memory::dims {ldc, 1}}, eng, C_Array);
 
     primitive_attr matmul_attr;
     zendnn::post_ops post_ops;
@@ -318,26 +334,46 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     }
     matmul_attr.set_autoTunerEnable(true);
 
+
     auto matmul_disc = bias?
-                       zendnn::matmul::desc(src_md, matmul_weights_md, bias_md, dst_md):
-                       zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
+                       zendnn::matmul::desc(src_md, blocked_matmul_weights_md, bias_md, dst_md):
+                       zendnn::matmul::desc(src_md, blocked_matmul_weights_md, dst_md);
 
     auto matmul_prim_disc =
         zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
 
+    //Memory creation
+    zendnn::memory user_weights_memory, src_memory, bias_memory, dst_memory;
+    src_memory = memory({{src_dims}, dt::f32, a_strides}, eng, in_arr);
+    user_weights_memory = memory(matmul_weights_md, eng, filt_arr);
+
+    if (bias) {
+        bias_memory = memory(bias_md, eng, bias_arr);
+    }
+    dst_memory = memory({{dst_dims}, dt::f32, memory::dims {ldc, 1}}, eng, C_Array);
+
+    //Weight reordering
+    zendnn::memory reordered_weights_memory;
+    if (found_obj == matmul_weight_caching_map_jit_kernel.end()) {
+        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                user_weights_memory, reordered_weights_memory);
+
+        matmul_weight_caching_map_jit_kernel[key_obj] = reordered_weights_memory;
+    }
+
     net.push_back(zendnn::matmul(matmul_prim_disc));
     if (bias) {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, matmul_weight_caching_map_jit_kernel[key_obj]},
             {ZENDNN_ARG_BIAS, bias_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     else {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, matmul_weight_caching_map_jit_kernel[key_obj]},
             {ZENDNN_ARG_DST, dst_memory}});
     }
-
     assert(net.size() == net_args.size() && "something is missing");
     for (size_t i = 0; i < net.size(); ++i) {
         net.at(i).execute(engine_stream, net_args.at(i));
@@ -391,14 +427,21 @@ void zenMatMul_gemm(
         }
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
+        obj.is_brgemm = true;
+        zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
+                           k,
+                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu);
+        /*
+        //Old functionality of ZENDNN_GEMM1
         zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                     m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty);
-        }
+                            m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
+               if (bias || relu || gelu) {
+                   zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                              ldc, 0,
+                              bias, relu, gelu, NULL,
+                              thread_qty);
+               }
+        */
 
     }
     else if (zenEnvObj.zenGEMMalgo ==
@@ -505,7 +548,7 @@ void zenMatMul_gemm_wrapper(
                   " algo_type=", algo_type,
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (algo_type == 4) {
+    if (algo_type == 4 || algo_type == 3) {
         obj.is_log = false;
     }
 }
@@ -1354,3 +1397,4 @@ void zenMatmulSplit(
 
     }
 }
+

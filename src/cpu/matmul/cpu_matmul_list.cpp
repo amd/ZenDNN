@@ -30,14 +30,14 @@
 #include "cpu/matmul/ref_matmul_int8.hpp"
 
 #if ZENDNN_X64
-#include "cpu/x64/matmul/brgemm_matmul.hpp"
-#include "cpu/matmul/zendnn_f32_matmul.hpp"
-using namespace zendnn::impl::cpu::x64::matmul;
-using namespace zendnn::impl::cpu::x64;
+    #include "cpu/x64/matmul/brgemm_matmul.hpp"
+    #include "cpu/matmul/zendnn_f32_matmul.hpp"
+    using namespace zendnn::impl::cpu::x64::matmul;
+    using namespace zendnn::impl::cpu::x64;
 #elif ZENDNN_AARCH64 && ZENDNN_AARCH64_USE_ACL
-#include "cpu/aarch64/matmul/acl_matmul.hpp"
-using namespace zendnn::impl::cpu::aarch64::matmul;
-using namespace zendnn::impl::cpu::aarch64;
+    #include "cpu/aarch64/matmul/acl_matmul.hpp"
+    using namespace zendnn::impl::cpu::aarch64::matmul;
+    using namespace zendnn::impl::cpu::aarch64;
 
 #endif
 
@@ -51,25 +51,23 @@ using namespace zendnn::impl::cpu::matmul;
 
 // clang-format off
 constexpr impl_list_item_t impl_list[] = REG_MATMUL_P({
-        CPU_INSTANCE(zendnn_f32_matmul_t)
-        CPU_INSTANCE_AARCH64_ACL(acl_matmul_t)
-        CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core>)
-        CPU_INSTANCE(gemm_f32_matmul_t)
-        CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_bf16>)
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
-	CPU_INSTANCE(zendnn_bf16_matmul_t<f32>)
-        CPU_INSTANCE(zendnn_bf16_matmul_t<bf16>)
-#endif
-	CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_bf16>)
-        CPU_INSTANCE(gemm_bf16_matmul_t<f32>)
-        CPU_INSTANCE(gemm_bf16_matmul_t<bf16>)
-        CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_int8>)
-        CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_vnni>)
-        CPU_INSTANCE(gemm_x8s8s32x_matmul_t)
-        CPU_INSTANCE(ref_matmul_t)
-        CPU_INSTANCE(ref_matmul_int8_t)
-        /* eol */
-        nullptr,
+    CPU_INSTANCE(zendnn_f32_matmul_t)
+    CPU_INSTANCE_AARCH64_ACL(acl_matmul_t)
+    CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core>)
+    CPU_INSTANCE(gemm_f32_matmul_t)
+    CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_bf16>)
+    CPU_INSTANCE(zendnn_bf16_matmul_t<f32>)
+    CPU_INSTANCE(zendnn_bf16_matmul_t<bf16>)
+    CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_bf16>)
+    CPU_INSTANCE(gemm_bf16_matmul_t<f32>)
+    CPU_INSTANCE(gemm_bf16_matmul_t<bf16>)
+    CPU_INSTANCE_AMX(brgemm_matmul_t<avx512_core_bf16_amx_int8>)
+    CPU_INSTANCE_AVX512(brgemm_matmul_t<avx512_core_vnni>)
+    CPU_INSTANCE(gemm_x8s8s32x_matmul_t)
+    CPU_INSTANCE(ref_matmul_t)
+    CPU_INSTANCE(ref_matmul_int8_t)
+    /* eol */
+    nullptr,
 });
 // clang-format on
 } // namespace

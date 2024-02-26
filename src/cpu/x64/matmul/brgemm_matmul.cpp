@@ -201,6 +201,10 @@ status_t brgemm_matmul_t<isa>::execute_body(const exec_ctx_t &ctx) const {
     DEFINE_ZERO_POINT_VALUE(wei_zero_point, ZENDNN_ARG_WEIGHTS);
     DEFINE_ZERO_POINT_VALUE(dst_zero_point, ZENDNN_ARG_DST);
 
+    //Enable primitive log
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    obj.is_log = true;
+
     brg_matmul_exec_ctx_t brgmm_ctx(
             ctx, pd(), src_zero_point, wei_zero_point, dst_zero_point);
 

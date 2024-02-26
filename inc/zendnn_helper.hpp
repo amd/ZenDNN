@@ -79,8 +79,9 @@ enum zenMatMulAlgoType {
 
 enum zenBF16MatMulAlgoType {
     MATMUL_AUTO_BF16 = 0,
-    MATMUL_BR_GEMM = 1,
-    MATMUL_AOCL_GEMM = 2,
+    MATMUL_AOCL_GEMM = 1,
+    MATMUL_BLOCKED_JIT = 2,
+    MATMUL_JIT = 3,
 };
 
 // enum containing all supported convolution algo types
@@ -154,16 +155,17 @@ class zendnnEnv {
 
         //ZENDNN_MATMUL_BF16 is to enable specific BF16 GEMM algo.
         //Currently ZenDNN support three ALGO path for GEMM execution
-        // TODO:If value is set to 0, library decide the optimal path
+        // 0. AutoTuner, library decide the optimal path
         // based on the matrix sizes and other parameter settings. However,
         // this can be overridden with specific path.
-        // 1. BRGEMM : MatMul is redirected to BRGEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BR_GEMM)
-        // 2. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM)
+        // 1. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM)
+        // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT)
+        // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT)
 
         zenBF16GEMMalgo = zendnn_getenv_int("ZENDNN_MATMUL_BF16",
-                                            zenBF16MatMulAlgoType::MATMUL_BR_GEMM);
-        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM) {
-            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BR_GEMM;
+                                            zenBF16MatMulAlgoType::MATMUL_JIT);
+        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT) {
+            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
         //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
