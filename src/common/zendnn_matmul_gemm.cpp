@@ -787,7 +787,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, bool is_mul_add,
+                           int group_count, int *group_size, int fusion,
                            const float **Add_Array, float mul_node, int batch_size,
                            const float **bias, const bool relu, const int gelu) {
 
@@ -818,7 +818,16 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            bias[grp_start + j], relu, gelu, NULL,
                            thread_qty);
 
-            if (is_mul_add) {
+            if (fusion == 1) {
+                // BatchMatMul + Mul
+                #pragma omp simd
+                for (int k = 0; k < m * n; k++) {
+                    C_Array[grp_start + j][k] =
+                        (C_Array[grp_start + j][k] * mul_node);
+                }
+            }
+            else if (fusion == 2) {
+                // BatchMatMul + Mul + Add
                 #pragma omp simd
                 for (int k = 0; k < m * n; k++) {
                     C_Array[grp_start + j][k] =
@@ -826,6 +835,7 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                         Add_Array[(grp_start + j) / (group_size[i] / batch_size)][k];
                 }
             }
+
         }
         grp_start +=group_size[i];
     }
@@ -842,7 +852,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, bool is_mul_add,
+                           int group_count, int *group_size, int fusion,
                            const float **Add_Array, float mul_node, int batch_size, const float **bias,
                            const bool relu, const int gelu) {
 
@@ -903,7 +913,16 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                bias[grp_start + threadOffset], relu, gelu, NULL,
                                thread_qty);
 
-                if (is_mul_add) {
+                if (fusion == 1) {
+                    // BatchMatMul + Mul
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node);
+                    }
+                }
+                else if (fusion == 2) {
+                    // BatchMatMul + Mul + Add
                     #pragma omp simd
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
@@ -927,7 +946,7 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
                            float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, bool is_mul_add,
+                           int group_count, int *group_size, int fusion,
                            const float **Add_Array, float mul_node, int batch_size,
                            const float **bias, const bool relu, const int gelu) {
 
@@ -1000,7 +1019,16 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                                bias[grp_start + threadOffset], relu, gelu, NULL,
                                thread_qty);
 
-                if (is_mul_add) {
+                if (fusion == 1) {
+                    // BatchMatMul + Mul
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node);
+                    }
+                }
+                else if (fusion == 2) {
+                    // BatchMatMul + Mul + Add
                     #pragma omp simd
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
@@ -1022,7 +1050,7 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
                              const float **A_Array,
                              const float **B_Array,
                              float **C_Array,
-                             int *group_size, bool is_mul_add,
+                             int *group_size, int fusion,
                              const float **Add_Array, float mul_node, int batch_size) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
@@ -1083,7 +1111,8 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
     filt_arr);
 
     primitive_attr matmul_attr;
-    if (is_mul_add) {
+    if (fusion) {
+
         float *add_arr = const_cast<float *>(Add_Array[0]);
 
         const float *mul = &mul_node;
@@ -1095,8 +1124,10 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
         zendnn::post_ops post_ops;
         post_ops.append_binary(algorithm::binary_mul,
                                memory::desc({mul_dims}, dt::f32, tag::abcd));
-        post_ops.append_binary(algorithm::binary_add,
-                               memory::desc({add_dims}, dt::f32, tag::abcd));
+        if (fusion == 2)
+            post_ops.append_binary(algorithm::binary_add,
+                                   memory::desc({add_dims}, dt::f32, tag::abcd));
+
 
         matmul_attr.set_post_ops(post_ops);
         matmul::desc matmul_pd1 =
@@ -1106,26 +1137,42 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
 
         net.push_back(matmul(matmul_pd));
 
-        zendnn::memory postop_memory1, postop_memory2;
+        zendnn::memory postop_memory1;
         postop_memory1 =
         memory({{mul_dims}, dt::f32, tag::abcd}, eng, mul_arr);
-        postop_memory2 =
-        memory({{add_dims}, dt::f32, tag::abcd}, eng, add_arr);
+        if (fusion == 1) {
+            // BatchMatMul + Mul
+            net_args.push_back({
+                {ZENDNN_ARG_SRC, src_memory},
+                {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+                {ZENDNN_ARG_DST, dst_memory},
+                {
+                    ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
+                    postop_memory1
+                }});
+        }
+        else {
+            // BatchMatMul + Mul + Add
+            zendnn::memory postop_memory2;
+            postop_memory2 =
+            memory({{add_dims}, dt::f32, tag::abcd}, eng, add_arr);
 
-        net_args.push_back({
-            {ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
-            {ZENDNN_ARG_DST, dst_memory},
-            {
-                ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
-                postop_memory1
-            },
-            {
-                ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1,
-                postop_memory2
-            }});
+            net_args.push_back({
+                {ZENDNN_ARG_SRC, src_memory},
+                {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+                {ZENDNN_ARG_DST, dst_memory},
+                {
+                    ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
+                    postop_memory1
+                },
+                {
+                    ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1,
+                    postop_memory2
+                }});
+        }
     }
     else {
+        // BatchMatMul
         matmul::desc matmul_pd1 =
             matmul::desc(src_md, matmul_weights_md, bias_md, dst_md);
         matmul::primitive_desc matmul_pd =
@@ -1146,12 +1193,13 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
 //Batched MatMul Wrapper, internally calls BLAS cblas_sgemm_batch from BLIS
 //or //zenBatchMatMulSplitV1/V2/V3
 //TODO: Add support for group_count TransA and TransB
+//TODO: Eliminate the fusion parameter and decide the fusion based on Add_Array and mul node
 void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     int *N_Array, int *K_Array, const float *alpha_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
                     float **C_Array, int *ldc_Array, int group_count, int *group_size,
-                    bool is_mul_add, const float **Add_Array, float mul_node,
+                    int fusion, const float **Add_Array, float mul_node,
                     int batch_size, const float **bias, const bool relu, const int gelu) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     obj.is_brgemm = true;
@@ -1198,7 +1246,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                 M_Array, N_Array, K_Array,
                                 A_Array, B_Array,
                                 C_Array,
-                                group_size, is_mul_add, Add_Array,
+                                group_size, fusion, Add_Array,
                                 mul_node, batch_size);
     }
     else {
@@ -1211,7 +1259,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   M_Array, N_Array, K_Array, alpha_Array,
                                   A_Array, lda_Array, B_Array, ldb_Array,
                                   beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, is_mul_add, Add_Array,
+                                  group_count, group_size, fusion, Add_Array,
                                   mul_node, batch_size, bias, relu, gelu);
         }
         else {
@@ -1219,7 +1267,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   M_Array, N_Array, K_Array, alpha_Array,
                                   A_Array, lda_Array, B_Array, ldb_Array,
                                   beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, is_mul_add, Add_Array,
+                                  group_count, group_size, fusion, Add_Array,
                                   mul_node, batch_size, bias, relu, gelu);
         }
     }
@@ -1244,7 +1292,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                   " group_count=", group_count, " group_size[0]=", group_size[0],
                   " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
                   " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
-                  " beta_Array[0]=", beta_Array[0], " is_mul_add=", is_mul_add,
+                  " beta_Array[0]=", beta_Array[0], " fusion=",
+                  (fusion == 1) ? "Mul" : (fusion == 2) ? "MulAdd" : "0",
                   " relu=", relu, " gelu=", gelu, " Time=", elapsed, "ms");
 
 }

@@ -764,7 +764,7 @@ extern "C" {
         int *ldc_Array,
         int group_count,
         int *group_size,
-        bool is_mul_add = 0,
+        int fusion = 0,
         const float **Add_Array = NULL,
         float mul_node = 1,
         int batch_size = 1,
