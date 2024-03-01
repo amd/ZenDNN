@@ -151,9 +151,6 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
     auto scratchpad = scratchpad_registry().registrar();
     init_scratchpad(scratchpad, bgmmc_);
 
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_brgemm = false;
-
     return status::success;
 }
 

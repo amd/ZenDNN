@@ -80,8 +80,6 @@ status_t gemm_f32_matmul_t::pd_t::init(engine_t *engine) {
     nthr_ = zendnn_get_max_threads();
     gemm_based::book_acc_scratchpad(*this, params_, sizeof(acc_data_t), nthr_);
 
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_brgemm = false;
     return status::success;
 }
 
@@ -174,6 +172,9 @@ status_t gemm_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto post_ops_binary_rhs_arg_vec = prepare_binary_args(po, ctx);
 
     DEFINE_SCALES_BUFFER(scales);
+    //Enable primitive log
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    obj.is_log = true;
 
     const auto src_d = ctx.memory_mdw(ZENDNN_ARG_SRC, pd()->src_md());
     const auto weights_d = ctx.memory_mdw(ZENDNN_ARG_WEIGHTS, pd()->weights_md());

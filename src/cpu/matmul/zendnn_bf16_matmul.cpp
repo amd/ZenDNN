@@ -534,15 +534,15 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     //eltwise post-ops
     if (has_eltwise_relu) {
         post_attr = true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_relu, 0.f, 0.f);
     }
     else if (geluType == 1) {
         post_attr = true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu, 1.f, 0.f);
     }
     else if (geluType == 2) {
         post_attr = true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, 1.f, 0.f);
     }
     if (post_attr) {
         matmul_attr.set_post_ops(post_ops);
@@ -890,7 +890,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
 
-    //Return unimplemented if BF16 algo NOT set to AOCL_GEMM (2)
+    //Return unimplemented if BF16 algo set to 3(MATMUL_JIT)
     zendnnEnv zenEnvObj = readEnv();
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT) {
         return status::unimplemented;

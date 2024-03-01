@@ -315,19 +315,19 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
         post_attr=true;
         post_ops.append_sum(beta);
     }
-    int scale = 1;
+    float scale = 1.f;
     //eltwise post-ops
     if (relu) {
         post_attr=true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_relu, 0.f, 0.f);
     }
     else if (gelu == 1) {
         post_attr=true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu, 1.f, 0.f);
     }
     else if (gelu == 2) {
         post_attr=true;
-        post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, alpha, beta);
+        post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, 1.f, 0.f);
     }
     if (post_attr) {
         matmul_attr.set_post_ops(post_ops);
@@ -550,6 +550,7 @@ void zenMatMul_gemm_wrapper(
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     if (algo_type == 4 || algo_type == 3) {
         obj.is_log = false;
+        obj.is_brgemm = false;
     }
 }
 
