@@ -90,7 +90,7 @@ void zenMatMul_ref(
             #pragma omp parallel for num_threads(thread_qty)
             for (int i=0; i<m; i++) {
                 for (int j=0; j<n; j++) {
-                    output[i*n+j] += bias[j];
+                    output[i*n+j] += alpha*bias[j];
                 }
             }
         }
@@ -98,7 +98,7 @@ void zenMatMul_ref(
             // for batch size is one
             #pragma omp parallel for num_threads(thread_qty)
             for (int j=0; j<n; j++) {
-                output[j] += bias[j];
+                output[j] += alpha*bias[j];
             }
         }
     }
@@ -172,5 +172,4 @@ void zenMatMul_refWrapper(
                " m=", m, " k=", k, " n=", n, " alpha=", alpha, " beta=", beta,
                " lda=", lda, " ldb=", ldb, " ldc=", ldc,
                " Time=", elapsed, "ms");
-
 }

@@ -142,8 +142,13 @@ void zenMatMul_gemm_blocked(
             int post_op_i = 0;
             if (bias != NULL) {
                 // Add bias postop
+                float* bias_ = new float[n]();//const_cast<float*>(bias);
+                if(alpha != 1.0f) {
+#pragma omp parallel for num_threads(thread_qty)
+                    for(int i=0;i<n;++i) bias_[i] = alpha * bias[i];
+                }
                 post_ops->seq_vector[post_op_i++] = BIAS;
-                post_ops->bias.bias = (float *)bias;
+                post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float*)bias;
             }
             if (relu) {
                 // Add ReLU postop
@@ -214,7 +219,7 @@ void zenMatMul_gemm_blocked(
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                        ldc, 0,
                        bias, relu, gelu, NULL,
-                       thread_qty);
+                       thread_qty, alpha);
         }
 #endif
 
@@ -229,7 +234,7 @@ void zenMatMul_gemm_blocked(
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                        ldc, 0,
                        bias, relu, gelu, NULL,
-                       thread_qty);
+                       thread_qty, alpha);
         }
 #endif
     }
@@ -244,7 +249,7 @@ void zenMatMul_gemm_blocked(
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                        ldc, 0,
                        bias, relu, gelu, NULL,
-                       thread_qty);
+                       thread_qty, alpha);
         }
     }
 }
@@ -423,7 +428,7 @@ void zenMatMul_gemm(
             zenPostOps(zenEnvObj, output, NULL, m, 1, n,
                        ldc, 0,
                        bias, relu, gelu, NULL,
-                       thread_qty);
+                       thread_qty, alpha);
         }
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
@@ -434,15 +439,14 @@ void zenMatMul_gemm(
         /*
         //Old functionality of ZENDNN_GEMM1
         zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                            m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
-               if (bias || relu || gelu) {
-                   zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                              ldc, 0,
-                              bias, relu, gelu, NULL,
-                              thread_qty);
-               }
+                     m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
+        if (bias || relu || gelu) {
+            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
+                       ldc, 0,
+                       bias, relu, gelu, NULL,
+                       thread_qty, alpha);
+        }
         */
-
     }
     else if (zenEnvObj.zenGEMMalgo ==
              zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
@@ -462,10 +466,7 @@ void zenMatMul_gemm(
                        m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
                        output, ldc);
     }
-
-
 }
-
 
 // Current parallel implementation for zenMatmulSplit does not consider column
 // major layout as input. To overcome that limitation zenMatMul_gemm_wrapper
@@ -1372,7 +1373,7 @@ void zenMatmulSplit(
                 zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
                            ldc, biasOffset,
                            bias, relu, gelu, NULL,
-                           l2_num_threads);
+                           l2_num_threads, alpha);
             }
         }
         else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
@@ -1386,7 +1387,7 @@ void zenMatmulSplit(
                 zenPostOps(zenEnvObj, output, NULL, gemmRows, 1, n,
                            ldc, biasOffset,
                            bias, relu, gelu, NULL,
-                           l2_num_threads);
+                           l2_num_threads, alpha);
             }
         }
         else {
@@ -1398,4 +1399,3 @@ void zenMatmulSplit(
 
     }
 }
-

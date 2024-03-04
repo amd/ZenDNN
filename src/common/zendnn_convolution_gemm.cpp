@@ -4041,7 +4041,7 @@ void zenConvolution2DlatencyVer3(
         zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, 1, no_of_filter,
                    no_of_filter, biasOffset,
                    bias, relu, 0, scale,
-                   inner_threads, 0, 0, images);
+                   inner_threads, 1.0f, 0, 0, images);
     }
     free(data_col);
 
@@ -4864,7 +4864,7 @@ void zenConvolution2DsmallGemmMergeLatency(
                 zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, mergeChunkSize,
                            no_of_filter, ldc,
                            biasOffset, bias,
-                           relu, 0, scale, inner_threads, 0, 0, images);
+                           relu, 0, scale, inner_threads, 1.0f, 0, 0, images);
                 data_col = col_data_old + patchHeightOffset;
             }
         }

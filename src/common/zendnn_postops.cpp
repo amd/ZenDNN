@@ -43,34 +43,34 @@ float gelu_const = sqrtf(2/M_PI);
     #define COMPUTE_GELU_ERF    COMPUTE_GELU_ERF_VEC1
 #endif
 
-#define COMPUTE_BIAS_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         for(int i=0;i<16;++i) \
-        out_layer[offset+c+i] = out_layer[offset+c+i] + bias[c+i]; \
+        out_layer[offset+c+i] = out_layer[offset+c+i] + alpha*bias[c+i]; \
     }
 
-#define COMPUTE_SCALE_BIAS_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_SCALE_BIAS_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         for(int i=0;i<16;++i) \
-        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + bias[c+i]; \
+        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + alpha*bias[c+i]; \
     }
 
-#define COMPUTE_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_ADD_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         for(int i=0;i<16;++i) \
         out_layer[offset+c+i] = out_layer[offset+c+i] + elementwise_input[offset + c + i]; \
     }
 
-#define COMPUTE_BIAS_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_ADD_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         for(int i=0;i<16;++i) \
-        out_layer[offset+c+i] = out_layer[offset+c+i] + bias[c+i] + elementwise_input[offset + c + i]; \
+        out_layer[offset+c+i] = out_layer[offset+c+i] + alpha*bias[c+i] + elementwise_input[offset + c + i]; \
 }
 
-#define COMPUTE_SCALE_BIAS_ADD_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_SCALE_BIAS_ADD_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         for(int i=0;i<16;++i) \
-        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + bias[c+i] + elementwise_input[offset + c + i]; \
+        out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + alpha*bias[c+i] + elementwise_input[offset + c + i]; \
     }
 
 #define COMPUTE_GELU_TANH_VEC16() \
@@ -83,33 +83,33 @@ float gelu_const = sqrtf(2/M_PI);
         aocl_gelu_erf_f32(16, out_layer+offset+c, 1); \
     }
 
-#define COMPUTE_NONE_VEC16(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_NONE_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
     }
 
-#define COMPUTE_BIAS_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c]; \
+        out_layer[offset+c] = out_layer[offset+c] + alpha*bias[c]; \
     }
 
-#define COMPUTE_SCALE_BIAS_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_SCALE_BIAS_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c]; \
+        out_layer[offset+c] = out_layer[offset+c]*scale[c] + alpha*bias[c]; \
     }
 
-#define COMPUTE_ADD_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_ADD_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
         out_layer[offset+c] = out_layer[offset+c] + elementwise_input[offset + c]; \
     }
 
-#define COMPUTE_BIAS_ADD_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_BIAS_ADD_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c] + bias[c] + elementwise_input[offset + c]; \
+        out_layer[offset+c] = out_layer[offset+c] + alpha*bias[c] + elementwise_input[offset + c]; \
     }
 
-#define COMPUTE_SCALE_BIAS_ADD_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_SCALE_BIAS_ADD_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
-        out_layer[offset+c] = out_layer[offset+c]*scale[c] + bias[c] + elementwise_input[offset + c]; \
+        out_layer[offset+c] = out_layer[offset+c]*scale[c] + alpha*bias[c] + elementwise_input[offset + c]; \
     }
 
 #define COMPUTE_GELU_TANH_VEC1() \
@@ -125,34 +125,34 @@ float gelu_const = sqrtf(2/M_PI);
                                   (1 + erff(out_layer[ offset + c ]/1.414213)); \
     }
 
-#define COMPUTE_NONE_VEC1(out_layer, scale, bias, elementwise_input, offset, c) \
+#define COMPUTE_NONE_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
     }
 
-#define COMPUTE_GELU_VEC16(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
+#define COMPUTE_GELU_VEC16(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
     { \
         unsigned int offset = biasOffset + i; \
         int c = 0; \
         for (c = 0; (c+16) <= no_of_filter; c+=16) { \
-            compute_postOp##_VEC16(out_layer, scale, bias, elementwise_input, offset, c); \
+            compute_postOp##_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c); \
                                     \
             compute_gelu_type##_VEC16();  \
                                     \
         } \
         for( ;c<no_of_filter; c++) \
         { \
-            compute_postOp##_VEC1(out_layer, scale, bias, elementwise_input, offset, c); \
+            compute_postOp##_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c); \
                                     \
             compute_gelu_type##_VEC1();  \
                                     \
         } \
     }
 
-#define COMPUTE_GELU_VEC1(out_layer, scale, bias, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
+#define COMPUTE_GELU_VEC1(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i, no_of_filter, compute_postOp, compute_gelu_type) \
     { \
         unsigned int offset = biasOffset + i; \
         for (int c = 0; c < no_of_filter; c++) { \
-            compute_postOp##_VEC1(out_layer, scale, bias, elementwise_input, offset, c); \
+            compute_postOp##_VEC1(out_layer, scale, bias, alpha, elementwise_input, offset, c); \
                                     \
             compute_gelu_type##_VEC1();  \
                                     \
@@ -195,10 +195,11 @@ void zenPostOps(
     const int gelu,
     const float *scale,
     const int no_of_threads,
+    const float alpha,
     const float *offset,
     const float  *mean,
     const int batch_size,
-    const float alpha
+    const float leaky_alpha
 ) {
 
     if (zenEnvObj.zenConvAlgo!=zenConvAlgoType::DIRECT1) {  // NHWC Path
@@ -213,11 +214,11 @@ void zenPostOps(
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                              bias[c];
+                                                              alpha*bias[c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
                         }
                 }
                 else if (bias != NULL && scale == NULL) {
@@ -225,11 +226,11 @@ void zenPostOps(
                     for (i = 0; i < total_size; i += total_filters)
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
-                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + alpha*bias[c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
                         }
                 }
                 else if (bias == NULL && scale == NULL) {
@@ -239,8 +240,8 @@ void zenPostOps(
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
                         }
                 }
             }
@@ -252,21 +253,21 @@ void zenPostOps(
                     if (bias != NULL && scale != NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_SCALE_BIAS, COMPUTE_GELU_TANH);
                         }
                     }
                     else if (bias != NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_BIAS, COMPUTE_GELU_TANH);
                         }
                     }
                     else if (bias == NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters) {
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_NONE, COMPUTE_GELU_TANH);
                         }
                     }
@@ -275,19 +276,19 @@ void zenPostOps(
                     if (bias != NULL && scale != NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_SCALE_BIAS, COMPUTE_GELU_ERF);
                     }
                     else if (bias != NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_BIAS, COMPUTE_GELU_ERF);
                     }
                     else if (bias == NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_NONE, COMPUTE_GELU_ERF);
                     }
                 }
@@ -299,7 +300,7 @@ void zenPostOps(
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                              bias[c];
+                                                              alpha * bias[c];
                         }
                 }
                 else if (bias != NULL &&  scale == NULL) {
@@ -307,7 +308,7 @@ void zenPostOps(
                     for (i = 0; i < total_size; i += total_filters)
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
-                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c];
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + alpha * bias[c];
                         }
                 }
             }
@@ -320,11 +321,11 @@ void zenPostOps(
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                              bias[c] + elementwise_input[biasOffset + i + c];
+                                                              alpha * bias[c] + elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
 
                         }
                 }
@@ -333,12 +334,12 @@ void zenPostOps(
                     for (i = 0; i < total_size; i += total_filters)
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
-                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + alpha * bias[c] +
                                                               elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
                         }
                 }
                 else if (bias == NULL && scale == NULL) {
@@ -350,8 +351,8 @@ void zenPostOps(
                                                               elementwise_input[biasOffset + i + c];
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c ]>0
                                                               ?out_layer[ biasOffset + i + c ]
-                                                              :(alpha==0.0f)?alpha
-                                                              :out_layer[ biasOffset + i + c ]*alpha;
+                                                              :(leaky_alpha==0.0f)?leaky_alpha
+                                                              :out_layer[ biasOffset + i + c ]*leaky_alpha;
                         }
                 }
             }
@@ -365,7 +366,7 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                                COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                              no_of_filter, COMPUTE_SCALE_BIAS_ADD, COMPUTE_GELU_TANH);
                             }
                     }
@@ -374,7 +375,7 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                                COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                              no_of_filter, COMPUTE_BIAS_ADD, COMPUTE_GELU_TANH);
                             }
                     }
@@ -383,7 +384,7 @@ void zenPostOps(
                         for (i = 0; i < total_size; i += total_filters)
                             #pragma omp simd
                             for (int c = 0; c < no_of_filter; c++) {
-                                COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                                COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                              no_of_filter, COMPUTE_ADD, COMPUTE_GELU_TANH);
                             }
                     }
@@ -392,19 +393,19 @@ void zenPostOps(
                     if (bias != NULL && scale != NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_SCALE_BIAS_ADD, COMPUTE_GELU_ERF);
                     }
                     else if (bias != NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_BIAS_ADD, COMPUTE_GELU_ERF);
                     }
                     else if (bias == NULL && scale == NULL) {
                         #pragma omp parallel for num_threads(no_of_threads)
                         for (i = 0; i < total_size; i += total_filters)
-                            COMPUTE_GELU(out_layer, scale, bias, elementwise_input, biasOffset, i,
+                            COMPUTE_GELU(out_layer, scale, bias, alpha, elementwise_input, biasOffset, i,
                                          no_of_filter, COMPUTE_ADD, COMPUTE_GELU_ERF);
                     }
                 }
@@ -416,7 +417,7 @@ void zenPostOps(
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
                             out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] * scale[c] +
-                                                              bias[c] + elementwise_input[biasOffset + i + c];
+                                                              alpha*bias[c] + elementwise_input[biasOffset + i + c];
                         }
                 }
                 else if (bias != NULL && scale == NULL) {
@@ -424,7 +425,7 @@ void zenPostOps(
                     for (i = 0; i < total_size; i += total_filters)
                         #pragma omp simd
                         for (int c = 0; c < no_of_filter; c++) {
-                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + bias[c] +
+                            out_layer[ biasOffset + i + c ] = out_layer[ biasOffset + i + c] + alpha*bias[c] +
                                                               elementwise_input[biasOffset + i + c];
                         }
                 }
@@ -461,8 +462,8 @@ void zenPostOps(
                                                                 + offset[index_filter + n]  + elementwise_input[index + m + n];
                                     out_layer[index + m + n]=out_layer[index + m + n]>0
                                                              ? out_layer[index + m + n] :
-                                                             (alpha==0.0f) ? alpha
-                                                             : out_layer[index + m + n] * alpha;
+                                                             (leaky_alpha==0.0f) ? leaky_alpha
+                                                             : out_layer[index + m + n] * leaky_alpha;
                                 }
                             }
                         }
@@ -481,8 +482,8 @@ void zenPostOps(
                                                                + offset[index_filter + n];
                                     out_layer[index + m + n]=out_layer[index + m + n]>0
                                                              ? out_layer[index + m + n] :
-                                                             (alpha==0.0f) ? alpha
-                                                             : out_layer[index + m + n]*alpha ;
+                                                             (leaky_alpha==0.0f) ? leaky_alpha
+                                                             : out_layer[index + m + n]*leaky_alpha ;
                                 }
                             }
                         }
@@ -617,11 +618,11 @@ void zenPostOps(
                             #pragma omp simd
                             for (int m=0; m< blocked_out_height_width; m=m+8) {
                                 for (int n=0; n < 8; n++) {
-                                    out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
+                                    out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n];
                                     out_layer[index + m + n] = out_layer[index + m + n]>0
                                                                ? out_layer[index + m + n] :
-                                                               (alpha==0.0f) ? alpha
-                                                               :out_layer[index + m + n] * alpha ;
+                                                               (leaky_alpha==0.0f) ? leaky_alpha
+                                                               :out_layer[index + m + n] * leaky_alpha ;
                                 }
                             }
                         }
@@ -635,12 +636,12 @@ void zenPostOps(
                             #pragma omp simd
                             for (int m=0; m< blocked_out_height_width; m=m+8) {
                                 for (int n=0; n < 8; n++) {
-                                    out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                    out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n] +
                                                                elementwise_input[index + m + n];
                                     out_layer[index + m + n]=out_layer[index + m + n]>0
                                                              ? out_layer[index + m + n] :
-                                                             (alpha==0.0f) ? alpha :
-                                                             out_layer[index + m + n] * alpha ;
+                                                             (leaky_alpha==0.0f) ? leaky_alpha :
+                                                             out_layer[index + m + n] * leaky_alpha ;
                                 }
                             }
                         }
@@ -656,8 +657,8 @@ void zenPostOps(
                                 out_layer[index + m] = out_layer[index + m ] + elementwise_input[index + m ];
                                 out_layer[index + m] = out_layer[index + m]>0
                                                        ? out_layer[index + m] :
-                                                       (alpha==0.0f) ? alpha :
-                                                       out_layer[index + m]*alpha;
+                                                       (leaky_alpha==0.0f) ? leaky_alpha :
+                                                       out_layer[index + m]*leaky_alpha;
                             }
                         }
                 }
@@ -676,7 +677,7 @@ void zenPostOps(
                                 #pragma omp simd
                                 for (int m=0; m< blocked_out_height_width; m=m+8) {
                                     for (int n=0; n < 8; n++) {
-                                        out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
+                                        out_layer[index + m + n] = out_layer[index + m + n] + alpha * bias[index_filter + n];
                                         out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
                                                                        gelu_const *
                                                                        (out_layer[index + m + n] + 0.044715 * powf(
@@ -694,7 +695,7 @@ void zenPostOps(
                                 #pragma omp simd
                                 for (int m=0; m< blocked_out_height_width; m=m+8) {
                                     for (int n=0; n < 8; n++) {
-                                        out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                        out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n] +
                                                                    elementwise_input[index + m + n];
                                         out_layer[index + m + n] = 0.5 * out_layer[index + m + n] * (1 + tanhf(
                                                                        gelu_const *
@@ -730,7 +731,7 @@ void zenPostOps(
                                 #pragma omp simd
                                 for (int m=0; m< blocked_out_height_width; m=m+8) {
                                     for (int n=0; n < 8; n++) {
-                                        out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
+                                        out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n];
                                         out_layer[index + m + n] = 0.5 * out_layer[index + m + n] *
                                                                    (1 + erff(out_layer[index + m + n]/1.414213));
                                     }
@@ -746,7 +747,7 @@ void zenPostOps(
                                 #pragma omp simd
                                 for (int m=0; m< blocked_out_height_width; m=m+8) {
                                     for (int n=0; n < 8; n++) {
-                                        out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                        out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n] +
                                                                    elementwise_input[index + m + n];
                                         out_layer[index + m + n] = 0.5 * out_layer[index + m + n] *
                                                                    (1 + erff(out_layer[index + m + n]/1.414213));
@@ -779,7 +780,7 @@ void zenPostOps(
                         #pragma omp simd
                         for (int m=0; m< blocked_out_height_width; m=m+8) {
                             for (int n=0; n < 8; n++) {
-                                out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n];
+                                out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n];
                             }
                         }
                     }
@@ -793,7 +794,7 @@ void zenPostOps(
                         #pragma omp simd
                         for (int m=0; m< 8*out_height*out_width; m=m+8) {
                             for (int n=0; n < 8; n++) {
-                                out_layer[index + m + n] = out_layer[index + m + n] + bias[index_filter + n] +
+                                out_layer[index + m + n] = out_layer[index + m + n] + alpha*bias[index_filter + n] +
                                                            elementwise_input[index + m + n];
                             }
                         }
@@ -831,7 +832,7 @@ void zenPostOps(
         gettimeofday(&end, 0);
         elapsed = timedifference_msec(start, end);
 #endif
-        if (!alpha)
+        if (!leaky_alpha)
             zendnnVerbose(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
                           " height=", out_height, " width=", out_width,
                           " no_of_filter=", no_of_filter, " relu_enable=", relu, " gelu=", gelu,
@@ -841,7 +842,7 @@ void zenPostOps(
             zendnnVerbose(ZENDNN_PROFLOG, "zenPostOps, no_of_images=", batch_size,
                           " height=", out_height, " width=", out_width,
                           " no_of_filter=", no_of_filter, " leakyrelu_enable=", relu,
-                          " with alpha= ", alpha," gelu=", gelu, " batchNorm_enable=", batchNorm_enable,
+                          " with leaky_alpha= ", leaky_alpha," gelu=", gelu, " batchNorm_enable=", batchNorm_enable,
                           " elementWise_enable=", elementWise_enable, " Time=", elapsed, "ms");
     }
 }

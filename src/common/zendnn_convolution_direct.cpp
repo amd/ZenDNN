@@ -171,7 +171,7 @@ void zenConvolution2D_direct(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, 0, scale, 1,0,0,no_of_images);
+                       relu, 0, scale, 1, 1.0f, 0,0,no_of_images);
         }
     }
     free(data_col);
@@ -317,7 +317,7 @@ void zenConvolution2D_directVer2(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, 0, scale, 1,0,0,no_of_images);
+                       relu, 0, scale, 1, 1.0f, 0,0,no_of_images);
         }
     }
     //free(directOut);
@@ -454,7 +454,7 @@ void zenConvolution2D_directVer3(
             zenPostOps(zenEnvObj, out_layer, elementwise_input, out_height, out_width,
                        no_of_filter, no_of_filter,
                        outputOffset, bias,
-                       relu, 0, scale, 1,0,0,no_of_images);
+                       relu, 0, scale, 1, 1.0f, 0,0,no_of_images);
         }
     }
     //free(directOut);

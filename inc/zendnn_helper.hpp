@@ -148,9 +148,9 @@ class zendnnEnv {
         //              MatMul is redirected to BLIS directly
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
         zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO",
-                                        zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1);
+                                        zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2);
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM2) {
-            zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
+            zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
         }
 
         //ZENDNN_MATMUL_BF16 is to enable specific BF16 GEMM algo.
@@ -777,10 +777,11 @@ extern "C" {
         const int gelu,
         const float *scale,
         const int no_of_threads,
+        const float alpha = 1.0f,
         const float *offset = NULL,
         const float  *mean = NULL,
         const int batch_size = 1,
-        const float alpha = 0.0f
+        const float leaky_alpha = 0.0f
     );
 
     void zenClipOp(
