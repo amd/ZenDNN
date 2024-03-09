@@ -84,10 +84,33 @@ void zen_matmul_impl(
     matmul(pd).execute(engine_stream, execute_args);
 
 }
+void set_z_result(const float &alpha, const float &beta,
+                  const bool &bias_defined, const memory &bias, const memory &result) {
 
+    int result_size = result.get_desc().get_size()/sizeof(float);
+    float *hndl = static_cast<float *>(result.get_data_handle());
+
+    // If alpha = 0, does not need to actually do gemm computation
+    if (beta == 0.0f) {
+        memset(hndl, 0, result_size * sizeof(float));
+        return;
+    }
+    else if (bias_defined) {
+        // bias is already multiplied by beta
+        float *bias_hndl = static_cast<float *>(bias.get_data_handle());
+        memcpy(hndl, bias_hndl, result_size * sizeof(float));
+        return;
+    }
+    else {
+        for (int j = 0; j < result_size; j++) {
+            hndl[j]*=beta;
+        }
+        return;
+    }
+}
 
 void zendnn_custom_op::zendnn_grp_mlp(
-    const memory &z_input,
+    const std::vector<memory> &z_input,
     const std::vector<memory> &z_weight,
     const std::vector<memory> &z_bias,
     const std::vector<float> &z_alpha,
@@ -101,38 +124,34 @@ void zendnn_custom_op::zendnn_grp_mlp(
     zendnn::stream stream(eng);
     int num_ops=z_result.size();
 
-    for (int i = 0; i < num_ops; i++) {
+    if (z_input.size()==1) {
+        for (int i = 0; i < num_ops; i++) {
 
-        int result_size = z_result[i].get_desc().get_size()/sizeof(float);
-        float *hndl = static_cast<float *>(z_result[i].get_data_handle());
-
-        // If alpha = 0, does not need to actually do gemm computation
-        if (z_alpha[i] == 0) {
-            if (z_beta[i] == 0.0f) {
-                memset(hndl, 0, result_size * sizeof(float));
+            // If alpha = 0, does not need to actually do gemm computation
+            if (z_alpha[i]==0) {
+                set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
                 continue;
             }
-            else if (z_bias_defined[i]) {
-                // bias is already multiplied by beta
-                float *bias_hndl = static_cast<float *>(z_bias[i].get_data_handle());
-                memcpy(hndl, bias_hndl, result_size * sizeof(float));
-                continue;
+            if (i==0) {
+                zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
+                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
             }
             else {
-                for (int j = 0; j < result_size; j++) {
-                    hndl[j]*=z_beta[i];
-
-                }
-                continue;
+                zen_matmul_impl(z_result[i-1], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
+                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
             }
         }
+    }
 
-        if (i==0) {
-            zen_matmul_impl(z_input, z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                            z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
-        }
-        else {
-            zen_matmul_impl(z_result[i-1], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
+    else {
+        for (int i = 0; i < num_ops; i++) {
+
+            // If alpha = 0, does not need to actually do gemm computation
+            if (z_alpha[i]==0) {
+                set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
+                continue;
+            }
+            zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
                             z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
         }
     }
@@ -149,7 +168,7 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
     std::vector <int32_t> &z_eb_include_last_offset,
     std::vector <int32_t> &z_eb_padding_idx,
     std::vector <memory> &z_eb_destination,
-    const memory &z_mm_input,
+    const std::vector<memory> &z_mm_input,
     const std::vector<memory> &z_mm_weight,
     const std::vector<memory> &z_mm_bias,
     const std::vector<float> &z_mm_alpha,
@@ -163,7 +182,33 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
     zendnn_custom_op::zendnn_grp_embedding_bag(
         z_eb_input, z_eb_indices, z_eb_offsets, z_eb_scale_grad_by_freq, z_eb_modes,
         z_eb_sparse, z_eb_per_sample_weights_opt, z_eb_per_sample_weights_defined,
-        z_eb_include_last_offset, z_eb_padding_idx, z_eb_destination);
+        z_eb_include_last_offset, z_eb_padding_idx, z_eb_destination, 1);
+
+    zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
+                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result);
+}
+
+void zendnn_custom_op::zendnn_grp_embedding_mlp(
+    std::vector <memory> &z_embed_input,
+    std::vector <memory> &z_embed_indices,
+    std::vector <int32_t> &z_embed_scale_grad_by_freq,
+    std::vector <int32_t> &z_embed_sparse,
+    std::vector <int32_t> &z_embed_padding_idx,
+    std::vector <memory> &z_embed_destination,
+    const std::vector<memory> &z_mm_input,
+    const std::vector<memory> &z_mm_weight,
+    const std::vector<memory> &z_mm_bias,
+    const std::vector<float> &z_mm_alpha,
+    const std::vector<float> &z_mm_beta,
+    const std::vector<bool> &z_mm_bias_defined,
+    const std::vector<int64_t> &z_mm_fuse,
+    const std::vector<memory> &z_mm_result)
+
+{
+
+    zendnn_custom_op::zendnn_grp_embedding(
+        z_embed_input, z_embed_indices, z_embed_padding_idx, z_embed_scale_grad_by_freq,
+        z_embed_sparse, z_embed_destination, 1);
 
     zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
                                      z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result);

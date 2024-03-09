@@ -775,7 +775,7 @@ class zendnn_custom_op {
                                      std::vector <memory> &z_destination, int thread_qty=1);
 
 //Group MLP op API
-    static void zendnn_grp_mlp(const memory &z_input,
+    static void zendnn_grp_mlp(const std::vector<memory> &z_input,
                                const std::vector<memory> &z_weight,
                                const std::vector<memory> &z_bias,
                                const std::vector<float> &z_alpha,
@@ -783,7 +783,7 @@ class zendnn_custom_op {
                                const std::vector<bool> &z_bias_defined,
                                const std::vector<int64_t> &z_fuse,
                                const std::vector<memory> &z_result);
-//Group MLP and EBag op API
+//Group Embedding_Bag and MLP op API
     static void zendnn_grp_ebag_mlp(std::vector <memory> &z_eb_input,
                                     std::vector <memory> &z_eb_indices, std::vector <memory> &z_eb_offsets,
                                     std::vector <int32_t> &z_eb_scale_grad_by_freq,
@@ -794,7 +794,7 @@ class zendnn_custom_op {
                                     std::vector <int32_t> &z_eb_include_last_offset,
                                     std::vector <int32_t> &z_eb_padding_idx,
                                     std::vector <memory> &z_eb_destination,
-                                    const memory &z_mm_input,
+                                    const std::vector<memory> &z_mm_input,
                                     const std::vector<memory> &z_mm_weight,
                                     const std::vector<memory> &z_mm_bias,
                                     const std::vector<float> &z_mm_alpha,
@@ -802,6 +802,22 @@ class zendnn_custom_op {
                                     const std::vector<bool> &z_mm_bias_defined,
                                     const std::vector<int64_t> &z_mm_fuse,
                                     const std::vector<memory> &z_mm_result);
+
+//Group Embedding and MLP op API
+    static void zendnn_grp_embedding_mlp(std::vector <memory> &z_embed_input,
+                                         std::vector <memory> &z_embed_indices,
+                                         std::vector <int32_t> &z_embed_scale_grad_by_freq,
+                                         std::vector <int32_t> &z_embed_sparse,
+                                         std::vector <int32_t> &z_embed_padding_idx,
+                                         std::vector <memory> &z_embed_destination,
+                                         const std::vector<memory> &z_mm_input,
+                                         const std::vector<memory> &z_mm_weight,
+                                         const std::vector<memory> &z_mm_bias,
+                                         const std::vector<float> &z_mm_alpha,
+                                         const std::vector<float> &z_mm_beta,
+                                         const std::vector<bool> &z_mm_bias_defined,
+                                         const std::vector<int64_t> &z_mm_fuse,
+                                         const std::vector<memory> &z_mm_result);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.
