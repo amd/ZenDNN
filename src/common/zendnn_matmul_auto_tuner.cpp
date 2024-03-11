@@ -766,11 +766,11 @@ int auto_compute_matmul(
 
     //Select auto_tuner version
     //Auto_type 1 and 2 works only with framework.
-    unsigned int auto_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_AUTO_TYPE",1);
+    unsigned int auto_type = zendnn::zendnn_getenv_int("ZENDNN_GEMM_AUTO_TYPE",3);
 
     //It is used to know if weights address should be enabled or not for map.
     //0: disable, 1: enable.
-    unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
+    unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",0);
 
     //These flags are passed in different versions to ensure that writing of map is done
     //only when needed.

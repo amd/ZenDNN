@@ -142,13 +142,15 @@ void zenMatMul_gemm_blocked(
             int post_op_i = 0;
             if (bias != NULL) {
                 // Add bias postop
-                float* bias_ = new float[n]();//const_cast<float*>(bias);
-                if(alpha != 1.0f) {
-#pragma omp parallel for num_threads(thread_qty)
-                    for(int i=0;i<n;++i) bias_[i] = alpha * bias[i];
+                float *bias_ = new float[n]();//const_cast<float*>(bias);
+                if (alpha != 1.0f) {
+                    #pragma omp parallel for num_threads(thread_qty)
+                    for (int i=0; i<n; ++i) {
+                        bias_[i] = alpha * bias[i];
+                    }
                 }
                 post_ops->seq_vector[post_op_i++] = BIAS;
-                post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float*)bias;
+                post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float *)bias;
             }
             if (relu) {
                 // Add ReLU postop
@@ -261,7 +263,7 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
                         float *C_Array, const float alpha,
                         const float beta, const int lda, const int ldb,
                         const int ldc, const float *bias, const bool relu,
-                        const int gelu) {
+                        const int gelu, bool blocked_format) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -340,9 +342,11 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     matmul_attr.set_autoTunerEnable(true);
 
 
-    auto matmul_disc = bias?
-                       zendnn::matmul::desc(src_md, blocked_matmul_weights_md, bias_md, dst_md):
-                       zendnn::matmul::desc(src_md, blocked_matmul_weights_md, dst_md);
+    auto matmul_disc = blocked_format ? bias? zendnn::matmul::desc(src_md,
+                       blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                               blocked_matmul_weights_md, dst_md): bias ? zendnn::matmul::desc(src_md,
+                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                                               matmul_weights_md, dst_md);
 
     auto matmul_prim_disc =
         zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
@@ -359,7 +363,7 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
-    if (found_obj == matmul_weight_caching_map_jit_kernel.end()) {
+    if (blocked_format && found_obj == matmul_weight_caching_map_jit_kernel.end()) {
         reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                 user_weights_memory, reordered_weights_memory);
@@ -370,13 +374,13 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     net.push_back(zendnn::matmul(matmul_prim_disc));
     if (bias) {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, matmul_weight_caching_map_jit_kernel[key_obj]},
+            {ZENDNN_ARG_WEIGHTS, blocked_format ? matmul_weight_caching_map_jit_kernel[key_obj] : user_weights_memory},
             {ZENDNN_ARG_BIAS, bias_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     else {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, matmul_weight_caching_map_jit_kernel[key_obj]},
+            {ZENDNN_ARG_WEIGHTS, blocked_format ? matmul_weight_caching_map_jit_kernel[key_obj] : user_weights_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     assert(net.size() == net_args.size() && "something is missing");
@@ -432,10 +436,11 @@ void zenMatMul_gemm(
         }
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
+        //Blocked JIT kernel
         obj.is_brgemm = true;
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
-                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu);
+                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, true);
         /*
         //Old functionality of ZENDNN_GEMM1
         zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
@@ -456,10 +461,11 @@ void zenMatMul_gemm(
                                output, ldc);
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        //JIT kernel call
         obj.is_brgemm = true;
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
-                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu);
+                           input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, false);
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,

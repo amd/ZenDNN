@@ -52,6 +52,7 @@
 #include "common/zendnn_private.hpp"
 #include "zendnn.hpp"
 
+#define NUM_BF16_ALGO 3
 #define MATMUL_SKIP_ITER_BF16 10
 #define MATMUL_EVALUATE_ITER_BF16 10
 
@@ -465,7 +466,7 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
                             const zendnn::impl::bfloat16_t *B_Array,
                             const char *bias, void *C_Array, const float alpha,
                             const float beta, const int lda, const int ldb,
-                            const int ldc, bool has_eltwise_relu, int geluType) {
+                            const int ldc, bool has_eltwise_relu, int geluType, bool blocked_format) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -550,9 +551,11 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     matmul_attr.set_autoTunerEnable(true);
 
     //MatMul desc
-    auto matmul_disc = bias_type? zendnn::matmul::desc(src_md,
+    auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
                        blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                               blocked_matmul_weights_md, dst_md);
+                               blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
+                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                                               matmul_weights_md, dst_md);
 
     //MatMul primitive desc
     auto matmul_prim_disc =
@@ -579,20 +582,21 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
         }
     */
 
-    reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
-    reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
-            user_weights_memory, reordered_weights_memory);
-
+    if (blocked_format) {
+        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                user_weights_memory, reordered_weights_memory);
+    }
     net.push_back(zendnn::matmul(matmul_prim_disc));
     if (bias_type) {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, /*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, blocked_format?/*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory:user_weights_memory},
             {ZENDNN_ARG_BIAS, bias_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     else {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, /*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, blocked_format?/*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory:user_weights_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     assert(net.size() == net_args.size() && "something is missing");
@@ -681,12 +685,22 @@ int matmul_bf16_wrapper(
     }
     else if (zenEnvObj.zenBF16GEMMalgo ==
              zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT) {
+        //CALL blocked BRGEMM Primitive
+        obj.is_brgemm = true;
+        zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
+                               M, N, K,
+                               src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
+                               geluType, true);
+        obj.is_log = false;
+        obj.is_brgemm = false;
+    }
+    else {
         //CALL BRGEMM Primitive
         obj.is_brgemm = true;
         zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
                                M, N, K,
                                src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType);
+                               geluType, false);
         obj.is_log = false;
         obj.is_brgemm = false;
     }
@@ -771,7 +785,7 @@ int auto_compute_matmul_bf16(
             std::get<0>(found_obj->second) < skip_iteration) {
 
         zendnnVerbose(ZENDNN_PROFLOG,"AutoTuner BF16 SKIP Iteration");
-        //Set algo 2 initially
+        //Set aocl gemm initially
         zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
 
         //If Key not found in map then time the algo and add new element to map
@@ -830,7 +844,7 @@ int auto_compute_matmul_bf16(
 
         //Get the number of iteration already ran and select Algo to run for current iteration
         //get<0>(found_obj->second) = count of iteration
-        zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%2) +1;
+        zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%NUM_BF16_ALGO) +1;
         std::get<0>(found_obj->second) += 1;
         //timer start
 #ifdef _WIN32
