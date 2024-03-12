@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
 
 #include <iostream>
 #include <zendnn.h>
-
+#include <cassert>
 #ifdef _WIN32
     #include <Windows.h>
     #include <chrono>
@@ -134,7 +134,7 @@ class zendnnEnv {
         omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
         zen_num_threads = zendnn_getenv_int("ZEN_NUM_THREADS", 1);
 
-        //ZENDNN_GEMM_ALGO is to enable specific GEMM ALGO.
+        //ZENDNN_MATMUL_ALGO=FP32: is to enable specific FP32 MATMUL ALGO.
         //Currently ZenDNN support three ALGO path for GEMM execution
         // If value is set to 0, library decide the optimal path
         // based on the matrix sizes and other parameter settings. However,
@@ -147,13 +147,12 @@ class zendnnEnv {
         //      Case 2:
         //              MatMul is redirected to BLIS directly
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
-        zenGEMMalgo = zendnn_getenv_int("ZENDNN_GEMM_ALGO",
-                                        zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2);
+        zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM2) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
         }
 
-        //ZENDNN_MATMUL_BF16 is to enable specific BF16 GEMM algo.
+        //ZENDNN_MATMUL_ALGO=BF16: is to enable specific BF16 MATMUL algo.
         //Currently ZenDNN support three ALGO path for GEMM execution
         // 0. AutoTuner, library decide the optimal path
         // based on the matrix sizes and other parameter settings. However,
@@ -162,8 +161,7 @@ class zendnnEnv {
         // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT)
         // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT)
 
-        zenBF16GEMMalgo = zendnn_getenv_int("ZENDNN_MATMUL_BF16",
-                                            zenBF16MatMulAlgoType::MATMUL_JIT);
+        zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
         if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT) {
             zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT;
         }
@@ -182,13 +180,13 @@ class zendnnEnv {
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //Enabling different threading implementation.
         zenEBThreadAlgo = zendnn_getenv_int("ZENDNN_EB_THREAD_TYPE",
-                                      zenEBThreadType::TABLE_THREADED);
+                                            zenEBThreadType::TABLE_THREADED);
         if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED ||
                 zenEBThreadAlgo<zenEBThreadType::AUTO_ALGO) {
             zenEBThreadAlgo = zenEBThreadType::TABLE_THREADED;
         }
         zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
-                                    zenEBAlgoType::EB_OP_ZENDNN);
+                                      zenEBAlgoType::EB_OP_ZENDNN);
         if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN ||
                 zenEBAlgo<zenEBAlgoType::EB_OP_FBGEMM) {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
@@ -201,6 +199,55 @@ class zendnnEnv {
                 zenConvAlgo > zenConvAlgoType::DIRECT2) {
             zenConvAlgo = zenConvAlgoType::GEMM;
         }
+    }
+
+    static int zenMatMulDefaultAlgo(const std::string &name) {
+        if (name == "FP32") {
+            return zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
+        }
+        else if (name == "BF16") {
+            return zenBF16MatMulAlgoType::MATMUL_JIT;
+        }
+        else {
+            return -1;
+        }
+    }
+
+    static inline int zendnnGetMatMulAlgo(const std::string &name) {
+#ifdef _WIN32
+        size_t sz = 0;
+        static char *algoCstr;
+        _dupenv_s(&algoCstr, &sz, "ZENDNN_MATMUL_ALGO");
+#else
+        static char *algoCstr = std::getenv("ZENDNN_MATMUL_ALGO");
+#endif
+        if (!algoCstr) {
+            return zenMatMulDefaultAlgo(name);
+        }
+        std::string algoStr(algoCstr);
+
+        size_t pos, epos;
+
+        std::string namePlusColon(name + ":");
+        pos = algoStr.find(namePlusColon);
+        if (pos == std::string::npos) {
+            return zenMatMulDefaultAlgo(name);
+        }
+
+        epos = pos+ namePlusColon.size();
+        long x;
+        char *ep;
+        if (epos >= algoStr.size()) {
+            assert(epos == algoStr.size());
+        }
+        else {
+            x = strtol(algoStr.c_str() + epos, &ep, 0);
+            size_t fpos = ep - algoStr.c_str();
+            if (fpos - epos > 0) {
+                return x;
+            }
+        }
+        return zenMatMulDefaultAlgo(name);
     }
 
   public:

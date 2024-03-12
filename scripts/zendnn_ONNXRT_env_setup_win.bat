@@ -1,5 +1,5 @@
 ::*******************************************************************************
-:: Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+:: Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 ::
 :: Licensed under the Apache License, Version 2.0 (the "License");
 :: you may not use this file except in compliance with the License.
@@ -63,9 +63,9 @@ echo ZENDNN_CONV_ALGO=%ZENDNN_CONV_ALGO%
 set ZENDNN_RELU_UPPERBOUND=0
 echo ZENDNN_RELU_UPPERBOUND=%ZENDNN_RELU_UPPERBOUND%
 
-::ZENDNN_GEMM_ALGO is set to 3 by default
-set ZENDNN_GEMM_ALGO=3
-echo ZENDNN_GEMM_ALGO=%ZENDNN_GEMM_ALGO%
+::ZENDNN_MATMUL_ALGO is set to FP32:4 and BF16:3 by default
+set ZENDNN_MATMUL_ALGO=FP32:4,BF16:3
+echo ZENDNN_MATMUL_ALGO=%ZENDNN_MATMUL_ALGO%
 
 ::Check if below declaration of ZENDNN_GIT_ROOT is correct
 set ZENDNN_GIT_ROOT=%cd%

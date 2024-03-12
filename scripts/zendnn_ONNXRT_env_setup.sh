@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -185,9 +185,9 @@ echo "ZENDNN_CONV_ALGO=$ZENDNN_CONV_ALGO"
 export ZENDNN_RELU_UPPERBOUND=0
 echo "ZENDNN_RELU_UPPERBOUND=$ZENDNN_RELU_UPPERBOUND"
 
-# ZENDNN_GEMM_ALGO is set to 0 by default
-export ZENDNN_GEMM_ALGO=3
-echo "ZENDNN_GEMM_ALGO=$ZENDNN_GEMM_ALGO"
+# ZENDNN_MATMUL_ALGO is set to FP32:4 and BF16:3 by default
+export ZENDNN_MATMUL_ALGO=FP32:4,BF16:3
+echo "ZENDNN_MATMUL_ALGO=$ZENDNN_MATMUL_ALGO"
 
 #Check if below declaration of ZENDNN_GIT_ROOT is correct
 export ZENDNN_GIT_ROOT=$(pwd)
