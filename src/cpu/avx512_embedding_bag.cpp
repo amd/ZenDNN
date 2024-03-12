@@ -1,4 +1,3 @@
-
 /*******************************************************************************
 * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
@@ -17,6 +16,8 @@
 *******************************************************************************/
 #if AVX512_EB_EN
 
+#include <vector>
+#include "zendnn_logging.hpp"
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
 #include "common/zendnn_traits.hpp"
@@ -24,12 +25,10 @@
 #include "common/type_helpers.hpp"
 #include "cpu/cpu_primitive.hpp"
 #include "cpu/simple_q10n.hpp"
-#include "cpu/zen_avx512_utils.hpp"
-#include "zendnn_logging.hpp"
+#include "cpu/avx512_embedding_bag_utils.hpp"
 #include "cpu/avx512_embedding_bag.hpp"
-#include <vector>
 
-#define PREFETCH_EN         1
+#define PREFETCH_EN         0
 #define PREFETCH_DISTANCE   0
 
 namespace zendnn {
@@ -132,27 +131,29 @@ avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
 /*
  * sum without weights
  */
-template<>
+template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
-    float        const *input    = static_cast<float *>(params.input);
+avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params) const {
+    input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
-    const int64_t      &width          = static_cast<int64_t>(params.width);
-    const int32_t      &indsz          = params.indices_size;
-    int32_t            offsz          = params.offset_size;
-    const int32_t      &dstsz          = params.dst_size;
-    const indices_type &padidx         = params.padidx;
-    const uint32_t     &nthr           = params.nthr;
-    const uint32_t     &scatter_offset = params.scatter_offset;
-    const uint32_t     &scatter_stride = params.scatter_stride;
+    const int64_t      &width               = static_cast<int64_t>(params.width);
+    const int32_t      &indsz               = params.indices_size;
+    int32_t            offsz                = params.offset_size;
+    const int32_t      &dstsz               = params.dst_size;
+    const indices_type &padidx              = params.padidx;
+    const uint32_t     &nthr                = params.nthr;
+    const uint32_t     &scatter_offset      = params.scatter_offset;
+    const uint32_t     &scatter_stride      = params.scatter_stride;
     const bool         &include_last_offset = params.include_last_offset;
+
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+
     if (include_last_offset==1) {
-        offsz-=1;
+        offsz -= 1;
     }
 
     // fast path for common cases of width 512, 256, 128, 64, 32 and 16
@@ -161,7 +162,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -171,7 +172,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -184,7 +185,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast =  0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -194,7 +195,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -208,7 +209,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -218,7 +219,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -241,7 +242,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -255,7 +256,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -265,7 +266,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -288,7 +289,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -312,7 +313,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -335,7 +336,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -359,7 +360,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -382,7 +383,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -406,7 +407,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -429,7 +430,7 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -456,9 +457,8 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
-                    for (auto j = 0; j < width; ++j) {
-                        sum[j] += input[j + (indices[i] * width)];
-                    }
+                    uint32_t input_offset = indices[i]*width;
+                    emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
                 }
             }
             for (auto j = 0; j < width; ++j) {
@@ -481,10 +481,11 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
             ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
             std::vector<dst_type> sum(width,0.0);
-            for (auto i = ofirst; i < olast; ++i)
-                for (auto j = 0; j < width; ++j) {
-                    sum[j] += input[j + (indices[i] * width)];
-                }
+            for (auto i = ofirst; i < olast; ++i){
+                uint32_t input_offset = indices[i]*width;
+                emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+            }
+
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
             }
@@ -495,14 +496,15 @@ avx512_embedding_bag_t<f32>::avx512_sum(const emb_params_t &params) const {
 /*
  * sum with weights
  */
-template<>
+template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
-    float        const *input    = static_cast<float *>(params.input);
+avx512_embedding_bag_t<data_type>::avx512_sum_wt(const emb_params_t &params) const {
+    input_type   const *input    = static_cast<input_type *>(params.input);
     float        const *wts      = static_cast<float *>(params.weights);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
+
     const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz    = params.offset_size;
@@ -515,8 +517,9 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+
     if (include_last_offset==1) {
-        offsz-=1;
+        offsz -= 1;
     }
 
     // fast path for common cases of width 512, 256, 128, 64, 32 and 16
@@ -525,7 +528,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -535,7 +538,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -548,7 +551,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -558,7 +561,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -572,7 +575,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -582,7 +585,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -605,7 +608,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -629,7 +632,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -652,7 +655,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -676,7 +679,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -699,7 +702,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -723,7 +726,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -746,7 +749,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -770,7 +773,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -793,7 +796,7 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -820,9 +823,8 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
-                    for (auto j = 0; j < width; ++j) {
-                        sum[j] += wts[i]*input[j + (indices[i] * width)];
-                    }
+                    uint32_t input_offset = indices[i]*width;
+                    emb_sum<input_type>(sum.data(), input, width, input_offset,wts[i]);
                 }
             }
             for (auto j = 0; j < width; ++j) {
@@ -845,10 +847,11 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
             ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
             std::vector<dst_type> sum(width,0.0);
-            for (auto i = ofirst; i < olast; ++i)
-                for (auto j = 0; j < width; ++j) {
-                    sum[j] += wts[i]*input[j + (indices[i] * width)];
-                }
+            for (auto i = ofirst; i < olast; ++i) {
+                uint32_t input_offset = indices[i]*width;
+                emb_sum<input_type>(sum.data(), input, width, input_offset, wts[i]);
+            }
+
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
             }
@@ -859,13 +862,14 @@ avx512_embedding_bag_t<f32>::avx512_sum_wt(const emb_params_t &params) const {
 /*
  * mean without weights
  */
-template<>
+template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
-    float        const *input    = static_cast<float *>(params.input);
+avx512_embedding_bag_t<data_type>::avx512_mean(const emb_params_t &params) const {
+    input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
+
     const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz    = params.offset_size;
@@ -875,11 +879,13 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
     const bool         &include_last_offset = params.include_last_offset;
+
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
+
     if (include_last_offset==1) {
-        offsz-=1;
+        offsz -= 1;
     }
 
     // fast path for common cases of width 512, 256, 128, 64, 32 and 16
@@ -888,7 +894,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -898,7 +904,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -913,7 +919,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -923,7 +929,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -938,7 +944,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -948,7 +954,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -963,7 +969,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -973,7 +979,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -988,7 +994,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -998,7 +1004,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1013,7 +1019,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1023,7 +1029,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1038,7 +1044,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1048,7 +1054,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1063,7 +1069,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1073,7 +1079,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1088,7 +1094,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1098,7 +1104,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1113,7 +1119,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1123,7 +1129,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1138,7 +1144,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1148,7 +1154,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16  sum;
+                zenmmAVX512_ext_ps<input_type, 1>  sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1163,7 +1169,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1173,7 +1179,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1188,7 +1194,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast=0;
+            auto olast  = 0;
             if (include_last_offset==0) {
                 olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
             }
@@ -1203,9 +1209,8 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
                     count++;
-                    for (auto j = 0; j < width; ++j) {
-                        sum[j] += input[j + (indices[i] * width)];
-                    }
+                    uint32_t input_offset = indices[i]*width;
+                    emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
                 }
             }
             float dn = 1.0/float(count);
@@ -1218,7 +1223,7 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast=0;
+            auto olast  = 0;
             if (include_last_offset==0) {
                 olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
             }
@@ -1229,10 +1234,11 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
             ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
             std::vector<dst_type> sum(width,0.0);
-            for (auto i = ofirst; i < olast; ++i)
-                for (auto j = 0; j < width; ++j) {
-                    sum[j] += input[j + (indices[i] * width)];
-                }
+            for (auto i = ofirst; i < olast; ++i) {
+                uint32_t input_offset = indices[i]*width;
+                emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+            }
+
             float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = dn*sum[j];
@@ -1244,13 +1250,14 @@ avx512_embedding_bag_t<f32>::avx512_mean(const emb_params_t &params) const {
 /*
  * max without weights
  */
-template<>
+template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
-    float        const *input    = static_cast<float *>(params.input);
+avx512_embedding_bag_t<data_type>::avx512_max(const emb_params_t &params) const {
+    input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
+
     const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz     = params.offset_size;
@@ -1260,11 +1267,12 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
     const uint32_t     &scatter_offset = params.scatter_offset;
     const uint32_t     &scatter_stride = params.scatter_stride;
     const bool         &include_last_offset = params.include_last_offset;
+
     // add scatter_offset
     uint32_t stride  = scatter_stride*width;
     dst             += scatter_offset*width;
     if (include_last_offset==1) {
-        offsz-=1;
+        offsz -= 1;
     }
 
     // fast path for common cases of width 512, 256, 128, 64, 32 and 16
@@ -1273,7 +1281,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1283,7 +1291,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1304,7 +1312,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1314,7 +1322,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps512 sum;
+                zenmmAVX512_ext_ps<input_type, 32> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1331,7 +1339,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1341,7 +1349,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1362,7 +1370,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1372,7 +1380,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps256 sum;
+                zenmmAVX512_ext_ps<input_type, 16> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1389,7 +1397,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1399,7 +1407,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1420,7 +1428,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1430,7 +1438,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps128 sum;
+                zenmmAVX512_ext_ps<input_type, 8> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1447,7 +1455,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1457,7 +1465,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1478,7 +1486,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1488,7 +1496,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps64 sum;
+                zenmmAVX512_ext_ps<input_type, 4> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1505,7 +1513,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1515,7 +1523,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1536,7 +1544,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1546,7 +1554,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps32 sum;
+                zenmmAVX512_ext_ps<input_type, 2> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1563,7 +1571,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1573,7 +1581,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 int32_t        nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1594,7 +1602,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
             #pragma omp parallel for num_threads(nthr) //proc_bind(master)
             for (auto oi = 0; oi < offsz; ++oi) {
                 auto ofirst = offsets[oi];
-                auto olast=0;
+                auto olast  = 0;
                 if (include_last_offset==0) {
                     olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
                 }
@@ -1604,7 +1612,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps16 sum;
+                zenmmAVX512_ext_ps<input_type, 1> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1621,7 +1629,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast=0;
+            auto olast  = 0;
             if (include_last_offset==0) {
                 olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
             }
@@ -1660,7 +1668,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
         for (auto oi = 0; oi < offsz; ++oi) {
             auto ofirst = offsets[oi];
-            auto olast=0;
+            auto olast  = 0;
             if (include_last_offset==0) {
                 olast  = oi < (offsz -1) ? offsets[oi+1] : indsz;
             }
@@ -1690,6 +1698,7 @@ avx512_embedding_bag_t<f32>::avx512_max(const emb_params_t &params) const {
     return status::success;
 }
 template struct avx512_embedding_bag_t<f32>;
+template struct avx512_embedding_bag_t<s16>;
 } //namespace cpu
 }
 }

@@ -26,6 +26,10 @@ AOCC ?= 1
 ARCHIVE ?= 0
 BLIS_API ?= 0
 
+# build for forced architecture. zero indicates arch is not forced
+FORCE_ARCH ?= 0
+GXX_COMPILER = g++
+
 # Set ZENDNN_STANDALONE_BUILD to 1 to build ZenDNN stanalone library
 # BLIS include path and lib path is not same when BLIS is build from source vs
 # BLIS official release is used
@@ -109,17 +113,25 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 #Rome processors   : 7xx2
 #Milan processors  : 7xx3
 
-#Find the last digit of EPYC model number
-EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, 4);}')
 ZNVER=znver2 #Default value
-
-AVX512_EB_EN=0
-ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "4"
+ifeq ($(FORCE_ARCH), 0)
+	EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, 4);}') # last arch digit
+	AVX512_EB_EN=0
+	ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "4"
+		AVX512_EB_EN=1
+		AVX512_FLAG=-mavx512f
+		ZNVER=znver4 #For Genoa
+	else ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
+		ZNVER=znver3 #For Milan
+	endif
+else ifeq ($(FORCE_ARCH), 3)
+	ZNVER=znver3 #For Milan
+else ifeq ($(FORCE_ARCH), 4)
+	ZNVER=znver4
 	AVX512_EB_EN=1
 	AVX512_FLAG=-mavx512f
-	ZNVER=znver4 #For Genoa
-else ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
-	ZNVER=znver3 #For Milan
+	AVX512_BF16_FLAG=-mavx512bf16
+	GXX_COMPILER=g++-13
 endif
 
 ifeq ($(RELEASE), 0)
@@ -129,9 +141,9 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
-	COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
+	COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
-		COMMONFLAGS += -march=znver2
+		COMMONFLAGS += -march=$(ZNVER)
 	else
 		COMMONFLAGS += -march=znver1
 	endif
@@ -153,10 +165,10 @@ ifeq ($(AOCC), 0)
 	ifeq ($(LPGEMM), 1)
 	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	else
-	     COMMONFLAGS := -Werror -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
+	     COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN)
 	endif
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
-		COMMONFLAGS += -march=znver2
+		COMMONFLAGS += -march=$(ZNVER)
 	else
 		COMMONFLAGS += -march=znver1
 	endif
@@ -176,11 +188,16 @@ else
 	COMMONFLAGS += -DZENDNN_USE_AOCL_BLIS_API
 endif
 
+ifeq ($(FORCE_ARCH), 4)
+	COMMONFLAGS += $(AVX512_FLAG)
+	COMMONFLAGS += $(AVX512_BF16_FLAG)
+endif
+
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
-	CXX		 := $(CXX_PREFIX) g++ $(USE_CUSTOM_BLIS) $(USE_FBGEMM) $(UPROF_ENABLE)
+	CXX := $(CXX_PREFIX) $(GXX_COMPILER) $(USE_CUSTOM_BLIS) $(USE_FBGEMM) $(UPROF_ENABLE)
 else
-	CXX		 := $(CXX_PREFIX) clang++ $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
+	CXX := $(CXX_PREFIX) clang++ $(USE_CUSTOM_BLIS) $(UPROF_ENABLE)
 endif
 
 # https://github.com/mapbox/cpp/issues/37
@@ -358,8 +375,6 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_grp_embedding_mlp_test.cpp -L_out/lib -lamdZenDNN \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
-
-
 
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \

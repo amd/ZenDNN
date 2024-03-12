@@ -49,6 +49,9 @@ struct avx512_embedding_bag_t : public primitive_t {
         using indices_type = int32_t;
         using offsets_type = int32_t;
 
+        impl::data_type_t src_type = src_md(0)->data_type;
+        impl::data_type_t dst_type = dst_md()->data_type;
+
         DECLARE_COMMON_PD_T("avx512:any", avx512_embedding_bag_t);
 
         status_t init(engine_t *engine) {
@@ -56,6 +59,7 @@ struct avx512_embedding_bag_t : public primitive_t {
                     !x64::mayiuse(x64::avx512_core)) {
                 return status::unimplemented;
             }
+
             bool eb_avx2 = zendnn_getenv_int("ZENDNN_EBAVX2_ENABLE", 0);
             if (eb_avx2) {
                 return status::unimplemented;
@@ -74,7 +78,7 @@ struct avx512_embedding_bag_t : public primitive_t {
     using input_type   = typename prec_traits<data_type>::type;
     using indices_type = int32_t;
     using offsets_type = int32_t;
-    using dst_type     = input_type;
+    using dst_type     = float; //input_type;
 
     // exec() override from primitive_t
     status_t execute(const exec_ctx_t &ctx) const override;
