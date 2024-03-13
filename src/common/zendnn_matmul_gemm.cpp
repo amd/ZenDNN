@@ -656,7 +656,8 @@ void zenMatMul(
                        alpha_Array.data(), A_Array.data(), lda_Array.data(),
                        B_Array.data(), ldb_Array.data(),
                        beta_Array.data(), C_Array.data(), ldc_Array.data(),
-                       group_count, group_size.data(), 0, NULL, 1, 1, bias_Array.data(), relu, gelu);
+                       group_count, group_size.data(), NULL, NULL, 1, 1,
+                       bias_Array.data(), relu, gelu);
     }
 
 }
@@ -780,16 +781,17 @@ void zenMatMulWithBiasGeLU(
 //cblas_sgemm_batch
 //zenMatmulSplit take care parallelism and dividing data across threads whenever
 //required, for some cases it falls back BLIS to parallelize the problem.
+//TODO: Fix the weight caching with BatchMatMul for GEMM 3
 void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            CBLAS_TRANSPOSE *TransA_Array,
                            CBLAS_TRANSPOSE *TransB_Array, int *M_Array,
                            int *N_Array, int *K_Array, const float *alpha_Array,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
-                           float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, int fusion,
-                           const float **Add_Array, float mul_node, int batch_size,
-                           const float **bias, const bool relu, const int gelu) {
+                           float **C_Array, int *ldc_Array, int group_count,
+                           int *group_size, const float **Add_Array,  int *add_shape,
+                           float mul_node, int batch_size, const float **bias,
+                           const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV1, Layout=",
                   Layout ? "CblasRowMajor," : "CblasColMajor,",
@@ -818,7 +820,21 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                            bias[grp_start + j], relu, gelu, NULL,
                            thread_qty);
 
-            if (fusion == 1) {
+            if (*Add_Array != nullptr) {
+                // BatchMatMul + Mul + Add
+                #pragma omp simd
+                for (int k = 0; k < m * n; k++) {
+                    // Add Array is traversed, used for computation when we have different shapes
+                    // C_Array: [Batchsize x Attentionheads x M x N]
+                    // Add_array: [Batchsize x 1 x M x N] or [Batchsize x 1 x 1 x N] or
+                    //            [Batchsize x 1 x M x 1]
+                    C_Array[grp_start + j][k] =
+                        (C_Array[grp_start + j][k] * mul_node) +
+                        Add_Array[(grp_start + j) / (group_size[i] / batch_size)][k %
+                                (add_shape[1] * add_shape[2])];
+                }
+            }
+            else if (mul_node != 1) {
                 // BatchMatMul + Mul
                 #pragma omp simd
                 for (int k = 0; k < m * n; k++) {
@@ -826,16 +842,6 @@ void zenBatchMatMulSplitV1(zendnnEnv zenEnvObj, bool Layout,
                         (C_Array[grp_start + j][k] * mul_node);
                 }
             }
-            else if (fusion == 2) {
-                // BatchMatMul + Mul + Add
-                #pragma omp simd
-                for (int k = 0; k < m * n; k++) {
-                    C_Array[grp_start + j][k] =
-                        (C_Array[grp_start + j][k] * mul_node) +
-                        Add_Array[(grp_start + j) / (group_size[i] / batch_size)][k];
-                }
-            }
-
         }
         grp_start +=group_size[i];
     }
@@ -851,9 +857,9 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                            int *N_Array, int *K_Array, const float *alpha_Array,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
-                           float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, int fusion,
-                           const float **Add_Array, float mul_node, int batch_size, const float **bias,
+                           float **C_Array, int *ldc_Array, int group_count,
+                           int *group_size, const float **Add_Array, int *add_shape,
+                           float mul_node, int batch_size, const float **bias,
                            const bool relu, const int gelu) {
 
 
@@ -913,21 +919,26 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                                bias[grp_start + threadOffset], relu, gelu, NULL,
                                thread_qty);
 
-                if (fusion == 1) {
+                if (*Add_Array != nullptr) {
+                    // BatchMatMul + Mul + Add
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        // Add Array is traversed, used for computation when we have different shapes
+                        // C_Array: [Batchsize x Attentionheads x M x N]
+                        // Add_array: [Batchsize x 1 x M x N] or [Batchsize x 1 x 1 x N] or
+                        //            [Batchsize x 1 x M x 1]
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node) +
+                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k %
+                                    (add_shape[1] * add_shape[2])];
+                    }
+                }
+                else if (mul_node != 1) {
                     // BatchMatMul + Mul
                     #pragma omp simd
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
                             (C_Array[grp_start + threadOffset][k] * mul_node);
-                    }
-                }
-                else if (fusion == 2) {
-                    // BatchMatMul + Mul + Add
-                    #pragma omp simd
-                    for (int k = 0; k < m * n; k++) {
-                        C_Array[grp_start + threadOffset][k] =
-                            (C_Array[grp_start + threadOffset][k] * mul_node) +
-                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k];
                     }
                 }
             }
@@ -945,10 +956,10 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                            int *N_Array, int *K_Array, const float *alpha_Array,
                            const float **A_Array, int *lda_Array,
                            const float **B_Array, int *ldb_Array, const float *beta_Array,
-                           float **C_Array, int *ldc_Array,
-                           int group_count, int *group_size, int fusion,
-                           const float **Add_Array, float mul_node, int batch_size,
-                           const float **bias, const bool relu, const int gelu) {
+                           float **C_Array, int *ldc_Array, int group_count,
+                           int *group_size, const float **Add_Array, int *add_shape,
+                           float mul_node, int batch_size, const float **bias,
+                           const bool relu, const int gelu) {
 
     zendnnVerbose(ZENDNN_ALGOLOG, "zenBatchMatMulSplitV3, Layout=",
                   Layout ? "CblasRowMajor" : "CblasColMajor",
@@ -1019,21 +1030,26 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
                                bias[grp_start + threadOffset], relu, gelu, NULL,
                                thread_qty);
 
-                if (fusion == 1) {
+                if (*Add_Array != nullptr) {
+                    // BatchMatMul + Mul + Add
+                    #pragma omp simd
+                    for (int k = 0; k < m * n; k++) {
+                        // Add Array is traversed, used for computation when we have different shapes
+                        // C_Array: [Batchsize x Attentionheads x M x N]
+                        // Add_array: [Batchsize x 1 x M x N] or [Batchsize x 1 x 1 x N] or
+                        //            [Batchsize x 1 x M x 1]
+                        C_Array[grp_start + threadOffset][k] =
+                            (C_Array[grp_start + threadOffset][k] * mul_node) +
+                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k %
+                                    (add_shape[1] * add_shape[2])];
+                    }
+                }
+                else if (mul_node != 1) {
                     // BatchMatMul + Mul
                     #pragma omp simd
                     for (int k = 0; k < m * n; k++) {
                         C_Array[grp_start + threadOffset][k] =
                             (C_Array[grp_start + threadOffset][k] * mul_node);
-                    }
-                }
-                else if (fusion == 2) {
-                    // BatchMatMul + Mul + Add
-                    #pragma omp simd
-                    for (int k = 0; k < m * n; k++) {
-                        C_Array[grp_start + threadOffset][k] =
-                            (C_Array[grp_start + threadOffset][k] * mul_node) +
-                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k];
                     }
                 }
             }
@@ -1047,11 +1063,10 @@ void zenBatchMatMulSplitV3(zendnnEnv zenEnvObj, bool Layout,
 void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
                              bool TransA, bool TransB, int *M_Array,
                              int *N_Array, int *K_Array,
-                             const float **A_Array,
-                             const float **B_Array,
-                             float **C_Array,
-                             int *group_size, int fusion,
-                             const float **Add_Array, float mul_node, int batch_size) {
+                             const float **A_Array, const float **B_Array,
+                             float **C_Array, int *group_size,
+                             const float **Add_Array, int *add_shape,
+                             float mul_node, int batch_size) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -1111,7 +1126,7 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
     filt_arr);
 
     primitive_attr matmul_attr;
-    if (fusion) {
+    if (*Add_Array != nullptr || mul_node != 1) {
 
         float *add_arr = const_cast<float *>(Add_Array[0]);
 
@@ -1119,14 +1134,16 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
         float *mul_arr = const_cast<float *>(mul);
 
         memory::dims mul_dims = {1, 1, 1, 1};
-        memory::dims add_dims = {batch_size, 1, M, N};
+        memory::dims add_dims;
 
         zendnn::post_ops post_ops;
         post_ops.append_binary(algorithm::binary_mul,
                                memory::desc({mul_dims}, dt::f32, tag::abcd));
-        if (fusion == 2)
+        if (*Add_Array != nullptr) {
+            add_dims = {batch_size, 1, add_shape[1], add_shape[2]};
             post_ops.append_binary(algorithm::binary_add,
                                    memory::desc({add_dims}, dt::f32, tag::abcd));
+        }
 
 
         matmul_attr.set_post_ops(post_ops);
@@ -1140,18 +1157,7 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
         zendnn::memory postop_memory1;
         postop_memory1 =
         memory({{mul_dims}, dt::f32, tag::abcd}, eng, mul_arr);
-        if (fusion == 1) {
-            // BatchMatMul + Mul
-            net_args.push_back({
-                {ZENDNN_ARG_SRC, src_memory},
-                {ZENDNN_ARG_WEIGHTS, user_weights_memory},
-                {ZENDNN_ARG_DST, dst_memory},
-                {
-                    ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
-                    postop_memory1
-                }});
-        }
-        else {
+        if (*Add_Array != nullptr) {
             // BatchMatMul + Mul + Add
             zendnn::memory postop_memory2;
             postop_memory2 =
@@ -1168,6 +1174,17 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
                 {
                     ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1,
                     postop_memory2
+                }});
+        }
+        else {
+            // BatchMatMul + Mul
+            net_args.push_back({
+                {ZENDNN_ARG_SRC, src_memory},
+                {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+                {ZENDNN_ARG_DST, dst_memory},
+                {
+                    ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1,
+                    postop_memory1
                 }});
         }
     }
@@ -1193,14 +1210,14 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
 //Batched MatMul Wrapper, internally calls BLAS cblas_sgemm_batch from BLIS
 //or //zenBatchMatMulSplitV1/V2/V3
 //TODO: Add support for group_count TransA and TransB
-//TODO: Eliminate the fusion parameter and decide the fusion based on Add_Array and mul node
 void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     int *N_Array, int *K_Array, const float *alpha_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
                     float **C_Array, int *ldc_Array, int group_count, int *group_size,
-                    int fusion, const float **Add_Array, float mul_node,
-                    int batch_size, const float **bias, const bool relu, const int gelu) {
+                    const float **Add_Array, int *add_shape, float mul_node,
+                    int batch_size, const float **bias, const bool relu,
+                    const int gelu) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     obj.is_brgemm = true;
 
@@ -1244,9 +1261,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
         //Todo: Add Group_count support with different sizes.
         zenBatchMatMulPrimitive(zenEnvObj, Layout, TransA, TransB,
                                 M_Array, N_Array, K_Array,
-                                A_Array, B_Array,
-                                C_Array,
-                                group_size, fusion, Add_Array,
+                                A_Array, B_Array, C_Array,
+                                group_size, Add_Array, add_shape,
                                 mul_node, batch_size);
     }
     else {
@@ -1259,7 +1275,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   M_Array, N_Array, K_Array, alpha_Array,
                                   A_Array, lda_Array, B_Array, ldb_Array,
                                   beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, fusion, Add_Array,
+                                  group_count, group_size, Add_Array, add_shape,
                                   mul_node, batch_size, bias, relu, gelu);
         }
         else {
@@ -1267,7 +1283,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   M_Array, N_Array, K_Array, alpha_Array,
                                   A_Array, lda_Array, B_Array, ldb_Array,
                                   beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, fusion, Add_Array,
+                                  group_count, group_size, Add_Array, add_shape,
                                   mul_node, batch_size, bias, relu, gelu);
         }
     }
@@ -1293,7 +1309,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                   " M_Array[0]=", M_Array[0], " N_Array[0]=", N_Array[0],
                   " K_Array[0]=", K_Array[0], " alpha_Array[0]=", alpha_Array[0],
                   " beta_Array[0]=", beta_Array[0], " fusion=",
-                  (fusion == 1) ? "Mul" : (fusion == 2) ? "MulAdd" : "0",
+                  (*Add_Array != nullptr) ? "MulAdd" : (mul_node != 1) ? "Mul" : "0",
                   " relu=", relu, " gelu=", gelu, " Time=", elapsed, "ms");
 
 }

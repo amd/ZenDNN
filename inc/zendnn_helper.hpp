@@ -764,14 +764,13 @@ extern "C" {
         int *ldc_Array,
         int group_count,
         int *group_size,
-        int fusion = 0,
         const float **Add_Array = NULL,
-        float mul_node = 1,
+        int *add_shape = NULL,
+        float mul_node = 1.0f,
         int batch_size = 1,
         const float **bias = NULL,
         const bool relu = 0,
         const int gelu = 0
-
     );
 
     void max_pooling(
