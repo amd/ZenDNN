@@ -678,7 +678,7 @@ int matmul_bf16_wrapper(
         zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
                                M, N, K,
                                src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType);
+                               geluType, false);
         obj.is_log = false;
         obj.is_brgemm = false;
 #endif
