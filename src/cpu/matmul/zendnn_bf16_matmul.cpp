@@ -128,16 +128,29 @@ void zenMatMul_gemm_bf16bf16f32of32(
     }
     char mem_format_a = 'n', mem_format_b = 'r';
 
+    int16_t *reorder_filter = NULL;
+    //Weight caching is disabled
+    /*
     if (found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        bfloat16 *reorder_filter = (bfloat16 *) aligned_alloc(64,
+        reorder_filter = (int16_t *) aligned_alloc(64,
                                    b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
         //Create new entry
         matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
     }
+    else {
+        reorder_filter = matmul_weight_caching_map_aocl[key_obj];
+    }
+    */
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+                                      order, trans, reorder_param0, reorder_param1, reorder_param2);
+    reorder_filter = (int16_t *) aligned_alloc(64,
+                     b_reorder_buf_siz_req);
+    aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
+                                 n, ldb);
 
     aocl_post_op *post_ops = NULL;
 
@@ -209,7 +222,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
     aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                               transpose_input ? 't' : 'n',
                               transpose_filter ? 't' : 'n', m, n, k, alpha,
-                              input, lda, mem_format_a, matmul_weight_caching_map_aocl[key_obj], ldb,
+                              input, lda, mem_format_a,
+                              reorder_filter, ldb,
                               mem_format_b,
                               beta,
                               output, ldc,
@@ -227,6 +241,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
+    //Free reorder memeory
+    free(reorder_filter);
 #endif
 }
 
@@ -283,18 +299,29 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     }
     char mem_format_a = 'n', mem_format_b = 'r';
 
+    int16_t *reorder_filter = NULL;
     // Currently filter caching disabled
-    if (found_obj == matmul_weight_caching_map_aocl.end()) {
+    /*if (found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        int16_t *reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) aligned_alloc(64,
                                   b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
         //Create new entry
         matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
     }
+    else {
+        reorder_filter = matmul_weight_caching_map_aocl[key_obj];
+    }
+    */
 
+    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+                                      order, trans, reorder_param0, reorder_param1, reorder_param2);
+    reorder_filter = (int16_t *) aligned_alloc(64,
+                     b_reorder_buf_siz_req);
+    aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
+                                 n, ldb);
     //Post ops addition
     aocl_post_op *post_ops = NULL;
 
@@ -424,7 +451,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                transpose_input ? 't' : 'n',
                                transpose_filter ? 't' : 'n', m, n, k, alpha,
                                input, lda, mem_format_a,
-                               matmul_weight_caching_map_aocl[key_obj], ldb,
+                               reorder_filter, ldb,
                                mem_format_b,
                                beta,
                                output, ldc,
@@ -449,6 +476,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
         free(post_ops);
     }
+    //Free reorder filter if weight caching disabled
+    free(reorder_filter);
 #endif
 }
 
@@ -573,6 +602,7 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     //Weight reordering
     zendnn::memory reordered_weights_memory;
     /*
+    if(blocked_format) {
         if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
             reordered_weights_memory = memory(re_matmul_weights_md, eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
@@ -580,6 +610,10 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
             //Save in map
             matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
         }
+    else {
+        reorder_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
+    }
+    }
     */
 
     if (blocked_format) {
@@ -590,13 +624,13 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     net.push_back(zendnn::matmul(matmul_prim_disc));
     if (bias_type) {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, blocked_format?/*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory:user_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory},
             {ZENDNN_ARG_BIAS, bias_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     else {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
-            {ZENDNN_ARG_WEIGHTS, blocked_format?/*matmul_weight_caching_map_jit[key_obj_reorder]*/reordered_weights_memory:user_weights_memory},
+            {ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory},
             {ZENDNN_ARG_DST, dst_memory}});
     }
     assert(net.size() == net_args.size() && "something is missing");
