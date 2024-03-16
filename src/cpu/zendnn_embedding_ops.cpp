@@ -20,6 +20,8 @@
 #include <vector>
 #include <omp.h>
 #include <string.h>
+#include "zendnn_logging.hpp"
+#include "verbose.hpp"
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
 #if FBGEMM_ENABLE
@@ -97,20 +99,22 @@ void zendnn_embedding_bag_exec(
     unsigned int op_num_threads=1) {
 
     zendnnEnv EnvObj = readEnv();
+    auto emd_table_dims = z_input.get_desc().dims();
+    auto dim_embedding  = emd_table_dims[1];
+    auto num_rows       = emd_table_dims[0];
+    int indices_size    = z_indices.get_desc().dims()[0];
+    int batch_size      = z_dst.get_desc().dims()[0];
 
 #if FBGEMM_ENABLE
-    if (EnvObj.zenEBAlgo==zenEBAlgoType::EB_OP_FBGEMM) {
+    // FBGEMM kernel path is taken for algo sum
+    if (EnvObj.zenEBAlgo==zenEBAlgoType::EB_OP_FBGEMM &&
+            z_algorithm==algorithm::embedding_bag_sum) {
+        double start_ms = impl::get_msec();
 
         float *table_ptr = static_cast<float *>(z_input.get_data_handle());
         int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
         int32_t *offsets = static_cast<int32_t *>(z_offsets.get_data_handle());
         float *output    = static_cast<float *>(z_dst.get_data_handle());
-
-        auto emd_table_dims = z_input.get_desc().dims();
-        auto dim_embedding  = emd_table_dims[1];
-        auto num_rows       = emd_table_dims[0];
-        int indices_size    = z_indices.get_desc().dims()[0];
-        int batch_size      = z_offsets.get_desc().dims()[0];;
 
         bool use_weight=false;
         bool normalize_by_lengths=false;
@@ -154,6 +158,13 @@ void zendnn_embedding_bag_exec(
                       nullptr,
                       output);
         }
+
+        double duration_ms = impl::get_msec() - start_ms;
+
+        zendnnVerbose(ZENDNN_PROFLOG, "zendnn_primitive_execute,cpu,embedding_bag,",
+                      "fbgemm",",","BS:",batch_size,",ED:",dim_embedding,",alg:sum",
+                      ",",duration_ms,
+                      ",ms");
     }
     else {
         zendnn_embedding_bag_kernel(
@@ -172,9 +183,8 @@ void zendnn_embedding_bag_exec(
         z_per_sample_weights_defined,
         include_last_offset,
         padding_idx, z_dst, op_num_threads);
-
-
 #endif
+
 }
 
 //API call to perform embedding lookups on bags of indices and then optionally apply
@@ -214,8 +224,13 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
     int num_tables = z_input.size();
+    std::string thread_type;
+    int batch_size      = z_destination[0].get_desc().dims()[0];
+    int embedding_dim   = z_input[0].get_desc().dims()[1];
 
+    double start_ms = impl::get_msec();
     if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::CCD_THREADED) {
+        thread_type="CCD_THREADED";
         omp_set_max_active_levels(2);
         int ccd_num_threads=CCD_NUM_THREADS;
         unsigned int outer_threads = (eb_thread_qty%ccd_num_threads)==0 ?
@@ -252,6 +267,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     }
     else if (num_tables<eb_thread_qty &&
              zenEnvObj.zenEBThreadAlgo==zenEBThreadType::HYBRID_THREADED) {
+        thread_type="HYBRID_THREADED";
         unsigned int outer_threads = num_tables;
         unsigned int rem = eb_thread_qty%num_tables;
         #pragma omp parallel num_threads(outer_threads)
@@ -272,6 +288,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     }
 
     else if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::BATCH_THREADED) {
+        thread_type="BATCH_THREADED";
         for (int i = 0; i < num_tables; i++) {
             zendnn_embedding_bag_exec(
                 z_input[i], z_indices[i], z_offsets[i],
@@ -284,6 +301,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     }
 
     else {
+        thread_type="TABLE_THREADED";
         unsigned int loopCount = (num_tables%eb_thread_qty)==0 ?
                                  num_tables/eb_thread_qty : ((num_tables/eb_thread_qty)+1);
         #pragma omp parallel num_threads(eb_thread_qty)
@@ -304,6 +322,12 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         }
 
     }
+    double duration_ms = impl::get_msec() - start_ms;
+
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_primitive_execute,cpu,embedding_bag_grp,",
+                  "num_table:",num_tables,",",thread_type,",","BS:",batch_size,",ED:",
+                  embedding_dim,",",duration_ms,
+                  ",ms");
 }
 
 //API call to perform just embedding lookup where each input index corresponds to single embedding.

@@ -350,6 +350,14 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
                 -Itests/api_tests tests/api_tests/zendnn_embedding_bag_benchmark.cpp -L_out/lib -lamdZenDNN \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_bag_test $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_grp_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
+                $(CK_LINK_FLAGS)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_mlp_test $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_grp_embedding_mlp_test.cpp -L_out/lib -lamdZenDNN \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
+                $(CK_LINK_FLAGS)
 
 
 
@@ -402,5 +410,11 @@ test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_bag_test $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_grp_embedding_bag_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_mlp_test $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_grp_embedding_mlp_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
 
 .PHONY: all build_so test clean
