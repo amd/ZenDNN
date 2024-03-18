@@ -148,7 +148,7 @@ class zendnnEnv {
         //              MatMul is redirected to BLIS directly
         // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
         zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM2) {
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
         }
 
