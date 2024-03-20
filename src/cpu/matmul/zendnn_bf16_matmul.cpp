@@ -60,7 +60,7 @@ using namespace zendnn;
 using tag = memory::format_tag;
 using dt = memory::data_type;
 extern int graph_exe_count;
-
+extern std::mutex map_mutex;
 //Map for weight caching of jit Primitive(reordered memory)
 std::unordered_map<Key_matmul, zendnn::memory >
 matmul_weight_caching_map_jit;
@@ -135,11 +135,13 @@ void zenMatMul_gemm_bf16bf16f32of32(
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
         reorder_filter = (int16_t *) aligned_alloc(64,
-                                   b_reorder_buf_siz_req);
+                         b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
         //Create new entry
+        map_mutex.lock();
         matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+        map_mutex.unlock();
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -301,15 +303,18 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     // Currently filter caching disabled
-    /*if (found_obj == matmul_weight_caching_map_aocl.end()) {
+    /*
+    if (found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
         reorder_filter = (int16_t *) aligned_alloc(64,
-                                  b_reorder_buf_siz_req);
+                         b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
         //Create new entry
+        map_mutex.lock();
         matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+        map_mutex.unlock();
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -322,6 +327,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                      b_reorder_buf_siz_req);
     aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                  n, ldb);
+
     //Post ops addition
     aocl_post_op *post_ops = NULL;
 
@@ -602,20 +608,21 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     //Weight reordering
     zendnn::memory reordered_weights_memory;
     /*
-    if(blocked_format) {
-        if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
-            reordered_weights_memory = memory(re_matmul_weights_md, eng);
-            reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
-                    user_weights_memory, reordered_weights_memory);
-            //Save in map
-            matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
+        if (blocked_format) {
+            if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
+                reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+                reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                        user_weights_memory, reordered_weights_memory);
+                //Save in map
+                map_mutex.lock();
+                matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
+                map_mutex.unlock();
+            }
+            else {
+                reordered_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
+            }
         }
-    else {
-        reorder_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
-    }
-    }
     */
-
     if (blocked_format) {
         reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,

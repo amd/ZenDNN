@@ -24,11 +24,13 @@
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include <vector>
+#include <mutex>
 #include <cmath>
 #include "zendnn_logging.hpp"
 #include "zendnn_private.hpp"
 #include "zendnn.hpp"
 
+std::mutex map_mutex;
 using namespace zendnn;
 using tag = memory::format_tag;
 using dt = memory::data_type;
@@ -117,7 +119,9 @@ void zenMatMul_gemm_blocked(
                                        n, ldb);
 #endif
             //Create new entry
+            map_mutex.lock();
             matmul_weight_caching_map[key_obj] = reorder_filter;
+            map_mutex.unlock();
         }
 
 #ifdef ZENDNN_ENABLE_LPGEMM_V4_2
@@ -368,7 +372,9 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                 user_weights_memory, reordered_weights_memory);
 
+        map_mutex.lock();
         matmul_weight_caching_map_jit_kernel[key_obj] = reordered_weights_memory;
+        map_mutex.unlock();
     }
 
     net.push_back(zendnn::matmul(matmul_prim_disc));
