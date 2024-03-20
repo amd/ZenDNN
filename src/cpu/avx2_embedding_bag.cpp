@@ -136,7 +136,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t      &width          = params.width;
+    const int64_t      &width          = static_cast<int64_t>(params.width);
     const int32_t      &indsz          = params.indices_size;
     int32_t            offsz           = params.offset_size;
     const int32_t      &dstsz          = params.dst_size;
@@ -170,7 +170,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_add_ps(input + indices[i]*width);
+                        sum.fetch_add_ps(input + (indices[i] * width));
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -190,7 +190,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_add_ps(input + indices[i]*width);
+                    sum.fetch_add_ps(input + (indices[i] * width));
                 }
                 sum.store_ps(dst + oi*stride);
             }
@@ -215,7 +215,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_add_ps(input + indices[i]*width);
+                        sum.fetch_add_ps(input + (indices[i] * width));
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -235,7 +235,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_add_ps(input + indices[i]*width);
+                    sum.fetch_add_ps(input + (indices[i] * width));
                 }
                 sum.store_ps(dst + oi*stride);
             }
@@ -261,7 +261,7 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
                     for (auto j = 0; j < width; ++j) {
-                        sum[j] += input[j + indices[i]*width];
+                        sum[j] += input[j + (indices[i] * width)];
                     }
                 }
             }
@@ -285,14 +285,11 @@ avx2_embedding_bag_t<f32>::avx2_sum(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
                 for (auto j = 0; j < width; ++j) {
-                    sum[j] += input[j + indices[i]*width];
+                    sum[j] += input[j + (indices[i] * width)];
                 }
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
-
             }
-
-
         }
     }
 
@@ -313,7 +310,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t      &width    = params.width;
+    const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
@@ -346,7 +343,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                        sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -366,7 +363,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                    sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
                 sum.store_ps(dst + oi*stride);
             }
@@ -391,7 +388,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                        sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -411,7 +408,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_fmadd_ps(input + indices[i]*width, wts[i]);
+                    sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
                 sum.store_ps(dst + oi*stride);
             }
@@ -436,7 +433,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
                     for (auto j = 0; j < width; ++j) {
-                        sum[j] += wts[i]*input[j + indices[i]*width];
+                        sum[j] += wts[i]*input[j + (indices[i] * width)];
                     }
                 }
             }
@@ -460,7 +457,7 @@ avx2_embedding_bag_t<f32>::avx2_sum_wt(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
                 for (auto j = 0; j < width; ++j) {
-                    sum[j] += wts[i]*input[j + indices[i]*width];
+                    sum[j] += wts[i]*input[j + (indices[i] * width)];
                 }
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
@@ -483,7 +480,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t      &width    = params.width;
+    const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
@@ -518,7 +515,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         count++;
-                        sum.fetch_add_ps(input + indices[i]*width);
+                        sum.fetch_add_ps(input + (indices[i] * width));
                     }
                 }
                 sum.scale_store_ps(dst + oi*stride, (1.0/float(count)));
@@ -538,7 +535,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
 
                 zenmm_ext_ps128 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_add_ps(input + indices[i]*width);
+                    sum.fetch_add_ps(input + (indices[i] * width));
                 }
                 float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
                 sum.scale_store_ps(dst + oi*stride, dn);
@@ -566,7 +563,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         count++;
-                        sum.fetch_add_ps(input + indices[i]*width);
+                        sum.fetch_add_ps(input + (indices[i] * width));
                     }
                 }
                 sum.scale_store_ps(dst + oi*stride, (1.0/float(count)));
@@ -586,7 +583,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
 
                 zenmm_ext_ps64 sum;
                 for (auto i = ofirst; i < olast; ++i) {
-                    sum.fetch_add_ps(input + indices[i]*width);
+                    sum.fetch_add_ps(input + (indices[i] * width));
                 }
                 float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
                 sum.scale_store_ps(dst + oi*stride, dn);
@@ -615,7 +612,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
                 if (indices[i] != padidx) {
                     count++;
                     for (auto j = 0; j < width; ++j) {
-                        sum[j] += input[j + indices[i]*width];
+                        sum[j] += input[j + (indices[i] * width)];
                     }
                 }
             }
@@ -641,7 +638,7 @@ avx2_embedding_bag_t<f32>::avx2_mean(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i)
                 for (auto j = 0; j < width; ++j) {
-                    sum[j] += input[j + indices[i]*width];
+                    sum[j] += input[j + (indices[i] * width)];
                 }
             float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
             for (auto j = 0; j < width; ++j) {
@@ -665,7 +662,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
     dst_type           *dst      = static_cast<dst_type *>(params.dst);
 
-    const int32_t      &width    = params.width;
+    const int64_t      &width    = static_cast<int64_t>(params.width);
     const int32_t      &indsz    = params.indices_size;
     int32_t            offsz     = params.offset_size;
     const int32_t      &dstsz    = params.dst_size;
@@ -699,7 +696,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
-                        sum.load_ps(input + indices[nfirst]*width);
+                        sum.load_ps(input + (indices[nfirst] * width));
                         break;
                     }
                     nfirst++;
@@ -707,7 +704,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
                 for (auto i = nfirst +1; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_max_ps(input + indices[i]*width);
+                        sum.fetch_max_ps(input + (indices[i] * width));
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -727,12 +724,11 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
                 zenmm_ext_ps128 sum;
                 if (ofirst!=indsz) {
-                    sum.load_ps(input + indices[ofirst]*width);
+                    sum.load_ps(input + (indices[ofirst] * width));
                 }
                 for (auto i = ofirst+1; i < olast; ++i) {
-                    sum.fetch_max_ps(input + indices[i]*width);
+                    sum.fetch_max_ps(input + (indices[i] * width));
                 }
-
                 sum.store_ps(dst + oi*stride);
             }
         }
@@ -757,7 +753,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
                 int32_t        nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
-                        sum.load_ps(input + indices[nfirst]*width);
+                        sum.load_ps(input + (indices[nfirst] * width));
                         break;
                     }
                     nfirst++;
@@ -765,7 +761,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
                 for (auto i = nfirst +1; i < olast; ++i) {
                     if (indices[i] != padidx) {
-                        sum.fetch_max_ps(input + indices[i]*width);
+                        sum.fetch_max_ps(input + (indices[i] * width));
                     }
                 }
                 sum.store_ps(dst + oi*stride);
@@ -785,12 +781,11 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
                 zenmm_ext_ps64 sum;
                 if (ofirst!=indsz) {
-                    sum.load_ps(input + indices[ofirst]*width);
+                    sum.load_ps(input + (indices[ofirst] * width));
                 }
                 for (auto i = ofirst+1; i < olast; ++i) {
-                    sum.fetch_max_ps(input + indices[i]*width);
+                    sum.fetch_max_ps(input + (indices[i] * width));
                 }
-
                 sum.store_ps(dst + oi*stride);
             }
         }
@@ -816,7 +811,7 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             while (nfirst < olast) {
                 if (nfirst != padidx) {
                     for (auto j = 0; j < width; ++j) {
-                        sum[j]  = input[j + indices[nfirst]*width];
+                        sum[j]  = input[j + (indices[nfirst] * width)];
                     }
                     break;
                 }
@@ -825,10 +820,11 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
 
             for (auto i = nfirst+1; i < olast; ++i) {
                 if (indices[i] != padidx) {
-                    for (auto j = 0; j < width; ++j)
-                        if (sum[j]  < input[j + indices[i]*width]) {
-                            sum[j] = input[j + indices[i]*width];
+                    for (auto j = 0; j < width; ++j) {
+                        if (sum[j]  < input[j + (indices[i] * width)]) {
+                            sum[j] = input[j + (indices[i] * width)];
                         }
+                    }
                 }
             }
 
@@ -852,15 +848,15 @@ avx2_embedding_bag_t<f32>::avx2_max(const emb_params_t &params) const {
             std::vector<dst_type> sum(width,0.0);
             for (auto j = 0; j < width; ++j) {
                 if (ofirst!=indsz) {
-                    sum[j]  = input[j + indices[ofirst]*width];
+                    sum[j]  = input[j + (indices[ofirst] * width)];
                 }
             }
             for (auto i = ofirst+1; i < olast; ++i)
-                for (auto j = 0; j < width; ++j)
-                    if (sum[j]  < input[j + indices[i]*width]) {
-                        sum[j] = input[j + indices[i]*width];
+                for (auto j = 0; j < width; ++j) {
+                    if (sum[j]  < input[j + (indices[i] * width)]) {
+                        sum[j] = input[j + (indices[i] * width)];
                     }
-
+                }
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
             }

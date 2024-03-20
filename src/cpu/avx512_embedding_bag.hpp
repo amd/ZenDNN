@@ -92,7 +92,7 @@ struct avx512_embedding_bag_t : public primitive_t {
     status_t avx512_mean(const emb_params_t &params) const;
     status_t avx512_max(const emb_params_t &params) const;
     void ebvec_prefetch(float const *input, indices_type *indices,
-                        const int32_t width, offsets_type *offsets, const int32_t index,
+                        const int64_t width, offsets_type *offsets, const int32_t index,
                         const int32_t offsz, const int32_t indsz) const;
 
 
