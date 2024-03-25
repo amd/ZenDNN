@@ -324,9 +324,9 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
     }
     double duration_ms = impl::get_msec() - start_ms;
 
-    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_primitive_execute,cpu,embedding_bag_grp,",
-                  "num_table:",num_tables,",",thread_type,",","BS:",batch_size,",ED:",
-                  embedding_dim,",",duration_ms,
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,embedding_bag_grp,",
+                  "num_table:",num_tables,",","Batch_size:",batch_size,",",thread_type,",",
+                  duration_ms,
                   ",ms");
 }
 

@@ -18,6 +18,9 @@
 #include <vector>
 #include <iostream>
 #include <cstring>
+#include "zendnn_logging.hpp"
+#include "verbose.hpp"
+#include <string.h>
 
 namespace zendnn {
 
@@ -120,11 +123,14 @@ void zendnn_custom_op::zendnn_grp_mlp(
     const std::vector<memory> &z_result)
 
 {
+    double start_ms = impl::get_msec();
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream stream(eng);
     int num_ops=z_result.size();
+    std::string mlp_type;
 
     if (z_input.size()==1) {
+        mlp_type="linear";
         for (int i = 0; i < num_ops; i++) {
 
             // If alpha = 0, does not need to actually do gemm computation
@@ -144,6 +150,7 @@ void zendnn_custom_op::zendnn_grp_mlp(
     }
 
     else {
+        mlp_type="parallel";
         for (int i = 0; i < num_ops; i++) {
 
             // If alpha = 0, does not need to actually do gemm computation
@@ -155,6 +162,13 @@ void zendnn_custom_op::zendnn_grp_mlp(
                             z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
         }
     }
+    double duration_ms = impl::get_msec() - start_ms;
+
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,grp_matmul,",
+                  "num_matmul:",num_ops,",",
+                  "mlp:",mlp_type,",",
+                  duration_ms,
+                  ",ms");
 }
 
 void zendnn_custom_op::zendnn_grp_ebag_mlp(

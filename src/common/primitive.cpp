@@ -204,8 +204,8 @@ status_t primitive_execute(
         zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
         if (obj.is_log) {
             zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_execute,",
-                       primitive_iface->pd()->info(),",",duration_ms, ",ms",",",ipc.event_in,":",
-                       ipc_val," , ",llc.event_in,":",llc_val);
+                       primitive_iface->pd()->info(),",",duration_ms, ",ms",";",ipc.event_in,":",
+                       ipc_val,";",llc.event_in,":",llc_val);
         }
     }
 #if UPROF_ENABLE
