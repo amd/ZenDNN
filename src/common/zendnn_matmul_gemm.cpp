@@ -622,7 +622,7 @@ void zenMatMul(
         std::vector<int> ldb_Array;
         std::vector<int> ldc_Array;
         std::vector<int> group_size;
-        std::vector<const float *> Add_Array;
+        std::vector<const float *> Add_Array(1, nullptr);
 
 
         group_size.resize(group_count);
@@ -662,7 +662,7 @@ void zenMatMul(
                        alpha_Array.data(), A_Array.data(), lda_Array.data(),
                        B_Array.data(), ldb_Array.data(),
                        beta_Array.data(), C_Array.data(), ldc_Array.data(),
-                       group_count, group_size.data(), NULL, NULL, 1, 1,
+                       group_count, group_size.data(), &Add_Array[0], NULL, 1, 1,
                        bias_Array.data(), relu, gelu);
     }
 
