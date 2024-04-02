@@ -5,15 +5,12 @@ Zen Deep Neural Network Library (ZenDNN)
 ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems. ZenDNN leverages oneDNN/DNNL v2.6.3's basic infrastructure and APIs. ZenDNN optimizes several APIs and adds new APIs, which are currently integrated into TensorFlow, ONNXRT, and PyTorch.
 
 ZenDNN depends on:
-- AOCL-BLIS (BLAS Library) is a portable software framework for performing highperformance Basic Linear Algebra Subprograms (BLAS) functionality.
-- AOCL-LibM (AMD Core Math Library) is a software library containing a collection of basic math functions optimized for x86-64 processor based machines.
+- AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS).
 - Composable Kernel for convolutions using an implicit GEMM algorithm
 
-AOCL-BLIS and AOCL-LibM are required dependencies for ZenDNN, whereas AMD Composable
-Kernel is an optional dependency.
+AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel is an optional dependency.
 
 # Table of Contents
-
 - [Zen Deep Neural Network Library (ZenDNN)](#zen-deep-neural-network-library-zendnn)
 - [Table of Contents](#table-of-contents)
 - [Scope](#scope)
@@ -22,10 +19,9 @@ Kernel is an optional dependency.
   - [OS](#os)
   - [Compilers](#compilers)
 - [Prerequisites](#prerequisites)
-- [AOCL-BLIS and AOCL-libM Library Installation](#aocl_blis-and-aocl_libm-library-installation)
+- [AOCL-BLAS Library Installation](#aocl-blas-library-installation)
   - [General Convention](#general-convention)
-  - [AOCL-BLIS Library Setup](#aocl_blis-library-setup)
-  - [AOCL-LibM Library Setup](#aocl_libm-library-setup)
+  - [AOCL-BLAS Library Setup](#aocl-blas-library-setup)
 - [Composable Kernel Library Installation](#composable-kernel-library-installation)
   - [Composable Kernel Library Setup](#composable-kernel-library-setup)
     - [Prerequisites](#prerequisites-1)
@@ -41,15 +37,15 @@ Kernel is an optional dependency.
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v4.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v4.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.12, ONNXRT v1.15.1, and PyTorch v1.13.
-* Python v3.8-v3.11 has been used to generate the TensorFlow v2.12 wheel files (*.whl).
-* Python v3.8-v3.11 has been used to generate the ONNXRT v1.15.1 wheel files (*.whl).
-* Python v3.7-v3.10 has been used to generate the PyTorch v1.13 wheel files (*.whl).
+* ZenDNN library is integrated with TensorFlow v2.16 (Plugin), ONNXRT v1.17.0, and PyTorch v2.1 (Plugin).
+* Python v3.9-v3.12 has been used to generate the TensorFlow v2.16 (Plugin) wheel files (*.whl).
+* Python v3.8-v3.11 has been used to generate the ONNXRT v1.17.0 wheel files (*.whl).
+* Python v3.8-v3.11 has been used to generate the PyTorch v2.1 (Plugin) wheel files (*.whl).
 * NHWC (default format), NHWC_BLOCKED and Blocked Format (NCHWc8) are supported.
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
@@ -60,12 +56,12 @@ The latest information on the ZenDNN release and installers is available on AMD.
 This release of ZenDNN supports the following Operating Systems (OS) and compilers:
 ## OS
 * Ubuntu® 22.04 LTS and later
-* Red Hat® Enterprise Linux® (RHEL) 9.1 and later
+* Red Hat® Enterprise Linux® (RHEL) 9.2 and later
 * SLES15 SP5 and later
-* PyTorch v1.13 wheel files are supported on Anolis OS 8.8
-* Supported on Windows with ONNX Runtime v1.15.1 only (Beta release)
+* PyTorch v2.1 wheel files are supported on Anolis OS 8.8
+
 ## Compilers
-* GCC 9.3 and later
+* GCC 10.2 and later
 
 Theoretically, for wheel files any Linux based OS with GLIBC version later than 2.17 could be supported.
 
@@ -73,32 +69,30 @@ For C++ interface binaries, any Linux based OS with GLIBC version later than 2.3
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* AOCL-BLIS v4.1 and AOCL-LibM v3.1.0 must be installed for optimal performance of the ZenDNN library.
+* AOCL-BLAS v4.2 must be installed for optimal performance of the ZenDNN library.
 
 
-# AOCL-BLIS and AOCL-libM Library Installation
+# AOCL-BLAS Library Installation
 
-**AOCL-BLIS** is a portable open-source software framework for instantiating high-performance Basic Linear Algebra Subprograms (BLAS), such as, dense linear algebra libraries. AOCL-BLIS is part of AOCL and can be downloaded from AMD.com portal Developer Central (https://www.amd.com/en/developer/aocl/blis.html).
+**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from AMD.com portal Developer Central (https://www.amd.com/en/developer/aocl/dense.html).
 
-**AOCL-LibM** is a software library containing a collection of basic math functions optimized for x86-64 processor-based machines. It provides many routines from the list of standard C99 math functions. AOCL-LibM is part of AOCL and can be downloaded from AMD.com portal (https://www.amd.com/en/developer/aocl/libm.html).
-
-Note: ZenDNN depends only on AOCL-BLIS amd AOCL-LibM and has no dependency on any other AOCL library.
+Note: ZenDNN depends only on AOCL-BLAS and has no dependency on any other AOCL library.
 ## General Convention
-The following points must be considered while installing AOCL-BLIS and AOCL-LibM:
-* Change to the preferred directory where AOCL-BLIS and AOCL-LibM will be downloaded.
+The following points must be considered while installing AOCL-BLAS:
+* Change to the preferred directory where AOCL-BLAS will be downloaded.
 * This parent folder is referred to as folder `<compdir>` in the steps below.
 * Assume that the parent folder for user setup follows this convention: `/home/<user-id>/my_work`.
 
-## AOCL-BLIS Library Setup
-Complete the following steps to setup the GCC compiled AOCL-BLIS library:
+## AOCL-BLAS Library Setup
+Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
-2. Download aocl-blis-linux-gcc-4.1.0.tar.gz.
+2. Download aocl-blis-linux-gcc-4.2.0.tar.gz.
 3. Execute the following commands:
     ```bash
-    tar -xvf aocl-blis-linux-gcc-4.1.0.tar.gz
+    tar -xvf aocl-blis-linux-gcc-4.2.0.tar.gz
     cd amd-blis
 	```
-This will set up the environment for AOCL-BLIS path:
+This will set up the environment for AOCL-BLAS path:
 ```bash
 export ZENDNN_BLIS_PATH=$(pwd)
 ```
@@ -106,20 +100,9 @@ For example:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
 ```
-## AOCL-LibM Library Setup
-Complete the following steps to setup the GCC compiled AOCL-LibM library:
-1. Execute the command `cd <compdir>`.
-2. Download aocl-linux-gcc-3.1.0.tar.gz.
-3. Execute the following commands:
-    ```bash
-    tar -xvf aocl-linux-gcc-3.1.0.tar.gz
-    cd aocl-linux-gcc-3.1.0
-    tar -xvf aocl-libm-linux-gcc-3.1.0.tar.gz
-    cd amd-libm
-    ```
 
 The bashrc file can be edited to setup ZENDNN_BLIS_PATH environment path.
-For example, in the case of GCC compiled AOCL-BLIS:
+For example, in the case of GCC compiled AOCL-BLAS:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
 ```
@@ -254,27 +237,9 @@ enum LogLevel {
 };
 ```
 # License
-
-ZenDNN is licensed under [Apache License Version 2.0](LICENSE). Refer to the "[LICENSE](LICENSE)" file for the full license text and copyright notice.
+Refer to the "[LICENSE](LICENSE)" file for the full license text and copyright notice.
 
 This distribution includes third party software governed by separate license terms.
-
-3-clause BSD license:
-* [Xbyak](https://github.com/herumi/xbyak)
-* [Googletest](https://github.com/google/googletest)
-* [Instrumentation and Tracing Technology API (ITT API)](https://github.com/intel/IntelSEAPI/tree/master/ittnotify)
-
-Apache License Version 2.0:
-* [oneDNN](https://github.com/oneapi-src/oneDNN)
-* [Xbyak_aarch64](https://github.com/fujitsu/xbyak_aarch64)
-* [TensorFlow](https://github.com/tensorflow/tensorflow)
-
-Boost Software License, Version 1.0:
-* [Boost C++ Libraries](https://www.boost.org/)
-
-BSD 2-Clause license:
-* [Caffe](https://github.com/BVLC/caffe)
-
 
 This third party software, even if included with the distribution of the Advanced Micro Devices software, may be governed by separate license terms, including without limitation, third party license terms,  and open source software license terms. These separate license terms govern your use of the third party programs as set forth in the **THIRD-PARTY-PROGRAMS** file.
 
