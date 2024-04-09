@@ -66,7 +66,7 @@ std::unordered_map<Key_matmul, zendnn::memory >
 matmul_weight_caching_map_jit;
 
 //AOCL weight caching map
-std::unordered_map<Key_matmul, const int16_t * >
+std::unordered_map<Key_matmul, int16_t * >
 matmul_weight_caching_map_aocl;
 
 //AutoTuner Simplified Map having Key as struct and value as Algo.
@@ -129,8 +129,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
     char mem_format_a = 'n', mem_format_b = 'r';
 
     int16_t *reorder_filter = NULL;
-    //Weight caching is disabled
-    /*
+    //Weight caching
     if (found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
@@ -146,14 +145,6 @@ void zenMatMul_gemm_bf16bf16f32of32(
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
     }
-    */
-    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                                      order, trans, reorder_param0, reorder_param1, reorder_param2);
-    reorder_filter = (int16_t *) aligned_alloc(64,
-                     b_reorder_buf_siz_req);
-    aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
-                                 n, ldb);
-
     aocl_post_op *post_ops = NULL;
 
     int postop_count = 0;
@@ -243,8 +234,6 @@ void zenMatMul_gemm_bf16bf16f32of32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    //Free reorder memeory
-    free(reorder_filter);
 #endif
 }
 
@@ -302,8 +291,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     char mem_format_a = 'n', mem_format_b = 'r';
 
     int16_t *reorder_filter = NULL;
-    // Currently filter caching disabled
-    /*
+    //Weight caching
     if (found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
@@ -319,15 +307,6 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
     }
-    */
-
-    siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                                      order, trans, reorder_param0, reorder_param1, reorder_param2);
-    reorder_filter = (int16_t *) aligned_alloc(64,
-                     b_reorder_buf_siz_req);
-    aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
-                                 n, ldb);
-
     //Post ops addition
     aocl_post_op *post_ops = NULL;
 
@@ -482,8 +461,6 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
         free(post_ops);
     }
-    //Free reorder filter if weight caching disabled
-    free(reorder_filter);
 #endif
 }
 
@@ -607,27 +584,21 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
-    /*
-        if (blocked_format) {
-            if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
-                reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
-                reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
-                        user_weights_memory, reordered_weights_memory);
-                //Save in map
-                map_mutex.lock();
-                matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
-                map_mutex.unlock();
-            }
-            else {
-                reordered_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
-            }
-        }
-    */
     if (blocked_format) {
-        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
-        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
-                user_weights_memory, reordered_weights_memory);
+        if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
+            reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+            reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                    user_weights_memory, reordered_weights_memory);
+            //Save in map
+            map_mutex.lock();
+            matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
+            map_mutex.unlock();
+        }
+        else {
+            reordered_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
+        }
     }
+
     net.push_back(zendnn::matmul(matmul_prim_disc));
     if (bias_type) {
         net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
@@ -1107,13 +1078,14 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                 alg_kind::eltwise_gelu_erf : 0;
 
     unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
-
+    bool auto_tuner = false;
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     int bias_dt = pd()->weights_md(1)->data_type;
     zendnnEnv zenEnvObj = readEnv();
     int algo_type = zenEnvObj.zenBF16GEMMalgo;
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
+        auto_tuner = true;
         algo_type = auto_compute_matmul_bf16(zenEnvObj, dst_type, bias_dt,Layout,
                                              strcmp(transA,
                                                      "N"),strcmp(transB, "N"),
@@ -1128,12 +1100,11 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                             geluType, beta, dst, ldc, output_scales, scale_size);
     }
 
-    zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul algo_type:", algo_type, " M: ",
-                  M, " N: ",N, " K: ", K,
-                  " transA: ", transA, " transB: ", transB,
-                  " lda: ", lda, " ldb: ", ldb, " ldc: ", ldc,
-                  " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
-                  " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)");
+    zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul auto_tuner=", auto_tuner ? "True": "False",
+                  " Layout=", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", " M=", M, " N=",N,
+                  " K=", K, " transA=", transA, " transB=", transB, " lda=", lda, " ldb=", ldb,
+                  " ldc=", ldc, " alpha=", alpha, " beta=", beta, " batch=", batch, " relu=",
+                  has_eltwise_relu, " gelu=", geluType, " algo_type=", algo_type);
 #endif //ZENDNN_ENABLE
     return status::success;
 }
