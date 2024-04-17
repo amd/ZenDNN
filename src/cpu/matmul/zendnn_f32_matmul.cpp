@@ -281,6 +281,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const bool batched = (batch_ndims > 0) ? true : false;
 
     const gemm_based::params_t &params = pd()->params();
+    zendnnEnv zenEnvObj = readEnv();
+    bool is_weights_const = zenEnvObj.zenWeightCache || pd()->weights_md()->is_memory_const;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
@@ -365,14 +367,14 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
                   weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
                   (float *)weights, ldb, NULL, has_eltwise_relu, geluType, beta, (float *)dst,
-                  ldc);
+                  ldc, is_weights_const);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
         zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                           batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                           lda, (float *)weights, ldb,
-                          (float *)bias, beta, (float *)dst, ldc);
+                          (float *)bias, beta, (float *)dst, ldc, is_weights_const);
     }
     else {
         if (has_eltwise_relu) {
@@ -380,7 +382,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc);
+                                  (float *)bias, beta, (float *)dst, ldc, is_weights_const);
         }
         else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
@@ -390,7 +392,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 1);
+                                  (float *)bias, beta, (float *)dst, ldc, 1, is_weights_const);
 
         }
         else if (has_eltwise_gelu_erf) {
@@ -401,7 +403,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 2);
+                                  (float *)bias, beta, (float *)dst, ldc, 2, is_weights_const);
         }
         else {
             return status::unimplemented;

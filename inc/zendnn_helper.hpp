@@ -128,6 +128,7 @@ class zendnnEnv {
     uint    zenEBThreadAlgo;
     uint    zenEBAlgo;
     bool    zenINT8format;
+    bool    zenWeightCache;
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -192,6 +193,8 @@ class zendnnEnv {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
         }
 
+        //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
+        zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 0);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
@@ -856,7 +859,8 @@ extern "C" {
         const int gelu,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const
     );
 
     zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
@@ -864,25 +868,26 @@ extern "C" {
                                  const int64_t ldb, float beta, float *C, int64_t ldc);
 
     void zenMatMul_gemm(
-        zendnn::zendnnEnv,
-        const bool,
-        const bool,
-        const bool,
-        const bool,
-        const int,
-        const int,
-        const int,
-        const float,
-        const float *,
-        const int,
-        const float *,
-        const int,
-        const float *,
-        const bool,
-        const int,
-        const float,
-        float *,
-        const int
+        zendnn::zendnnEnv zenEnvObj,
+        const bool auto_tuner,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc,
+        bool is_weights_const
     );
 
     int auto_compute_matmul(
@@ -903,7 +908,8 @@ extern "C" {
         const int gelu,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const
     );
     int auto_compute_conv(
         int supportedPath,

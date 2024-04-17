@@ -552,7 +552,8 @@ extern "C"
         const int gelu,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const = false
     );
 
     void zenMatMul(
@@ -576,7 +577,8 @@ extern "C"
         const int gelu,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const = false
     );
 
     void zenMatMulWithBias(
@@ -598,7 +600,8 @@ extern "C"
         const float *bias,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const = false
     );
 
     void zenMatMulWithBiasReLU(
@@ -620,7 +623,8 @@ extern "C"
         const float *bias,
         const float beta,
         float *output,
-        const int ldc
+        const int ldc,
+        bool is_weights_const = false
     );
 
     void zenMatMulWithBiasGeLU(
@@ -643,7 +647,8 @@ extern "C"
         const float beta,
         float *output,
         const int ldc,
-        const int geluType
+        const int geluType,
+        bool is_weights_const = false
     );
 
     void zenMatMul_refWrapper(

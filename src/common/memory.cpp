@@ -125,7 +125,7 @@ status_t zendnn_memory::reset_memory_storage(
 }
 
 status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
-        const dims_t dims, data_type_t data_type, format_tag_t tag) {
+        const dims_t dims, data_type_t data_type, format_tag_t tag, bool is_memory_const) {
     if (any_null(memory_desc)) return invalid_arguments;
     if (ndims == 0 || tag == format_tag::undef) {
         *memory_desc = types::zero_md();
@@ -140,6 +140,7 @@ status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
     if (!args_ok) return invalid_arguments;
 
     auto md = memory_desc_t();
+    md.is_memory_const = is_memory_const;
     md.ndims = ndims;
     array_copy(md.dims, dims, ndims);
     md.data_type = data_type;
@@ -167,7 +168,7 @@ status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
 }
 
 status_t zendnn_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndims,
-        const dims_t dims, data_type_t data_type, const dims_t strides) {
+        const dims_t dims, data_type_t data_type, const dims_t strides, bool is_memory_const) {
     if (any_null(memory_desc)) return invalid_arguments;
     if (ndims == 0) {
         *memory_desc = types::zero_md();
@@ -181,6 +182,7 @@ status_t zendnn_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndim
     if (!args_ok) return invalid_arguments;
 
     auto md = memory_desc_t();
+    md.is_memory_const = is_memory_const;
     md.ndims = ndims;
     array_copy(md.dims, dims, ndims);
     md.data_type = data_type;

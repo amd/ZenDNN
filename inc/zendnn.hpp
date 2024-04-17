@@ -2609,18 +2609,20 @@ struct memory : public handle<zendnn_memory_t> {
         /// @param adims Tensor dimensions.
         /// @param adata_type Data precision/type.
         /// @param aformat_tag Memory format tag.
+        /// @param is_memory_const A Flag to indicate if memory will remain
+        ///     constant(Required for weight caching).
         /// @param allow_empty A flag signifying whether construction is
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, format_tag aformat_tag,
+        desc(const dims &adims, data_type adata_type, format_tag aformat_tag, bool is_memory_const = false,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
             zendnnInfo(ZENDNN_APILOG, "Memory create");
             zendnn_status_t status = zendnn_memory_desc_init_by_tag(&data,
                                      (int)adims.size(), adims.data(), convert_to_c(adata_type),
-                                     convert_to_c(aformat_tag));
+                                     convert_to_c(aformat_tag), is_memory_const);
             if (!allow_empty)
                 error::wrap_c_api(status,
                                   "could not construct a memory descriptor using a "
@@ -2638,11 +2640,13 @@ struct memory : public handle<zendnn_memory_t> {
         /// @param adims Tensor dimensions.
         /// @param adata_type Data precision/type.
         /// @param strides Strides for each dimension.
+        /// @param is_memory_const A Flag to indicate if memory will remain
+        ///     constant(Required for weight caching).
         /// @param allow_empty A flag signifying whether construction is
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, const dims &strides,
+        desc(const dims &adims, data_type adata_type, const dims &strides, bool is_memory_const = false,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
@@ -2652,7 +2656,7 @@ struct memory : public handle<zendnn_memory_t> {
             zendnnInfo(ZENDNN_APILOG, "Memory create - strides");
             zendnn_status_t status = zendnn_memory_desc_init_by_strides(&data,
                                      (int)adims.size(), adims.data(), convert_to_c(adata_type),
-                                     strides.empty() ? nullptr : &strides[0]);
+                                     strides.empty() ? nullptr : &strides[0], is_memory_const);
             if (!allow_empty)
                 error::wrap_c_api(status,
                                   "could not construct a memory descriptor using "

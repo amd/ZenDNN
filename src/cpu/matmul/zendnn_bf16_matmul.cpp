@@ -94,7 +94,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
     const int gelu,
     const float beta,
     float *output,
-    const int ldc
+    const int ldc,
+    bool is_weights_const
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -129,8 +130,10 @@ void zenMatMul_gemm_bf16bf16f32of32(
     char mem_format_a = 'n', mem_format_b = 'r';
 
     int16_t *reorder_filter = NULL;
+
     //Weight caching
-    if (found_obj == matmul_weight_caching_map_aocl.end()) {
+    if (!is_weights_const ||
+            found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
         reorder_filter = (int16_t *) aligned_alloc(64,
@@ -234,6 +237,9 @@ void zenMatMul_gemm_bf16bf16f32of32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
+    if (!is_weights_const) {
+        free(reorder_filter);
+    }
 #endif
 }
 
@@ -256,7 +262,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     int16_t *output,
     const int ldc,
     const float *scale,
-    const int out_scale_size
+    const int out_scale_size,
+    bool is_weights_const
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -292,7 +299,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     //Weight caching
-    if (found_obj == matmul_weight_caching_map_aocl.end()) {
+    if (!is_weights_const ||
+            found_obj == matmul_weight_caching_map_aocl.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
         reorder_filter = (int16_t *) aligned_alloc(64,
@@ -461,6 +469,9 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
         free(post_ops);
     }
+    if (!is_weights_const) {
+        free(reorder_filter);
+    }
 #endif
 }
 
@@ -478,7 +489,8 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
                             const zendnn::impl::bfloat16_t *B_Array,
                             const char *bias, void *C_Array, const float alpha,
                             const float beta, const int lda, const int ldb,
-                            const int ldc, bool has_eltwise_relu, int geluType, bool blocked_format) {
+                            const int ldc, bool has_eltwise_relu, int geluType, bool blocked_format,
+                            bool is_weights_const) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -585,7 +597,8 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     //Weight reordering
     zendnn::memory reordered_weights_memory;
     if (blocked_format) {
-        if (found_obj_reorder == matmul_weight_caching_map_jit.end()) {
+        if (!is_weights_const ||
+                found_obj_reorder == matmul_weight_caching_map_jit.end()) {
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
@@ -648,7 +661,8 @@ int matmul_bf16_wrapper(
     void *dst,
     const int ldc,
     const float *output_scales,
-    const int scale_size
+    const int scale_size,
+    bool is_weights_const
 ) {
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
@@ -671,13 +685,13 @@ int matmul_bf16_wrapper(
                                             (int16_t *)src, lda, (int16_t *)weights, ldb,
                                             bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
                                             has_eltwise_relu, geluType, beta, (int16_t *)dst, ldc, output_scales,
-                                            scale_size);
+                                            scale_size, is_weights_const);
         }
         else if (dst_type == f32) {
             zenMatMul_gemm_bf16bf16f32of32(Layout, transA, transB, M, K, N, alpha,
                                            (int16_t *)src, lda, (int16_t *)weights, ldb,
                                            bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
-                                           has_eltwise_relu, geluType, beta, (float *)dst, ldc);
+                                           has_eltwise_relu, geluType, beta, (float *)dst, ldc, is_weights_const);
         }
 
         // Free memory if bias memory is allocated
@@ -690,7 +704,7 @@ int matmul_bf16_wrapper(
         zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
                                M, N, K,
                                src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType, false);
+                               geluType, false, is_weights_const);
         obj.is_log = false;
         obj.is_brgemm = false;
 #endif
@@ -702,7 +716,7 @@ int matmul_bf16_wrapper(
         zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
                                M, N, K,
                                src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType, true);
+                               geluType, true, is_weights_const);
         obj.is_log = false;
         obj.is_brgemm = false;
     }
@@ -712,7 +726,7 @@ int matmul_bf16_wrapper(
         zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
                                M, N, K,
                                src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType, false);
+                               geluType, false, is_weights_const);
         obj.is_log = false;
         obj.is_brgemm = false;
     }
@@ -753,7 +767,8 @@ int auto_compute_matmul_bf16(
     void *dst,
     const int ldc,
     const float *output_scales,
-    const int scale_size
+    const int scale_size,
+    bool is_weights_const
 ) {
 
     Key_matmul key_obj_auto;
@@ -813,7 +828,7 @@ int auto_compute_matmul_bf16(
             matmul_bf16_wrapper(zenEnvObj, dst_type, bias_type, Layout, transpose_input,
                                 transpose_filter,
                                 M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                                geluType, beta, dst, ldc, output_scales, scale_size);
+                                geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
 
             //Time end
 #ifdef _WIN32
@@ -836,7 +851,7 @@ int auto_compute_matmul_bf16(
             matmul_bf16_wrapper(zenEnvObj, dst_type, bias_type, Layout, transpose_input,
                                 transpose_filter,
                                 M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                                geluType, beta, dst, ldc, output_scales, scale_size);
+                                geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
 
         }
     }
@@ -849,7 +864,7 @@ int auto_compute_matmul_bf16(
         matmul_bf16_wrapper(zenEnvObj, dst_type, bias_type, Layout, transpose_input,
                             transpose_filter,
                             M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                            geluType, beta, dst, ldc, output_scales, scale_size);
+                            geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
     }
     //Updates the map values by running different algorithms
     else {
@@ -868,7 +883,7 @@ int auto_compute_matmul_bf16(
         matmul_bf16_wrapper(zenEnvObj, dst_type, bias_type, Layout, transpose_input,
                             transpose_filter,
                             M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                            geluType, beta, dst, ldc, output_scales, scale_size);
+                            geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
 
         //timer end
 #ifdef _WIN32
@@ -1028,7 +1043,9 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     const bool batched = (batch_ndims > 0) ? true : false;
 
+    zendnnEnv zenEnvObj = readEnv();
     const gemm_based::params_t &params = pd()->params();
+    bool is_weights_const = zenEnvObj.zenWeightCache || pd()->weights_md()->is_memory_const;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
@@ -1082,7 +1099,6 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     int bias_dt = pd()->weights_md(1)->data_type;
-    zendnnEnv zenEnvObj = readEnv();
     int algo_type = zenEnvObj.zenBF16GEMMalgo;
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
         auto_tuner = true;
@@ -1090,17 +1106,18 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                              strcmp(transA,
                                                      "N"),strcmp(transB, "N"),
                                              M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                                             geluType, beta, dst, ldc, output_scales, scale_size);
+                                             geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
     }
     else {
 
         matmul_bf16_wrapper(zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA, "N"),
                             strcmp(transB, "N"),
                             M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                            geluType, beta, dst, ldc, output_scales, scale_size);
+                            geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
     }
 
-    zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul auto_tuner=", auto_tuner ? "True": "False",
+    zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul auto_tuner=",
+                  auto_tuner ? "True": "False",
                   " Layout=", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", " M=", M, " N=",N,
                   " K=", K, " transA=", transA, " transB=", transB, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta, " batch=", batch, " relu=",
