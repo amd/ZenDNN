@@ -695,7 +695,8 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn_primitive_attr()
         : scratchpad_mode_(zendnn::impl::scratchpad_mode::library)
         , fpmath_mode_(zendnn::impl::get_fpmath_mode())
-        , autoTunerEnable(false) {}
+        , autoTunerEnable(false)
+        , plugin_op(""){}
 
     zendnn_primitive_attr *clone() const {
         return new zendnn_primitive_attr(*this);
@@ -722,6 +723,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                   other.rnn_weights_projection_qparams_));
         CHECK(rnn_tparams_.copy_from(other.rnn_tparams_));
         autoTunerEnable = other.autoTunerEnable;
+        plugin_op = other.plugin_op;
         return status::success;
     }
 
@@ -765,11 +767,13 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                    && rnn_weights_projection_qparams_
                    == rhs.rnn_weights_projection_qparams_
                    && rnn_tparams_ == rhs.rnn_tparams_
-                   && autoTunerEnable == rhs.autoTunerEnable;
+                   && autoTunerEnable == rhs.autoTunerEnable
+                   && plugin_op == rhs.plugin_op;
         return ret;
     }
 
     zendnn::impl::status_t set_autoTunerEnable(bool autoTunerFlag);
+    zendnn::impl::status_t set_plugin_op_name(const std::string plugin_op_name);
     zendnn::impl::status_t set_fpmath_mode(zendnn::impl::fpmath_mode_t fpmath_mode);
     zendnn::impl::status_t set_scratchpad_mode(
         zendnn::impl::scratchpad_mode_t scratchpad_mode);
@@ -812,6 +816,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn::impl::scales_t rnn_weights_projection_qparams_;
     zendnn::impl::rnn_tparams_t rnn_tparams_;
     bool autoTunerEnable;
+    std::string plugin_op;
 
     zendnn_primitive_attr &operator=(const zendnn_primitive_attr &other) = delete;
 };

@@ -3614,6 +3614,14 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
                               get(), autoTunerFlag),
                           "could not set autoTuner Enable primitive attribute");
     }
+
+    /// Sets PLUGIN Op name.
+    void set_plugin_op_name(const std::string &plugin_op_name) {
+        error::wrap_c_api(zendnn_primitive_attr_set_plugin_op_name(
+                              get(), plugin_op_name),
+                          "could not set FWK op primitive attribute");
+    }
+
     /// Sets fpmath mode.
     ///
     /// @param mode Specified fpmath mode.

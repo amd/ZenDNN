@@ -25,9 +25,9 @@
 
 #include <stdlib.h>
 #ifndef _WIN32
-#include <sys/time.h>
+    #include <sys/time.h>
 #else
-#include <windows.h>
+    #include <windows.h>
 #endif
 
 #include "zendnn.h"
@@ -60,20 +60,20 @@
 #include "embedding_bag_pd.hpp"
 
 #if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
-#include "common/zendnn_thread.hpp"
-#include "cpu/platform.hpp"
+    #include "common/zendnn_thread.hpp"
+    #include "cpu/platform.hpp"
 #endif
 
 #if ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_OCL
-#include "gpu/ocl/verbose.hpp"
+    #include "gpu/ocl/verbose.hpp"
 #endif
 
 #ifdef ZENDNN_WITH_SYCL
-#include "sycl/verbose.hpp"
+    #include "sycl/verbose.hpp"
 #endif
 
 #ifdef ZENDNN_EXPERIMENTAL
-#include "common/experimental.hpp"
+    #include "common/experimental.hpp"
 #endif
 
 #include "zendnn_private.hpp"
@@ -95,17 +95,17 @@ int get_verbose() {
     static std::atomic_flag version_printed = ATOMIC_FLAG_INIT;
     if (verbose.get() > 0 && !version_printed.test_and_set()) {
         printf("zendnn_verbose,info,ZENDNN v%d.%d.%d (commit %s)\n",
-                zendnn_version()->major, zendnn_version()->minor,
-                zendnn_version()->patch, zendnn_version()->hash);
+               zendnn_version()->major, zendnn_version()->minor,
+               zendnn_version()->patch, zendnn_version()->hash);
 #if ZENDNN_CPU_RUNTIME != ZENDNN_RUNTIME_NONE
         printf("zendnn_verbose,info,cpu,runtime:%s,nthr:%d\n",
-                zendnn_runtime2str(zendnn_version()->cpu_runtime),
-                zendnn_get_max_threads());
+               zendnn_runtime2str(zendnn_version()->cpu_runtime),
+               zendnn_get_max_threads());
         printf("zendnn_verbose,info,cpu,isa:%s\n",
-                cpu::platform::get_isa_info());
+               cpu::platform::get_isa_info());
 #endif
         printf("zendnn_verbose,info,gpu,runtime:%s\n",
-                zendnn_runtime2str(zendnn_version()->gpu_runtime));
+               zendnn_runtime2str(zendnn_version()->gpu_runtime));
 #if ZENDNN_GPU_RUNTIME == ZENDNN_RUNTIME_OCL
         gpu::ocl::print_verbose_header();
 #endif
@@ -116,14 +116,14 @@ int get_verbose() {
         printf("zendnn_verbose,info,experimental features are enabled\n");
         printf("zendnn_verbose,info,use batch_normalization stats one pass is "
                "%s\n",
-                experimental::use_bnorm_stats_one_pass() ? "enabled"
-                                                         : "disabled");
+               experimental::use_bnorm_stats_one_pass() ? "enabled"
+               : "disabled");
 #endif
         printf("zendnn_verbose,info,prim_template:");
         printf("%soperation,engine,primitive,implementation,prop_"
                "kind,memory_descriptors,attributes,auxiliary,problem_desc,exec_"
                "time\n",
-                get_verbose_timestamp() ? "timestamp," : "");
+               get_verbose_timestamp() ? "timestamp," : "");
     }
     return verbose.get();
 #endif
@@ -134,12 +134,14 @@ bool get_verbose_timestamp() {
 #if defined(DISABLE_VERBOSE)
     return false;
 #else
-    if (verbose.get() == 0) return false;
+    if (verbose.get() == 0) {
+        return false;
+    }
 
     if (!verbose_timestamp.initialized()) {
         // Assumes that all threads see the same environment
         static bool val
-                = getenv_int_user("ZENDNN_VERBOSE_TIMESTAMP", verbose_timestamp.get());
+            = getenv_int_user("ZENDNN_VERBOSE_TIMESTAMP", verbose_timestamp.get());
         verbose_timestamp.set(val);
     }
     return verbose_timestamp.get();
@@ -149,7 +151,9 @@ bool get_verbose_timestamp() {
 double get_msec() {
 #ifdef _WIN32
     static LARGE_INTEGER frequency;
-    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    if (frequency.QuadPart == 0) {
+        QueryPerformanceFrequency(&frequency);
+    }
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     return 1e+3 * now.QuadPart / frequency.QuadPart;
@@ -162,7 +166,7 @@ double get_msec() {
 
 #if defined(DISABLE_VERBOSE)
 void pd_info_t::init(
-        zendnn::impl::engine_t *, const zendnn::impl::primitive_desc_t *) {}
+    zendnn::impl::engine_t *, const zendnn::impl::primitive_desc_t *) {}
 
 #else
 
@@ -173,15 +177,18 @@ std::ostream &operator<<(std::ostream &ss, engine_kind_t eng_kind) {
 
 std::ostream &operator<<(std::ostream &ss, const engine_t *engine) {
     ss << zendnn_engine_kind2str(engine->kind());
-    if (zendnn_engine_get_count(engine->kind()) > 1)
+    if (zendnn_engine_get_count(engine->kind()) > 1) {
         ss << ":" + std::to_string(engine->index());
+    }
     return ss;
 }
 
 const char *prim_kind2str(primitive_kind_t prim_kind) {
     switch ((int)prim_kind) {
-        case primitive_kind::zero_pad: return "zero_pad";
-        default: return zendnn_prim_kind2str(prim_kind);
+    case primitive_kind::zero_pad:
+        return "zero_pad";
+    default:
+        return zendnn_prim_kind2str(prim_kind);
     }
 }
 
@@ -212,11 +219,21 @@ std::ostream &operator<<(std::ostream &ss, format_kind_t format_kind) {
 
 std::string flags2str(unsigned flags) {
     std::string s;
-    if (flags & zendnn_use_global_stats) s += "G";
-    if (flags & zendnn_use_scaleshift) s += "S";
-    if (flags & zendnn_use_scale) s += "C";
-    if (flags & zendnn_use_shift) s += "H";
-    if (flags & zendnn_fuse_norm_relu) s += "R";
+    if (flags & zendnn_use_global_stats) {
+        s += "G";
+    }
+    if (flags & zendnn_use_scaleshift) {
+        s += "S";
+    }
+    if (flags & zendnn_use_scale) {
+        s += "C";
+    }
+    if (flags & zendnn_use_shift) {
+        s += "H";
+    }
+    if (flags & zendnn_fuse_norm_relu) {
+        s += "R";
+    }
     return s;
 }
 
@@ -224,12 +241,15 @@ std::ostream &operator<<(std::ostream &ss, const memory_extra_desc_t &extra) {
     using namespace memory_extra_flags;
 
     ss << ":f" << extra.flags;
-    if (extra.flags & compensation_conv_s8s8)
+    if (extra.flags & compensation_conv_s8s8) {
         ss << ":s8m" << extra.compensation_mask;
-    if (extra.flags & compensation_conv_asymmetric_src)
+    }
+    if (extra.flags & compensation_conv_asymmetric_src) {
         ss << ":zpm" << extra.asymm_compensation_mask;
-    if (extra.flags & scale_adjust && extra.scale_adjust != 1.f)
+    }
+    if (extra.flags & scale_adjust && extra.scale_adjust != 1.f) {
         ss << ":sa" << extra.scale_adjust;
+    }
     return ss;
 }
 
@@ -249,18 +269,24 @@ std::string md2fmt_tag_str(const zendnn_memory_desc_t *md) {
     bool plain = true;
     for (int d = 0; d < mdw.ndims(); ++d) {
         dim_chars[d] = (blocks[d] == 1 ? 'a' : 'A') + (char)d;
-        if (blocks[d] != 1) plain = false;
+        if (blocks[d] != 1) {
+            plain = false;
+        }
         ou_blocks[d] /= blocks[d];
     }
 
     // Can't report meaningful tag for runtime dimensions.
-    if (mdw.has_runtime_strides()) return "*";
+    if (mdw.has_runtime_strides()) {
+        return "*";
+    }
 
     dims_t strides;
     utils::array_copy(strides, blk.strides, mdw.ndims());
 
     utils::simultaneous_sort(strides, ou_blocks, dim_chars, mdw.ndims(),
-            [](dim_t a, dim_t b) { return b - a; });
+    [](dim_t a, dim_t b) {
+        return b - a;
+    });
 
     dim_chars[mdw.ndims()] = '\0';
 
@@ -298,14 +324,20 @@ std::string md2fmt_str(const zendnn_memory_desc_t *md) {
 
     bool padded_dims = false, padded_offsets = false;
     for (int d = 0; d < mdw.ndims(); ++d) {
-        if (mdw.dims()[d] != mdw.padded_dims()[d]) padded_dims = true;
-        if (mdw.padded_offsets()[d] != 0) padded_offsets = true;
+        if (mdw.dims()[d] != mdw.padded_dims()[d]) {
+            padded_dims = true;
+        }
+        if (mdw.padded_offsets()[d] != 0) {
+            padded_offsets = true;
+        }
     }
     bool offset0 = mdw.offset0();
     ss << (padded_dims ? "p" : "") << (padded_offsets ? "o" : "");
     ss << (offset0 ? "0" : "") << ":" << mdw.format_kind() << ":";
 
-    if (mdw.is_blocking_desc()) ss << md2fmt_tag_str(md);
+    if (mdw.is_blocking_desc()) {
+        ss << md2fmt_tag_str(md);
+    }
 
     ss << mdw.extra();
 
@@ -321,22 +353,27 @@ std::ostream &operator<<(std::ostream &ss, const memory_desc_t *md) {
 template <typename T>
 static std::string get_val_str(T val) {
     static_assert(
-            std::is_arithmetic<T>::value, "T must be an arithmetic type.");
-    if (is_runtime_value(val)) return std::string("*");
+        std::is_arithmetic<T>::value, "T must be an arithmetic type.");
+    if (is_runtime_value(val)) {
+        return std::string("*");
+    }
     return std::to_string(val);
 }
 
 // Returns string with dimensions from a given memory descriptor.
 // The format is defined as: dim0xdim1x...xdimN, with RT values signed as `*`.
 std::string md2dim_str(const zendnn_memory_desc_t *md) {
-    if (md == nullptr || md->ndims == 0) return "";
+    if (md == nullptr || md->ndims == 0) {
+        return "";
+    }
 
     memory_desc_wrapper mdw(md);
     std::string s;
 
     s += get_val_str(mdw.dims()[0]);
-    for (int d = 1; d < mdw.ndims(); ++d)
+    for (int d = 1; d < mdw.ndims(); ++d) {
         s += ("x" + get_val_str(mdw.dims()[d]));
+    }
 
     return s;
 }
@@ -346,7 +383,9 @@ std::string md2dim_str(const zendnn_memory_desc_t *md) {
 std::string md2desc_str(const memory_desc_t *md) {
     const auto dims = md->dims;
     std::string s;
-    if (md->ndims >= 6) return md2dim_str(md);
+    if (md->ndims >= 6) {
+        return md2dim_str(md);
+    }
 
     if (md->ndims == 1) {
         s += "x" + std::to_string(dims[0]);
@@ -354,17 +393,24 @@ std::string md2desc_str(const memory_desc_t *md) {
     }
 
     s += "mb" + std::to_string(dims[0]) + "ic" + std::to_string(dims[1]);
-    if (md->ndims >= 5) s += "id" + std::to_string(dims[md->ndims - 3]);
-    if (md->ndims >= 4) s += "ih" + std::to_string(dims[md->ndims - 2]);
-    if (md->ndims >= 3) s += "iw" + std::to_string(dims[md->ndims - 1]);
+    if (md->ndims >= 5) {
+        s += "id" + std::to_string(dims[md->ndims - 3]);
+    }
+    if (md->ndims >= 4) {
+        s += "ih" + std::to_string(dims[md->ndims - 2]);
+    }
+    if (md->ndims >= 3) {
+        s += "iw" + std::to_string(dims[md->ndims - 1]);
+    }
     return s;
 }
 
 std::ostream &operator<<(std::ostream &ss, const scales_t &oscale) {
     ss << oscale.mask_;
     const float val = oscale.scales_[0];
-    if (oscale.mask_ == 0 || is_runtime_value(val))
+    if (oscale.mask_ == 0 || is_runtime_value(val)) {
         ss << ":" << get_val_str(val);
+    }
     return ss;
 }
 
@@ -380,10 +426,14 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
         ss << "attr-fpmath_mode:" << zendnn_fpmath_mode2str(fpm) << " ";
     }
 
-    if (attr->has_default_values()) return ss;
+    if (attr->has_default_values()) {
+        return ss;
+    }
 
     const scales_t &os = attr->output_scales_;
-    if (!os.has_default_values()) { ss << "attr-oscale:" << os << " "; }
+    if (!os.has_default_values()) {
+        ss << "attr-oscale:" << os << " ";
+    }
 
     std::string empty_delim, attr_delim = "+";
 
@@ -393,7 +443,9 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
         ss << "attr-scales:";
         for (const auto &map_entry : as.scales_) {
             const auto &val = map_entry.second;
-            if (val.has_default_values()) continue;
+            if (val.has_default_values()) {
+                continue;
+            }
 
             int idx = as.get_index_val(map_entry.first);
             ss << delim << "src" << idx << ":" << val;
@@ -406,8 +458,12 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
     if (!zp.has_default_values()) {
         std::string delim = empty_delim;
         ss << "attr-zero-points:";
-        for (const auto &arg : {ZENDNN_ARG_SRC, ZENDNN_ARG_WEIGHTS, ZENDNN_ARG_DST}) {
-            if (zp.has_default_values(arg)) continue;
+        for (const auto &arg : {
+                    ZENDNN_ARG_SRC, ZENDNN_ARG_WEIGHTS, ZENDNN_ARG_DST
+                }) {
+            if (zp.has_default_values(arg)) {
+                continue;
+            }
 
             int mask = 0;
             const int *zpp = nullptr;
@@ -415,10 +471,11 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
 
             ss << delim
                << (arg == ZENDNN_ARG_SRC ? "src"
-                                       : arg == ZENDNN_ARG_DST ? "dst" : "wei")
+                   : arg == ZENDNN_ARG_DST ? "dst" : "wei")
                << ":" << mask;
-            if (mask == 0 || is_runtime_value(*zpp))
+            if (mask == 0 || is_runtime_value(*zpp)) {
                 ss << ":" << get_val_str(*zpp);
+            }
             delim = attr_delim;
         }
         ss << " ";
@@ -431,52 +488,73 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
         for (int i = 0; i < po.len(); ++i) {
             const post_ops_t::entry_t &e = po.entry_[i];
             switch (e.kind) {
-                case primitive_kind::sum: {
-                    const auto &s = e.sum;
-                    ss << delim << "sum";
-                    if (s.scale != 1.f || s.zero_point != 0
-                            || s.dt != data_type::undef)
-                        ss << ":" << s.scale;
-                    if (s.zero_point != 0 || s.dt != data_type::undef)
-                        ss << ":" << s.zero_point;
-                    if (s.dt != data_type::undef) ss << ":" << s.dt;
-                } break;
-                case primitive_kind::convolution: {
-                    using namespace data_type;
-                    const auto &c = e.depthwise_conv;
-                    ss << delim << "dw:k" << c.kernel << "s" << c.stride << "p"
-                       << c.padding;
-                    if (c.wei_dt == s8 || c.dst_dt != f32)
-                        ss << ":" << c.dst_dt;
-                    if (c.count > 0 && c.wei_dt == s8) {
-                        ss << ":" << c.mask;
-                        if (c.mask == 0) ss << ":" << c.scales[0];
+            case primitive_kind::sum: {
+                const auto &s = e.sum;
+                ss << delim << "sum";
+                if (s.scale != 1.f || s.zero_point != 0
+                        || s.dt != data_type::undef) {
+                    ss << ":" << s.scale;
+                }
+                if (s.zero_point != 0 || s.dt != data_type::undef) {
+                    ss << ":" << s.zero_point;
+                }
+                if (s.dt != data_type::undef) {
+                    ss << ":" << s.dt;
+                }
+            }
+            break;
+            case primitive_kind::convolution: {
+                using namespace data_type;
+                const auto &c = e.depthwise_conv;
+                ss << delim << "dw:k" << c.kernel << "s" << c.stride << "p"
+                   << c.padding;
+                if (c.wei_dt == s8 || c.dst_dt != f32) {
+                    ss << ":" << c.dst_dt;
+                }
+                if (c.count > 0 && c.wei_dt == s8) {
+                    ss << ":" << c.mask;
+                    if (c.mask == 0) {
+                        ss << ":" << c.scales[0];
                     }
-                } break;
-                case primitive_kind::eltwise: {
-                    const post_ops_t::entry_t::eltwise_t &ew = e.eltwise;
-                    ss << delim << ew.alg;
-                    if (ew.alpha != 0.f || ew.beta != 0.f || ew.scale != 1.f)
-                        ss << ":" << ew.alpha;
-                    if (ew.beta != 0.f || ew.scale != 1.f) ss << ":" << ew.beta;
-                    if (ew.scale != 1.f) ss << ":" << ew.scale;
-                } break;
-                case primitive_kind::binary: {
-                    const post_ops_t::entry_t::binary_t &eb = e.binary;
-                    const auto &md = eb.src1_desc;
-                    int mask = 0;
-                    for (int d = 0; d < md.ndims; ++d)
-                        mask += md.dims[d] != 1 ? (1 << d) : 0;
-                    ss << delim << eb.alg << ":" << md.data_type << ":" << mask;
-                    if (!memory_desc_wrapper(md).count_non_unit_dims(1))
-                        ss << ":" << md2fmt_tag_str(&md);
-                } break;
-                case primitive_kind::prelu: {
-                    const auto &ep = e.prelu;
-                    ss << delim << "prelu"
-                       << ":" << ep.mask;
-                } break;
-                default: assert(!"unsupported post op primitive kind!"); break;
+                }
+            }
+            break;
+            case primitive_kind::eltwise: {
+                const post_ops_t::entry_t::eltwise_t &ew = e.eltwise;
+                ss << delim << ew.alg;
+                if (ew.alpha != 0.f || ew.beta != 0.f || ew.scale != 1.f) {
+                    ss << ":" << ew.alpha;
+                }
+                if (ew.beta != 0.f || ew.scale != 1.f) {
+                    ss << ":" << ew.beta;
+                }
+                if (ew.scale != 1.f) {
+                    ss << ":" << ew.scale;
+                }
+            }
+            break;
+            case primitive_kind::binary: {
+                const post_ops_t::entry_t::binary_t &eb = e.binary;
+                const auto &md = eb.src1_desc;
+                int mask = 0;
+                for (int d = 0; d < md.ndims; ++d) {
+                    mask += md.dims[d] != 1 ? (1 << d) : 0;
+                }
+                ss << delim << eb.alg << ":" << md.data_type << ":" << mask;
+                if (!memory_desc_wrapper(md).count_non_unit_dims(1)) {
+                    ss << ":" << md2fmt_tag_str(&md);
+                }
+            }
+            break;
+            case primitive_kind::prelu: {
+                const auto &ep = e.prelu;
+                ss << delim << "prelu"
+                   << ":" << ep.mask;
+            }
+            break;
+            default:
+                assert(!"unsupported post op primitive kind!");
+                break;
             }
             delim = attr_delim;
         }
@@ -497,7 +575,7 @@ namespace {
 
 template <typename pd_t>
 static std::string init_info_batch_normalization(
-        const engine_t *e, const pd_t *pd) {
+    const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
@@ -505,7 +583,9 @@ static std::string init_info_batch_normalization(
     auto src_md = pd->src_md();
     auto diff_src_md = pd->diff_src_md();
     ss << "data_" << src_md;
-    if (diff_src_md) ss << " diff_" << diff_src_md;
+    if (diff_src_md) {
+        ss << " diff_" << diff_src_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",";
@@ -552,7 +632,9 @@ static std::string init_info_concat(const engine_t *e, const pd_t *pd) {
     for (int i = 0; i < pd->n_inputs(); ++i) {
         auto src_i_md = pd->src_md(i);
         ss << md2dim_str(src_i_md);
-        if (i < pd->n_inputs() - 1) ss << ":";
+        if (i < pd->n_inputs() - 1) {
+            ss << ":";
+        }
     }
 
     return ss.str();
@@ -565,24 +647,28 @@ static std::string init_info_convolution(const engine_t *e, const pd_t *pd) {
        << pd->desc()->prop_kind << ",";
 
     auto src_md = pd->desc()->prop_kind == prop_kind::backward_data
-            ? pd->diff_src_md()
-            : pd->src_md();
+                  ? pd->diff_src_md()
+                  : pd->src_md();
     auto wei_md = pd->desc()->prop_kind == prop_kind::backward_weights
-            ? pd->diff_weights_md(0)
-            : pd->weights_md(0);
+                  ? pd->diff_weights_md(0)
+                  : pd->weights_md(0);
     auto bia_md = pd->desc()->prop_kind == prop_kind::backward_weights
-            ? pd->diff_weights_md(1)
-            : pd->weights_md(1);
+                  ? pd->diff_weights_md(1)
+                  : pd->weights_md(1);
     auto dst_md = !pd->is_fwd() ? pd->diff_dst_md() : pd->dst_md();
 
     ss << "src_" << src_md << " wei_" << wei_md;
-    if (bia_md) ss << " bia_" << bia_md;
+    if (bia_md) {
+        ss << " bia_" << bia_md;
+    }
     ss << " dst_" << dst_md << ",";
 
     ss << pd->attr() << ",";
     ss << "alg:" << pd->desc()->alg_kind << ",";
 
-    if (pd->with_groups()) ss << "g" << pd->G();
+    if (pd->with_groups()) {
+        ss << "g" << pd->G();
+    }
     ss << "mb" << pd->MB() << "_"
        << "ic" << pd->IC() << "oc" << pd->OC() << "_";
     if (pd->ndims() >= 5)
@@ -611,7 +697,9 @@ static std::string init_info_eltwise(const engine_t *e, const pd_t *pd) {
     auto data_md = pd->use_dst() ? pd->dst_md() : pd->src_md();
     auto diff_src_md = pd->diff_src_md();
     ss << "data_" << data_md;
-    if (diff_src_md) ss << " diff_" << diff_src_md;
+    if (diff_src_md) {
+        ss << " diff_" << diff_src_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",";
@@ -629,18 +717,20 @@ static std::string init_info_inner_product(const engine_t *e, const pd_t *pd) {
        << pd->desc()->prop_kind << ",";
 
     auto src_md = pd->desc()->prop_kind == prop_kind::backward_data
-            ? pd->diff_src_md()
-            : pd->src_md();
+                  ? pd->diff_src_md()
+                  : pd->src_md();
     auto wei_md = pd->desc()->prop_kind == prop_kind::backward_weights
-            ? pd->diff_weights_md(0)
-            : pd->weights_md(0);
+                  ? pd->diff_weights_md(0)
+                  : pd->weights_md(0);
     auto bia_md = pd->desc()->prop_kind == prop_kind::backward_weights
-            ? pd->diff_weights_md(1)
-            : pd->weights_md(1);
+                  ? pd->diff_weights_md(1)
+                  : pd->weights_md(1);
     auto dst_md = !pd->is_fwd() ? pd->diff_dst_md() : pd->dst_md();
 
     ss << "src_" << src_md << " wei_" << wei_md;
-    if (bia_md) ss << " bia_" << bia_md;
+    if (bia_md) {
+        ss << " bia_" << bia_md;
+    }
     ss << " dst_" << dst_md << ",";
 
     ss << pd->attr() << ",,";
@@ -653,18 +743,22 @@ static std::string init_info_inner_product(const engine_t *e, const pd_t *pd) {
 
 template <typename pd_t>
 static std::string init_info_layer_normalization(
-        const engine_t *e, const pd_t *pd) {
+    const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
     auto src_md = pd->src_md(0);
     auto stats_md = pd->is_fwd() && !pd->stats_are_src() ? pd->dst_md(1)
-                                                         : pd->src_md(1);
+                    : pd->src_md(1);
     auto diff_src_md = pd->diff_src_md();
     ss << "data_" << src_md;
-    if (stats_md) ss << " stats_" << stats_md;
-    if (diff_src_md) ss << " diff_" << diff_src_md;
+    if (stats_md) {
+        ss << " stats_" << stats_md;
+    }
+    if (diff_src_md) {
+        ss << " diff_" << diff_src_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",";
@@ -683,7 +777,9 @@ static std::string init_info_lrn(const engine_t *e, const pd_t *pd) {
     auto data_md = pd->src_md();
     auto diff_src_md = pd->diff_src_md();
     ss << "data_" << data_md;
-    if (diff_src_md) ss << " diff_" << diff_src_md;
+    if (diff_src_md) {
+        ss << " diff_" << diff_src_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",";
@@ -697,7 +793,8 @@ static std::string init_info_lrn(const engine_t *e, const pd_t *pd) {
 template <typename pd_t>
 static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
     std::stringstream ss;
-    ss << e << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
+    ss << e <<","<<"plugin_op:"<<pd->attr()->plugin_op<< "," << pd->kind() << "," <<
+       pd->name() << "," << prop_kind::undef
        << ",";
 
     auto src_md = pd->src_md();
@@ -716,7 +813,9 @@ static std::string init_info_matmul(const engine_t *e, const pd_t *pd) {
     };
 
     ss << "src_" << src_md << " wei_" << wei_md;
-    if (pd->with_bias()) ss << " bia_" << bia_md << "_mask" << get_bia_mask();
+    if (pd->with_bias()) {
+        ss << " bia_" << bia_md << "_mask" << get_bia_mask();
+    }
     ss << " dst_" << dst_md << ",";
 
     ss << pd->attr() << ",,";
@@ -738,7 +837,9 @@ static std::string init_info_pooling(const engine_t *e, const pd_t *pd) {
     auto ws_md = pd->workspace_md();
 
     ss << "src_" << src_md << " dst_" << dst_md;
-    if (ws_md) ss << " ws_" << ws_md;
+    if (ws_md) {
+        ss << " ws_" << ws_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",";
@@ -769,8 +870,12 @@ static std::string init_info_prelu(const engine_t *e, const pd_t *pd) {
     auto diff_wei_md = pd->diff_weights_md(0);
 
     ss << "data_" << data_md << " wei_" << wei_md;
-    if (diff_data_md) ss << " diff_" << diff_data_md;
-    if (diff_wei_md) ss << " diff_wei_" << diff_wei_md;
+    if (diff_data_md) {
+        ss << " diff_" << diff_data_md;
+    }
+    if (diff_wei_md) {
+        ss << " diff_wei_" << diff_wei_md;
+    }
     ss << ",";
 
     ss << pd->attr() << ",,";
@@ -804,10 +909,12 @@ static std::string init_info_reorder(const engine_t *e, pd_t *pd) {
     const auto src_ek = pd->desc()->src_engine_kind;
     const auto dst_ek = pd->desc()->dst_engine_kind;
 
-    if (src_ek != dst_ek)
+    if (src_ek != dst_ek) {
         ss << src_ek << "2" << dst_ek;
-    else
+    }
+    else {
         ss << e;
+    }
 
     ss << "," << pd->kind() << "," << pd->name() << "," << prop_kind::undef
        << ",";
@@ -837,8 +944,12 @@ static std::string init_info_resampling(const engine_t *e, const pd_t *pd) {
     ss << "alg:" << pd->desc()->alg_kind << ",";
 
     ss << "mb" << pd->MB() << "ic" << pd->C() << "_";
-    if (pd->ndims() >= 5) ss << "id" << pd->ID() << "od" << pd->OD() << "_";
-    if (pd->ndims() >= 4) ss << "ih" << pd->IH() << "oh" << pd->OH() << "_";
+    if (pd->ndims() >= 5) {
+        ss << "id" << pd->ID() << "od" << pd->OD() << "_";
+    }
+    if (pd->ndims() >= 4) {
+        ss << "ih" << pd->IH() << "oh" << pd->OH() << "_";
+    }
     ss << "iw" << pd->IW() << "ow" << pd->OW();
 
     return ss.str();
@@ -866,9 +977,9 @@ static std::string init_info_rnn(const engine_t *e, const pd_t *pd) {
     print_tensor(true, ZENDNN_ARG_WEIGHTS_LAYER, "wei_layer");
     print_tensor(true, ZENDNN_ARG_WEIGHTS_ITER, "wei_iter");
     print_tensor(
-            pd->is_lstm_peephole(), ZENDNN_ARG_WEIGHTS_PEEPHOLE, "wei_peephole");
+        pd->is_lstm_peephole(), ZENDNN_ARG_WEIGHTS_PEEPHOLE, "wei_peephole");
     print_tensor(
-            pd->is_lstm_projection(), ZENDNN_ARG_WEIGHTS_PROJECTION, "wei_proj");
+        pd->is_lstm_projection(), ZENDNN_ARG_WEIGHTS_PROJECTION, "wei_proj");
     print_tensor(pd->with_bias(), ZENDNN_ARG_BIAS, "bias");
     print_tensor(true, ZENDNN_ARG_DST_LAYER, "dst_layer");
     print_tensor(pd->with_dst_iter(), ZENDNN_ARG_DST_ITER, "dst_iter");
@@ -876,17 +987,17 @@ static std::string init_info_rnn(const engine_t *e, const pd_t *pd) {
     if (!pd->is_fwd()) {
         print_tensor(true, ZENDNN_ARG_DIFF_SRC_LAYER, "diff_src_layer");
         print_tensor(
-                pd->with_src_iter(), ZENDNN_ARG_DIFF_SRC_ITER, "diff_src_iter");
+            pd->with_src_iter(), ZENDNN_ARG_DIFF_SRC_ITER, "diff_src_iter");
         print_tensor(true, ZENDNN_ARG_DIFF_WEIGHTS_LAYER, "diff_wei_layer");
         print_tensor(true, ZENDNN_ARG_DIFF_WEIGHTS_ITER, "diff_wei_iter");
         print_tensor(pd->is_lstm_peephole(), ZENDNN_ARG_DIFF_WEIGHTS_PEEPHOLE,
-                "diff_wei_peephole");
+                     "diff_wei_peephole");
         print_tensor(pd->is_lstm_projection(), ZENDNN_ARG_DIFF_WEIGHTS_PROJECTION,
-                "diff_wei_proj");
+                     "diff_wei_proj");
         print_tensor(pd->with_bias(), ZENDNN_ARG_DIFF_BIAS, "diff_bias");
         print_tensor(true, ZENDNN_ARG_DIFF_DST_LAYER, "diff_dst_layer");
         print_tensor(
-                pd->with_dst_iter(), ZENDNN_ARG_DIFF_DST_ITER, "diff_dst_iter");
+            pd->with_dst_iter(), ZENDNN_ARG_DIFF_DST_ITER, "diff_dst_iter");
     }
 
     ss << ",";
@@ -972,7 +1083,8 @@ static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
     ss << e << "," << pd->kind() << "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
-    { // src
+    {
+        // src
         for (int i = 0; i < pd->n_inputs(); ++i) {
             auto src_i_md = pd->src_md(i);
             ss << "src_" << src_i_md << " ";
@@ -992,7 +1104,9 @@ static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
 } // namespace
 
 void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
-    if (is_initialized_) return;
+    if (is_initialized_) {
+        return;
+    }
 
     std::call_once(initialization_flag_, [&] {
         using logsoftmax_pd_t = softmax_pd_t;
@@ -1014,7 +1128,7 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
             CASE(lrn);
             CASE(logsoftmax);
             CASE(matmul);
-            case primitive_kind::pooling_v2:
+        case primitive_kind::pooling_v2:
             CASE(pooling);
             CASE(prelu);
             CASE(reduction);
@@ -1022,12 +1136,14 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
             CASE(resampling);
             CASE(rnn);
             CASE(shuffle);
-            case primitive_kind::softmax_v2:
+        case primitive_kind::softmax_v2:
             CASE(softmax);
             CASE(sum);
             CASE(embedding_bag);
-            case primitive_kind::zero_pad: break;
-            default: assert(!"unknown primitive kind");
+        case primitive_kind::zero_pad:
+            break;
+        default:
+            assert(!"unknown primitive kind");
         }
 #undef CASE
         // clang-format on
@@ -1042,14 +1158,17 @@ void pd_info_t::init(engine_t *engine, const primitive_desc_t *pd) {
 
 zendnn_status_t zendnn_set_verbose(int level) {
     using namespace zendnn::impl::status;
-    if (level < 0 || level > 2) return invalid_arguments;
+    if (level < 0 || level > 2) {
+        return invalid_arguments;
+    }
     zendnn::impl::verbose.set(level);
     return success;
 }
 
 const zendnn_version_t *zendnn_version(void) {
     static const zendnn_version_t ver
-            = {ZENDNN_VERSION_MAJOR, ZENDNN_VERSION_MINOR, ZENDNN_VERSION_PATCH,
-                    ZENDNN_VERSION_HASH, ZENDNN_CPU_RUNTIME, ZENDNN_GPU_RUNTIME};
+    = {ZENDNN_VERSION_MAJOR, ZENDNN_VERSION_MINOR, ZENDNN_VERSION_PATCH,
+       ZENDNN_VERSION_HASH, ZENDNN_CPU_RUNTIME, ZENDNN_GPU_RUNTIME
+      };
     return &ver;
 }

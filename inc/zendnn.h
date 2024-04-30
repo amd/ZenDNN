@@ -28,6 +28,7 @@
 #include "zendnn_config.h"
 #include "zendnn_types.h"
 #include "zendnn_version.h"
+#include <string>
 
 #ifdef __cplusplus
 extern "C" {
@@ -349,6 +350,15 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_get_fpmath_mode(
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_autoTunerEnable(
         zendnn_primitive_attr_t attr, bool autoTunerFlag);
+
+/// Sets the Plugin op name primitive attributes.
+///
+/// @param attr Primitive attributes.
+/// @param string Plugin Op Name
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_plugin_op_name(
+        zendnn_primitive_attr_t attr, const std::string plugin_op_name);
 
 /// Sets the floating-point math mode primitive attributes.
 ///

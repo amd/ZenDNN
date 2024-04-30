@@ -362,6 +362,11 @@ status_t primitive_attr_t::set_autoTunerEnable(bool autoTunerflag) {
     return success;
 }
 
+status_t primitive_attr_t::set_plugin_op_name(const std::string plugin_op_name) {
+    plugin_op = plugin_op_name;
+    return success;
+}
+
 status_t primitive_attr_t::set_fpmath_mode(fpmath_mode_t fpmath_mode) {
     auto st = check_fpmath_mode(fpmath_mode);
     if (st == success) fpmath_mode_ = fpmath_mode;
@@ -421,6 +426,12 @@ status_t zendnn_primitive_attr_set_autoTunerEnable(
     primitive_attr_t *attr, bool flag){
         return attr->set_autoTunerEnable(flag);
 }
+
+status_t zendnn_primitive_attr_set_plugin_op_name(
+    primitive_attr_t *attr, const std::string plugin_op_name){
+        return attr->set_plugin_op_name(plugin_op_name);
+}
+
 
 status_t zendnn_primitive_attr_set_fpmath_mode(
         primitive_attr_t *attr, fpmath_mode_t mode) {
