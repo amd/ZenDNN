@@ -58,6 +58,7 @@ This release of ZenDNN supports the following Operating Systems (OS) and compile
 * Ubuntu® 22.04 LTS and later
 * Red Hat® Enterprise Linux® (RHEL) 9.2 and later
 * SLES15 SP5 and later
+* CentOS Stream 8.4
 * PyTorch v2.1 wheel files are supported on Anolis OS 8.8
 
 ## Compilers
@@ -162,9 +163,9 @@ ZenDNN has the following runtime dependencies:
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python v3.8-v3.11 for TensorFlow v2.12
-* Python v3.7-v3.10 for PyTorch v1.13
-* Python v3.8-v3.11 for ONNXRT v1.15.1
+* Python v3.9-v3.12 for TensorFlow v2.16 (Plugin)
+* Python v3.8-v3.11 for PyTorch v2.1 (Plugin)
+* Python v3.8-v3.11 for ONNXRT v1.17.0
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
