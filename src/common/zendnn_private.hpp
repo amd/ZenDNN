@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -1097,6 +1097,35 @@ extern "C"
         const float *in_layer,
         unsigned long offset
     );
+
+    int matmul_int8_wrapper(
+       zendnn::zendnnEnv zenEnvObj,
+       int src_type,
+       int dst_type,
+       int bias_type,
+       const bool Layout,
+       const bool transA,
+       const bool transB,
+       const int M,
+       const int K,
+       const int N,
+       const float alpha,
+       const char *src,
+       const int lda,
+       const int8_t *weights,
+       const int ldb,
+       const char *bias,
+       const bool has_eltwise_relu,
+       const int geluType,
+       const float beta,
+       char *dst,
+       const int ldc,
+       float *scale,
+       const int32_t zero_point_dst,
+       int out_scale_size,
+       float do_sum,
+       bool is_weights_const
+       );
 }
 
 #endif

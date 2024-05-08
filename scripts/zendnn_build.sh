@@ -1,5 +1,5 @@
 ﻿#*******************************************************************************
-# Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,43 +17,51 @@
 
 #!/bin/bash
 
-if [[ "$1" == "aocc" ]]; then
-    chmod u+x ./scripts/zendnn_aocc_env_setup.sh
-    echo "source scripts/zendnn_aocc_env_setup.sh"
-    source scripts/zendnn_aocc_env_setup.sh
-    make_args="AOCC=1"
-elif [[ "$1" == "gcc" ]]; then
-    chmod u+x ./scripts/zendnn_gcc_env_setup.sh
-    echo "source scripts/zendnn_gcc_env_setup.sh"
-    source scripts/zendnn_gcc_env_setup.sh
-    make_args="AOCC=0"
-else
-    echo "Input not recognised.  First argument should be one of"
-    echo "aocc / gcc"
-    return 1;
+if [[ "$1" == "aocc" ]];
+then
+chmod u+x ./scripts/zendnn_aocc_env_setup.sh
+echo "source scripts/zendnn_aocc_env_setup.sh"
+source scripts/zendnn_aocc_env_setup.sh
+make_args="AOCC=1"
+          elif [[ "$1" == "gcc" ]];
+then
+chmod u+x ./scripts/zendnn_gcc_env_setup.sh
+echo "source scripts/zendnn_gcc_env_setup.sh"
+source scripts/zendnn_gcc_env_setup.sh
+make_args="AOCC=0"
+          else
+              echo "Input not recognised.  First argument should be one of"
+              echo "aocc / gcc"
+              return 1;
 fi
 
 make_lpgemm_args=""
-if [[ "$2" == "lpgemm" ]]; then
-	make_lpgemm_args="LPGEMM=1"
-fi
+                 if [[ "$2" == "lpgemm" ]];
+then
+make_lpgemm_args="LPGEMM=1"
+                 fi
+                 if [[ "$2" == "lpgemm_v5_0" ]];
+then
+make_lpgemm_args="LPGEMM=1 LPGEMM_V4_2=1 LPGEMM_V5_0=1"
+                 fi
 
-if [[ "$3" == "lpgemm_v4_2" ]]; then
-	make_lpgemm_args="LPGEMM=1 LPGEMM_V4_2=1"
-fi
+                 if [[ "$2" == "lpgemm_v4_2" ]];
+then
+make_lpgemm_args="LPGEMM=1 LPGEMM_V4_2=1"
+                 fi
 
 #check again if ZENDNN_BLIS_PATH is defined, otherwise return
-if [ -z "$ZENDNN_BLIS_PATH" ];
+                 if [ -z "$ZENDNN_BLIS_PATH" ];
 then
-    echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"
-    return
-fi
+echo "Error: Environment variable ZENDNN_BLIS_PATH needs to be set"
+return
+    fi
 
 #echo "make clean"
 #make clean
 
-echo "make -j $make_args $make_lpgemm_args"
-make -j $make_args $make_lpgemm_args
+    echo "make -j $make_args $make_lpgemm_args"
+    make -j $make_args $make_lpgemm_args
 
-echo "make test $make_args $make_lpgemm_args"
-make test $make_args $make_lpgemm_args
+    echo "make test $make_args $make_lpgemm_args"
+    make test $make_args $make_lpgemm_args

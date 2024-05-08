@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,6 +55,10 @@ endif
 
 ifeq "$(LPGEMM_V4_2)" "1"
        LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM=1 -DZENDNN_ENABLE_LPGEMM_V4_2=1
+endif
+
+ifeq "$(LPGEMM_V5_0)" "1"
+       LPGEMM_ENABLE:= -DZENDNN_ENABLE_LPGEMM=1 -DZENDNN_ENABLE_LPGEMM_V4_2=1 -DZENDNN_ENABLE_LPGEMM_V5_0=1
 endif
 
 ifeq ($(DEPEND_ON_CK), 1)
@@ -336,6 +340,10 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_avx_conv_primitive_cache_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_int $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_matmul_int8_test.cpp -L_out/lib -lamdZenDNN \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
+		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
@@ -432,6 +440,9 @@ test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/embedding_bag_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_embedding_bag_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_int $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_matmul_int8_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_bag_test $(INCDIRS) \
                 -Itests/api_tests tests/api_tests/zendnn_grp_embedding_bag_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \

@@ -87,6 +87,12 @@ enum zenBF16MatMulAlgoType {
     MATMUL_JIT_PAR = 6,
 };
 
+enum zenINT8MatMulAlgoType {
+    MATMUL_AUTO_INT8 = 0,
+    MATMUL_AOCL_GEMM_INT8 = 1,
+    MATMUL_BLOCKED_JIT_INT8 = 2,
+    MATMUL_JIT_INT8 = 3,
+};
 // enum containing all supported convolution algo types
 // AUTO - Autotuner path which will be used in future release
 // GEMM - GEMM and im2row convolution path
@@ -124,6 +130,7 @@ class zendnnEnv {
     uint    zen_num_threads;
     uint    zenGEMMalgo;
     uint    zenBF16GEMMalgo;
+    uint    zenINT8GEMMalgo;
     uint    zenConvAlgo;
     uint    zenEnableMemPool;
     uint    zenLibMemPoolEnable;
@@ -171,6 +178,20 @@ class zendnnEnv {
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
         if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT_PAR) {
             zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_PAR;
+        }
+        //ZENDNN_MATMUL_ALGO=INT8: is to enable specific INT8 MATMUL algo.
+        //Currently ZenDNN support three ALGO path for GEMM execution
+        // 0. AutoTuner, library decide the optimal path
+        // based on the matrix sizes and other parameter settings. However,
+        // this can be overridden with specific path.
+        // 1. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_INT8)
+        // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8)
+        // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_INT8)
+
+        zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 ||
+                zenINT8GEMMalgo<zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8) {
+            zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
         //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
