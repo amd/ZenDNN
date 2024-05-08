@@ -90,10 +90,10 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_layers + 1; ++i) {
         dims[i] = dis(gen);
     }
-
+    int batch_size=1;
     // Create memory descriptors for input matrices
     std::vector<memory> input_mem;
-    input_mem.push_back(create_memory(memory::desc({1, dims[0]},
+    input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
                                       memory::data_type::f32,
                                       memory::format_tag::ab), eng));
 
@@ -111,22 +111,21 @@ int main(int argc, char *argv[]) {
     std::vector<memory::dims> out_mdims(num_layers);
     std::vector<memory> out_mem(num_layers);
     for (int i = 0; i < num_layers; ++i) {
-        out_mdims[i] = {1, dims[i+1]};
+        out_mdims[i] = {batch_size, dims[i+1]};
         out_mem[i] = create_memory(memory::desc(out_mdims[i], memory::data_type::f32,
                                                 memory::format_tag::ab), eng);
     }
-
     // Generate random input
+    // Random weights range: 0.0 to 1.0
+    std::uniform_real_distribution<float> dis_weights(0.0f,1.0f);
     std::vector<float> input_data;
-    for (int i = 0; i < dims[0]; ++i) {
-        input_data.resize(1*dims[0]);
-        input_data[i] = dis(gen);
+    for (int i = 0; i < batch_size*dims[0]; ++i) {
+        input_data.resize(batch_size*dims[0]);
+        input_data[i] = dis_weights(gen);
     }
     write_to_zendnn_memory(input_data.data(), input_mem[0]);
 
     // Generate random weights for layers
-    // Random weights range: -1.0 to 1.0
-    std::uniform_real_distribution<float> dis_weights(-1.0f,1.0f);
     std::vector<float> weights_data;
     for (int i = 0; i < num_layers; ++i) {
         weights_data.resize(dims[i] * dims[i + 1]);
@@ -141,7 +140,6 @@ int main(int argc, char *argv[]) {
     std::vector<memory> bias(num_layers);
     std::vector<bool> bias_defined(num_layers, 0);
     std::vector<int64_t> fuse(num_layers, 1);
-
     // Execute the MLP layers
     for (int i = 0; i < num_layers; ++i) {
         if (i==0) {
@@ -155,35 +153,100 @@ int main(int argc, char *argv[]) {
                            bias_defined[i], fuse[i], out_mem[i]);
         }
     }
-
     // Read data from memory object for the final output
-    std::vector<float> data_output(1*dims[num_layers]);
-    read_from_zendnn_memory(data_output.data(), out_mem[num_layers-1]);
+    std::vector<float> output(batch_size*dims[num_layers]);
+    read_from_zendnn_memory(output.data(), out_mem[num_layers-1]);
 
 
     // Create memory descriptors for output matrices for grp Matmul call
     std::vector<memory> out_grp_mem(num_layers);
     for (int i = 0; i < num_layers; ++i) {
-        out_mdims[i] = {1, dims[i+1]};
+        out_mdims[i] = {batch_size, dims[i+1]};
         out_grp_mem[i] = create_memory(memory::desc(out_mdims[i],
                                        memory::data_type::f32,
                                        memory::format_tag::ab), eng);
 
     }
-
-    // Group Matmal call
+    /*****************Test for Group Linear MatMul********************/
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem, bias, alpha, beta,
                                      bias_defined, fuse, out_grp_mem);
 
     // Read data from memory object for the final output of grp Matmul
-    std::vector<float> data_output_grp(1*dims[num_layers]);
-    read_from_zendnn_memory(data_output_grp.data(), out_grp_mem[num_layers-1]);
+    std::vector<float> output_grp(batch_size*dims[num_layers]);
+    read_from_zendnn_memory(output_grp.data(), out_grp_mem[num_layers-1]);
 
     //Compare result
-    for (int i=0; i<dims[num_layers]; i++) {
-        assert(data_output[i] == data_output_grp[i]);
+    for (int i=0; i<batch_size*dims[num_layers]; i++) {
+        assert(output[i] == output_grp[i]);
     }
-    std::cout << " Test Comparison Successful " << std::endl;
+    std::cout << " Test Comparison for group Matmul Successful " << std::endl;
 
+    /*****************Test for Group parallel MatMul********************/
+    input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
+                                      memory::data_type::f32,
+                                      memory::format_tag::ab), eng));
+    input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
+                                      memory::data_type::f32,
+                                      memory::format_tag::ab), eng));
+
+    // Create memory descriptors for weight matrices
+    std::vector<memory> weight_mem_parallel(num_layers);
+    for (int i = 0; i < num_layers; ++i) {
+        weight_mem_parallel[i] = create_memory(memory::desc({dims[0], dims[1]},
+                                               memory::data_type::f32,
+                                               memory::format_tag::ab), eng);
+    }
+
+    // Generate random input
+    // Random weights range: 0.0 to 1.0
+    for (int j = 0; j< num_layers; ++j) {
+        for (int i = 0; i < batch_size*dims[0]; ++i) {
+            input_data.resize(batch_size*dims[0]);
+            input_data[i] = dis_weights(gen);
+        }
+        write_to_zendnn_memory(input_data.data(), input_mem[j]);
+    }
+
+    // Generate random weights for layers
+    for (int i = 0; i < num_layers; ++i) {
+        weights_data.resize(dims[0] * dims[1]);
+        for (auto &w : weights_data) {
+            w = dis_weights(gen);
+        }
+        write_to_zendnn_memory(weights_data.data(), weight_mem_parallel[i]);
+    }
+
+
+    // Create memory descriptors for output matrices
+    std::vector<memory> out_mem_parallel(num_layers);
+    for (int i = 0; i < num_layers; ++i) {
+        out_mem_parallel[i] = create_memory(memory::desc({batch_size, dims[1]},
+                                            memory::data_type::f32,
+                                            memory::format_tag::ab), eng);
+    }
+
+    // Execute the MLP layers
+    for (int i = 0; i < num_layers; ++i) {
+        matmul_execute(eng, s, input_mem[i], weight_mem_parallel[i], alpha[i], beta[i],
+                       bias_defined[i], fuse[i], out_mem_parallel[i]);
+    }
+    std::vector<float> output_parallel(batch_size*dims[1]);
+    read_from_zendnn_memory(output_parallel.data(), out_mem_parallel[1]);
+
+
+    zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem_parallel, bias, alpha,
+                                     beta,
+                                     bias_defined, fuse, out_mem_parallel);
+
+    std::vector<float> output_grp_parallel(batch_size*dims[1]);
+    read_from_zendnn_memory(output_grp_parallel.data(), out_mem_parallel[1]);
+
+    //Compare result
+    for (int i=0; i<batch_size*dims[1]; i++) {
+        assert(output_parallel[i] == output_grp_parallel[i]);
+    }
+
+    std::cout << " Test Comparison for group parallel Matmul Successful " <<
+              std::endl;
     return 0;
 }
