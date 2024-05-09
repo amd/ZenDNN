@@ -31,7 +31,7 @@
 #include "zendnn.hpp"
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
-
+#include "zendnn_helper.hpp"
 
 using namespace zendnn;
 using tag = memory::format_tag;
@@ -308,28 +308,19 @@ int main(int argc, char **argv) {
     setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
 #endif
 
-    std::vector<float> brgemm, zen_aocl;
+    std::vector<float> gemm_jit, zen;
     matmul_example_3D(post_op);
 
-    //Enable BLIS path
-#ifdef _WIN32
-    _putenv_s("ZENDNN_MATMUL_BF16","2");
-#else
-    setenv("ZENDNN_MATMUL_BF16","2",1);
-#endif
-    zen_aocl = matmul_example_2D(f32_flag, post_op);
+    //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
+    zen = matmul_example_2D(f32_flag, post_op);
 
-    //Disable BLIS path
-#ifdef _WIN32
-    _putenv_s("ZENDNN_MATMUL_BF16","1");
-#else
-    setenv("ZENDNN_MATMUL_BF16","1",1);
-#endif
-
-    brgemm = matmul_example_2D(f32_flag, post_op);
-    //Compare the brgemm and blis
+    //Gemm-JIT Path
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    obj.is_ref_gemm_bf16 = true;
+    gemm_jit = matmul_example_2D(f32_flag, post_op);
+    //Compare the ZENDNN_PATHS with GEMM_JIT Kernels
     auto rc = compare_vectors(
-                  brgemm, zen_aocl,256, "Compare BRGEMM MatMul vs BLIS Path");
-    zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test test ends");
+                  gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
+    zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_bf16 test ends");
     return 0;
 }

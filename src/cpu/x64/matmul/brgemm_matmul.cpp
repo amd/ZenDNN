@@ -90,6 +90,9 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
 
     if (!ok) return status::unimplemented;
 
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    if(obj.is_ref_gemm_bf16) return status::unimplemented;
+
     CHECK(init_brgemm_matmul_conf(isa, bgmmc_, *desc(), src_md_, weights_md_,
             dst_md_, bias_md_, attr_));
 
