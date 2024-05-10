@@ -46,7 +46,7 @@ Following are the highlights of this release:
 * Python v3.9-v3.12 has been used to generate the TensorFlow v2.16 (Plugin) wheel files (*.whl).
 * Python v3.8-v3.11 has been used to generate the ONNXRT v1.17.0 wheel files (*.whl).
 * Python v3.8-v3.11 has been used to generate the PyTorch v2.1 (Plugin) wheel files (*.whl).
-* NHWC (default format), NHWC_BLOCKED and Blocked Format (NCHWc8) are supported.
+* NHWC (default format), NHWC_BLOCKED and Blocked Format are supported.
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
