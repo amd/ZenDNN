@@ -1080,7 +1080,8 @@ template <typename pd_t>
 static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
     std::stringstream ss;
 
-    ss << e << "," << pd->kind() << "," << pd->name() << ","
+    ss << e << "," << "plugin_op:" << pd->attr()->plugin_op << "," << pd->kind() <<
+       "," << pd->name() << ","
        << pd->desc()->prop_kind << ",";
 
     {

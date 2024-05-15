@@ -429,7 +429,7 @@ status_t zendnn_primitive_attr_set_autoTunerEnable(
 
 status_t zendnn_primitive_attr_set_plugin_op_name(
     primitive_attr_t *attr, const std::string plugin_op_name){
-        return attr->set_plugin_op_name(plugin_op_name);
+        return attr->set_plugin_op_name(plugin_op_name.c_str());
 }
 
 
