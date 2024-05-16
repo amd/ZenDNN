@@ -748,7 +748,7 @@ class zendnn_custom_op {
                                      const memory &z_per_sample_weights_opt,
                                      const bool &z_per_sample_weights_defined,
                                      const bool &z_include_last_offset, const int32_t &z_padding_idx,
-                                     memory &z_destination, int thread_qty=1);
+                                     memory &z_destination, const char* plugin_op="", int thread_qty=1);
 
 //Group embedding bag op API
     static void zendnn_grp_embedding_bag(std::vector <memory> &z_input,
@@ -758,13 +758,13 @@ class zendnn_custom_op {
                                          std::vector <int32_t> &z_per_sample_weights_defined,
                                          std::vector <int32_t> &z_include_last_offset,
                                          std::vector <int32_t> &z_padding_idx,
-                                         std::vector <memory> &z_destination, int thread_qty=1);
+                                         std::vector <memory> &z_destination, const char* plugin_op="", int thread_qty=1);
 
 //Embedding op API
     static void zendnn_embedding(const memory &z_input, const memory &z_indices,
                                  const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                                  const bool  &z_sparse,
-                                 memory &z_destination, int thread_qty=1);
+                                 memory &z_destination, const char* plugin_op="", int thread_qty=1);
 
 //Group Embedding op API
     static void zendnn_grp_embedding(std::vector <memory> &z_input,
@@ -772,7 +772,7 @@ class zendnn_custom_op {
                                      std::vector <int32_t> &z_padding_idx,
                                      std::vector <int32_t> &z_scale_grad_by_freq,
                                      std::vector <int32_t> &z_sparse,
-                                     std::vector <memory> &z_destination, int thread_qty=1);
+                                     std::vector <memory> &z_destination, const char* plugin_op="", int thread_qty=1);
 
 //Group MLP op API
     static void zendnn_grp_mlp(const std::vector<memory> &z_input,
@@ -782,7 +782,7 @@ class zendnn_custom_op {
                                const std::vector<float> &z_beta,
                                const std::vector<bool> &z_bias_defined,
                                const std::vector<int64_t> &z_fuse,
-                               const std::vector<memory> &z_result);
+                               const std::vector<memory> &z_result, const char* plugin_op="");
 //Group Embedding_Bag and MLP op API
     static void zendnn_grp_ebag_mlp(std::vector <memory> &z_eb_input,
                                     std::vector <memory> &z_eb_indices, std::vector <memory> &z_eb_offsets,
@@ -801,7 +801,7 @@ class zendnn_custom_op {
                                     const std::vector<float> &z_mm_beta,
                                     const std::vector<bool> &z_mm_bias_defined,
                                     const std::vector<int64_t> &z_mm_fuse,
-                                    const std::vector<memory> &z_mm_result);
+                                    const std::vector<memory> &z_mm_result, const char* plugin_op="");
 
 //Group Embedding and MLP op API
     static void zendnn_grp_embedding_mlp(std::vector <memory> &z_embed_input,

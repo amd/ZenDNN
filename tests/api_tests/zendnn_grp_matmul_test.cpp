@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
     }
     /*****************Test for Group Linear MatMul********************/
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem, bias, alpha, beta,
-                                     bias_defined, fuse, out_grp_mem);
+                                     bias_defined, fuse, out_grp_mem, "lib::zendnn_grp_mlp");
 
     // Read data from memory object for the final output of grp Matmul
     std::vector<float> output_grp(batch_size*dims[num_layers]);
@@ -236,7 +236,7 @@ int main(int argc, char *argv[]) {
 
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem_parallel, bias, alpha,
                                      beta,
-                                     bias_defined, fuse, out_mem_parallel);
+                                     bias_defined, fuse, out_mem_parallel, "lib::zendnn_grp_mlp");
 
     std::vector<float> output_grp_parallel(batch_size*dims[1]);
     read_from_zendnn_memory(output_grp_parallel.data(), out_mem_parallel[1]);

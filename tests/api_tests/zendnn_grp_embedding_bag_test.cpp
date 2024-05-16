@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
     zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem,
             input_mem, offset_mem,
             scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
-            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem);
+            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem, "zendnn_grp_embedding_bag");
 
     //Compare results
 

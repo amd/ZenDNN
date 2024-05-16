@@ -34,9 +34,11 @@ void zen_matmul_impl(
     const int64_t &z_fuse,
     const memory &z_result,
     engine eng,
-    stream engine_stream) {
+    stream engine_stream, const char* plugin_op) {
 
     zendnn::primitive_attr op_attr;
+    std::string op_name=plugin_op;
+    op_attr.set_plugin_op_name(op_name);
     post_ops po;
     if (z_beta != 0.0f && !z_bias_defined) {
         // sets post_ops as add or sum
@@ -120,7 +122,7 @@ void zendnn_custom_op::zendnn_grp_mlp(
     const std::vector<float> &z_beta,
     const std::vector<bool> &z_bias_defined,
     const std::vector<int64_t> &z_fuse,
-    const std::vector<memory> &z_result)
+    const std::vector<memory> &z_result, const char* plugin_op)
 
 {
     double start_ms = impl::get_msec();
@@ -140,11 +142,11 @@ void zendnn_custom_op::zendnn_grp_mlp(
             }
             if (i==0) {
                 zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
+                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
             }
             else {
                 zen_matmul_impl(z_result[i-1], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
+                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
             }
         }
     }
@@ -159,12 +161,12 @@ void zendnn_custom_op::zendnn_grp_mlp(
                 continue;
             }
             zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                            z_bias_defined[i], z_fuse[i], z_result[i], eng, stream);
+                            z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
         }
     }
     double duration_ms = impl::get_msec() - start_ms;
 
-    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,grp_matmul,",
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,plugin_op:",plugin_op,
                   "num_matmul:",num_ops,",",
                   "mlp:",mlp_type,",",
                   duration_ms,
@@ -189,17 +191,17 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
     const std::vector<float> &z_mm_beta,
     const std::vector<bool> &z_mm_bias_defined,
     const std::vector<int64_t> &z_mm_fuse,
-    const std::vector<memory> &z_mm_result)
+    const std::vector<memory> &z_mm_result, const char* plugin_op)
 
 {
 
     zendnn_custom_op::zendnn_grp_embedding_bag(
         z_eb_input, z_eb_indices, z_eb_offsets, z_eb_scale_grad_by_freq, z_eb_modes,
         z_eb_sparse, z_eb_per_sample_weights_opt, z_eb_per_sample_weights_defined,
-        z_eb_include_last_offset, z_eb_padding_idx, z_eb_destination, 1);
+        z_eb_include_last_offset, z_eb_padding_idx, z_eb_destination, plugin_op, 1);
 
     zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
-                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result);
+                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result, plugin_op);
 }
 
 void zendnn_custom_op::zendnn_grp_embedding_mlp(
@@ -222,10 +224,10 @@ void zendnn_custom_op::zendnn_grp_embedding_mlp(
 
     zendnn_custom_op::zendnn_grp_embedding(
         z_embed_input, z_embed_indices, z_embed_padding_idx, z_embed_scale_grad_by_freq,
-        z_embed_sparse, z_embed_destination, 1);
+        z_embed_sparse, z_embed_destination,"zendnn_grp_embedding_mlp" ,1);
 
     zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
-                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result);
+                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result, "zendnn_grp_ebag_mlp");
 }
 
 }

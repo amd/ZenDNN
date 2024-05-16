@@ -37,11 +37,14 @@ void zendnn_embedding_bag_kernel(
     const memory &z_per_sample_weights,
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
-    unsigned int op_num_threads) {
+    unsigned int op_num_threads, const char* plugin_op) {
     engine eng;
     stream s;
     eng=engine(engine::kind::cpu, 0);
     s=stream(eng);
+    primitive_attr op_attr;
+    std::string op_name=plugin_op;
+    op_attr.set_plugin_op_name(op_name);
 
     embedding_bag::desc pdesc;
     embedding_bag::primitive_desc pd;
@@ -59,7 +62,7 @@ void zendnn_embedding_bag_kernel(
                                     z_dst.get_desc(),
                                     padding_idx);
 
-        pd = embedding_bag::primitive_desc(pdesc, eng);
+        pd = embedding_bag::primitive_desc(pdesc, op_attr, eng );
 
         embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
             {ZENDNN_ARG_SRC_1, z_indices},
@@ -79,7 +82,7 @@ void zendnn_embedding_bag_kernel(
                                     z_dst.get_desc(),
                                     padding_idx);
 
-        pd = embedding_bag::primitive_desc(pdesc, eng);
+        pd = embedding_bag::primitive_desc(pdesc, op_attr, eng);
 
         embedding_bag(pd).execute(s, {{ZENDNN_ARG_SRC_0, z_input},
             {ZENDNN_ARG_SRC_1, z_indices},
@@ -96,7 +99,7 @@ void zendnn_embedding_bag_exec(
     const memory &z_per_sample_weights,
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
-    unsigned int op_num_threads=1) {
+    const char* plugin_op, unsigned int op_num_threads) {
 
     zendnnEnv EnvObj = readEnv();
     auto emd_table_dims = z_input.get_desc().dims();
@@ -173,7 +176,7 @@ void zendnn_embedding_bag_exec(
             sparse, z_per_sample_weights,
             z_per_sample_weights_defined,
             include_last_offset,
-            padding_idx, z_dst, op_num_threads);
+            padding_idx, z_dst, op_num_threads, plugin_op);
     }
 #else
     zendnn_embedding_bag_kernel(
@@ -182,7 +185,7 @@ void zendnn_embedding_bag_exec(
         sparse, z_per_sample_weights,
         z_per_sample_weights_defined,
         include_last_offset,
-        padding_idx, z_dst, op_num_threads);
+        padding_idx, z_dst, op_num_threads, plugin_op);
 #endif
 
 }
@@ -198,8 +201,8 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
         const memory &z_per_sample_weights_opt,
         const bool &z_per_sample_weights_defined,
         const bool &z_include_last_offset, const int32_t &z_padding_idx,
-        memory &z_destination, int thread_qty) {
-
+        memory &z_destination, const char* plugin_op, int thread_qty) {
+    
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
 
@@ -209,7 +212,7 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
         static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
         static_cast<int32_t>(z_per_sample_weights_defined),
         static_cast<int32_t>(z_include_last_offset),
-        z_padding_idx, z_destination, eb_thread_qty);
+        z_padding_idx, z_destination, plugin_op, eb_thread_qty);
 }
 
 void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
@@ -219,7 +222,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         std::vector <int32_t> &z_per_sample_weights_defined,
         std::vector <int32_t> &z_include_last_offset,
         std::vector <int32_t> &z_padding_idx,
-        std::vector <memory> &z_destination, int thread_qty) {
+        std::vector <memory> &z_destination, const char* plugin_op, int thread_qty) {
 
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
@@ -260,7 +263,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset],inner_threads);
+                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, inner_threads);
             }
 
         }
@@ -283,7 +286,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                 z_per_sample_weights_defined[threadOffset],
                 z_include_last_offset[threadOffset],
-                z_padding_idx[threadOffset], z_destination[threadOffset],inner_threads);
+                z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, inner_threads);
         }
     }
 
@@ -295,7 +298,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq[i], z_modes[i],
                 z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
                 z_include_last_offset[i],
-                z_padding_idx[i], z_destination[i], eb_thread_qty);
+                z_padding_idx[i], z_destination[i], plugin_op, eb_thread_qty);
         }
 
     }
@@ -317,14 +320,14 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset], 1);
+                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, 1);
             }
         }
 
     }
     double duration_ms = impl::get_msec() - start_ms;
 
-    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,embedding_bag_grp,",
+    zendnnVerbose(ZENDNN_PROFLOG, "zendnn_custom_op_execute,cpu,plugin_op:",plugin_op,
                   "num_table:",num_tables,",","Batch_size:",batch_size,",",thread_type,",",
                   duration_ms,
                   ",ms");
@@ -336,7 +339,7 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
                                         const memory &z_indices,
                                         const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                                         const bool &z_sparse,
-                                        memory &z_destination, int thread_qty) {
+                                        memory &z_destination, const char* plugin_op, int thread_qty) {
 
     int indices_size = z_indices.get_desc().dims()[0];
     int32_t z_per_sample_weights_defined=0;
@@ -368,7 +371,7 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
         static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
         static_cast<int32_t>(z_per_sample_weights_defined),
         static_cast<int32_t>(z_include_last_offset),
-        z_padding_idx, z_destination, num_thread);
+        z_padding_idx, z_destination, plugin_op, num_thread);
 }
 
 void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
@@ -376,7 +379,7 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         std::vector <int32_t> &z_padding_idx,
         std::vector <int32_t> &z_scale_grad_by_freq,
         std::vector <int32_t> &z_sparse,
-        std::vector <memory> &z_destination, int thread_qty) {
+        std::vector <memory> &z_destination, const char* plugin_op, int thread_qty) {
 
     int num_eb_ops = z_input.size();
     std::vector <memory> z_offsets(num_eb_ops);
@@ -413,8 +416,7 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
     zendnn_custom_op::zendnn_grp_embedding_bag(
         z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
         z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
-        z_include_last_offset, z_padding_idx, z_destination, thread_qty);
-
+        z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty);
 
 }
 }//ZenDNN
