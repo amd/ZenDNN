@@ -568,7 +568,8 @@ void zenMatMul_gemm_wrapper(
     elapsed = timedifference_msec(start, end);
 #endif
 
-    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner,
+    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=",
+                  auto_tuner ? "True": "False",
                   " Layout=",
                   Layout ? "CblasRowMajor," : "CblasColMajor,",
                   " transa=", transpose_input ? "CblasTrans," : "CblasNoTrans,",
@@ -1248,6 +1249,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     const int gelu) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     obj.is_brgemm = true;
+    obj.is_log = true;
 
     zendnnEnv zenEnvObj = readEnv();
 
@@ -1317,6 +1319,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     }
     if (obj.is_brgemm) {
         obj.is_brgemm = false;
+        obj.is_log = false;
     }
 
 #endif
