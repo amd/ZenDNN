@@ -1,6 +1,6 @@
-LICENSE for ZenDNN v4.1 Source - AMD copyrighted code
+LICENSE for ZenDNN v4.2 Source - AMD copyrighted code
 
-Portions Copyright (c) 2018-2023 Advanced Micro Devices, Inc. All rights reserved. 
+Portions Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved. 
 
 Apache-2.0
 http://www.apache.org/licenses/
@@ -41,7 +41,7 @@ See the License for the specific language governing permissions and limitations 
 ///
 
 
-Portions Copyright (c) 2018-2023 Advanced Micro Devices, Inc. All rights reserved.
+Portions Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 BSD-3-Clause
 http://spdx.org/licenses/BSD-3-Clause
@@ -53,7 +53,7 @@ THIS SOFTWARE IS PROVIDED BY COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY 
 
 ///
 
-Portions Copyright (c) 2018-2023 Advanced Micro Devices, Inc. All rights reserved.
+Portions Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 MIT
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
