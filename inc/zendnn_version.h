@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -28,7 +28,7 @@
 #define ZENDNN_VERSION_MAJOR 4
 
 /// Minor version
-#define ZENDNN_VERSION_MINOR 1
+#define ZENDNN_VERSION_MINOR 2
 
 /// Patch version
 #define ZENDNN_VERSION_PATCH 0
