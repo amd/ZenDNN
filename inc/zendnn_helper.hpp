@@ -97,16 +97,14 @@ enum zenINT8MatMulAlgoType {
 // AUTO - Autotuner path which will be used in future release
 // GEMM - GEMM and im2row convolution path
 // WINOGRAD - Winograd path which will fall back to im2row + GEMM for non compatible sizes
-// DIRECT1 : Direct convolution with inputs and filters in blocked memory format
-// DIRECT2 : Direct convolution with only filters in blocked memory format
+// DIRECT1 : Direct convolution with only filters in blocked memory format
 // CK : Composable kernel path for convolution
 enum zenConvAlgoType {
     AUTO = 0,
     GEMM = 1,
     WINOGRAD = 2,
     DIRECT1 = 3,
-    DIRECT2 = 4,
-    CK = 5
+    CK = 4
 };
 
 enum zenEBAlgoType {
@@ -223,9 +221,9 @@ class zendnnEnv {
         zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 0);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
-        zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO",0);
+        zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO", 1 /* GEMM */);
         if (zenConvAlgo <= zenConvAlgoType::AUTO ||
-                zenConvAlgo > zenConvAlgoType::DIRECT2) {
+                zenConvAlgo > zenConvAlgoType::DIRECT1) {
             zenConvAlgo = zenConvAlgoType::GEMM;
         }
     }
