@@ -18,6 +18,7 @@
 
 #include <iostream>
 #include <assert.h>
+#include <type_traits>
 
 #include "common/c_types_map.hpp"
 #include "common/type_helpers.hpp"
@@ -37,7 +38,57 @@
 #include "zendnn.hpp"
 #include "common/zendnn_private.hpp"
 
-//#define DEBUG_ATTN
+// #define DEBUG_ATTN
+
+#define LPGEMM_BF16_MATMUL(B_matrix) \
+    aocl_post_op *post_ops = NULL; \
+    int postop_count = 0; \
+    if (c != NULL) { \
+        ++postop_count; \
+    } \
+    if (postop_count > 0) { \
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op), 64); \
+        dim_t max_post_ops_seq_length = postop_count; \
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length * \
+                            sizeof(AOCL_POST_OP_TYPE), 64); \
+    \
+        int post_op_i = 0; \
+        if (c != NULL) { \
+            post_ops->seq_vector[post_op_i++] = BIAS; \
+            post_ops->bias.bias = (float *)c; \
+        } \
+        post_ops->seq_length = postop_count; \
+    } \
+    \
+    if(std::is_same<T,float>::value) \
+    { \
+        aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c', \
+                                transpose_input ? 't' : 'n', \
+                                transpose_weight ? 't' : 'n', m, n, k, scale, \
+                                (int16_t *)a + a_offsets[i], lda, mem_format_a, B_matrix, ldb, \
+                                mem_format_b, \
+                                beta, \
+                                (float *)o + o_offsets[i], ldc, \
+                                post_ops); \
+    } \
+    else if(std::is_same<T,int16_t>::value) \
+    { \
+        aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c', \
+                                transpose_input ? 't' : 'n', \
+                                transpose_weight ? 't' : 'n', m, n, k, scale, \
+                                (int16_t *)a + a_offsets[i], lda, mem_format_a, B_matrix, ldb, \
+                                mem_format_b, \
+                                beta, \
+                                (int16_t *)o + o_offsets[i], ldc, \
+                                post_ops); \
+    } \
+    \
+    if (c != NULL) { \
+        post_ops->bias.bias=NULL; \
+        zendnn::impl::free( post_ops->bias.bias ); \
+        zendnn::impl::free( post_ops->seq_vector ); \
+        zendnn::impl::free( post_ops ); \
+    } \
 
 namespace zendnn {
 namespace impl {
@@ -113,14 +164,204 @@ void calculate_offsets(std::vector<unsigned long> &offsets,
 namespace cpu {
 namespace attention {
 
-void zenAttention_Matmul(const float *a,
+template <typename T>
+void zenMatMul_gemm_bf16(const bool Layout,
+                      const bool transpose_input,
+                      const bool transpose_weight,
+                      const int batch, const unsigned long *a_offsets,
+                      const unsigned long *b_offsets, const unsigned long *o_offsets,
+                      const int m, const int k, const int n,
+                      const float scale,                      //alpha
+                      const int16_t *a, const int lda,        //Input
+                      const int16_t *b, const int ldb,        //Weight
+                      float *c,                               //Bias
+                      const int beta,                         //beta
+                      T *o, const int ldc) {                  //output
+
+#ifdef ZENDNN_ENABLE_LPGEMM
+
+    // Blocked BLIS API for matmul
+    // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
+    // Define dimentions of B matrix as reorder_param1 and reorder_param2
+    // Define memory format as 'n'(non reordered) for A matrix and 'r'(reordered) for B matrix
+
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = k;
+    const dim_t reorder_param2 = n;
+    const char order = 'r';
+    char trans = 'n';
+    if (transpose_weight) {
+        trans = 't';
+    }
+    char mem_format_a = 'n', mem_format_b = 'r';
+
+    int16_t *reorder_filter;
+
+    // Batched matmul - Same B matrix (weights). we need to reorder B matrix only once in this case
+    if (b_offsets[batch-1] == 0)
+    {
+        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                                        order, trans,
+#endif
+                                        reorder_param0, reorder_param1, reorder_param2);
+
+        reorder_filter = (int16_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+
+        aocl_reorder_bf16bf16f32of32(
+#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
+                order, trans,
+#endif
+                'B', b, reorder_filter, k, n, ldb);
+
+
+        for (int i=0; i<batch; ++i)
+        {
+            LPGEMM_BF16_MATMUL(reorder_filter)
+        }
+
+        free(reorder_filter);
+
+    } // single B matrix - weight matrix
+
+    // Batched matmul - Multiple B matrixes. No Reorder. Do on the go pack of B 
+    else if (b_offsets[batch-1] > 0)
+    {
+        for (int i=0; i<batch; ++i)
+        {
+            mem_format_b = 'n';
+            LPGEMM_BF16_MATMUL(b + b_offsets[i])
+        }
+
+    }// multiple B matrix
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenMatMul_gemm_bf16 ");
+#endif
+
+#endif
+}
+
+template <typename T>
+void zenMatMul_bf16_Primitive(const bool Layout,
+                      const bool transpose_input,
+                      const bool transpose_weight,
+                      const int m, const int k, const int n,
+                      const float alpha,                      //alpha
+                      const int16_t *a, const int lda,        //Input
+                      const int16_t *b, const int ldb,        //Weight
+                      float *c,                               //Bias
+                      const int beta,                         //beta
+                      T *o, const int ldc) {                  //output
+
+    zendnn::engine eng(engine::kind::cpu, 0);
+    zendnn::stream engine_stream(eng);
+
+    std::vector<primitive> net;
+    std::vector<std::unordered_map<int, memory>> net_args;
+
+    memory::dims src_dims = {m, k};
+    memory::dims weight_dims = {k, n};
+    memory::dims bias_dims = {1, n};
+    memory::dims dst_dims = {m, n};
+
+    memory::dims a_strides = transpose_input ? memory::dims {1, lda} :
+                             memory::dims {lda, 1};
+    memory::dims b_strides = transpose_weight ? memory::dims {1, ldb} :
+                             memory::dims {ldb, 1};
+
+    memory::desc src_md = memory::desc({src_dims}, zendnn::memory::data_type::bf16, a_strides);
+    memory::desc matmul_weights_md = memory::desc({weight_dims}, zendnn::memory::data_type::bf16, b_strides);
+
+    memory::desc bias_md;
+    //Bias type f32
+    if (c != NULL)
+        bias_md = memory::desc({bias_dims}, zendnn::memory::data_type::f32, zendnn::memory::format_tag::ab);
+
+    int dst_type = 0;
+
+    if(std::is_same<T,float>::value)
+        dst_type = 1;
+
+    else if(std::is_same<T,int16_t>::value)
+        dst_type = 0;
+
+    memory::desc dst_md = memory::desc({dst_dims}, dst_type == 1 ? zendnn::memory::data_type::f32 :
+                                                    zendnn::memory::data_type::bf16, {ldc, 1});
+
+    primitive_attr matmul_attr;
+    zendnn::post_ops post_ops;
+    bool post_attr = false;
+    const float scale = 1.0f;
+    if (alpha != 1.f) {
+        post_attr = true;
+        post_ops.append_eltwise(/* mask */ 1, algorithm::eltwise_linear, alpha, 0);
+    }
+    if (beta != 0.f) {
+        post_attr = true;
+        post_ops.append_sum(beta);
+    }
+    if (post_attr) {
+        matmul_attr.set_post_ops(post_ops);
+    }
+    matmul_attr.set_autoTunerEnable(true);
+
+    //MatMul desc
+    auto matmul_disc = (c != NULL) ?  zendnn::matmul::desc(src_md, matmul_weights_md, bias_md, dst_md) :
+                        zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
+
+
+    //MatMul primitive desc
+    auto matmul_prim_disc = zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
+
+    //Memory creation
+    zendnn::memory user_weights_memory, src_memory, bias_memory, dst_memory;
+    src_memory = memory(src_md, eng, (void*)a);
+    user_weights_memory = memory(matmul_weights_md, eng, (void*)b);
+
+    if (c != NULL)
+        bias_memory = memory(bias_md, eng, (void*)c);
+
+    if(std::is_same<T,float>::value)
+        dst_memory = memory(dst_md, eng, (void*)o);
+    if(std::is_same<T,int16_t>::value)
+        dst_memory = memory(dst_md, eng, (void*)o);
+
+    net.push_back(zendnn::matmul(matmul_prim_disc));
+
+
+    if (c != NULL)
+        net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS,user_weights_memory},
+            {ZENDNN_ARG_BIAS, bias_memory},
+            {ZENDNN_ARG_DST, dst_memory}});
+
+    else
+        net_args.push_back({{ZENDNN_ARG_SRC, src_memory},
+            {ZENDNN_ARG_WEIGHTS, user_weights_memory},
+            {ZENDNN_ARG_DST, dst_memory}});
+
+    assert(net.size() == net_args.size() && "something is missing");
+    for (size_t i = 0; i < net.size(); ++i) {
+        net.at(i).execute(engine_stream, net_args.at(i));
+    }
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention ZenDNN BRGEMM BF16 Matmul ");
+#endif
+
+}
+
+
+template <typename T1, typename T2>
+void zenAttention_Matmul(const T1 *a,
             memory_desc_wrapper a_mdw,
-            const float *b,
+            const T1 *b,
             memory_desc_wrapper b_mdw,
             float scale,
             const float *c,
             memory_desc_wrapper c_mdw,
-            float *o,
+            T2 *o,
             memory_desc_wrapper o_mdw) {
 
     zendnn::impl::cpu::matmul::matmul_helper_t helper(a_mdw, b_mdw, o_mdw);
@@ -190,18 +431,22 @@ void zenAttention_Matmul(const float *a,
     zendnnInfo(ZENDNN_CORELOG,"[Custom] transB: ", transB);
 #endif
 
+    if(std::is_same<T1,float>::value)
+    {
 #if 1
-    zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                      batch, a_offsets, b_offsets, o_offsets,
-                      M, K, N,
-                      scale,//alpha
-                      (float *)a, lda,
-                      (float *)b, ldb,
-                      (float *)c,
-                      0.0f,//beta
-                      (float *)o, ldc);
+        zenMatMulWithBias(
+                Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                batch, a_offsets, b_offsets, o_offsets,
+                M, K, N,
+                scale,//alpha
+                (float *)a, lda,
+                (float *)b, ldb,
+                (float *)c,
+                0.0f,//beta
+                (float *)o, ldc
+            );
 #else
-    zenMatMul(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+        zenMatMul(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
               batch, a_offsets, b_offsets, o_offsets,
               M, K, N,
               scale,//alpha
@@ -211,19 +456,62 @@ void zenAttention_Matmul(const float *a,
               (bool)0,
               (int)0,
               0.0f,//beta
-              (float *)o, ldc);
+              (float *)o, ldc
+            );
 #endif
+    }
+
+    else if(std::is_same<T1,int16_t>::value)
+    {
+#ifdef ZENDNN_ENABLE_LPGEMM
+
+            zenMatMul_gemm_bf16(
+                Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                batch, a_offsets, b_offsets, o_offsets,
+                M, K, N,
+                scale,        //alpha
+                (int16_t *)a, lda,
+                (int16_t *)b, ldb,
+                (float *)c,
+                0,//beta
+                (T2 *)o, ldc
+            );
+#else
+            for (int i=0; i<batch; ++i)
+                zenMatMul_bf16_Primitive(
+                    Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                    M, K, N,
+                    scale,        //alpha
+                    (int16_t *)a + a_offsets[i], lda,
+                    (int16_t *)b + b_offsets[i], ldb,
+                    (float *)c,
+                    0,//beta
+                    (T2 *)o + o_offsets[i], ldc
+                );
+#endif
+    }
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenAttention_Matmul() ");
+#endif
+
     return;
 }
 
 /* TODO: Is transpose really necessary here?? Please check for optimizing!! */
-void zenAttention_Transpose(float *src,
+template <typename T>
+void zenAttention_Transpose(T *src,
                             zendnn::memory::desc src_md,
-                            float *dst,
+                            T *dst,
                             zendnn::memory::desc dst_md,
                             std::vector<int> perm) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
+
+    auto dta = zendnn::memory::data_type::f32;
+
+    if(std::is_same<T,int16_t>::value){
+        dta = zendnn::memory::data_type::bf16;
+    }
 
     auto data_dims = src_md.dims();
     auto ndata_dims = src_md.dims().size();
@@ -236,17 +524,23 @@ void zenAttention_Transpose(float *src,
         total_stride *= data_dims[perm[i]];
     }
 
-    zendnn::memory src_mem({data_dims, zendnn::memory::data_type::f32, zendnn::memory::format_tag::abcd}, eng, (void*)src);
-    zendnn::memory int_mem({data_dims, zendnn::memory::data_type::f32, strides}, eng, (void*)dst);
+    zendnn::memory src_mem({data_dims, dta, zendnn::memory::format_tag::abcd}, eng, (void*)src);
+    zendnn::memory int_mem({data_dims, dta, strides}, eng, (void*)dst);
 
     zendnn::reorder(src_mem, int_mem).execute(engine_stream, src_mem, int_mem);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenAttention_Transpose() ");
+#endif
+
 }
 
-void zenAttention_TransformAddMask(float *qkbuff,
+template <typename T>
+void zenAttention_TransformAddMask(T *qkbuff,
                                    zendnn::memory::desc qk_md,
                                    const float *mask,
                                    zendnn::memory::desc mask_md,
-                                   float *scratchpad) {
+                                   T *scratchpad) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -286,10 +580,14 @@ void zenAttention_TransformAddMask(float *qkbuff,
     for (size_t i=0; i<net.size(); ++i) {
         net.at(i).execute(engine_stream, net_args.at(i));
     }
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] zenAttention_TransformAddMask() ");
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenAttention_TransformAddMask() ");
+#endif
+
 }
 
-void zenAttention_Softmax(const float *src,
+template <typename T>
+void zenAttention_Softmax(const T *src,
                           zendnn::memory::desc src_md,
                           int axis) {
     zendnn::engine eng(engine::kind::cpu, 0);
@@ -313,13 +611,32 @@ void zenAttention_Softmax(const float *src,
     for (size_t i = 0; i < net.size(); ++i) {
         net.at(i).execute(engine_stream, net_args.at(i));
     }
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] zenAttention_Softmax() ");
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenAttention_Softmax() ");
+#endif
+}
+
+void zenAttention_Reorder_float_to_bf16(const float *src,
+                                        zendnn::memory::desc src_md,
+                                        int16_t *dst,
+                                        zendnn::memory::desc dst_md){
+    zendnn::engine eng(engine::kind::cpu, 0);
+    zendnn::stream engine_stream(eng);
+
+    zendnn::memory src_mem(src_md, eng, (void*)src);
+    zendnn::memory dst_mem(dst_md, eng, (void*)dst);
+
+    zendnn::reorder(src_mem, dst_mem).execute(engine_stream, src_mem, dst_mem);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention zenAttention_Reorder_float_to_bf16() ");
+#endif
 }
 
 } // namespace attentiom
 
 /* add new primitive */
-template <impl::data_type_t data_type>
+template <impl::data_type_t attn_opn_type>
 struct ref_attention_t : public primitive_t {
     struct pd_t : public cpu_attention_pd_t {
         using cpu_attention_pd_t::cpu_attention_pd_t;
@@ -327,7 +644,7 @@ struct ref_attention_t : public primitive_t {
         DECLARE_COMMON_PD_T("ref:any", ref_attention_t);
 
         status_t init(engine_t *engine) {
-            if (!platform::has_data_type_support(data_type)) {
+            if (!platform::has_data_type_support(attn_opn_type)) {
                 return status::unimplemented;
             }
 
@@ -349,16 +666,39 @@ struct ref_attention_t : public primitive_t {
                 zendnnInfo(ZENDNN_CORELOG, "init_scratchpad() N : ", N);
                 zendnnInfo(ZENDNN_CORELOG, "init_scratchpad() H : ", H);
 
-                auto scratchpad_size = (4*B*N*S*H + B*N*S*S);
+                size_t sz_bnsh=B*N*S*H, sz_bnss=B*N*S*S, sz_bs=B*S;
 
-                zendnnInfo(ZENDNN_CORELOG, "init_scratchpad() scratchpad_size : ", scratchpad_size);
+                if(attn_opn_type == data_type::f32){
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_0,
+                        sz_bnsh, types::data_type_size(zendnn_f32));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_1,
+                        sz_bnsh, types::data_type_size(zendnn_f32));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_2,
+                        sz_bnsh, types::data_type_size(zendnn_f32));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSS,
+                        sz_bnss, types::data_type_size(zendnn_f32));
+                }
 
-                scratchpad.book(memory_tracking::names::key_attention,
-                    scratchpad_size, types::data_type_size(zendnn_f32));
+                else if(attn_opn_type == data_type::s16){
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_0,
+                        sz_bnsh, types::data_type_size(zendnn_s16));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_1,
+                        sz_bnsh, types::data_type_size(zendnn_s16));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSH_2,
+                        sz_bnsh, types::data_type_size(zendnn_s16));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSS,
+                        sz_bnss, types::data_type_size(zendnn_f32));
+                    scratchpad.book(memory_tracking::names::key_attention_BS,
+                        sz_bs, types::data_type_size(zendnn_f32));
+                    scratchpad.book(memory_tracking::names::key_attention_BNSS_1,
+                        sz_bnss, types::data_type_size(zendnn_s16));
+                }
             }
     };
     // constructor using pd_t
     ref_attention_t(const pd_t *apd) : primitive_t(apd) {}
+
+    typedef typename prec_traits<attn_opn_type>::type attn_opn_type_t;
 
     // init() override from primitive_t
     status_t init(engine_t *engine) override {
@@ -378,9 +718,9 @@ struct ref_attention_t : public primitive_t {
     status_t execute_ref(const exec_ctx_t &ctx) const;
 };
 
-template<data_type_t data_type>
+template<data_type_t attn_opn_type>
 status_t
-ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
+ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
     status_t status = status::success;
 
     // get algorithm params
@@ -389,22 +729,38 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
     auto num_heads = pd()->desc()->num_heads;
     auto num_threads = pd()->desc()->num_threads;
 
+    typedef typename prec_traits<attn_opn_type>::type attn_opn_type_t;
+
     // get the tensors
-    auto query   = CTX_IN_MEM(const float *, ZENDNN_ARG_SRC_0);
-    auto key   = CTX_IN_MEM(const float *, ZENDNN_ARG_SRC_1);
-    auto value   = CTX_IN_MEM(const float *, ZENDNN_ARG_SRC_2);
-    auto weights_query   = CTX_IN_MEM(const float *, ZENDNN_ARG_WEIGHTS_0);
-    auto weights_key   = CTX_IN_MEM(const float *, ZENDNN_ARG_WEIGHTS_1);
-    auto weights_value   = CTX_IN_MEM(const float *, ZENDNN_ARG_WEIGHTS_2);
+    auto query   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_SRC_0);
+    auto key   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_SRC_1);
+    auto value   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_SRC_2);
+    auto weights_query   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_WEIGHTS_0);
+    auto weights_key   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_WEIGHTS_1);
+    auto weights_value   = CTX_IN_MEM(const attn_opn_type_t *, ZENDNN_ARG_WEIGHTS_2);
+
+    //keeping mask, bias tensors in float for fp32 and bf16
     auto bias_query   = CTX_IN_MEM(const float *, ZENDNN_ARG_BIAS_0);
     auto bias_key   = CTX_IN_MEM(const float *, ZENDNN_ARG_BIAS_1);
     auto bias_value   = CTX_IN_MEM(const float *, ZENDNN_ARG_BIAS_2);
     auto mask  = CTX_IN_MEM(const float *, ZENDNN_ARG_MASK);
-    auto dst     = CTX_OUT_MEM(float *, ZENDNN_ARG_DST);
+
+    auto dst     = CTX_OUT_MEM(attn_opn_type_t *, ZENDNN_ARG_DST);
 
     const auto scratchpad = ctx.get_scratchpad_grantor();
-    auto scratchpad_buf_base = scratchpad.template get<float>(
-                               memory_tracking::names::key_attention);
+
+    auto scp_bnsh_0 = scratchpad.template get<attn_opn_type_t>(
+                               memory_tracking::names::key_attention_BNSH_0);
+    auto scp_bnsh_1 = scratchpad.template get<attn_opn_type_t>(
+                               memory_tracking::names::key_attention_BNSH_1);
+    auto scp_bnsh_2 = scratchpad.template get<attn_opn_type_t>(
+                               memory_tracking::names::key_attention_BNSH_2);
+
+    float *scp_bnss;
+    scp_bnss = scratchpad.template get<float>(
+                            memory_tracking::names::key_attention_BNSS);
+
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Attention ");
 
     // get memory descriptors
     memory_desc_wrapper query_mdw(pd()->src_md(ZENDNN_ARG_SRC_0));
@@ -426,31 +782,37 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
         zendnnInfo(ZENDNN_CORELOG, "scratchpad_mode::library");
     }
 #endif
-    engine_t *engine = ctx.stream()->engine();
 
-    // initialize output to zero
-    std::fill(dst, (dst + dst_mdw.nelems()), 0);
+    auto dta = zendnn::impl::data_type::f32;
+
+    if(attn_opn_type == data_type::s16){
+        dta = zendnn::impl::data_type::bf16;
+    }
+
+    engine_t *engine = ctx.stream()->engine();
 
     /* Intermediate Q-buffer memory setup */
     memory_desc_t Qbuff_md;
     std::vector<dim_t> qDims = {query_mdw.dims()[0], query_mdw.dims()[1], weights_query_mdw.dims()[1]};
     zendnn::impl::dims_t qStrides{qDims[1]*qDims[2], qDims[2], 1};
-    zendnn_memory_desc_init_by_strides(&Qbuff_md, qDims.size(), qDims.data(), zendnn::impl::data_type::f32, qStrides);
+    zendnn_memory_desc_init_by_strides(&Qbuff_md, qDims.size(), qDims.data(), dta, qStrides);
     memory_desc_wrapper Qbuff_mdw(Qbuff_md);
     auto qbuff_size = utils::array_product(Qbuff_mdw.dims(), Qbuff_mdw.ndims());
-    auto scp_qBuff = scratchpad_buf_base;
-    auto temp_buff_size = qbuff_size;
-    auto scp_qtBuff = scratchpad_buf_base + (temp_buff_size);
-#ifdef DEBUG_ATTN
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scratchpad_buf_base : ", scratchpad_buf_base);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] temp_buff_size : ", temp_buff_size);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_qtBuff : ", scp_qtBuff);
-#endif
+
+    attn_opn_type_t* scp_qBuff = scp_bnsh_0;
+    attn_opn_type_t* scp_qtBuff = scp_bnsh_1;
+
     zendnn::impl::cpu::attention::zenAttention_Matmul(query, query_mdw,
                                                       weights_query, weights_query_mdw,
                                                       1.0f,
                                                       bias_query, bias_query_mdw,
                                                       scp_qBuff, Qbuff_mdw);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Q : ", scp_bnsh_1);
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Qrt : ", scp_bnsh_1);
+#endif
+
     int i=0, id=0;
     //Qb_reshape
     std::vector<dim_t> rQDims = {Qbuff_mdw.dims()[0], Qbuff_mdw.dims()[1], (dim_t)num_heads, (dim_t)Qbuff_mdw.dims()[2]/num_heads};
@@ -467,7 +829,7 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
         rtQDims.push_back(rQbuff_mdw.dims()[Qperm[i]]);
     }
     zendnn::impl::dims_t rtQStrides{rtQDims[1]*rtQDims[2]*rtQDims[3], rtQDims[2]*rtQDims[3], rtQDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&rtQ_md, rtQDims.size(), rtQDims.data(), zendnn::impl::data_type::f32, rtQStrides);
+    zendnn_memory_desc_init_by_strides(&rtQ_md, rtQDims.size(), rtQDims.data(), dta, rtQStrides);
     memory_desc_wrapper rtQbuff_mdw(rtQ_md);
     zendnn::impl::cpu::attention::zenAttention_Transpose(scp_qBuff, rQ_md, scp_qtBuff, rtQ_md, Qperm);
     //Qb_reshape //Qb_transpose
@@ -476,22 +838,23 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
     memory_desc_t Kbuff_md;
     std::vector<dim_t> kDims = {key_mdw.dims()[0], key_mdw.dims()[1], weights_key_mdw.dims()[1]};
     zendnn::impl::dims_t kStrides{kDims[1]*kDims[2], kDims[2], 1};
-    zendnn_memory_desc_init_by_strides(&Kbuff_md, kDims.size(), kDims.data(), zendnn::impl::data_type::f32, kStrides);
+    zendnn_memory_desc_init_by_strides(&Kbuff_md, kDims.size(), kDims.data(), dta, kStrides);
     memory_desc_wrapper Kbuff_mdw(Kbuff_md);
-    //scratchpad_buf_base is BSNH size
-    auto kbuff_size = utils::array_product(Kbuff_mdw.dims(), Kbuff_mdw.ndims());
-    auto scp_kBuff = scratchpad_buf_base;
-    auto scp_ktBuff = scratchpad_buf_base + (temp_buff_size + qbuff_size);
-#ifdef DEBUG_ATTN
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_kBuff : ", scp_kBuff);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] temp_buff_size + qbuff_size : ", temp_buff_size + qbuff_size);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_ktBuff : ", scp_ktBuff);
-#endif
+
+    attn_opn_type_t* scp_kBuff = scp_bnsh_0;
+    attn_opn_type_t* scp_ktBuff = scp_bnsh_2;
+
     zendnn::impl::cpu::attention::zenAttention_Matmul(key, key_mdw,
                                                       weights_key, weights_key_mdw,
                                                       1.0f,
                                                       bias_key, bias_key_mdw,
                                                       scp_kBuff, Kbuff_mdw);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] K : ", scp_bnsh_0);
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Krt : ", scp_bnsh_2);
+#endif
+
     //Kb_reshape
     std::vector<dim_t> rKDims = {Kbuff_mdw.dims()[0], Kbuff_mdw.dims()[1], (dim_t)num_heads, (dim_t)Kbuff_mdw.dims()[2]/num_heads};
     memory_desc_t rK_md;
@@ -507,31 +870,78 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
         rtKDims.push_back(rKbuff_mdw.dims()[Kperm[i]]);
     }
     zendnn::impl::dims_t rtKStrides{rtKDims[1]*rtKDims[2]*rtKDims[3], rtKDims[2]*rtKDims[3], rtKDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&rtK_md, rtKDims.size(), rtKDims.data(), zendnn::impl::data_type::f32, rtKStrides);
+    zendnn_memory_desc_init_by_strides(&rtK_md, rtKDims.size(), rtKDims.data(), dta, rtKStrides);
     memory_desc_wrapper rtKbuff_mdw(rtK_md);
     zendnn::impl::cpu::attention::zenAttention_Transpose(scp_kBuff, rK_md, scp_ktBuff, rtK_md, Kperm);
     //Kb_reshape //Kb_transpose
+
+    //4DMatmul(QK', 1/N)
+    /* Intermediate QK' buffer memory setup */
+    memory_desc_t QKbuff_md;
+    std::vector<dim_t> qkDims = {rtQbuff_mdw.dims()[0], rtQbuff_mdw.dims()[1], rtQbuff_mdw.dims()[2], rtKbuff_mdw.dims()[3]};
+    zendnn::impl::dims_t qkStrides{qkDims[1]*qkDims[2]*qkDims[3], qkDims[2]*qkDims[3], qkDims[3], 1};
+    zendnn_memory_desc_init_by_strides(&QKbuff_md, qkDims.size(), qkDims.data(), zendnn::impl::data_type::f32, qkStrides);
+    memory_desc_wrapper QKbuff_mdw(QKbuff_md);
+
+    //QK' matmul output is in float type for both f32 and bf16 attention
+    float* qk_buff = scp_bnss;
+
+    zendnn::impl::cpu::attention::zenAttention_Matmul(scp_qtBuff, rtQbuff_mdw,
+                                                    scp_ktBuff, rtKbuff_mdw,
+                                                    scale,
+                                                    nullptr, bias_value_mdw,
+                                                    qk_buff , QKbuff_mdw);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Qrt : ", scp_bnsh_1);
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Krt : ", scp_bnsh_2);
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Krt : ", scp_bnss);
+#endif
+
+    /* Mask memory setup */
+    zendnn_memory_desc_t mask_md = *(pd()->src_md(ZENDNN_ARG_MASK));
+    //mask_reshape
+    std::vector<dim_t> maskDims = {mask_mdw.dims()[0], 1, 1, mask_mdw.dims()[1]};
+    memory_desc_t rMask_md;
+    reshapeSts = zendnn_memory_desc_reshape(&rMask_md, (const zendnn_memory_desc_t*)&mask_md, maskDims.size(), (const zendnn_dim_t *)maskDims.data());
+    if(reshapeSts != zendnn_success)
+        zendnnInfo(ZENDNN_CORELOG,"[Custom] reshape unsuccessfull. Re-check!!: ");
+
+    /* Transform mask memory for masking AND add to QKBuffer */
+    if(attn_opn_type == data_type::f32){
+        zendnn::impl::cpu::attention::zenAttention_TransformAddMask(qk_buff, QKbuff_md, mask, rMask_md, (float *)scp_bnsh_0);
+    }
+
+    else if(attn_opn_type == data_type::s16){
+        float *scp_bs_float_temp;
+        scp_bs_float_temp = scratchpad.template get<float>(memory_tracking::names::key_attention_BS);
+        zendnn::impl::cpu::attention::zenAttention_TransformAddMask(qk_buff, QKbuff_md, mask, rMask_md, (float *)scp_bs_float_temp);
+    }
+
+    /* Applying softmax */
+    zendnn::impl::cpu::attention::zenAttention_Softmax(qk_buff, QKbuff_md, 3);
 
     /* Intermediate V-buffer memory setup */
     memory_desc_t Vbuff_md;
     std::vector<dim_t> vDims = {value_mdw.dims()[0], value_mdw.dims()[1], weights_value_mdw.dims()[1]};
     zendnn::impl::dims_t vStrides{vDims[1]*vDims[2], vDims[2], 1};
-    zendnn_memory_desc_init_by_strides(&Vbuff_md, vDims.size(), vDims.data(), zendnn::impl::data_type::f32, vStrides);
+    zendnn_memory_desc_init_by_strides(&Vbuff_md, vDims.size(), vDims.data(), dta, vStrides);
     memory_desc_wrapper Vbuff_mdw(Vbuff_md);
-    //scratchpad_buf_base is BSNH size
-    auto vbuff_size = utils::array_product(Vbuff_mdw.dims(), Vbuff_mdw.ndims());
-    auto scp_vBuff = scratchpad_buf_base;
-    auto scp_vtBuff = scratchpad_buf_base + (temp_buff_size + qbuff_size + kbuff_size);
-#ifdef DEBUG_ATTN
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_vBuff : ", scp_vBuff);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] temp_buff_size + qbuff_size + kbuff_size : ", temp_buff_size + qbuff_size + kbuff_size);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_vtBuff : ", scp_vtBuff);
-#endif
+
+    attn_opn_type_t* scp_vBuff = scp_bnsh_0;
+    attn_opn_type_t* scp_vtBuff = scp_bnsh_1;
+
     zendnn::impl::cpu::attention::zenAttention_Matmul(value, value_mdw,
                                                       weights_value, weights_value_mdw,
                                                       1.0f,
                                                       bias_value, bias_value_mdw,
                                                       scp_vBuff, Vbuff_mdw);
+
+#ifdef DEBUG_ATTN
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Vs : ", scp_bnsh_0);
+    zendnnInfo(ZENDNN_CORELOG,"[Custom] Vrt : ", scp_bnsh_1);
+#endif
+
     //Vb_reshape
     std::vector<dim_t> rVDims = {Vbuff_mdw.dims()[0], Vbuff_mdw.dims()[1], (dim_t)num_heads, (dim_t)Vbuff_mdw.dims()[2]/num_heads};
     memory_desc_t rV_md;
@@ -547,54 +957,45 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
         rtVDims.push_back(rVbuff_mdw.dims()[Vperm[i]]);
     }
     zendnn::impl::dims_t rtVStrides{rtVDims[1]*rtVDims[2]*rtVDims[3], rtVDims[2]*rtVDims[3], rtVDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&rtV_md, rtVDims.size(), rtVDims.data(), zendnn::impl::data_type::f32, rtVStrides);
+    zendnn_memory_desc_init_by_strides(&rtV_md, rtVDims.size(), rtVDims.data(), dta, rtVStrides);
     memory_desc_wrapper rtVbuff_mdw(rtV_md);
     zendnn::impl::cpu::attention::zenAttention_Transpose(scp_vBuff, rV_md, scp_vtBuff, rtV_md, Vperm);
     //Vb_reshape //Vb_transpose
-
-    //4DMatmul(QK', 1/N)
-    /* Intermediate QK' buffer memory setup */
-    memory_desc_t QKbuff_md;
-    std::vector<dim_t> qkDims = {rtQbuff_mdw.dims()[0], rtQbuff_mdw.dims()[1], rtQbuff_mdw.dims()[2], rtKbuff_mdw.dims()[3]};
-    zendnn::impl::dims_t qkStrides{qkDims[1]*qkDims[2]*qkDims[3], qkDims[2]*qkDims[3], qkDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&QKbuff_md, qkDims.size(), qkDims.data(), zendnn::impl::data_type::f32, qkStrides);
-    memory_desc_wrapper QKbuff_mdw(QKbuff_md);
-    auto scp_qk = scratchpad_buf_base + (temp_buff_size + qbuff_size + kbuff_size + vbuff_size);
-#ifdef DEBUG_ATTN
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scratchpad_buf_base : ", scratchpad_buf_base);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] temp_buff_size + qbuff_size + kbuff_size + vbuff_size : ", temp_buff_size + qbuff_size + kbuff_size + vbuff_size);
-    zendnnInfo(ZENDNN_CORELOG,"[Custom] scp_qk : ", scp_qk);
-#endif
-    zendnn::impl::cpu::attention::zenAttention_Matmul(scp_qtBuff, rtQbuff_mdw,
-                                                      scp_ktBuff, rtKbuff_mdw,
-                                                      scale,
-                                                      nullptr, bias_value_mdw,
-                                                      scp_qk, QKbuff_mdw);
-
-    /* Mask memory setup */
-    zendnn_memory_desc_t mask_md = *(pd()->src_md(ZENDNN_ARG_MASK));
-    //mask_reshape
-    std::vector<dim_t> maskDims = {mask_mdw.dims()[0], 1, 1, mask_mdw.dims()[1]};
-    memory_desc_t rMask_md;
-    reshapeSts = zendnn_memory_desc_reshape(&rMask_md, (const zendnn_memory_desc_t*)&mask_md, maskDims.size(), (const zendnn_dim_t *)maskDims.data());
-    if(reshapeSts != zendnn_success)
-        zendnnInfo(ZENDNN_CORELOG,"[Custom] reshape unsuccessfull. Re-check!!: ");
-    /* Transform mask memory for masking AND add to QKBuffer */
-    zendnn::impl::cpu::attention::zenAttention_TransformAddMask(scp_qk, QKbuff_md, mask, rMask_md, scratchpad_buf_base);
-    /* Applying softmax */
-    zendnn::impl::cpu::attention::zenAttention_Softmax(scp_qk, QKbuff_md, 3);
 
     /* Intermediate QK'V buffer memory setup */
     memory_desc_t QKVbuff_md;
     std::vector<dim_t> qkvDims = {QKbuff_mdw.dims()[0], QKbuff_mdw.dims()[1], QKbuff_mdw.dims()[2], rtVbuff_mdw.dims()[3]};
     zendnn::impl::dims_t qkvStrides{qkvDims[1]*qkvDims[2]*qkvDims[3], qkvDims[2]*qkvDims[3], qkvDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&QKVbuff_md, qkvDims.size(), qkvDims.data(), zendnn::impl::data_type::f32, qkvStrides);
+    zendnn_memory_desc_init_by_strides(&QKVbuff_md, qkvDims.size(), qkvDims.data(), dta, qkvStrides);
     memory_desc_wrapper QKVbuff_mdw(QKVbuff_md);
-    zendnn::impl::cpu::attention::zenAttention_Matmul(scp_qk, QKbuff_mdw,
-                                                      scp_vtBuff, rtVbuff_mdw,
-                                                      1.0f,
-                                                      nullptr, bias_value_mdw,
-                                                      scratchpad_buf_base, QKVbuff_mdw);
+
+    attn_opn_type_t* qkv_buff = scp_bnsh_0;
+
+    if(attn_opn_type == data_type::f32) {
+        zendnn::impl::cpu::attention::zenAttention_Matmul((float *)qk_buff, QKbuff_mdw,
+                                                        (float *)scp_vtBuff, rtVbuff_mdw,
+                                                        1.0f,
+                                                        nullptr, bias_value_mdw,
+                                                        (float *)qkv_buff, QKVbuff_mdw);
+    }
+
+    else if(attn_opn_type == data_type::s16){
+        memory_desc_t QKbuff_bf16_md;
+
+        zendnn_memory_desc_init_by_strides(&QKbuff_bf16_md, qkDims.size(), qkDims.data(), zendnn::impl::data_type::bf16, qkStrides);
+        memory_desc_wrapper QKbuff_bf16_mdw(QKbuff_bf16_md);
+
+        attn_opn_type_t *scp_bnss_1 = scratchpad.template get<attn_opn_type_t>(memory_tracking::names::key_attention_BNSS_1);
+
+        zendnn::impl::cpu::attention::zenAttention_Reorder_float_to_bf16(qk_buff , QKbuff_md, (int16_t *)scp_bnss_1, QKbuff_bf16_md);
+
+        zendnn::impl::cpu::attention::zenAttention_Matmul((int16_t *)scp_bnss_1, QKbuff_bf16_mdw,
+                                                        (int16_t *)scp_vtBuff, rtVbuff_mdw,
+                                                        1.0f,
+                                                        nullptr, bias_value_mdw,
+                                                        (int16_t *)qkv_buff, QKVbuff_mdw);
+    }
+
     //Dst traspose
     memory_desc_t tDst_md;
     std::vector<int> dstPerm{0, 2, 1, 3};
@@ -603,9 +1004,9 @@ ref_attention_t<data_type>::execute_ref(const exec_ctx_t &ctx) const {
         tDstDims.push_back(QKVbuff_mdw.dims()[dstPerm[i]]);
     }
     zendnn::impl::dims_t tDstStrides{tDstDims[1]*tDstDims[2]*tDstDims[3], tDstDims[2]*tDstDims[3], tDstDims[3], 1};
-    zendnn_memory_desc_init_by_strides(&tDst_md, tDstDims.size(), tDstDims.data(), zendnn::impl::data_type::f32, tDstStrides);
+    zendnn_memory_desc_init_by_strides(&tDst_md, tDstDims.size(), tDstDims.data(), dta, tDstStrides);
     memory_desc_wrapper tDst_mdw(tDst_md);
-    zendnn::impl::cpu::attention::zenAttention_Transpose(scratchpad_buf_base, QKVbuff_md, dst, tDst_md, dstPerm);
+    zendnn::impl::cpu::attention::zenAttention_Transpose(scp_bnsh_0, QKVbuff_md, dst, tDst_md, dstPerm);
 
     //Dst reshape is not reqiured as only the dst memory descriptor changes come-in
     return status;

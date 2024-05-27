@@ -30,12 +30,18 @@ using namespace zendnn::impl::prop_kind;
 
 /* add new primitive */
 // clang-format off
-const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
-    static const std::map<pk_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_ATTENTION_P({
-        {{forward}, {
-            //CPU_INSTANCE(flash_attention_v2<f32>)
-            //CPU_INSTANCE(flash_attention_v1<f32>)
+const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map() {
+    static const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> the_map = REG_ATTENTION_P({
+        {{forward, f32, f32, f32}, {
             CPU_INSTANCE(ref_attention_t<f32>)
+            /* eol */
+            nullptr,
+        }},
+        {{forward, bf16, bf16, bf16}, {
+            //Using zendnn type s16 as it returns int16_t type.
+            //Attention primitive operations including blas matrix multiplications for bf16 type is
+            //internally executed with int16_t type.
+            CPU_INSTANCE(ref_attention_t<s16>)
             /* eol */
             nullptr,
         }},
@@ -54,7 +60,13 @@ const impl_list_item_t *get_attention_impl_list(
             desc->prop_kind, forward_training, forward_inference);
     prop_kind_t prop_kind = is_fwd ? forward : backward;
 
-    pk_impl_key_t key {prop_kind};
+    /* We can either define a new key struture like pk_dt_impl_key_t for attention, or use the simpler one defined for conv. */
+    pk_dt_impl_key_t key {
+            prop_kind,
+            desc->query_desc.data_type,
+            desc->weights_query_desc.data_type,
+            desc->dst_desc.data_type,
+    };
 
     const auto impl_list_it = impl_list_map().find(key);
     return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()

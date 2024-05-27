@@ -294,6 +294,10 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_multihead_attention_f32.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
+	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_attention_multihead_bf16 $(INCDIRS) \
+		-Itests/api_tests tests/api_tests/zendnn_multihead_attention_bf16.cpp -L_out/lib -lamdZenDNN \
+		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) \
+		$(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \

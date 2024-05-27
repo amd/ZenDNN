@@ -78,6 +78,9 @@ zendnn_attention_desc_init(attention_desc_t *desc,
     attn.weights_query_desc = *weights_query_desc;
     attn.weights_key_desc   = *weights_key_desc;
     attn.weights_value_desc = *weights_value_desc;
+    attn.bias_query_desc    = *bias_query_desc;
+    attn.bias_key_desc      = *bias_key_desc;
+    attn.bias_value_desc    = *bias_value_desc;
     attn.mask_desc          = *mask_desc;
     attn.dst_desc           = *dst_desc;
     attn.scale              =  scale;

@@ -276,7 +276,12 @@ enum {
     key_wino_U,
     key_wino_V,
     key_wino_M,
-    key_attention,
+    key_attention_BNSH_0,
+    key_attention_BNSH_1,
+    key_attention_BNSH_2,
+    key_attention_BNSS, //encoder MHA specific
+    key_attention_BNSS_1, //encoder MHA specific
+    key_attention_BS, //encoder MHA specific
     // These two keys should always be the last ones,
     // even though they are not in alphabetical order
     key_nested,
