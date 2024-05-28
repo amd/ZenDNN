@@ -73,7 +73,6 @@ void zenMatMul_gemm_blocked(
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     if (!transpose_filter && !transpose_input) {
-#ifdef ZENDNN_ENABLE_LPGEMM
         zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
         Key_matmul key_obj;
@@ -105,21 +104,12 @@ void zenMatMul_gemm_blocked(
 
         //Weight caching based on is_weights_const
         if (!is_weights_const || found_obj == matmul_weight_caching_map.end()) {
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
-            zendnnVerbose(ZENDNN_PROFLOG,"BLIS 4.2 enabled");
+            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
             siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
                                               order, trans, reorder_param0, reorder_param1, reorder_param2);
             reorder_filter = (float_t *) aligned_alloc(64, b_reorder_buf_siz_req);
             aocl_reorder_f32f32f32of32(order, trans, 'B', filter, reorder_filter, k,
                                        n, ldb);
-#else
-            zendnnVerbose(ZENDNN_PROFLOG,"BLIS 4.1 enabled");
-            siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
-                                              reorder_param0, reorder_param1, reorder_param2);
-            reorder_filter = (float_t *) aligned_alloc(64, b_reorder_buf_siz_req);
-            aocl_reorder_f32f32f32of32('B', filter, reorder_filter, k,
-                                       n, ldb);
-#endif
             //Create new entry
             map_mutex.lock();
             matmul_weight_caching_map[key_obj] = reorder_filter;
@@ -129,8 +119,6 @@ void zenMatMul_gemm_blocked(
             reorder_filter = matmul_weight_caching_map[key_obj];
         }
 
-
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
         // Currently 4.2 blis post ops are used
         int postop_count = 0;
         if (bias != NULL) {
@@ -201,7 +189,6 @@ void zenMatMul_gemm_blocked(
             }
             post_ops->seq_length = postop_count;
         }
-#endif
         //Perform MatMul using AMD BLIS
         aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                                 transpose_input ? 't' : 'n',
@@ -211,7 +198,6 @@ void zenMatMul_gemm_blocked(
                                 output, ldc,
                                 post_ops);
 
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
         // Currently 4.2 blis post ops are used
         // Free memory for postops.
         if (bias != NULL) {
@@ -228,30 +214,6 @@ void zenMatMul_gemm_blocked(
         if (!is_weights_const) {
             free(reorder_filter);
         }
-#else
-        // ZenDNN post ops used when 4.1 BLIS is used
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty, alpha);
-        }
-#endif
-
-#else
-        zendnnVerbose(ZENDNN_PROFLOG,"Custom blis is not used");
-        cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
-                    transpose_input ? CblasTrans : CblasNoTrans,
-                    transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
-                    input, lda, filter, ldb, beta, output, ldc);
-
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty, alpha);
-        }
-#endif
     }
     else {
         zendnnVerbose(ZENDNN_PROFLOG,"cblas is used");

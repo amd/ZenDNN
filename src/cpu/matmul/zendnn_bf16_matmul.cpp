@@ -99,7 +99,6 @@ void zenMatMul_gemm_bf16bf16f32of32(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
     Key_matmul key_obj;
     key_obj.transpose_input = transpose_input;
     key_obj.transpose_weights = transpose_filter;
@@ -249,7 +248,6 @@ void zenMatMul_gemm_bf16bf16f32of32(
     if (!is_weights_const) {
         free(reorder_filter);
     }
-#endif
 }
 
 void zenMatMul_gemm_bf16bf16f32obf16(
@@ -276,7 +274,6 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
     Key_matmul key_obj;
     key_obj.transpose_input = transpose_input;
     key_obj.transpose_weights = transpose_filter;
@@ -490,7 +487,6 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     if (!is_weights_const) {
         free(reorder_filter);
     }
-#endif
 }
 
 namespace zendnn {
@@ -688,7 +684,6 @@ int matmul_bf16_wrapper(
     obj.is_log = true;
     float *bias_f32 = NULL;
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM) {
-#ifdef ZENDNN_ENABLE_LPGEMM_V4_2
         //creating float memory for bf16 bias
         if (bias!=NULL && bias_type == data_type::bf16) {
             bias_f32 = (float *)calloc(N, sizeof(float));
@@ -716,16 +711,6 @@ int matmul_bf16_wrapper(
         if (bias_type == data_type::bf16 && bias!=NULL) {
             free(bias_f32);
         }
-#else
-        //CALL BRGEMM Primitive
-        obj.is_brgemm = true;
-        zenMatMulPrimitiveBF16(zenEnvObj, dst_type, bias_type, Layout, transA, transB,
-                               M, N, K,
-                               src, weights, bias, dst, alpha, beta, lda, ldb, ldc, has_eltwise_relu,
-                               geluType, false, is_weights_const);
-        obj.is_log = false;
-        obj.is_brgemm = false;
-#endif
     }
     else if (zenEnvObj.zenBF16GEMMalgo ==
              zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT) {
