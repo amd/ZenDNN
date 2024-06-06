@@ -82,6 +82,9 @@ enum zenBF16MatMulAlgoType {
     MATMUL_AOCL_GEMM = 1,
     MATMUL_BLOCKED_JIT = 2,
     MATMUL_JIT = 3,
+    MATMUL_AOCL_GEMM_PAR = 4,
+    MATMUL_BLOCKED_JIT_PAR = 5,
+    MATMUL_JIT_PAR = 6,
 };
 
 // enum containing all supported convolution algo types
@@ -161,10 +164,13 @@ class zendnnEnv {
         // 1. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM)
         // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT)
         // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT)
+        // 4. AOCL GEMM - Parallel Implementation (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_PAR)
+        // 5. BLOCKED JIT Parallel - MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR)
+        // 6. JIT Parallel - MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR)
 
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
-        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT) {
-            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT;
+        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT_PAR) {
+            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_PAR;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
         //use ZENDNN_ENABLE_ONNX_MEMPOOL for ONNX
