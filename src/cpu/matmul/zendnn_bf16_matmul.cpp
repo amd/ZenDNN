@@ -171,7 +171,16 @@ void zenMatMul_gemm_bf16bf16f32of32(
         if (bias != NULL) {
             // Add bias postop
             post_ops->seq_vector[post_op_i++] = BIAS;
-            post_ops->bias.bias = (float *)bias;
+            // Multiplying aplha with bias in the Blis path to make the computation same as JIT.
+            // TODO (zendnn) : Handle this with the scale from Blis and make alpha as dummy.
+            float* bias_ = new float[n]();
+            if(alpha != 1.0f) {
+                #pragma omp parallel for num_threads(thread_qty)
+                for (int i = 0; i < n; i++) {
+                    bias_[i] = alpha * bias[i];
+                }
+            }
+            post_ops->bias.bias = (alpha!=1.0f) ? bias_ : bias;
         }
 
         if (relu) {
@@ -357,7 +366,16 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         if (bias != NULL) {
             // Add bias postop
             post_ops->seq_vector[post_op_i++] = BIAS;
-            post_ops->bias.bias = (float *)bias;
+            // Multiplying aplha with bias in the Blis path to make the computation same as JIT.
+            // TODO (zendnn) : Handle this with the scale from Blis and make alpha as dummy.
+            float* bias_ = new float[n]();
+            if(alpha != 1.0f) {
+                #pragma omp parallel for num_threads(thread_qty)
+                for (int i = 0; i < n; i++) {
+                    bias_[i] = alpha * bias[i];
+                }
+            }
+            post_ops->bias.bias = (alpha!=1.0f) ? bias_ : bias;
         }
 
         if (relu != 0) {
