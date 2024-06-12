@@ -324,7 +324,7 @@ int main(int argc, char *argv[]) {
                                           eb_per_sample_weights_opt, eb_per_sample_weights_defined,
                                           eb_include_last_offset, eb_padding_idx, grp_eb_out_mem, mlp_input_mem,
                                           mlp_weight_mem, mlp_bias, mlp_alpha, mlp_beta, mlp_bias_defined, mlp_fuse,
-                                          grp_mlp_out_mem);
+                                          grp_mlp_out_mem,"lib::zendnn_grp_ebag_mlp");
 
     //Compare embedding bag results
     // Read data from memory object for the final output

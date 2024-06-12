@@ -1095,7 +1095,7 @@ static std::string init_info_embedding_bag(const engine_t *e, pd_t *pd) {
     ss << "dst_" << dst_md << ",";
 
     ss << pd->attr() << ",,";
-    ss << md2dim_str(dst_md);
+    ss << md2dim_str(dst_md) << ";";
 
     ss << "alg:" << pd->desc()->alg_kind << ",";
 

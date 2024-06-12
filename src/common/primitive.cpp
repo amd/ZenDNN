@@ -111,7 +111,8 @@ status_t primitive_create(primitive_iface_t **primitive_iface,
     // leads to penaly for latency measurements. Environment variable
     // ZENDNN_PRIMITIVE_LOG_ENABLE can be used to optionally enable below
     // primitive log.
-    if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1) {
+    if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1 ||
+            zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 2) {
         double start_ms = get_msec();
         CHECK(primitive_desc_iface->create_primitive_iface(
                   p_iface, cache_blob));
@@ -126,9 +127,14 @@ status_t primitive_create(primitive_iface_t **primitive_iface,
         if (get_verbose_timestamp()) {
             stamp = "," + std::to_string(start_ms);
         }
-        zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_create,", stamp.c_str(),
-                   str, p_iface.first->pd()->info(), ",", duration_ms,  ",ms");
+        if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1)
+            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_create,", stamp.c_str(),
+                       str, p_iface.first->pd()->info(), ",", duration_ms,  ",ms");
+        else
+            zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_create,", stamp.c_str(),
+                       str, p_iface.first->pd()->info(), ",", duration_ms,  ",ms");
     }
+
     else {
         CHECK(primitive_desc_iface->create_primitive_iface(
                   p_iface, cache_blob));
