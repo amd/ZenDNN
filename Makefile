@@ -114,24 +114,25 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 #Milan processors  : 7xx3
 
 ZNVER=znver2 #Default value
+AVX512_EB_EN = 0
+AVX512_BF16_EN = 0
 ifeq ($(FORCE_ARCH), 0)
-	EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, 4);}') # last arch digit
-	AVX512_EB_EN=0
-	ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "4"
-		AVX512_EB_EN=1
-		AVX512_FLAG=-mavx512f
-		ZNVER=znver4 #For Genoa
-	else ifeq "$(EPYC_FAMILY_LAST_DIGIT)" "3"
-		ZNVER=znver3 #For Milan
-	endif
+    EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, length($$6), 1)}')
+    ifeq ($(EPYC_FAMILY_LAST_DIGIT), 4)
+        AVX512_EB_EN = 1
+        AVX512_FLAG = -mavx512f
+    else ifeq ($(EPYC_FAMILY_LAST_DIGIT), 3)
+        ZNVER=znver3 # For Milan
+    endif
 else ifeq ($(FORCE_ARCH), 3)
-	ZNVER=znver3 #For Milan
+    ZNVER=znver3 # For Milan
 else ifeq ($(FORCE_ARCH), 4)
-	ZNVER=znver4
-	AVX512_EB_EN=1
-	AVX512_FLAG=-mavx512f
-	AVX512_BF16_FLAG=-mavx512bf16
-	GXX_COMPILER=g++-13
+    ZNVER=znver4 # For Genoa
+    AVX512_EB_EN=1
+    AVX512_BF16_EN=1
+    AVX512_FLAG=-mavx512f
+    AVX512_BF16_FLAG=-mavx512bf16
+    GXX_COMPILER=g++-13
 endif
 
 ifeq ($(RELEASE), 0)

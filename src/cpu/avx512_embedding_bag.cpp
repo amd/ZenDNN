@@ -133,7 +133,8 @@ avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
  */
 template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params) const {
+avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params)
+const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
@@ -481,7 +482,7 @@ avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params) const 
             ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
             std::vector<dst_type> sum(width,0.0);
-            for (auto i = ofirst; i < olast; ++i){
+            for (auto i = ofirst; i < olast; ++i) {
                 uint32_t input_offset = indices[i]*width;
                 emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
             }
@@ -498,7 +499,8 @@ avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params) const 
  */
 template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_sum_wt(const emb_params_t &params) const {
+avx512_embedding_bag_t<data_type>::avx512_sum_wt(const emb_params_t &params)
+const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     float        const *wts      = static_cast<float *>(params.weights);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
@@ -864,7 +866,8 @@ avx512_embedding_bag_t<data_type>::avx512_sum_wt(const emb_params_t &params) con
  */
 template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_mean(const emb_params_t &params) const {
+avx512_embedding_bag_t<data_type>::avx512_mean(const emb_params_t &params)
+const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
@@ -1252,7 +1255,8 @@ avx512_embedding_bag_t<data_type>::avx512_mean(const emb_params_t &params) const
  */
 template<data_type_t data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_max(const emb_params_t &params) const {
+avx512_embedding_bag_t<data_type>::avx512_max(const emb_params_t &params)
+const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
     offsets_type       *offsets  = static_cast<offsets_type *>(params.offsets);
@@ -1697,8 +1701,11 @@ avx512_embedding_bag_t<data_type>::avx512_max(const emb_params_t &params) const 
     }
     return status::success;
 }
-template struct avx512_embedding_bag_t<f32>;
-template struct avx512_embedding_bag_t<s16>;
+#if AVX512_BF16_EN
+    template struct avx512_embedding_bag_t<s16>;
+#else
+    template struct avx512_embedding_bag_t<f32>;
+#endif
 } //namespace cpu
 }
 }
