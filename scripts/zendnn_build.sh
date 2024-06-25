@@ -53,6 +53,16 @@ then
     return
 fi
 
+#check for libxsmm sanity
+if [ "$ZENDNN_ENABLE_TPP" = "1" ];
+then
+    if [ -z ${ZENDNN_LIBXSMM_PATH+x} ];
+    then
+        echo "Error: Environment variable ZENDNN_LIBXSMM_PATH is not set. (TPP requires libxsmm)"
+        return
+    fi
+fi
+
 #echo "make clean"
 #make clean
 

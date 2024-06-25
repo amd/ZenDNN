@@ -313,6 +313,19 @@ echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
 export ZENDNN_PRIMITIVE_LOG_ENABLE=0
 echo "ZENDNN_PRIMITIVE_LOG_ENABLE: $ZENDNN_PRIMITIVE_LOG_ENABLE"
 
+export ZENDNN_ENABLE_TPP=1
+echo "ZENDNN_ENABLE_TPP: $ZENDNN_ENABLE_TPP"
+
+if [ "$ZENDNN_ENABLE_TPP" = "1" ];
+then
+    if [ -z ${ZENDNN_LIBXSMM_PATH+x} ];
+    then
+        echo "ZENDNN_LIBXSMM_PATH is not set. (TPP requires libxsmm)"
+    else
+        echo "ZENDNN_LIBXSMM_PATH : $ZENDNN_LIBXSMM_PATH"
+    fi
+fi
+
 # Default location for benchmark data.
 export ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC=FALSE
 echo "ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC: $ZENDNN_TEST_USE_COMMON_BENCHMARK_LOC"
@@ -329,6 +342,17 @@ then
     export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib/LP64:$LD_LIBRARY_PATH
 else
     export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib:$LD_LIBRARY_PATH
+fi
+
+if [ "$ZENDNN_ENABLE_TPP" = "1" ];
+then
+    echo -n "checking and adding ZENDNN_LIBXSMM path..."
+    if [ ! -z ${ZENDNN_LIBXSMM_PATH+x} ];
+    then
+        export LD_LIBRARY_PATH=$ZENDNN_LIBXSMM_PATH/lib/:$LD_LIBRARY_PATH
+    else
+        echo "ZENNDNN_LIBXSMM_PATH not set."
+    fi
 fi
 
 export LD_LIBRARY_PATH=$ZENDNN_GIT_ROOT/_out/lib/:$ZENDNN_GIT_ROOT/external/googletest/lib:$LD_LIBRARY_PATH
