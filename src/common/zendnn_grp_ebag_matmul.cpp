@@ -22,6 +22,10 @@
 #include "zendnn_logging.hpp"
 #include "verbose.hpp"
 #include <string.h>
+#include <omp.h>
+#include <future>
+#include <thread>
+#include <blis.h>
 
 namespace zendnn {
 
@@ -154,15 +158,85 @@ void zendnn_custom_op::zendnn_grp_mlp(
 
     else {
         mlp_type="parallel";
-        for (int i = 0; i < num_ops; i++) {
+        const int num_outer_threads = z_input.size();
+        uint  mlp_thread_type;
+        mlp_thread_type = zendnn_getenv_int("ZENDNN_MLP_THREAD_TYPE", 0);
 
-            // If alpha = 0, does not need to actually do gemm computation
-            if (z_alpha[i]==0) {
-                set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
-                continue;
+        //This is the experimental path to perform multi-level parallelism
+        zendnnEnv zenEnvObj = readEnv();
+        unsigned int mlp_thread_qty = zenEnvObj.omp_num_threads;
+        unsigned int rem = mlp_thread_qty % num_outer_threads;
+
+        if (mlp_thread_type==1) {
+            omp_set_max_active_levels(2);
+            #pragma omp parallel num_threads(num_outer_threads)
+            {
+                unsigned int inner_threads = mlp_thread_qty/num_outer_threads;
+                unsigned int threadOffset = omp_get_thread_num();
+                if (threadOffset < rem) {
+                    inner_threads++;
+                }
+                bli_thread_set_num_threads(inner_threads);
+                // If alpha = 0, does not need to actually do gemm computation
+                if (z_alpha[threadOffset]==0) {
+                    set_z_result(z_alpha[threadOffset], z_beta[threadOffset],
+                                 z_bias_defined[threadOffset], z_bias[threadOffset], z_result[threadOffset]);
+                }
+                else {
+                    zen_matmul_impl(z_input[threadOffset], z_weight[threadOffset],
+                                    z_bias[threadOffset], z_alpha[threadOffset], z_beta[threadOffset],
+                                    z_bias_defined[threadOffset], z_fuse[threadOffset], z_result[threadOffset], eng,
+                                    stream, plugin_op);
+                }
             }
-            zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                            z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+        }
+        else if (mlp_thread_type==2) {
+            std::vector<std::future<void>> futures;
+            for (int i = 0; i < num_outer_threads; i++) {
+
+                // If alpha = 0, does not need to actually do gemm computation
+                if (z_alpha[i]==0) {
+                    set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
+                    continue;
+                }
+                // Launch the top-level threads asynchronously
+                futures.push_back(std::async(std::launch::async,zen_matmul_impl, z_input[i],
+                                             z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
+                                             z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op));
+            }
+            for (auto &fut : futures) {
+                fut.get();
+            }
+        }
+        else if (mlp_thread_type==3) {
+            std::vector<std::thread> threads;
+            for (int i = 0; i < num_outer_threads; i++) {
+
+                // If alpha = 0, does not need to actually do gemm computation
+                if (z_alpha[i]==0) {
+                    set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
+                    continue;
+                }
+                threads.emplace_back(zen_matmul_impl, z_input[i], z_weight[i], z_bias[i],
+                                     z_alpha[i], z_beta[i],
+                                     z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+            }
+            for (auto &thread : threads) {
+                thread.join();
+            }
+
+        }
+        else {
+            for (int i = 0; i < num_outer_threads; i++) {
+
+                // If alpha = 0, does not need to actually do gemm computation
+                if (z_alpha[i]==0) {
+                    set_z_result(z_alpha[i], z_beta[i], z_bias_defined[i], z_bias[i], z_result[i]);
+                    continue;
+                }
+                zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
+                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+            }
         }
     }
     double duration_ms = impl::get_msec() - start_ms;
@@ -232,7 +306,8 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
     }
     zendnnVerbose(ZENDNN_PROFLOG,
                   "zendnn_custom_op_execute,cpu,plugin_op:",plugin_op,",",
-                  "num_ops:","matmuls=",z_mm_result.size()," ","eb=",z_eb_input.size(),",","dims:",
+                  "num_ops:","matmuls=",z_mm_result.size()," ","eb=",z_eb_input.size(),",",
+                  "dims:",
                   ",","alg:mlp=",mlp_type," ","eb=",
                   eb_type,",",
                   duration_ms,",ms");
