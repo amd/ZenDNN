@@ -1701,10 +1701,10 @@ const {
     }
     return status::success;
 }
+
+template struct avx512_embedding_bag_t<f32>;
 #if AVX512_BF16_EN
     template struct avx512_embedding_bag_t<s16>;
-#else
-    template struct avx512_embedding_bag_t<f32>;
 #endif
 } //namespace cpu
 }
