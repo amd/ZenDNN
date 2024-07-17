@@ -102,6 +102,12 @@ struct memory_desc_wrapper : public c_compatible {
     /** return the size of data type (a shortcut) */
     size_t data_type_size() const { return types::data_type_size(data_type()); }
 
+    /** For sub-byte data types returns number of elements per byte.
+     * For the rest data types returns 1. */
+    size_t sub_byte_data_type_multiplier() const {
+        if (utils::one_of(data_type(), data_type::s4, data_type::u4)) return 2;
+        return 1;
+    }
     /** return the size of data type of additional buffer */
     size_t additional_buffer_data_size(uint64_t flag_select) const {
         if (flag_select & memory_extra_flags::compensation_conv_s8s8)
@@ -194,7 +200,7 @@ struct memory_desc_wrapper : public c_compatible {
                 max_size = utils::array_product(bd.inner_blks, bd.inner_nblks);
             }
 
-            size_t data_size = max_size * data_type_size();
+            size_t data_size = ceil(1.0 * max_size * data_type_size() / sub_byte_data_type_multiplier());
             if (is_additional_buffer()) {
                 // The additional buffers, typically of data type int32_t, float
                 // are stored at the end of data. Pad the data, so that the
@@ -228,7 +234,7 @@ struct memory_desc_wrapper : public c_compatible {
         if (utils::one_of(format_kind(), format_kind::undef, format_kind::any))
             return false;
         if (has_runtime_dims_or_strides() || has_broadcast()) return false;
-        return nelems(with_padding) * data_type_size() == size();
+        return nelems(with_padding) * data_type_size() / sub_byte_data_type_multiplier() == size();
     }
 
     /** returns true if format is set to `any` */

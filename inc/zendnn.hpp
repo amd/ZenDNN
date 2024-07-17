@@ -1383,6 +1383,10 @@ struct memory : public handle<zendnn_memory_t> {
         s8 = zendnn_s8,
         /// 8-bit unsigned integer.
         u8 = zendnn_u8,
+        /// 4-bit signed integer.
+        s4 = zendnn_s4,
+        /// 4-bit unsigned integer.
+        u4 = zendnn_u4,
     };
 
     /// Returns size of data type in bytes.
@@ -3617,6 +3621,13 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
         error::wrap_c_api(zendnn_primitive_attr_set_autoTunerEnable(
                               get(), autoTunerFlag),
                           "could not set autoTuner Enable primitive attribute");
+    }
+
+    /// Sets woq weight sacle.
+    void set_woq_scale(int mask, const std::vector<float> &scales) {
+        error::wrap_c_api(zendnn_primitive_attr_set_woq_weight_scale(
+                              get(), (zendnn_dim_t)scales.size(), mask, scales.data()),
+                          "could not set WOQ weight scale primitive attribute");
     }
 
     /// Sets PLUGIN Op name.

@@ -33,6 +33,7 @@
 
 #include "bfloat16.hpp"
 #include "float16.hpp"
+#include "int4.hpp"
 #include "internal_defs.hpp"
 #include "z_magic.hpp"
 
@@ -173,6 +174,28 @@ struct numeric_limits<float16_t> {
     }
 };
 
+template <>
+struct numeric_limits<uint4_t> {
+    static constexpr uint4_t lowest() { return uint4_t(0); }
+
+    static constexpr uint4_t max() { return uint4_t(15); }
+
+    static constexpr int digits = 4;
+
+    static constexpr uint4_t epsilon() { return uint4_t(0); }
+};
+
+template <>
+struct numeric_limits<int4_t> {
+    static constexpr int4_t lowest() { return int4_t(-8); }
+
+    static constexpr int4_t max() { return int4_t(7); }
+
+    static constexpr int digits = 4;
+
+    static constexpr int4_t epsilon() { return int4_t(0); }
+};
+
 template <typename T>
 struct is_integral {
     static constexpr bool value = false;
@@ -191,6 +214,14 @@ struct is_integral<int8_t> {
 };
 template <>
 struct is_integral<uint8_t> {
+    static constexpr bool value = true;
+};
+template <>
+struct is_integral<int4_t> {
+    static constexpr bool value = true;
+};
+template <>
+struct is_integral<uint4_t> {
     static constexpr bool value = true;
 };
 

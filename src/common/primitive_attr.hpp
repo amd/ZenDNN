@@ -723,6 +723,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                   other.rnn_weights_projection_qparams_));
         CHECK(rnn_tparams_.copy_from(other.rnn_tparams_));
         autoTunerEnable = other.autoTunerEnable;
+        CHECK(woqScales_.copy_from(other.woqScales_));
         plugin_op = other.plugin_op;
         return status::success;
     }
@@ -768,7 +769,8 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                    == rhs.rnn_weights_projection_qparams_
                    && rnn_tparams_ == rhs.rnn_tparams_
                    && autoTunerEnable == rhs.autoTunerEnable
-                   && plugin_op == rhs.plugin_op;
+                   && plugin_op == rhs.plugin_op
+                   && woqScales_ == rhs.woqScales_;
         return ret;
     }
 
@@ -817,6 +819,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn::impl::rnn_tparams_t rnn_tparams_;
     bool autoTunerEnable;
     std::string plugin_op;
+    zendnn::impl::scales_t woqScales_;
 
     zendnn_primitive_attr &operator=(const zendnn_primitive_attr &other) = delete;
 };

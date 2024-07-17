@@ -58,7 +58,7 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
     };
 
     bool ok = src_md()->data_type == src_type
-              && weights_md()->data_type == weights_type
+              && utils::one_of(weights_md()->data_type, f32, s8, s4)
               && desc()->accum_data_type == acc_type
               && dst_md()->data_type == dst_type && check_bias()
               && attr()->has_default_values(
@@ -68,12 +68,15 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
               && gemm_based::check_gemm_compatible_formats(*this);
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2 &&
+            weights_md()->data_type == f32) {
         return status::unimplemented;
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm) return status::unimplemented;
+    if (obj.is_brgemm) {
+        return status::unimplemented;
+    }
 
     if (!ok) {
         return status::unimplemented;
@@ -282,7 +285,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const gemm_based::params_t &params = pd()->params();
     zendnnEnv zenEnvObj = readEnv();
-    bool is_weights_const = zenEnvObj.zenWeightCache || pd()->weights_md()->is_memory_const;
+    bool is_weights_const = zenEnvObj.zenWeightCache ||
+                            pd()->weights_md()->is_memory_const;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
@@ -342,6 +346,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
+    float *output_scales = pd()->attr()->output_scales_.scales_;
+    int scale_size = pd()->attr()->output_scales_.count_;
     std::vector<int> dst_off;
     std::vector<int> ip_off;
     std::vector<int> wei_off;
@@ -362,7 +368,22 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int *dst_offsets = dst_off.data();
     int *weight_offsets = wei_off.data();
 
-    if ((float *)bias == NULL) {
+    int weights_type = pd()->weights_md()->data_type;
+
+    if (weights_type == s4 || weights_type == s8) {
+        float *woq_scales {nullptr};
+        woq_scales = pd()->attr()->woqScales_.scales_;
+        int woq_scale_size = pd()->attr()->woqScales_.count_;
+        matmul_woq_wrapper(ctx, zendnn_f32, weights_type, zendnn_f32, zendnn_f32, Layout,
+                           strcmp(transA, "N"),
+                           strcmp(transB, "N"),
+                           M, K, N, alpha, (char *)src, lda, (char *)weights, ldb,
+                           bias == NULL ? NULL :(char *)bias,
+                           pd()->attr()->post_ops_, has_eltwise_relu,
+                           geluType, beta, (char *)dst, ldc, woq_scales, 0/*zp*/,
+                           woq_scale_size, beta, is_weights_const);
+    }
+    else if ((float *)bias == NULL) {
         //MatMul without Bias
         zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
                   weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,

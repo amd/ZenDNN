@@ -94,6 +94,8 @@ inline size_t data_type_size(data_type_t data_type) {
         case s16: return sizeof(prec_traits<s16>::type);
         case s8: return sizeof(prec_traits<s8>::type);
         case u8: return sizeof(prec_traits<u8>::type);
+        case s4: return sizeof(prec_traits<s4>::type);
+        case u4: return sizeof(prec_traits<s4>::type);
         case data_type::undef:
         default: assert(!"unknown data_type");
     }
@@ -113,6 +115,8 @@ inline T max_value(data_type_t data_type) {
         CASE(s16);
         CASE(s8);
         CASE(u8);
+        CASE(s4);
+        CASE(u4);
         case data_type::undef:
         default: assert(!"unknown data_type");
     }
@@ -133,6 +137,8 @@ inline float max_value(data_type_t data_type) {
         CASE(bf16);
         CASE(s8);
         CASE(u8);
+        CASE(s4);
+        CASE(u4);
         // INT_MAX is not representable in float. The nearest float to it is
         // INT_MAX + 1 = 2^31 (0x4f000000). Regular conversion instructions such
         // as `cvtps2dq` or `cvtss2si` will convert this number to INT_MIN
@@ -166,6 +172,8 @@ inline float get_float_value(data_type_t dt, const void *ptr, dim_t idx) {
         CASE(s16);
         CASE(s8);
         CASE(u8);
+        CASE(s4);
+        CASE(u4);
         default: assert(!"bad data_type");
     }
 
@@ -260,7 +268,7 @@ inline data_type_t default_accum_data_type(
     using namespace utils;
     using namespace data_type;
 
-    if (one_of(src_dt, s8, u8) && dst_dt != f32) return s32;
+    if (one_of(src_dt, s8, u8, s4, u4) && dst_dt != f32) return s32;
 
     if (one_of(f16, src_dt, dst_dt)) return f16;
     if (one_of(bf16, src_dt, dst_dt)) return f32;
@@ -282,10 +290,10 @@ inline data_type_t default_accum_data_type(data_type_t src_dt,
     /* prop_kind doesn't matter */
     if (everyone_is(f16, src_dt, wei_dt) && one_of(dst_dt, f16, f32, s8, u8))
         return f16;
-    if (everyone_is(f32, src_dt, wei_dt)) return f32;
+    if (everyone_is(f32, src_dt, wei_dt) || (src_dt == f32 && one_of(wei_dt, s8, s4))) return f32;
 
     if (one_of(prop_kind, forward_training, forward_inference)) {
-        if ((src_dt == u8 || src_dt == s8) && wei_dt == s8) return s32;
+        if ((src_dt == u8 || src_dt == s8) && (wei_dt == s8 || wei_dt == s4)) return s32;
     } else if (prop_kind == backward_data) {
         if (one_of(src_dt, f32, s32, s8, u8) && wei_dt == s8
                 && one_of(dst_dt, s8, u8, s32))
@@ -906,7 +914,7 @@ inline bool memory_desc_sanity_check(int ndims, const dims_t dims,
     if (ndims == 0) return true;
 
     bool ok = dims != nullptr && 0 < ndims && ndims <= ZENDNN_MAX_NDIMS
-            && utils::one_of(data_type, f16, bf16, f32, s32, s16, s8, u8);
+            && utils::one_of(data_type, f16, bf16, f32, s32, s16, s8, u8, s4, u4);
     if (!ok) return false;
 
     bool has_runtime_dims = false;

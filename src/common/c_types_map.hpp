@@ -184,6 +184,8 @@ const data_type_t s32 = zendnn_s32;
 const data_type_t s16 = zendnn_s16;
 const data_type_t s8 = zendnn_s8;
 const data_type_t u8 = zendnn_u8;
+const data_type_t s4 = zendnn_s4;
+const data_type_t u4 = zendnn_u4;
 } // namespace data_type
 
 using fpmath_mode_t = zendnn_fpmath_mode_t;

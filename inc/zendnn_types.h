@@ -80,6 +80,10 @@ typedef enum {
     /// 8-bit unsigned integer.
     zendnn_u8 = 6,
     zendnn_s16 = 7,
+    /// 4-bit signed integer.
+    zendnn_s4 = 8,
+    /// 4-bit signed integer.
+    zendnn_u4 = 9,
 } zendnn_data_type_t;
 
 /// Memory format kind

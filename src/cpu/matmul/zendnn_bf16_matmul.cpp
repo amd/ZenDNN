@@ -1555,7 +1555,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     };
 
     bool ok = src_md()->data_type == src_type
-              && weights_md()->data_type == weights_type
+              && utils::one_of(weights_md()->data_type, bf16, s8, s4)
               && desc()->accum_data_type == acc_type
               && dst_md()->data_type == dst_type
               && platform::has_data_type_support(data_type::bf16) && check_bias()
@@ -1568,12 +1568,14 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
 
     //Return unimplemented if BF16 algo set to 3(MATMUL_JIT)
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT) {
+    if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT &&
+            weights_md()->data_type == bf16) {
         return status::unimplemented;
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm || obj.is_ref_gemm_bf16) {
+    if ((obj.is_brgemm || obj.is_ref_gemm_bf16) &&
+            weights_md()->data_type == bf16) {
         return status::unimplemented;
     }
 
@@ -1709,8 +1711,23 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     int bias_dt = pd()->weights_md(1)->data_type;
+    int src_type = pd()->src_md()->data_type;
+    int weights_type = pd()->weights_md()->data_type;
     int algo_type = zenEnvObj.zenBF16GEMMalgo;
-    if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
+    if (weights_type == s4 || weights_type == s8) {
+        float *woq_scales {nullptr};
+        woq_scales = pd()->attr()->woqScales_.scales_;
+        int woq_scale_size = pd()->attr()->woqScales_.count_;
+        matmul_woq_wrapper(ctx, src_type, weights_type, dst_type, bias_dt, Layout,
+                           strcmp(transA, "N"),
+                           strcmp(transB, "N"),
+                           M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
+                           pd()->attr()->post_ops_, has_eltwise_relu,
+                           geluType, beta, (char *)dst, ldc, woq_scales, 0, woq_scale_size,
+                           beta, is_weights_const);
+        return status::success;
+    }
+    else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
         auto_tuner = true;
         algo_type = auto_compute_matmul_bf16(ctx, zenEnvObj, dst_type, bias_dt,Layout,
                                              strcmp(transA, "N"),strcmp(transB, "N"),

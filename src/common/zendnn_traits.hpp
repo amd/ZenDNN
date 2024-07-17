@@ -74,6 +74,14 @@ template <>
 struct prec_traits<data_type::u8> {
     typedef uint8_t type;
 };
+template <>
+struct prec_traits<data_type::s4> {
+    typedef int4_t type;
+};
+template <>
+struct prec_traits<data_type::u4> {
+    typedef uint4_t type;
+};
 
 template <>
 struct data_traits<float16_t> {
@@ -102,6 +110,14 @@ struct data_traits<int8_t> {
 template <>
 struct data_traits<uint8_t> {
     static constexpr data_type_t data_type = data_type::u8;
+};
+template <>
+struct data_traits<int4_t> {
+    static constexpr data_type_t data_type = data_type::s4;
+};
+template <>
+struct data_traits<uint4_t> {
+    static constexpr data_type_t data_type = data_type::u4;
 };
 
 template <>

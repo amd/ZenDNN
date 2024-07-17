@@ -23,7 +23,7 @@
 #include "utils.hpp"
 #include "zendnn_helper.hpp"
 #include "zendnn_utils.hpp"
-
+#include "memory.hpp"
 #ifndef ZENDNN_PRIVATE_HPP
 #define ZENDNN_PRIVATE_HPP
 
@@ -1155,6 +1155,37 @@ extern "C"
         float do_sum,
         bool is_weights_const
     );
+
+    int matmul_woq_wrapper(
+       const zendnn::impl::exec_ctx_t &ctx,
+       int src_type,
+       int weights_type,
+       int dst_type,
+       int bias_type,
+       const bool Layout,
+       const bool transA,
+       const bool transB,
+       const int M,
+       const int K,
+       const int N,
+       const float alpha,
+       const char *src,
+       const int lda,
+       const char *weights,
+       const int ldb,
+       const char *bias,
+       const zendnn::impl::post_ops_t &po_ops,
+       const bool has_eltwise_relu,
+       const int geluType,
+       const float beta,
+       char *dst,
+       const int ldc,
+       float *wei_scale,
+       const int32_t zero_point_weights,
+       int scale_size,
+       float do_sum,
+       bool is_weights_const
+       );
 }
 
 #endif

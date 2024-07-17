@@ -50,6 +50,8 @@ const char *zendnn_dt2str(zendnn_data_type_t v) {
     if (v == zendnn_s16) return "s16";
     if (v == zendnn_s8) return "s8";
     if (v == zendnn_u8) return "u8";
+    if (v == zendnn_s4) return "s4";
+    if (v == zendnn_u4) return "u4";
     assert(!"unknown dt");
     return "unknown dt";
 }
