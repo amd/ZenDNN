@@ -31,6 +31,7 @@ using namespace zendnn;
 
 //Total num of algo available
 #define NUM_OF_ALGO 5
+#define NUM_OF_ALGO_INT8 3
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
 //CPU information size
@@ -216,7 +217,196 @@ int map_read_from_file() {
     return 0;
 }
 
+/*INT8 AutoTuner
+ *
+ Based on iteration count
+ Makes use of eval_count to decide when to fetch value from map.
+ Uses iteration count of each unique layer.
+ Doesn't need framework to increment the graph_exe_count.
 
+ Map value tuple
+ <
+   iteration_count,
+   time,
+   algo
+ >
+*/
+//Start
+int auto_compute_matmul_int8(
+    zendnn::zendnnEnv zenEnvObj,
+    int src_type,
+    int dst_type,
+    int bias_type,
+    const bool Layout,
+    const bool transpose_input,
+    const bool transpose_weights,
+    const int m,
+    const int k,
+    const int n,
+    const float alpha,
+    const char *input,
+    const int lda,
+    const int8_t *weights,
+    const int ldb,
+    const char *bias,
+    const bool relu,
+    const int gelu,
+    const float beta,
+    char *dst,
+    const int ldc,
+    float *scale,
+    const int32_t zero_point_dst,
+    int out_scale_size,
+    float do_sum,
+    bool is_weights_const
+) {
+    Key_matmul key_obj;
+
+    //It is used to know if weights address should be enabled or not for map.
+    //0: disable, 1: enable.
+    unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",0);
+
+    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_weights = transpose_weights;
+    key_obj.m = m;
+    key_obj.k = k;
+    key_obj.n = n;
+    key_obj.lda = lda;
+    key_obj.ldb = ldb;
+    key_obj.ldc = ldc;
+
+    //This condition makes sure that address
+    //doesn't gets saved while using persistent map.
+    key_obj.weights = mapType == 1 ? (int8_t *)weights : NULL;
+    key_obj.thread_count = zenEnvObj.omp_num_threads;
+
+    float cur_algo_time; //current algorithm's execution time
+    struct timeval start_n, end_n;
+
+    //Number of iterations to run without creating map for each unique layer.
+    unsigned int skip_iteration =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
+                                  MATMUL_SKIP_ITER_V3);
+
+    //Number of iterations to run for creating map for each layer.
+    unsigned int evaluate_iteration =
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
+                                  MATMUL_EVALUATE_ITER_V3);
+
+    //finds object in map
+    auto found_obj = matmul_kernel_map1_helper.find(key_obj);
+
+    //If current iterations less than Skip iteration then run default algo.
+    //Checks using the (0) element of map value that denotes count of iterations in map
+    if (found_obj == matmul_kernel_map1_helper.end() ||
+            std::get<0>(found_obj->second) < skip_iteration) {
+
+        //Set AOCL GEMM algo for skip iterations.
+        zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8;
+
+        //If Key not found in map then time the algo and add new element to map
+        if (found_obj == matmul_kernel_map1_helper.end()) {
+
+            //Time start
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
+            gettimeofday(&start_n, 0);
+#endif
+
+            matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
+                                transpose_input,
+                                transpose_weights,
+                                m, k, n, alpha, input, lda, weights, ldb, bias, relu,
+                                gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+                                do_sum, is_weights_const);
+
+            //Time end
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
+            gettimeofday(&end_n, 0);
+            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f
+                            + (end_n.tv_usec - start_n.tv_usec)/1000.0f; //time in milliseconds
+#endif
+
+            //Create new entry
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8}; // {iter_count, time, algo}
+            matmul_kernel_map[key_obj] = zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8;
+        }
+        //If key found then increment the iter_count and run algo 3.
+        else {
+            std::get<0>(found_obj->second) += 1;
+            matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
+                                transpose_input,
+                                transpose_weights,
+                                m, k, n, alpha, input, lda, weights, ldb, bias, relu,
+                                gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+                                do_sum, is_weights_const);
+        }
+    }
+    //Read Value from map.
+    //Runs after skip iterations and evaluation iterations are done.
+    else if (std::get<0>(found_obj->second) > evaluate_iteration + skip_iteration) {
+
+        //Get best algo for given layer from MAP
+        zenEnvObj.zenINT8GEMMalgo = matmul_kernel_map[key_obj];
+        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
+                            transpose_input,
+                            transpose_weights,
+                            m, k, n, alpha, input, lda, weights, ldb, bias, relu,
+                            gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+                            do_sum, is_weights_const);
+    }
+    //Updates the map values by running different algorithms
+    else {
+
+        //Get the number of iteration already ran and select Algo to run for current iteration
+        //get<0>(found_obj->second) = count of iteration
+        zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_INT8)
+                                    +1;
+        std::get<0>(found_obj->second) += 1;
+        //timer start
+#ifdef _WIN32
+        auto start_n = std::chrono::high_resolution_clock::now();
+#else
+        gettimeofday(&start_n, 0);
+#endif
+        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
+                            transpose_input,
+                            transpose_weights,
+                            m, k, n, alpha, input, lda, weights, ldb, bias, relu,
+                            gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+                            do_sum, is_weights_const);
+        //timer end
+#ifdef _WIN32
+        auto end_n = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> difference = end_n - start_n;
+        cur_algo_time = difference.count();
+#else
+        gettimeofday(&end_n, 0);
+        cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
+                        (end_n.tv_usec - start_n.tv_usec)/ 1000.0f; //time in milliseconds
+#endif
+
+
+        //If current run gives better timing then update
+        if (cur_algo_time < std::get<1>(found_obj->second)) {
+            std::get<1>(found_obj->second) = cur_algo_time; //Minimum time for chosen algo
+            std::get<2>(found_obj->second) =
+                zenEnvObj.zenINT8GEMMalgo; //Algo with minimum time (1-NUM_OF_ALGO)
+            matmul_kernel_map[key_obj] = zenEnvObj.zenINT8GEMMalgo;
+        }
+
+    }
+
+    return zenEnvObj.zenINT8GEMMalgo;
+}
+//END
+
+//FP32 AutoTuner
 /*Verion 1
 
   Works with framework (graph_exe_count)

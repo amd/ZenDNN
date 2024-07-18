@@ -189,8 +189,7 @@ class zendnnEnv {
         // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_INT8)
 
         zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
-        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 ||
-                zenINT8GEMMalgo<zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8) {
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8) {
             zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL

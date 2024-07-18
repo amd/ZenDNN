@@ -1126,6 +1126,35 @@ extern "C"
        float do_sum,
        bool is_weights_const
        );
+
+    int auto_compute_matmul_int8(
+        zendnn::zendnnEnv zenEnvObj,
+        int src_type,
+        int dst_type,
+        int bias_type,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_weights,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const char *input,
+        const int lda,
+        const int8_t *weights,
+        const int ldb,
+        const char *bias,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        char *output,
+        const int ldc,
+        float *scale,
+        const int32_t zero_point_dst,
+        int out_scale_size,
+        float do_sum,
+        bool is_weights_const
+    );
 }
 
 #endif
