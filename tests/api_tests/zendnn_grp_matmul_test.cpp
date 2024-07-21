@@ -22,6 +22,8 @@
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
 
+#define BF16_ENABLE 0
+
 using namespace zendnn;
 
 // Create memory object for a given memory descriptor
@@ -91,30 +93,44 @@ int main(int argc, char *argv[]) {
         dims[i] = dis(gen);
     }
     int batch_size=1;
-    // Create memory descriptors for input matrices
+
+    // Create FP32 memory descriptors and memory objects for input, weight, output matrices
     std::vector<memory> input_mem;
+    std::vector<memory> weight_mem(num_layers);
+    std::vector<memory> out_mem(num_layers);
+
     input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
                                       memory::data_type::f32,
                                       memory::format_tag::ab), eng));
 
-    // Create memory descriptors for weight matrices
-    std::vector<memory::dims> mdims(num_layers);
-    std::vector<memory> weight_mem(num_layers);
     for (int i = 0; i <num_layers; ++i) {
-
-        mdims[i] = {dims[i], dims[i+1]};
-        weight_mem[i] = create_memory(memory::desc(mdims[i], memory::data_type::f32,
+        weight_mem[i] = create_memory(memory::desc({dims[i], dims[i+1]},
+                                      memory::data_type::f32,
                                       memory::format_tag::ab), eng);
-    }
-
-    // Create memory descriptors for output matrices
-    std::vector<memory::dims> out_mdims(num_layers);
-    std::vector<memory> out_mem(num_layers);
-    for (int i = 0; i < num_layers; ++i) {
-        out_mdims[i] = {batch_size, dims[i+1]};
-        out_mem[i] = create_memory(memory::desc(out_mdims[i], memory::data_type::f32,
+        out_mem[i] = create_memory(memory::desc({batch_size, dims[i+1]},
+                                                memory::data_type::f32,
                                                 memory::format_tag::ab), eng);
     }
+
+    // Create BF16 memory descriptors and memory objects for input, weight, output matrices
+    std::vector<memory> input_mem_bf16;
+    std::vector<memory> weight_mem_bf16(num_layers);
+    std::vector<memory> out_mem_bf16(num_layers);
+
+    input_mem_bf16.push_back(create_memory(memory::desc({batch_size, dims[0]},
+                                           memory::data_type::bf16,
+                                           memory::format_tag::ab), eng));
+
+    for (int i = 0; i <num_layers; ++i) {
+        weight_mem_bf16[i] = create_memory(memory::desc({dims[i], dims[i+1]},
+                                           memory::data_type::bf16,
+                                           memory::format_tag::ab), eng);
+
+        out_mem_bf16[i] = create_memory(memory::desc({batch_size, dims[i+1]},
+                                        memory::data_type::bf16,
+                                        memory::format_tag::ab), eng);
+    }
+
     // Generate random input
     // Random weights range: 0.0 to 1.0
     std::uniform_real_distribution<float> dis_weights(0.0f,1.0f);
@@ -124,6 +140,9 @@ int main(int argc, char *argv[]) {
         input_data[i] = dis_weights(gen);
     }
     write_to_zendnn_memory(input_data.data(), input_mem[0]);
+    //reorder the f32 to bf16 and execute
+    reorder(input_mem[0], input_mem_bf16[0]).execute(s,input_mem[0],
+            input_mem_bf16[0]);
 
     // Generate random weights for layers
     std::vector<float> weights_data;
@@ -133,6 +152,9 @@ int main(int argc, char *argv[]) {
             w = dis_weights(gen);
         }
         write_to_zendnn_memory(weights_data.data(), weight_mem[i]);
+        //reorder the f32 to bf16 and execute
+        reorder(weight_mem[i], weight_mem_bf16[i]).execute(s,weight_mem[i],
+                weight_mem_bf16[i]);
     }
 
     std::vector<float> alpha(num_layers, 1.f);
@@ -143,58 +165,104 @@ int main(int argc, char *argv[]) {
     // Execute the MLP layers
     for (int i = 0; i < num_layers; ++i) {
         if (i==0) {
+#ifdef BF16_ENABLE
+            matmul_execute(eng, s, input_mem_bf16[i], weight_mem_bf16[i], alpha[i], beta[i],
+                           bias_defined[i],
+                           fuse[i], out_mem_bf16[i]);
+#else
             matmul_execute(eng, s, input_mem[i], weight_mem[i], alpha[i], beta[i],
                            bias_defined[i],
                            fuse[i], out_mem[i]);
 
+#endif
         }
         else {
+#ifdef BF16_ENABLE
+            matmul_execute(eng, s, out_mem_bf16[i-1], weight_mem_bf16[i], alpha[i], beta[i],
+                           bias_defined[i],
+                           fuse[i], out_mem_bf16[i]);
+#else
             matmul_execute(eng, s, out_mem[i-1], weight_mem[i], alpha[i], beta[i],
                            bias_defined[i], fuse[i], out_mem[i]);
+#endif
         }
     }
     // Read data from memory object for the final output
     std::vector<float> output(batch_size*dims[num_layers]);
+#ifdef BF16_ENABLE
+    read_from_zendnn_memory(output.data(), out_mem_bf16[num_layers-1]);
+#else
     read_from_zendnn_memory(output.data(), out_mem[num_layers-1]);
-
+#endif
 
     // Create memory descriptors for output matrices for grp Matmul call
     std::vector<memory> out_grp_mem(num_layers);
     for (int i = 0; i < num_layers; ++i) {
-        out_mdims[i] = {batch_size, dims[i+1]};
-        out_grp_mem[i] = create_memory(memory::desc(out_mdims[i],
+        out_grp_mem[i] = create_memory(memory::desc({batch_size, dims[i+1]},
                                        memory::data_type::f32,
                                        memory::format_tag::ab), eng);
 
     }
+    std::vector<memory> out_grp_mem_bf16(num_layers);
+    for (int i = 0; i < num_layers; ++i) {
+        out_grp_mem_bf16[i] = create_memory(memory::desc({batch_size, dims[i+1]},
+                                            memory::data_type::bf16,
+                                            memory::format_tag::ab), eng);
+
+    }
+
     /*****************Test for Group Linear MatMul********************/
+#ifdef BF16_ENABLE
+    zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_bf16, bias, alpha,
+                                     beta,
+                                     bias_defined, fuse, out_grp_mem_bf16, "lib::zendnn_grp_mlp");
+#else
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem, bias, alpha, beta,
                                      bias_defined, fuse, out_grp_mem, "lib::zendnn_grp_mlp");
+#endif
 
     // Read data from memory object for the final output of grp Matmul
     std::vector<float> output_grp(batch_size*dims[num_layers]);
+#ifdef BF16_ENABLE
+    read_from_zendnn_memory(output_grp.data(), out_grp_mem_bf16[num_layers-1]);
+#else
     read_from_zendnn_memory(output_grp.data(), out_grp_mem[num_layers-1]);
-
+#endif
     //Compare result
     for (int i=0; i<batch_size*dims[num_layers]; i++) {
         assert(output[i] == output_grp[i]);
     }
-    std::cout << " Test Comparison for group Matmul Successful " << std::endl;
+    std::cout << " Test Comparison for group Linear Matmul Successful " <<
+              std::endl;
 
     /*****************Test for Group parallel MatMul********************/
-    input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
-                                      memory::data_type::f32,
-                                      memory::format_tag::ab), eng));
-    input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
-                                      memory::data_type::f32,
-                                      memory::format_tag::ab), eng));
 
-    // Create memory descriptors for weight matrices
+    // Create FP32 memory descriptors and memory objects for input and weight matrices
+    for (int i = 0; i < num_layers-1; ++i) {
+        input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
+                                          memory::data_type::f32,
+                                          memory::format_tag::ab), eng));
+    }
+
     std::vector<memory> weight_mem_parallel(num_layers);
     for (int i = 0; i < num_layers; ++i) {
         weight_mem_parallel[i] = create_memory(memory::desc({dims[0], dims[1]},
                                                memory::data_type::f32,
                                                memory::format_tag::ab), eng);
+    }
+
+    // Create BF16 memory descriptors and memory objects for input, weight, output matrices
+    for (int i = 0; i < num_layers-1; ++i) {
+        input_mem_bf16.push_back(create_memory(memory::desc({batch_size, dims[0]},
+                                               memory::data_type::bf16,
+                                               memory::format_tag::ab), eng));
+    }
+
+    std::vector<memory> weight_mem_parallel_bf16(num_layers);
+    for (int i = 0; i < num_layers; ++i) {
+        weight_mem_parallel_bf16[i] = create_memory(memory::desc({dims[0], dims[1]},
+                                      memory::data_type::bf16,
+                                      memory::format_tag::ab), eng);
     }
 
     // Generate random input
@@ -205,6 +273,9 @@ int main(int argc, char *argv[]) {
             input_data[i] = dis_weights(gen);
         }
         write_to_zendnn_memory(input_data.data(), input_mem[j]);
+        //reorder the f32 to bf16 and execute
+        reorder(input_mem[j], input_mem_bf16[j]).execute(s, input_mem[j],
+                input_mem_bf16[j]);
     }
 
     // Generate random weights for layers
@@ -214,6 +285,9 @@ int main(int argc, char *argv[]) {
             w = dis_weights(gen);
         }
         write_to_zendnn_memory(weights_data.data(), weight_mem_parallel[i]);
+        //reorder the f32 to bf16 and execute
+        reorder(weight_mem_parallel[i], weight_mem_parallel_bf16[i]).execute(s,
+                weight_mem_parallel[i], weight_mem_parallel_bf16[i]);
     }
 
 
@@ -227,17 +301,29 @@ int main(int argc, char *argv[]) {
 
     // Execute the MLP layers
     for (int i = 0; i < num_layers; ++i) {
+#ifdef BF16_ENABLE
+        matmul_execute(eng, s, input_mem_bf16[i], weight_mem_parallel_bf16[i], alpha[i],
+                       beta[i],
+                       bias_defined[i], fuse[i], out_mem_parallel[i]);
+#else
         matmul_execute(eng, s, input_mem[i], weight_mem_parallel[i], alpha[i], beta[i],
                        bias_defined[i], fuse[i], out_mem_parallel[i]);
+#endif
+
     }
     std::vector<float> output_parallel(batch_size*dims[1]);
     read_from_zendnn_memory(output_parallel.data(), out_mem_parallel[1]);
 
-
+#ifdef BF16_ENABLE
+    zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_parallel_bf16, bias,
+                                     alpha,
+                                     beta,
+                                     bias_defined, fuse, out_mem_parallel, "lib::zendnn_grp_mlp");
+#else
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem_parallel, bias, alpha,
                                      beta,
                                      bias_defined, fuse, out_mem_parallel, "lib::zendnn_grp_mlp");
-
+#endif
     std::vector<float> output_grp_parallel(batch_size*dims[1]);
     read_from_zendnn_memory(output_grp_parallel.data(), out_mem_parallel[1]);
 
