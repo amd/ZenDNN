@@ -140,6 +140,9 @@ void zenMatMul_gemm_blocked(
 
             // Iterate through each postop, check and add it if needed.
             int post_op_i = 0;
+            dim_t bias_index = 0;
+            dim_t sum_index = 0;
+            dim_t scale_index = 0;
             if (bias != NULL) {
                 // Add bias postop
                 float *bias_ = new float[n]();//const_cast<float*>(bias);
@@ -150,7 +153,14 @@ void zenMatMul_gemm_blocked(
                     }
                 }
                 post_ops->seq_vector[post_op_i++] = BIAS;
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+                post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
+                                     aocl_post_op_bias));
+                (post_ops->bias + bias_index)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
+#else
                 post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float *)bias;
+#endif
+                bias_index++;
             }
             if (relu) {
                 // Add ReLU postop
@@ -204,7 +214,12 @@ void zenMatMul_gemm_blocked(
         // Free memory for postops.
         if (bias != NULL) {
             //Bias is directly passed
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+            post_ops->bias->bias = NULL;
+            free(post_ops->bias);
+#else
             post_ops->bias.bias = NULL;
+#endif
         }
         if (relu || gelu) {
             free(post_ops->eltwise);

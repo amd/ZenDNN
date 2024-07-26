@@ -247,6 +247,10 @@ aocl_post_op *create_aocl_post_ops(
         ++postop_count;
     }
 
+    dim_t eltwise_index = 0;
+    dim_t bias_index = 0;
+    dim_t scale_index = 0;
+    dim_t add_index = 0;
     // Create postop for LPGEMM
     // Order of postops: BIAS -> RELU -> SCALE
     if (postop_count > 0) {
@@ -262,24 +266,28 @@ aocl_post_op *create_aocl_post_ops(
             // Bias is of type int16 (accumulation type)
             post_ops->seq_vector[post_op_i++] = BIAS;
             //int bias_size = n * sizeof(int32_t);
-            post_ops->bias.bias = (int32_t *) bias;//malloc(bias_size);
-            /*if (post_ops->bias.bias != NULL) {
-                memcpy(post_ops->bias.bias, bias, bias_size);
-            }*/
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+            post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
+                            aocl_post_op_bias));
+            (post_ops->bias + bias_index)->bias = (int32_t *) bias;
+#else
+            post_ops->bias.bias = (int32_t *) bias;
+#endif
         }
         // Add dst scale and dst zero_point postop
         if (downscale) {
             post_ops->seq_vector[post_op_i++] = SCALE;
-            post_ops->sum.is_power_of_2 = FALSE;
-            //post_ops->sum.buff = NULL;
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-            post_ops->sum.zero_point = malloc(sizeof(int8_t)); //NULL;
-            int8_t *t_zp = (int8_t *)post_ops->sum.zero_point;
-            t_zp[0] = zero_point_dst;
+            post_ops->sum = (aocl_post_op_sum *) malloc(sizeof(aocl_post_op_sum));
+            (post_ops->sum + scale_index)->is_power_of_2 = FALSE;
+            (post_ops->sum + scale_index)->buff = NULL;
+            (post_ops->sum + scale_index)->zero_point = malloc(sizeof(int8_t)); //NULL;
+            int8_t *t_zp = (int8_t *)(post_ops->sum + scale_index)->zero_point;
+            t_zp[0] = (int8_t)0;
 
             int scale_size = out_scale_size * sizeof(float);
-            post_ops->sum.scale_factor = malloc(scale_size);
-            float *temp_dscale_ptr = (float *)post_ops->sum.scale_factor;
+            (post_ops->sum + scale_index)->scale_factor = malloc(scale_size);
+            float *temp_dscale_ptr = (float *)(post_ops->sum + scale_index)->scale_factor;
             if (out_scale_size > 1) {
                 for (int i=0; i<out_scale_size; ++i) {
                     temp_dscale_ptr[i] = (float)scale[i];
@@ -288,10 +296,13 @@ aocl_post_op *create_aocl_post_ops(
             else {
                 temp_dscale_ptr[0] = (float)scale[0];
             }
-            post_ops->sum.scale_factor_len = out_scale_size;
-            post_ops->sum.zero_point_len = 1;
+            (post_ops->sum + scale_index)->scale_factor_len = out_scale_size;
+            (post_ops->sum + scale_index)->zero_point_len = 1;
+            scale_index++;
 #else
             int zp_size = n * sizeof(int8_t);
+            post_ops->sum.is_power_of_2 = FALSE;
+            post_ops->sum.buff = NULL;
             post_ops->sum.zero_point = (int8_t *)malloc(zp_size);
             int8_t *temp_zp_ptr = (int8_t *)post_ops->sum.zero_point;
             for (int i=0; i<n; ++i) {
@@ -312,18 +323,19 @@ aocl_post_op *create_aocl_post_ops(
             }
 #endif
         }
-        //Matrix Add
+        //Matrix Add to achieve sum_po
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
         if (do_sum) {
             post_ops->seq_vector[post_op_i++] = MATRIX_ADD;
+            post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
+                            aocl_post_op_matrix_add));
             //post_ops->matrix_add.matrix = NULL;
-            post_ops->matrix_add.ldm = n;
-            post_ops->matrix_add.matrix = (T *)add_buffer;//malloc( m * n * ele_dsize );
+            (post_ops->matrix_add + add_index)->ldm = n;
+            (post_ops->matrix_add + add_index)->matrix = (T *)add_buffer;//malloc( m * n * ele_dsize );
         }
 #endif
         if (relu) {
             // Add ReLU postop
-            dim_t eltwise_index = 0;
             post_ops->seq_vector[post_op_i++] = ELTWISE;
             post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
                                     aocl_post_op_eltwise));
@@ -449,8 +461,22 @@ void zenMatMul_gemm_s8s8s32os8(
         free(b_reorder);
     }
     // Scale postop is always enabled so deleted directly.
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+    free((post_ops->sum)->scale_factor);
+    free((post_ops->sum)->zero_point);
+    free(post_ops->sum);
+    //Bias free
+    if(post_ops->bias != NULL){
+        free(post_ops->bias);
+    }
+    //Matrix add
+    if(post_ops->matrix_add != NULL){
+        free(post_ops->matrix_add);
+    }
+#else
     free(post_ops->sum.scale_factor);
     free(post_ops->sum.zero_point);
+#endif
     free(post_ops->seq_vector);
     free(post_ops);
 }
@@ -540,8 +566,22 @@ void zenMatMul_gemm_s8s8s32os32(
         free(b_reorder);
     }
     // Scale postop is always enabled so deleted directly.
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+    free((post_ops->sum)->scale_factor);
+    free((post_ops->sum)->zero_point);
+    free(post_ops->sum);
+    //Bias free
+    if(post_ops->bias != NULL){
+        free(post_ops->bias);
+    }
+    //Matrix add
+    if(post_ops->matrix_add != NULL){
+        free(post_ops->matrix_add);
+    }
+#else
     free(post_ops->sum.scale_factor);
     free(post_ops->sum.zero_point);
+#endif
     free(post_ops->seq_vector);
     free(post_ops);
 }
@@ -631,8 +671,22 @@ void zenMatMul_gemm_u8s8s32os8(
         free(b_reorder);
     }
     // Scale postop is always enabled so deleted directly.
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+    free((post_ops->sum)->scale_factor);
+    free((post_ops->sum)->zero_point);
+    free(post_ops->sum);
+    //Bias free
+    if(post_ops->bias != NULL){
+        free(post_ops->bias);
+    }
+    //Matrix add
+    if(post_ops->matrix_add != NULL){
+        free(post_ops->matrix_add);
+    }
+#else
     free(post_ops->sum.scale_factor);
     free(post_ops->sum.zero_point);
+#endif
     free(post_ops->seq_vector);
     free(post_ops);
 }
@@ -722,8 +776,22 @@ void zenMatMul_gemm_u8s8s32os32(
         free(b_reorder);
     }
     // Scale postop is always enabled so deleted directly.
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+    free((post_ops->sum)->scale_factor);
+    free((post_ops->sum)->zero_point);
+    free(post_ops->sum);
+    //Bias free
+    if(post_ops->bias != NULL){
+        free(post_ops->bias);
+    }
+    //Matrix add
+    if(post_ops->matrix_add != NULL){
+        free(post_ops->matrix_add);
+    }
+#else
     free(post_ops->sum.scale_factor);
     free(post_ops->sum.zero_point);
+#endif
     free(post_ops->seq_vector);
     free(post_ops);
 }

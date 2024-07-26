@@ -73,6 +73,17 @@ float gelu_const = sqrtf(2/M_PI);
         out_layer[offset+c+i] = out_layer[offset+c+i]*scale[c+i] + alpha*bias[c+i] + elementwise_input[offset + c + i]; \
     }
 
+#ifdef ZENDNN_ENABLE_LPGEMM_V5_0
+#define COMPUTE_GELU_TANH_VEC16() \
+    { \
+        aocl_gemm_gelu_tanh_f32(16, out_layer+offset+c, 1); \
+    }
+
+#define COMPUTE_GELU_ERF_VEC16() \
+    { \
+        aocl_gemm_gelu_erf_f32(16, out_layer+offset+c, 1); \
+    }
+#else
 #define COMPUTE_GELU_TANH_VEC16() \
     { \
         aocl_gelu_tanh_f32(16, out_layer+offset+c, 1); \
@@ -82,6 +93,7 @@ float gelu_const = sqrtf(2/M_PI);
     { \
         aocl_gelu_erf_f32(16, out_layer+offset+c, 1); \
     }
+#endif
 
 #define COMPUTE_NONE_VEC16(out_layer, scale, bias, alpha, elementwise_input, offset, c) \
     { \
