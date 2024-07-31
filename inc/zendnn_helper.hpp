@@ -218,7 +218,7 @@ class zendnnEnv {
         }
 
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
-        zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 0);
+        zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO", 1 /* GEMM */);
