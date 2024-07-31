@@ -51,6 +51,14 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
                 nullptr,
             }
         },
+        {   {forward, bf16, s32, f32}, {
+#if AVX512_EB_EN && AVX512_BF16_EN
+                CPU_INSTANCE(avx512_embedding_bag_t<s16>)
+#endif
+                /* eol */
+                nullptr,
+            }
+        },
     });
     return the_map;
 }

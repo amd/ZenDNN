@@ -85,7 +85,8 @@ public:
         if (input_desc.data_type() != memory::data_type::f32)
             return API_FAILURE;
 
-        if (output_desc.data_type() != memory::data_type::s16)
+        if ((output_desc.data_type() != memory::data_type::s16) &&
+            (output_desc.data_type() != memory::data_type::bf16))
             return API_FAILURE;
 
         auto input_dims  = input_desc.dims();
@@ -117,7 +118,8 @@ public:
         auto input_desc  = input.get_desc();
         auto output_desc = output.get_desc();
 
-        if (input_desc.data_type() != memory::data_type::s16)
+        if ((input_desc.data_type() != memory::data_type::s16) &&
+            (input_desc.data_type() != memory::data_type::bf16))
             return API_FAILURE;
 
         if (output_desc.data_type() != memory::data_type::f32)
@@ -412,7 +414,7 @@ void exec_embedding_bag(engine eng, stream s, memory table,
     }
 }
 
-bool run_test(std::string test_id, engine eng, stream s, uint32_t width,
+int run_test(std::string test_id, engine eng, stream s, uint32_t width,
               algorithm alg, bool is_wt, int32_t padidx,
               std::vector<float>& expected, std::string precision) {
 
@@ -422,13 +424,16 @@ bool run_test(std::string test_id, engine eng, stream s, uint32_t width,
 
     /* create embedding table */
     memory fp32_table = create_embedding_table(eng, emb_rows, width);
-    memory bf16_table = memory({{emb_rows, width}, memory::data_type::s16,
+    memory bf16_table = memory({{emb_rows, width}, memory::data_type::bf16,
             memory::format_tag::ab}, eng);
 
     /* convert embedding table to required precision */
     if (precision == std::string("bf16")) {
         precision_converter converter;
-        converter.fp32_to_bf16_tensor(bf16_table, fp32_table);
+        if (converter.fp32_to_bf16_tensor(bf16_table, fp32_table) == API_FAILURE){
+            zendnnError(ZENDNN_TESTLOG, "unsupported data type of embedding table");
+            return API_FAILURE;
+        }
     }
 
     /* create indices */
@@ -462,10 +467,10 @@ bool run_test(std::string test_id, engine eng, stream s, uint32_t width,
         zendnnError(ZENDNN_TESTLOG, test_id, ":", vec_str("exp", expected),":",
                     vec_str("act", actual));
 
-        return false;
+        return API_FAILURE;
     }
 
-    return true;
+    return API_SUCCESS;
 }
 
 int main(int argc, char **argv) {
@@ -500,35 +505,35 @@ int main(int argc, char **argv) {
     zendnnVerbose(ZENDNN_TESTLOG, "stream created");
 
     /* run tests */
-    if (!run_test("sm_nw_np_128", eng, s, 128, algorithm::embedding_bag_sum,
+    if (run_test("sm_nw_np_128", eng, s, 128, algorithm::embedding_bag_sum,
                   false, -1, exp_sum_nwt_npd_128, precision))
         status = API_FAILURE;
 
-    if (!run_test("sm_w_np_128", eng, s, 128, algorithm::embedding_bag_sum,
+    if (run_test("sm_w_np_128", eng, s, 128, algorithm::embedding_bag_sum,
                   true, -1, exp_sum_wt_npd_128, precision))
         status = API_FAILURE;
 
-    if (!run_test("sm_nw_np_64", eng, s, 64, algorithm::embedding_bag_sum,
+    if (run_test("sm_nw_np_64", eng, s, 64, algorithm::embedding_bag_sum,
                   false, -1, exp_sum_nwt_npd_64, precision))
         status = API_FAILURE;
 
-    if (!run_test("sm_w_np_64", eng, s, 64, algorithm::embedding_bag_sum,
+    if (run_test("sm_w_np_64", eng, s, 64, algorithm::embedding_bag_sum,
                   true, -1, exp_sum_wt_npd_64, precision))
         status = API_FAILURE;
 
-    if (!run_test("sm_nw_np_10", eng, s, 10, algorithm::embedding_bag_sum,
+    if (run_test("sm_nw_np_10", eng, s, 10, algorithm::embedding_bag_sum,
                   false, -1, exp_sum_nwt_npd_10, precision))
         status = API_FAILURE;
 
-    if (!run_test("sm_w_np_10", eng, s, 10, algorithm::embedding_bag_sum,
+    if (run_test("sm_w_np_10", eng, s, 10, algorithm::embedding_bag_sum,
                   true, -1, exp_sum_wt_npd_10, precision))
         status = API_FAILURE;
 
-    if (!run_test("mn_np_128", eng, s, 128, algorithm::embedding_bag_mean,
+    if (run_test("mn_np_128", eng, s, 128, algorithm::embedding_bag_mean,
                   false, -1, exp_mean_npd_128, precision))
         status = API_FAILURE;
 
-    if (!run_test("mx_w_np_128", eng, s, 128, algorithm::embedding_bag_max,
+    if (run_test("mx_w_np_128", eng, s, 128, algorithm::embedding_bag_max,
                   false, -1, exp_max_npd_128, precision))
         status = API_FAILURE;
 
