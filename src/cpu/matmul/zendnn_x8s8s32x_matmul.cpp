@@ -285,28 +285,31 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int sum_idx = po.find(primitive_kind::sum);
     float do_sum = sum_idx >= 0 ? po.entry_[sum_idx].sum.scale: 0.0f;
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
-    if(algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8){
+    if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {
         auto_tuner = 1;
-        algo = auto_compute_matmul_int8(zenEnvObj, src_type, dst_type, bias_type, 0, strcmp(transA,
-                        "N"), strcmp(transB, "N"),
-                        M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                        geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
-                        do_sum, is_weights_const);
+        algo = auto_compute_matmul_int8(zenEnvObj, src_type, dst_type, bias_type, 0,
+                                        strcmp(transA,
+                                               "N"), strcmp(transB, "N"),
+                                        M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
+                                        geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
+                                        do_sum, is_weights_const);
     }
-    else{
-    matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, 0, strcmp(transA,
-                        "N"), strcmp(transB, "N"),
-                        M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                        geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
-                        do_sum, is_weights_const);
+    else {
+        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, 0, strcmp(transA,
+                            "N"), strcmp(transB, "N"),
+                            M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
+                            geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
+                            do_sum, is_weights_const);
     }
-    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=", auto_tuner ? "True": "False",
+    zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=",
+                  auto_tuner ? "True": "False",
                   " Layout=",
                   1 ? "CblasRowMajor," : "CblasColMajor,",
                   " m=", M, " k=", K, " n=", N, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                   " relu=", has_eltwise_relu, " gelu=", geluType,
-                  " algo_type=", algo, " scale sum=", do_sum, " src dt=", src_type, " dst_dt=", dst_type);
+                  " algo_type=", algo, " scale sum=", do_sum, " src dt=", src_type, " dst_dt=",
+                  dst_type, " weight_caching=", is_weights_const ? "True": "False");
 
 
     return status::success;

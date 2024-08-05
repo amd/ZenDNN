@@ -77,7 +77,22 @@ matmul_kernel_map_bf16;
 std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
         matmul_kernel_map_bf16_helper;
 
-aocl_post_op *create_aocl_post_ops(int n, const float alpha, float *bias,
+static inline float bf16_to_float(int16_t bf16_val) {
+    int32_t inter_temp = *((int16_t *) &bf16_val);
+    inter_temp = inter_temp << 16;
+    float float_value = 0.0;
+    memcpy(&float_value, &inter_temp, sizeof(int32_t));
+    return float_value;
+}
+
+static inline void float_to_bf16(float *float_value, bfloat16 *bf16_val) {
+    /*Set offset 2 to copy most significant 2 bytes of float
+    to convert float values to bf16 values*/
+    memcpy((bf16_val), (char *)(float_value) + 2, sizeof(int16_t));
+}
+
+template<typename T>
+aocl_post_op *create_aocl_post_ops(int n, const float alpha, T *bias,
                                    const bool relu, const int gelu, int &postop_count,
                                    const float *scale=NULL) {
     aocl_post_op *post_ops = NULL;
@@ -106,14 +121,29 @@ aocl_post_op *create_aocl_post_ops(int n, const float alpha, float *bias,
             post_ops->seq_vector[post_op_i++] = BIAS;
             // Multiplying aplha with bias in the Blis path to make the computation same as JIT.
             // TODO (zendnn) : Handle this with the scale from Blis and make alpha as dummy.
-            float *bias_ = new float[n]();
-            if (alpha != 1.0f) {
-                #pragma omp parallel for
-                for (int i = 0; i < n; i++) {
-                    bias_[i] = alpha * bias[i];
+            float *bias_fp = NULL;
+            int16_t *bias_bf = NULL;
+            //creating float memory for bf16 bias
+            if (alpha != 1.0) {
+                if (typeid(T) == typeid(int16_t)) {
+                    bias_bf = new int16_t[n]();
+                    //conversion fucntion from bf16 to f32
+                    #pragma omp parallel for
+                    for (size_t i = 0; i < n; i++) {
+                        float inter_val = alpha*bf16_to_float(bias[i]);
+                        float_to_bf16(&inter_val, bias_bf + i);
+                    }
+                }
+                else {
+                    bias_fp = new float[n]();
+                    #pragma omp parallel for
+                    for (int i = 0; i < n; i++) {
+                        bias_fp[i] = alpha * bias[i];
+                    }
                 }
             }
-            post_ops->bias.bias = (alpha!=1.0f) ? bias_ : bias;
+            post_ops->bias.bias = (alpha!=1.0f) ? (typeid(T) == typeid(float)) ?
+                                  (T *)bias_fp : (T *)bias_bf : (T *)bias;
         }
         if (relu) {
             // Add ReLU postop
@@ -244,7 +274,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
     }
     int postop_count=0;
-    aocl_post_op *post_ops = create_aocl_post_ops(n, alpha, bias, relu, gelu,
+    aocl_post_op *post_ops = create_aocl_post_ops<float>(n, alpha, bias, relu, gelu,
                              postop_count);
 
     //Perform MatMul using AMD BLIS
@@ -259,16 +289,21 @@ void zenMatMul_gemm_bf16bf16f32of32(
                               post_ops);
 
     // Free memory for postops.
-    if (bias != NULL) {
-        post_ops->bias.bias=NULL;
-    }
-    if (relu || gelu) {
-        free(post_ops->eltwise);
-    }
+    if (post_ops != NULL) {
+        if (bias != NULL) {
+            if (alpha != 1.0) {
+                delete (post_ops->bias.bias);
+            }
+            post_ops->bias.bias=NULL;
+        }
+        if (relu || gelu) {
+            free(post_ops->eltwise);
+        }
 
-    if (postop_count > 0) {
-        free(post_ops->seq_vector);
-        free(post_ops);
+        if (postop_count > 0) {
+            free(post_ops->seq_vector);
+            free(post_ops);
+        }
     }
     if (!is_weights_const) {
         free(reorder_filter);
@@ -347,7 +382,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
     }
     int postop_count=0;
-    aocl_post_op *post_ops = create_aocl_post_ops(n, alpha, bias, relu, gelu,
+    aocl_post_op *post_ops = create_aocl_post_ops<float>(n, alpha, bias, relu, gelu,
                              postop_count);
 
     omp_set_max_active_levels(1);
@@ -382,16 +417,21 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
 
     }
     // Free memory for postops.
-    if (bias != NULL) {
-        post_ops->bias.bias=NULL;
-    }
-    if (relu || gelu) {
-        free(post_ops->eltwise);
-    }
+    if (post_ops != NULL) {
+        if (bias != NULL) {
+            if (alpha != 1.0) {
+                delete (post_ops->bias.bias);
+            }
+            post_ops->bias.bias=NULL;
+        }
+        if (relu || gelu) {
+            free(post_ops->eltwise);
+        }
 
-    if (postop_count > 0) {
-        free(post_ops->seq_vector);
-        free(post_ops);
+        if (postop_count > 0) {
+            free(post_ops->seq_vector);
+            free(post_ops);
+        }
     }
     if (!is_weights_const) {
         free(reorder_filter);
@@ -410,7 +450,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     const int lda,
     const int16_t *filter,
     const int ldb,
-    float *bias,
+    int16_t *bias,
     const bool relu,
     const int gelu,
     const float beta,
@@ -471,7 +511,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     }
     //Post ops addition
     int postop_count=1;
-    aocl_post_op *post_ops = create_aocl_post_ops(n, alpha, bias, relu, gelu,
+    aocl_post_op *post_ops = create_aocl_post_ops<int16_t>(n, alpha, bias, relu,
+                             gelu,
                              postop_count, scale);
 
     //Perform MatMul using AMD BLIS
@@ -495,6 +536,9 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         }
 
         if (post_ops->bias.bias != NULL) {
+            if (alpha != 1.0) {
+                delete (post_ops->bias.bias);
+            }
             post_ops->bias.bias = NULL;
         }
 
@@ -521,7 +565,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     const int lda,
     const int16_t *filter,
     const int ldb,
-    float *bias,
+    int16_t *bias,
     const bool relu,
     const int gelu,
     const float beta,
@@ -584,7 +628,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
 
     //Post ops addition
     int postop_count=1;
-    aocl_post_op *post_ops = create_aocl_post_ops(n, alpha, bias, relu, gelu,
+    aocl_post_op *post_ops = create_aocl_post_ops<int16_t>(n, alpha, bias, relu,
+                             gelu,
                              postop_count, scale);
 
     omp_set_max_active_levels(1);
@@ -624,6 +669,9 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
         }
 
         if (post_ops->bias.bias != NULL) {
+            if (alpha != 1.0) {
+                delete (post_ops->bias.bias);
+            }
             post_ops->bias.bias = NULL;
         }
 
@@ -793,15 +841,6 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
     }
 }
 
-
-static inline float bf16_to_float(int16_t bf16_val) {
-    int32_t inter_temp = *((int16_t *) &bf16_val);
-    inter_temp = inter_temp << 16;
-    float float_value = 0.0;
-    memcpy(&float_value, &inter_temp, sizeof(int32_t));
-    return float_value;
-}
-
 int matmul_bf16_wrapper(
     zendnn::zendnnEnv zenEnvObj,
     int dst_type,
@@ -834,22 +873,14 @@ int matmul_bf16_wrapper(
     float *bias_f32 = NULL;
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM ||
             zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_PAR) {
-        //creating float memory for bf16 bias
-        if (bias!=NULL && bias_type == data_type::bf16) {
-            bias_f32 = (float *)calloc(N, sizeof(float));
-            int16_t *bias_bf16 = (int16_t *)bias;
-            //conversion fucntion from bf16 to f32
-            for (size_t i=0; i<N; i++) {
-                bias_f32[i] = bf16_to_float(bias_bf16[i]);
-            }
-        }
+
         if (dst_type == bf16) {
             if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_PAR) {
                 zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
                            zenEnvObj.zenBF16GEMMalgo);
                 zenMatMul_gemm_parallel_bf16bf16f32obf16(Layout, transA, transB, M, K, N, alpha,
                         (int16_t *)src, lda, (int16_t *)weights, ldb,
-                        bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
+                        (int16_t *)bias,
                         has_eltwise_relu, geluType, beta, (int16_t *)dst, ldc, output_scales,
                         scale_size, is_weights_const);
             }
@@ -858,7 +889,7 @@ int matmul_bf16_wrapper(
                            zenEnvObj.zenBF16GEMMalgo);
                 zenMatMul_gemm_bf16bf16f32obf16(Layout, transA, transB, M, K, N, alpha,
                                                 (int16_t *)src, lda, (int16_t *)weights, ldb,
-                                                bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
+                                                (int16_t *)bias,
                                                 has_eltwise_relu, geluType, beta, (int16_t *)dst, ldc, output_scales,
                                                 scale_size, is_weights_const);
             }
@@ -869,7 +900,7 @@ int matmul_bf16_wrapper(
                            zenEnvObj.zenBF16GEMMalgo);
                 zenMatMul_gemm_parallel_bf16bf16f32of32(Layout, transA, transB, M, K, N, alpha,
                                                         (int16_t *)src, lda, (int16_t *)weights, ldb,
-                                                        bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
+                                                        (float *)bias,
                                                         has_eltwise_relu, geluType, beta, (float *)dst, ldc, is_weights_const);
             }
             else {
@@ -877,7 +908,7 @@ int matmul_bf16_wrapper(
                            zenEnvObj.zenBF16GEMMalgo);
                 zenMatMul_gemm_bf16bf16f32of32(Layout, transA, transB, M, K, N, alpha,
                                                (int16_t *)src, lda, (int16_t *)weights, ldb,
-                                               bias_type == data_type::bf16 ? (float *)bias_f32 : (float *)bias,
+                                               (float *)bias,
                                                has_eltwise_relu, geluType, beta, (float *)dst, ldc, is_weights_const);
             }
         }
@@ -1336,7 +1367,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     const int *zero_point_dst {nullptr};
     zero_point_dst = pd()->attr()->zero_points_.get(ZENDNN_ARG_DST);
-    zendnnInfo(ZENDNN_CORELOG, "zendnn_bf16_matmul_t::execute_ref new");
+    zendnnInfo(ZENDNN_CORELOG, "zendnn_bf16_matmul_t::execute");
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
 
     int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
@@ -1362,8 +1393,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
     if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
         auto_tuner = true;
         algo_type = auto_compute_matmul_bf16(zenEnvObj, dst_type, bias_dt,Layout,
-                                             strcmp(transA,
-                                                     "N"),strcmp(transB, "N"),
+                                             strcmp(transA,"N"), strcmp(transB, "N"),
                                              M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
                                              geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
     }
@@ -1380,7 +1410,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                   " Layout=", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", " M=", M, " N=",N,
                   " K=", K, " transA=", transA, " transB=", transB, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta, " batch=", batch, " relu=",
-                  has_eltwise_relu, " gelu=", geluType, " algo_type=", algo_type);
+                  has_eltwise_relu, " gelu=", geluType, " algo_type=", algo_type,
+                  " weight_caching=", is_weights_const ? "True": "False");
 #endif //ZENDNN_ENABLE
     return status::success;
 }

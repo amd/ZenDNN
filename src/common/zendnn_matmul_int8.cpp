@@ -750,11 +750,11 @@ int matmul_int8_wrapper(
     int thread_qty = zenEnvObj.omp_num_threads;
     if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-        && (do_sum == 0.0 || do_sum == 1.0) && bias_type != zendnn_f32
+            && (do_sum == 0.0 || do_sum == 1.0) && bias_type != zendnn_f32
 #else
-        && do_sum == 0.0 && bias_type != zendnn_f32
+            && do_sum == 0.0 && bias_type != zendnn_f32
 #endif
-    ) {
+       ) {
         int bias_size = N * sizeof(int32_t);
         int32_t *bias_f32 = NULL;
         //Check if bias is NULL or not s32 type
@@ -821,6 +821,7 @@ int matmul_int8_wrapper(
                 obj.is_brgemm = false;
             }
         }
+        free(bias_f32);
     }
     else if (zenEnvObj.zenINT8GEMMalgo ==
              zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8) {

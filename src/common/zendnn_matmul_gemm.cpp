@@ -538,8 +538,8 @@ void zenMatMul_gemm_wrapper(
                   " transb=", transpose_filter ? "CblasTrans," : "CblasNoTrans,",
                   " m=", m, " k=", k, " n=", n, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
-                  " relu=", relu, " gelu=", gelu,
-                  " algo_type=", algo_type,
+                  " relu=", relu, " gelu=", gelu, " algo_type=", algo_type,
+                  " weight_caching=", is_weights_const ? "True": "False",
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     if (algo_type == 4 || algo_type == 3) {

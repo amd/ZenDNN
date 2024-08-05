@@ -71,10 +71,6 @@ int compare_vectors(const std::vector<float> &v1, const std::vector<float> &v2,
 }
 } // namespace
 
-int number_of_runs = 1;
-float fixed_beta = 0.f;
-
-
 void matmul_example_3D(unsigned int post_op) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_3D starts");
 
@@ -186,6 +182,7 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
 
     // Tensor dimensions.
     const memory::dim M = 128, K = 256, N = 512;
+    //const memory::dim M = 2, K = 2, N = 2;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -196,7 +193,8 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
     std::vector<float> weights_data(K * N);
     std::vector<float> bias_data(1 * N);
     std::vector<float> dst_data(M * N);
-    // Initialize src, weights, bias.i
+
+    // Initialize src, weights, bias, add_mem
     for (int i=0; i<src_data.size(); i++) {
         src_data[i] = std::cos(i / 10.f);
     }
@@ -209,11 +207,13 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
         bias_data[i] = std::tanh(i);
     }
 
-    // Create memory descriptors and memory objects for src, weights, bias, and
+    // Create memory descriptors of memory objects for src, weights, bias, and
     // dst.
     auto src_md_f = memory::desc(src_dims, dt::f32, tag::ab);
     auto weights_md_f = memory::desc(weights_dims, dt::f32, tag::ab);
     auto bias_md_f = memory::desc(bias_dims, dt::f32, tag::ab);
+
+    //Create memory using desc
     auto src_mem = memory(src_md_f, eng);
     auto weights_mem = memory(weights_md_f, eng);
     auto bias_mem = memory(bias_md_f, eng);
@@ -226,7 +226,7 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
     //Create bf16 memory desc
     auto src_md = memory::desc(src_dims, dt::bf16, tag::ab);
     auto weights_md = memory::desc(weights_dims, dt::bf16, tag::ab);
-    auto bias_md = memory::desc(bias_dims, dt::f32, tag::ab);
+    auto bias_md = memory::desc(bias_dims, dt::bf16, tag::ab);
 
     auto dst_md = memory::desc(dst_dims, dt::bf16, tag::ab);
     auto dst_md_f32 = memory::desc(dst_dims, dt::f32, tag::ab);
@@ -240,11 +240,15 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
     reorder(src_mem, src_bf_mem).execute(engine_stream,src_mem,src_bf_mem);
     reorder(weights_mem, weights_bf_mem).execute(engine_stream,weights_mem,
             weights_bf_mem);
+    if (!dst_f32) {
+        reorder(bias_mem, bias_bf_mem).execute(engine_stream, bias_mem, bias_bf_mem);
+    }
+    auto bias_arg_mem = dst_f32 ? bias_mem : bias_bf_mem;
 
     auto dst_bf_mem = memory(dst_f32?dst_md_f32:dst_md, eng);
 
     // Create operation descriptor
-    auto matmul_d = matmul::desc(src_md, weights_md, bias_md_f,
+    auto matmul_d = matmul::desc(src_md, weights_md, dst_f32?bias_md_f:bias_md,
                                  dst_f32?dst_md_f32:dst_md);
 
     // Create primitive post-ops (ReLU).
@@ -257,33 +261,33 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op) {
         matmul_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
     }
     else if (post_op == 1) {
-        matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+        matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, 1.0, beta);
     }
     else if (post_op == 2) {
-        matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, alpha, beta);
+        matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, 1.0, beta);
     }
-
     primitive_attr matmul_attr;
+
+    //Set scale
     matmul_attr.set_post_ops(matmul_ops);
 
     // Create primitive descriptor.
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, eng);
     // Create the primitive.
     auto matmul_prim = matmul(matmul_pd);
-    // Primitive arguments.
-    std::unordered_map<int, memory> matmul_args;
-    matmul_args.insert({ZENDNN_ARG_SRC, src_bf_mem});
-    matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_bf_mem});
-    matmul_args.insert({ZENDNN_ARG_BIAS, bias_mem});
-    matmul_args.insert({ZENDNN_ARG_DST, dst_bf_mem});
-    // Primitive execution: matrix multiplication with ReLU.
-    matmul_prim.execute(engine_stream, matmul_args);
+
+    // Primitive execution: matrix multiplication with Add-Add.
+    matmul_prim.execute(engine_stream, {
+        {ZENDNN_ARG_SRC, src_bf_mem},
+        {ZENDNN_ARG_WEIGHTS, weights_bf_mem},
+        {ZENDNN_ARG_BIAS, bias_arg_mem},
+        {ZENDNN_ARG_DST, dst_bf_mem}
+    });
     // Wait for the computation to finalize.
     engine_stream.wait();
     // Read data from memory object's handle.
     read_from_zendnn_memory(dst_data.data(), dst_bf_mem);
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D ends");
-
     return dst_data;
 }
 
@@ -310,7 +314,6 @@ int main(int argc, char **argv) {
 
     std::vector<float> gemm_jit, zen;
     matmul_example_3D(post_op);
-
     //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
     zen = matmul_example_2D(f32_flag, post_op);
 
