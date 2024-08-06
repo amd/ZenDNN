@@ -188,10 +188,12 @@ void zenMatMulPrimitiveINT8(int thread_qty, int src_type, int dst_type,
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
-            //Save in map
-            map_mutex.lock();
-            matmul_weight_caching_map_jit_int8[key_obj_reorder] = reordered_weights_memory;
-            map_mutex.unlock();
+            if(is_weights_const) {
+                //Save in map
+                map_mutex.lock();
+                matmul_weight_caching_map_jit_int8[key_obj_reorder] = reordered_weights_memory;
+                map_mutex.unlock();
+            }
         }
         else {
             reordered_weights_memory = matmul_weight_caching_map_jit_int8[key_obj_reorder];
@@ -415,10 +417,12 @@ void zenMatMul_gemm_s8s8s32os8(
                                           reorder_param0, reorder_param1, reorder_param2);
         b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
-        map_mutex.unlock();
+        if(is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            map_mutex.unlock();
+        }
     }
     else {
         b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
@@ -506,10 +510,12 @@ void zenMatMul_gemm_s8s8s32os32(
                                           reorder_param0, reorder_param1, reorder_param2);
         b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
-        map_mutex.unlock();
+        if(is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            map_mutex.unlock();
+        }
     }
     else {
         b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
@@ -595,10 +601,12 @@ void zenMatMul_gemm_u8s8s32os8(
                                           reorder_param0, reorder_param1, reorder_param2);
         b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
-        map_mutex.unlock();
+        if(is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            map_mutex.unlock();
+        }
     }
     else {
         b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
@@ -684,10 +692,12 @@ void zenMatMul_gemm_u8s8s32os32(
                                           reorder_param0, reorder_param1, reorder_param2);
         b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
-        map_mutex.unlock();
+        if(is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            map_mutex.unlock();
+        }
     }
     else {
         b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];

@@ -265,10 +265,12 @@ void zenMatMul_gemm_bf16bf16f32of32(
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
-        map_mutex.unlock();
+        if (is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+            map_mutex.unlock();
+        }
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -373,10 +375,12 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
-        map_mutex.unlock();
+        if (is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+            map_mutex.unlock();
+        }
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -501,10 +505,12 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
-        map_mutex.unlock();
+        if (is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+            map_mutex.unlock();
+        }
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -617,10 +623,12 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
-        //Create new entry
-        map_mutex.lock();
-        matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
-        map_mutex.unlock();
+        if (is_weights_const) {
+            //Create new entry
+            map_mutex.lock();
+            matmul_weight_caching_map_aocl[key_obj] = reorder_filter;
+            map_mutex.unlock();
+        }
     }
     else {
         reorder_filter = matmul_weight_caching_map_aocl[key_obj];
@@ -813,10 +821,12 @@ void zenMatMulPrimitiveBF16(zendnnEnv zenEnvObj, int dst_type, int bias_type,
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
-            //Save in map
-            map_mutex.lock();
-            matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
-            map_mutex.unlock();
+            if (is_weights_const) {
+                //Save in map
+                map_mutex.lock();
+                matmul_weight_caching_map_jit[key_obj_reorder] = reordered_weights_memory;
+                map_mutex.unlock();
+            }
         }
         else {
             reordered_weights_memory = matmul_weight_caching_map_jit[key_obj_reorder];
