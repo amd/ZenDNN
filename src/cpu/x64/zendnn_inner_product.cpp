@@ -89,9 +89,9 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     zendnnInfo(ZENDNN_CORELOG,
                "ZENDNN implementation path in zendnn_inner_product_fwd_t::execute_forward [cpu/inner_product]");
 
-    int input_offsets[] = {0};
-    int weight_offsets[] = {0};
-    int dst_offsets[] = {0};
+    unsigned long input_offsets[] = {0};
+    unsigned long weight_offsets[] = {0};
+    unsigned long dst_offsets[] = {0};
 
     if (bias == NULL) {
         zendnnVerbose(ZENDNN_CORELOG,

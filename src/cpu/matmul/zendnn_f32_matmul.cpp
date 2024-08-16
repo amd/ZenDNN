@@ -193,7 +193,7 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     return status::success;
 }
 
-static void fill_offset(std::vector<int> &offsets,
+static void fill_offset(std::vector<unsigned long> &offsets,
                         unsigned int offset_index,
                         unsigned int curr_offset,
                         int64_t const dims1[],
@@ -249,7 +249,7 @@ static void fill_offset(std::vector<int> &offsets,
     return;
 }
 
-static void calculate_offsets(std::vector<int> &offsets,
+static void calculate_offsets(std::vector<unsigned long> &offsets,
                               int64_t const dims1[],
                               int64_t const dims2[],
                               unsigned int dims_len,
@@ -348,9 +348,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
     float *output_scales = pd()->attr()->output_scales_.scales_;
     int scale_size = pd()->attr()->output_scales_.count_;
-    std::vector<int> dst_off;
-    std::vector<int> ip_off;
-    std::vector<int> wei_off;
+    std::vector<unsigned long> dst_off;
+    std::vector<unsigned long> ip_off;
+    std::vector<unsigned long> wei_off;
 
     dst_off.resize(batch);
     ip_off.resize(batch);
@@ -364,9 +364,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                       dst_d.ndims() - 2, K, N);
 
 
-    int *input_offsets = ip_off.data();
-    int *dst_offsets = dst_off.data();
-    int *weight_offsets = wei_off.data();
+    unsigned long *input_offsets = ip_off.data();
+    unsigned long *dst_offsets = dst_off.data();
+    unsigned long *weight_offsets = wei_off.data();
 
     int weights_type = pd()->weights_md()->data_type;
 

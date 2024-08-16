@@ -42,7 +42,7 @@
 namespace zendnn {
 namespace impl {
 namespace utils {
-void fill_offset(std::vector<int> &offsets,
+void fill_offset(std::vector<unsigned long> &offsets,
                         unsigned int offset_index,
                         unsigned int curr_offset,
                         int64_t const dims1[],
@@ -98,7 +98,7 @@ void fill_offset(std::vector<int> &offsets,
     return;
 }
 
-void calculate_offsets(std::vector<int> &offsets,
+void calculate_offsets(std::vector<unsigned long> &offsets,
                               int64_t const dims1[],
                               int64_t const dims2[],
                               unsigned int dims_len,
@@ -131,7 +131,7 @@ void zenAttention_Matmul(const float *a,
     const dim_t K = helper.K();
     const dim_t batch = helper.batch();
 
-    std::vector<int> o_off, a_off, b_off;
+    std::vector<unsigned long> o_off, a_off, b_off;
 
     a_off.resize(batch);
     b_off.resize(batch);
@@ -152,9 +152,9 @@ void zenAttention_Matmul(const float *a,
                                            o_mdw.ndims() - 2,
                                            M,
                                            N);
-    int *a_offsets = a_off.data();
-    int *b_offsets = b_off.data();
-    int *o_offsets = o_off.data();
+    unsigned long *a_offsets = a_off.data();
+    unsigned long *b_offsets = b_off.data();
+    unsigned long *o_offsets = o_off.data();
 
     const bool Layout = true; // CblasRowMajor
 
