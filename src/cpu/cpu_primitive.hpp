@@ -32,6 +32,25 @@
 #include "common/utils.hpp"
 #include "common/z_magic.hpp"
 
+#define DEFINE_WOQ_SCALES_BUFFER(woqscales) \
+    alignas(16) float CONCAT2(woqscales, _buf16)[16] = {0}; \
+    const float *woqscales; \
+    if (pd()->attr()->woqScales_.defined()) { \
+        woqscales = pd()->attr()->woqScales_.scales_; \
+    } else { \
+        woqscales = CTX_IN_MEM(const float *, ZENDNN_ARG_ATTR_WOQ_SCALES); \
+        if (woqscales == nullptr) return status::invalid_arguments; \
+        const auto scales_de = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES); \
+        bool ok = scales_de.data_type() == data_type::f32 \
+                && scales_de.ndims() == 1; \
+        if (!ok) return status::invalid_arguments; \
+        if (scales_de.dims()[0] == 1) { \
+            utils::array_set(CONCAT2(woqscales, _buf16), woqscales[0], 16); \
+            scales = CONCAT2(woqscales, _buf16); \
+        } \
+    } \
+    MAYBE_UNUSED(woqscales);
+
 #define DEFINE_SCALES_BUFFER(scales) \
     alignas(16) float CONCAT2(scales, _buf16)[16] = {0}; \
     const float *scales; \

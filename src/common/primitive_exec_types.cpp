@@ -52,7 +52,8 @@ status_t cvt_primitive_args(const primitive_desc_t *pd, int nargs,
                 args[arg] = {mem, true};
                 n_inputs++;
                 extra_inputs += (arg == ZENDNN_ARG_ATTR_OUTPUT_SCALES)
-                        || (arg & ZENDNN_ARG_ATTR_ZERO_POINTS);
+                        || (arg & ZENDNN_ARG_ATTR_ZERO_POINTS)
+                        || (arg == ZENDNN_ARG_ATTR_WOQ_SCALES);
                 extra_inputs += (arg & ZENDNN_ARG_ATTR_INPUT_SCALES) != 0;
                 break;
             case primitive_desc_t::arg_usage_t::output:

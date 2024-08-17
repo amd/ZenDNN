@@ -1715,9 +1715,12 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
     int weights_type = pd()->weights_md()->data_type;
     int algo_type = zenEnvObj.zenBF16GEMMalgo;
     if (weights_type == s4 || weights_type == s8) {
-        float *woq_scales {nullptr};
-        woq_scales = pd()->attr()->woqScales_.scales_;
+        DEFINE_WOQ_SCALES_BUFFER(woqscales);
+        float *woq_scales = const_cast<float *>(woqscales);
         int woq_scale_size = pd()->attr()->woqScales_.count_;
+        const auto scales_d = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES);
+        woq_scale_size = woq_scale_size > scales_d.dims()[0] ? woq_scale_size :
+                         scales_d.dims()[0];
         matmul_woq_wrapper(ctx, src_type, weights_type, dst_type, bias_dt, Layout,
                            strcmp(transA, "N"),
                            strcmp(transB, "N"),

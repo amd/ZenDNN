@@ -86,6 +86,9 @@ struct primitive_desc_t : public c_compatible {
     enum class arg_usage_t { unused, input, output };
     virtual arg_usage_t arg_usage(int arg) const {
         using types::is_zero_md;
+        if (arg == ZENDNN_ARG_ATTR_WOQ_SCALES
+                && !attr()->woqScales_.defined())
+            return arg_usage_t::input;
         if (arg == ZENDNN_ARG_ATTR_OUTPUT_SCALES
                 && !attr()->output_scales_.defined())
             return arg_usage_t::input;

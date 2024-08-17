@@ -3624,6 +3624,14 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     }
 
     /// Sets woq weight sacle.
+    /// @param scales Constant vector of woq weights scaling factors. If the
+    ///     scaling factors are known at the time of this call, the following
+    ///     equality must hold:
+    ///     \f$scales.size() = \prod\limits_{d \in mask} output.dims[d].\f$
+    ///     If the scaling factors are not known at the time of the call,
+    ///     this vector must contain a single #ZENDNN_RUNTIME_F32_VAL value and
+    ///     the woq weights scaling factors must be passed at execution time as an
+    ///     argument with index #ZENDNN_ARG_ATTR_WOQ_SCALES.
     void set_woq_scale(int mask, const std::vector<float> &scales) {
         error::wrap_c_api(zendnn_primitive_attr_set_woq_weight_scale(
                               get(), (zendnn_dim_t)scales.size(), mask, scales.data()),

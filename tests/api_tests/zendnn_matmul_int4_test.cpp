@@ -75,7 +75,6 @@ std::vector<float> matmul_example_2D_f32_ref(bool s4_weights, int post_op) {
 
     // Tensor dimensions.
     const memory::dim M = 128, K = 256, N = 512;
-    //const memory::dim M = 5, K = 5, N = 5;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -92,7 +91,6 @@ std::vector<float> matmul_example_2D_f32_ref(bool s4_weights, int post_op) {
     }
     for (int i=0; i<weights_data.size(); i++) {
         weights_data[i] = 2.0831*(i%5);
-        //weights_data[i] = 1.0*(i%5);
     }
     for (int i=0; i<bias_data.size(); i++) {
         bias_data[i] = std::tanh(i);
@@ -170,7 +168,6 @@ std::vector<float> matmul_example_2D_f32(bool s4_weights, int post_op) {
 
     // Tensor dimensions.
     const memory::dim M = 128, K = 256, N = 512;
-    //const memory::dim M = 5, K = 5, N = 5;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -268,15 +265,14 @@ std::vector<float> matmul_example_2D_f32(bool s4_weights, int post_op) {
 
 //Weights are passed as BF16
 std::vector<float> matmul_example_2D_bf16_ref(bool s4_weights, bool dst_f32,
-        unsigned int post_op) {
+        unsigned int post_op, std::vector<float> woq_sc) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
 
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
     // Tensor dimensions.
-    const memory::dim M = 128, K = 256, N = 512;
-    //const memory::dim M = 5, K = 50, N = 5;
+    const memory::dim M = 4, K = 4096, N = 11008;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -291,8 +287,13 @@ std::vector<float> matmul_example_2D_bf16_ref(bool s4_weights, bool dst_f32,
     for (int i=0; i<src_data.size(); i++) {
         src_data[i] = std::cos(i / 10.f);
     }
+    int idx =0;
     for (int i=0; i<weights_data.size(); i++) {
-        weights_data[i] = 2.0831*(i%5);
+        weights_data[i] = woq_sc[idx]*(i%5);
+        idx++;
+        if (idx == N) {
+            idx = 0;
+        }
     }
     for (int i=0; i<bias_data.size(); i++) {
         bias_data[i] = std::tanh(i);
@@ -387,15 +388,14 @@ std::vector<float> matmul_example_2D_bf16_ref(bool s4_weights, bool dst_f32,
     return dst_data;
 }
 std::vector<float> matmul_example_2D_bf16(bool s4_weights, bool dst_f32,
-        unsigned int post_op) {
+        unsigned int post_op, std::vector<float> woq_sc) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
 
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
     // Tensor dimensions.
-    const memory::dim M = 128, K = 256, N = 512;
-    //const memory::dim M = 5, K = 50, N = 5;
+    const memory::dim M = 4, K = 4096, N = 11008;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -491,8 +491,15 @@ std::vector<float> matmul_example_2D_bf16(bool s4_weights, bool dst_f32,
 
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
-    //matmul_attr.set_output_scales(0, {2.0831});
-    matmul_attr.set_woq_scale(0, {2.08});
+    //Directly passing woq scales
+    //matmul_attr.set_woq_scale(2, woq_sc);
+    //Passing WOQ scales as ARG
+    //Mask values: per channel(2) and per tensor(0)
+    matmul_attr.set_woq_scale(2, {ZENDNN_RUNTIME_F32_VAL});
+    // Create scale memory
+    auto scale_mem = memory({{N}, dt::f32, tag::a}, eng);
+    write_to_zendnn_memory(woq_sc.data(), scale_mem);
+
     // Create primitive descriptor.
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, eng);
     // Create the primitive.
@@ -503,6 +510,7 @@ std::vector<float> matmul_example_2D_bf16(bool s4_weights, bool dst_f32,
     matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_mem});
     matmul_args.insert({ZENDNN_ARG_BIAS, bias_arg_mem});
     matmul_args.insert({ZENDNN_ARG_DST, dst_arg_mem});
+    matmul_args.insert({ZENDNN_ARG_ATTR_WOQ_SCALES, scale_mem});
     // Primitive execution: matrix multiplication with ReLU.
     matmul_prim.execute(engine_stream, matmul_args);
     // Wait for the computation to finalize.
@@ -516,21 +524,29 @@ std::vector<float> matmul_example_2D_bf16(bool s4_weights, bool dst_f32,
 
 void wrapper_woq(int val, int of32) {
     if (val == 0 || val == 1) {
+        std::vector<float> ref_dst, woq_dst;
+        std::vector<float> woq_sc(11008);
+        default_random_engine gen;
+        uniform_real_distribution<double> distribution(0.0, 1.0);
+        for (int i = 0; i < woq_sc.size(); i++) {
+            woq_sc[i] = distribution(gen);
+        }
         if (!of32) {
-            std::vector<float> ref_dst = matmul_example_2D_bf16_ref(true, false, 1);
-            auto woq_dst = matmul_example_2D_bf16(true, false, 1);
+            ref_dst = matmul_example_2D_bf16_ref(true, false, 1, woq_sc);
+            woq_dst = matmul_example_2D_bf16(true, false, 1, woq_sc);
             compare_vectors(
                 woq_dst, ref_dst, 256, "Compare s4 weights | comp BF16 output BF16");
-            auto woq_dst2 = matmul_example_2D_bf16(false, false, 1);
+
+            woq_dst = matmul_example_2D_bf16(false, false, 1, woq_sc);
             compare_vectors(
-                woq_dst2, ref_dst, 256, "Compare s8 weights | comp BF16 output BF16");
+                woq_dst, ref_dst, 256, "Compare s8 weights | comp BF16 output BF16");
         }
         if (of32) {
-            auto ref_dst = matmul_example_2D_bf16_ref(true, true, 1);
-            auto woq_dst = matmul_example_2D_bf16(true, true, 1);
+            ref_dst = matmul_example_2D_bf16_ref(true, true, 1, woq_sc);
+            woq_dst = matmul_example_2D_bf16(true, true, 1, woq_sc);
             compare_vectors(
                 woq_dst, ref_dst, 256, "Compare s4 weights | comp BF16 output FP32");
-            woq_dst = matmul_example_2D_bf16(false, true, 1);
+            woq_dst = matmul_example_2D_bf16(false, true, 1, woq_sc);
             compare_vectors(
                 woq_dst, ref_dst, 256, "Compare s8 weights | comp BF16 output FP32");
         }

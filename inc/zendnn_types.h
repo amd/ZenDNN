@@ -3019,6 +3019,8 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 /// Output scaling factors provided at execution time.
 #define ZENDNN_ARG_ATTR_OUTPUT_SCALES 513
 
+#define ZENDNN_ARG_ATTR_WOQ_SCALES 517
+
 /// Starting index for source arguments for primitives that take a variable
 /// number of source arguments.
 #define ZENDNN_ARG_MULTIPLE_SRC 1024

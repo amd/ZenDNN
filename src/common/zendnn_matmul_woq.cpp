@@ -806,17 +806,11 @@ int aocl_woq_bf16(
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
         (post_ops->pre_ops)->b_scl = (aocl_pre_op_sf *)malloc(sizeof(aocl_pre_op_sf));
         /* Only int8_t zero point supported in pre-ops. */
-        ((post_ops->pre_ops)->b_zp)->zero_point = malloc(1 * sizeof(int8_t));
-        for (dim_t i = 0; i < 1; ++i) {
-            ((int8_t *)((post_ops->pre_ops)->b_zp)->zero_point)[i] = (int8_t)(0);
-        }
+        int8_t zp = 0;
+        ((post_ops->pre_ops)->b_zp)->zero_point = (int8_t *)&zp;
         ((post_ops->pre_ops)->b_zp)->zero_point_len = 1;
         /* Only float scale factor supported in pre-ops. */
-        ((post_ops->pre_ops)->b_scl)->scale_factor = malloc(scale_size * sizeof(float));
-        for (dim_t i = 0; i < scale_size; ++i) {
-            ((float *)((post_ops->pre_ops)->b_scl)->scale_factor)[i] = ((
-                        float)wei_scale[i]);
-        }
+        ((post_ops->pre_ops)->b_scl)->scale_factor = (float *)wei_scale;
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         (post_ops->pre_ops)->seq_length = 1;
 
@@ -843,17 +837,11 @@ int aocl_woq_bf16(
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
         (post_ops->pre_ops)->b_scl = (aocl_pre_op_sf *)malloc(sizeof(aocl_pre_op_sf));
         /* Only int8_t zero point supported in pre-ops. */
-        ((post_ops->pre_ops)->b_zp)->zero_point = malloc(1 * sizeof(int8_t));
-        for (dim_t i = 0; i < 1; ++i) {
-            ((int8_t *)((post_ops->pre_ops)->b_zp)->zero_point)[i] = (int8_t)(0);
-        }
+        int8_t zp = 0;
+        ((post_ops->pre_ops)->b_zp)->zero_point = (int8_t *)&zp;
         ((post_ops->pre_ops)->b_zp)->zero_point_len = 1;
         /* Only float scale factor supported in pre-ops. */
-        ((post_ops->pre_ops)->b_scl)->scale_factor = malloc(scale_size * sizeof(float));
-        for (dim_t i = 0; i < scale_size; ++i) {
-            ((float *)((post_ops->pre_ops)->b_scl)->scale_factor)[i] = ((
-                        float)wei_scale[i]);
-        }
+        ((post_ops->pre_ops)->b_scl)->scale_factor = (float *)wei_scale;
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         (post_ops->pre_ops)->seq_length = 1;
 
@@ -888,8 +876,8 @@ int aocl_woq_bf16(
     if (post_ops->matrix_mul != NULL) {
         post_ops->matrix_mul = NULL;
     }
-    free(((post_ops->pre_ops)->b_zp)->zero_point);
-    free(((post_ops->pre_ops)->b_scl)->scale_factor);
+    ((post_ops->pre_ops)->b_zp)->zero_point = NULL;
+    ((post_ops->pre_ops)->b_scl)->scale_factor = NULL;
     free((post_ops->pre_ops)->b_zp);
     free((post_ops->pre_ops)->b_scl);
     free(post_ops->pre_ops);
