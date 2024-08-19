@@ -23,6 +23,7 @@
 #include "zendnn_logging.hpp"
 
 #define BF16_ENABLE 0
+#define WEIGHT_CACHING 0
 
 using namespace zendnn;
 
@@ -87,12 +88,16 @@ int main(int argc, char *argv[]) {
     // Generate random dimensions for layers
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1, 10); // Random dimension range: 1 to 10
+#if WEIGHT_CACHING
+    std::uniform_int_distribution<> dis(4096, 16384);
+#else
+    std::uniform_int_distribution<> dis(1, 10);
+#endif
     std::vector<int> dims(num_layers + 1);
     for (int i = 0; i < num_layers + 1; ++i) {
         dims[i] = dis(gen);
     }
-    int batch_size=1;
+    int batch_size=dis(gen);
 
     // Create FP32 memory descriptors and memory objects for input, weight, output matrices
     std::vector<memory> input_mem;
@@ -162,10 +167,12 @@ int main(int argc, char *argv[]) {
     std::vector<memory> bias(num_layers);
     std::vector<bool> bias_defined(num_layers, 0);
     std::vector<int64_t> fuse(num_layers, 1);
+
+#if !WEIGHT_CACHING
     // Execute the MLP layers
     for (int i = 0; i < num_layers; ++i) {
         if (i==0) {
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
             matmul_execute(eng, s, input_mem_bf16[i], weight_mem_bf16[i], alpha[i], beta[i],
                            bias_defined[i],
                            fuse[i], out_mem_bf16[i]);
@@ -177,7 +184,7 @@ int main(int argc, char *argv[]) {
 #endif
         }
         else {
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
             matmul_execute(eng, s, out_mem_bf16[i-1], weight_mem_bf16[i], alpha[i], beta[i],
                            bias_defined[i],
                            fuse[i], out_mem_bf16[i]);
@@ -187,9 +194,10 @@ int main(int argc, char *argv[]) {
 #endif
         }
     }
+#endif
     // Read data from memory object for the final output
     std::vector<float> output(batch_size*dims[num_layers]);
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
     read_from_zendnn_memory(output.data(), out_mem_bf16[num_layers-1]);
 #else
     read_from_zendnn_memory(output.data(), out_mem[num_layers-1]);
@@ -212,18 +220,21 @@ int main(int argc, char *argv[]) {
     }
 
     /*****************Test for Group Linear MatMul********************/
-#ifdef BF16_ENABLE
-    zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_bf16, bias, alpha,
-                                     beta,
-                                     bias_defined, fuse, out_grp_mem_bf16, "lib::zendnn_grp_mlp");
+#if BF16_ENABLE || WEIGHT_CACHING
+#if WEIGHT_CACHING
+    for (int i =0; i<50; i++)
+#endif
+        zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_bf16, bias, alpha,
+                                         beta,
+                                         bias_defined, fuse, out_grp_mem_bf16, "lib::zendnn_grp_mlp");
 #else
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem, bias, alpha, beta,
                                      bias_defined, fuse, out_grp_mem, "lib::zendnn_grp_mlp");
 #endif
-
+#if !WEIGHT_CACHING
     // Read data from memory object for the final output of grp Matmul
     std::vector<float> output_grp(batch_size*dims[num_layers]);
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
     read_from_zendnn_memory(output_grp.data(), out_grp_mem_bf16[num_layers-1]);
 #else
     read_from_zendnn_memory(output_grp.data(), out_grp_mem[num_layers-1]);
@@ -301,7 +312,7 @@ int main(int argc, char *argv[]) {
 
     // Execute the MLP layers
     for (int i = 0; i < num_layers; ++i) {
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
         matmul_execute(eng, s, input_mem_bf16[i], weight_mem_parallel_bf16[i], alpha[i],
                        beta[i],
                        bias_defined[i], fuse[i], out_mem_parallel[i]);
@@ -314,7 +325,7 @@ int main(int argc, char *argv[]) {
     std::vector<float> output_parallel(batch_size*dims[1]);
     read_from_zendnn_memory(output_parallel.data(), out_mem_parallel[1]);
 
-#ifdef BF16_ENABLE
+#if BF16_ENABLE
     zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_parallel_bf16, bias,
                                      alpha,
                                      beta,
@@ -335,4 +346,5 @@ int main(int argc, char *argv[]) {
     std::cout << " Test Comparison for group parallel Matmul Successful " <<
               std::endl;
     return 0;
+#endif
 }
