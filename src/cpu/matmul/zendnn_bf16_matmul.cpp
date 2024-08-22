@@ -1574,8 +1574,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if ((obj.is_brgemm || obj.is_ref_gemm_bf16) &&
-            weights_md()->data_type == bf16) {
+    if (obj.is_brgemm || (obj.is_ref_gemm_bf16 &&
+            weights_md()->data_type == bf16)) {
         return status::unimplemented;
     }
 
