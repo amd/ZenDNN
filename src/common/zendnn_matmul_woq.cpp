@@ -519,15 +519,15 @@ int ref_woq_bf16(
     aocl_post_op *post_ops = NULL;
 
     if (dst_type == zendnn_bf16) {
-        int postop_count= 1;
+        int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const int16_t *)bias, has_eltwise_relu, geluType, (int16_t *)output,
-                   postop_count, &alpha);
+                   postop_count, postop_count ? &alpha : NULL);
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
                                    transA ? 't' : 'n',
                                    transB ? 't' : 'n', M, N, K,
-                                   alpha,
+                                   bias == NULL ? alpha : 1.0,
                                    src, lda, mem_format_a,
                                    reorder_filter, ldb,
                                    mem_format_b,
@@ -536,14 +536,14 @@ int ref_woq_bf16(
                                    post_ops);
     }
     else {
-        int postop_count= 1;
+        int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
                                                alpha, (const float *)bias, has_eltwise_relu, geluType, (float *)output,
-                                               postop_count, &alpha);
+                                               postop_count, postop_count ? &alpha : NULL);
         aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                                   transA ? 't' : 'n',
                                   transB ? 't' : 'n', M, N, K,
-                                  alpha,
+                                  bias == NULL ? alpha : 1.0,
                                   src, lda, mem_format_a,
                                   reorder_filter, ldb,
                                   mem_format_b,
@@ -690,7 +690,6 @@ int ref_woq_f32(
                             post_ops);
 
     // Free memory for postops.
-
     if (post_ops != NULL) {
         if (bias != NULL) {
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
@@ -996,10 +995,10 @@ int aocl_woq_bf16(
     aocl_post_op *post_ops = NULL;
 
     if (dst_type == zendnn_bf16) {
-        int postop_count= 1;
+        int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const int16_t *)bias, has_eltwise_relu, geluType, (int16_t *)output,
-                   postop_count, &alpha);
+                   postop_count, bias !=NULL ? &alpha : NULL);
 
         //Add pre-op for S4 API
         post_ops->pre_ops = NULL;
@@ -1019,7 +1018,7 @@ int aocl_woq_bf16(
         aocl_gemm_bf16s4f32obf16(Layout? 'r' : 'c',
                                  transA ? 't' : 'n',
                                  transB ? 't' : 'n', M, N, K,
-                                 alpha,
+                                 bias == NULL ? alpha : 1.0,
                                  src, lda, mem_format_a,
                                  reorder_filter, ldb,
                                  mem_format_b,
@@ -1028,10 +1027,10 @@ int aocl_woq_bf16(
                                  post_ops);
     }
     else {
-        int postop_count= 1;
+        int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
                                                alpha, (const float *)bias, has_eltwise_relu, geluType, (float *)output,
-                                               postop_count, &alpha);
+                                               postop_count, bias !=NULL ? &alpha : NULL);
         //Add pre-op for S4 API
         post_ops->pre_ops = NULL;
         post_ops->pre_ops = (aocl_pre_op *)malloc(sizeof(aocl_pre_op));
@@ -1049,7 +1048,7 @@ int aocl_woq_bf16(
         aocl_gemm_bf16s4f32of32(Layout? 'r' : 'c',
                                 transA ? 't' : 'n',
                                 transB ? 't' : 'n', M, N, K,
-                                alpha,
+                                bias == NULL ? alpha : 1.0,
                                 src, lda, mem_format_a,
                                 reorder_filter, ldb,
                                 mem_format_b,
@@ -1068,9 +1067,11 @@ int aocl_woq_bf16(
         }
         free(post_ops->eltwise);
     }
-    free(post_ops->sum->scale_factor);
-    free(post_ops->sum->zero_point);
-    free(post_ops->sum);
+    if (post_ops->sum != NULL) {
+        free(post_ops->sum->scale_factor);
+        free(post_ops->sum->zero_point);
+        free(post_ops->sum);
+    }
     if (post_ops->matrix_add != NULL) {
         post_ops->matrix_add = NULL;
     }
@@ -1125,6 +1126,11 @@ int matmul_woq_wrapper(
     zendnnEnv zenEnvObj = readEnv();
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
 
+    //Due to limitation of current aocl kernels
+    //using jit call for cases where BIAS, alpha and beta
+    //all are available
+    int use_jit = (bias && alpha != 1.0 && beta != 0.0);
+
     if (src_type == zendnn_bf16) {
         if (zenEnvObj.zenBF16GEMMalgo == 0) {
             // If M >=64, N and K >=1024 AOCL BLIS kernels gives optimal performance.
@@ -1149,7 +1155,7 @@ int matmul_woq_wrapper(
             }
         }
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-        if (zenEnvObj.zenBF16GEMMalgo == 3 && weights_type == zendnn_s4)
+        if (zenEnvObj.zenBF16GEMMalgo == 3 && weights_type == zendnn_s4 && !use_jit)
 #else
         if (0)
 #endif
@@ -1161,7 +1167,7 @@ int matmul_woq_wrapper(
                           wei_scale, 0, scale_size, do_sum,
                           is_weights_const);
         }
-        else if (zenEnvObj.zenBF16GEMMalgo == 1) {
+        else if (zenEnvObj.zenBF16GEMMalgo == 1 && !use_jit) {
             ref_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                          transA, transB,
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,

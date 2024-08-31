@@ -365,6 +365,7 @@ std::vector<float> matmul_example_2D_bf16_ref(bool s4_weights, bool dst_f32,
     }
 
     primitive_attr matmul_attr;
+    matmul_attr.set_output_scales(0, {2.08});
     matmul_attr.set_post_ops(matmul_ops);
 
     // Create primitive descriptor.
@@ -491,6 +492,7 @@ std::vector<float> matmul_example_2D_bf16(bool s4_weights, bool dst_f32,
 
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
+    matmul_attr.set_output_scales(0, {2.08});
     //Directly passing woq scales
     //matmul_attr.set_woq_scale(2, woq_sc);
     //Passing WOQ scales as ARG
