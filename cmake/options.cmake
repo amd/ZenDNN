@@ -356,3 +356,10 @@ option(ZENDNN_BLOCKED_POOLING_ENABLE "Enables ZENDNN_BLOCKED_POOLING specifc
 option(ZENDNN_USE_LOCAL_BLIS "Use locally installed BLIS.
     export ZENDNN_BLIS_PATH to use it." ON)
 option(ZENDNN_ENABLE_LPGEMM "Enable ZENDNN_ENABLE_LPGEMM for Zendnn." OFF)
+
+option(ZENDNN_LPGEMM_V5_0_ENABLE "Enable ZENDNN_LPGEMM_V5_0_ENABLE for Zendnn." ON)
+
+option(ZENDNN_ENABLE_TPP "Enable TPP and libxsmm support for Zendnn." OFF)
+
+option(ZENDNN_CUSTOM_OP_ENABLE "Enable custom op support for Zendnn." OFF)
+

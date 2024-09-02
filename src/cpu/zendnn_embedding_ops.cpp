@@ -21,7 +21,7 @@
 #include <omp.h>
 #include <string.h>
 #include "zendnn_logging.hpp"
-#include "verbose.hpp"
+#include "common/verbose.hpp"
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
 #if FBGEMM_ENABLE

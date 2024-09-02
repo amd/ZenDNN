@@ -681,7 +681,7 @@ struct zendnn_post_ops : public zendnn::impl::c_compatible {
             CHECK(entry_[idx].copy_from(other.entry_[idx]));
         }
 
-        return status::success;
+        return zendnn::impl::status::success;
     }
 
     std::vector<entry_t> entry_;
@@ -725,7 +725,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
         autoTunerEnable = other.autoTunerEnable;
         CHECK(woqScales_.copy_from(other.woqScales_));
         plugin_op = other.plugin_op;
-        return status::success;
+        return zendnn::impl::status::success;
     }
 
     bool is_initialized() const {
@@ -791,13 +791,13 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
         bool is_compat = is_fpsubtype(dt_to, dt_from);
         auto can_downconvert = [&]() {
             switch (fpmath_mode_) {
-            case fpmath_mode::strict:
+            case zendnn::impl::fpmath_mode::strict:
                 return dt_from == dt_to;
-            case fpmath_mode::any:
+            case zendnn::impl::fpmath_mode::any:
                 return true;
-            case fpmath_mode::bf16:
+            case zendnn::impl::fpmath_mode::bf16:
                 return is_fpsubtype(data_type::bf16, dt_to);
-            case fpmath_mode::f16:
+            case zendnn::impl::fpmath_mode::f16:
                 return is_fpsubtype(data_type::f16, dt_to);
             default:
                 return false;

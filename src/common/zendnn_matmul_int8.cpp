@@ -37,6 +37,7 @@
 
 #include "zendnn_logging.hpp"
 #include "zendnn_private.hpp"
+#include "zendnn_helper.hpp"
 #include "zendnn.hpp"
 
 // #define NUM_INT8_ALGO 3
@@ -427,7 +428,7 @@ void zenMatMul_gemm_s8s8s32os8(
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
         if(is_weights_const) {
             //Create new entry
@@ -534,7 +535,7 @@ void zenMatMul_gemm_s8s8s32os32(
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
         if(is_weights_const) {
             //Create new entry
@@ -639,7 +640,7 @@ void zenMatMul_gemm_u8s8s32os8(
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
         if(is_weights_const) {
             //Create new entry
@@ -744,7 +745,7 @@ void zenMatMul_gemm_u8s8s32os32(
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
         aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
         if(is_weights_const) {
             //Create new entry

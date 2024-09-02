@@ -28,6 +28,7 @@
 #include <cmath>
 #include "zendnn_logging.hpp"
 #include "zendnn_private.hpp"
+#include "zendnn_helper.hpp"
 #include "zendnn.hpp"
 
 std::mutex map_mutex;
@@ -107,7 +108,7 @@ void zenMatMul_gemm_blocked(
             zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
             siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
                                               order, trans, reorder_param0, reorder_param1, reorder_param2);
-            reorder_filter = (float_t *) aligned_alloc(64, b_reorder_buf_siz_req);
+            reorder_filter = (float_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
             aocl_reorder_f32f32f32of32(order, trans, 'B', filter, reorder_filter, k,
                                        n, ldb);
             if(is_weights_const) {

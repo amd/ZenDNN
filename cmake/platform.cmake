@@ -84,6 +84,10 @@ if (ZENDNN_ENABLE_LPGEMM)
 	add_definitions_with_host_compiler(-DZENDNN_ENABLE_LPGEMM_CONV=0)
 endif()
 
+if (ZENDNN_LPGEMM_V5_0_ENABLE)
+       add_definitions_with_host_compiler(-DZENDNN_ENABLE_LPGEMM_V5_0=1)
+endif()
+
 if (ZENDNN_USE_LOCAL_BLIS)
     set(BLIS_PATH $ENV{ZENDNN_BLIS_PATH})
     if(UNIX)

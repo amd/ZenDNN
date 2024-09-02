@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+# Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
 # Notified per clause 4(b) of the license.
 #******************************************************************************/
 
@@ -77,7 +77,7 @@ endif()
 
 set(PROJECT_NAME "ZenDNN")
 set(PROJECT_FULL_NAME "Zen Deep Neural Network Library (ZenDNN)")
-set(PROJECT_VERSION "4.1.0")
+set(PROJECT_VERSION "5.0.0")
 
 if (CMAKE_VERSION VERSION_LESS 3.0)
     project(${PROJECT_NAME} C CXX)
@@ -160,11 +160,6 @@ configure_file(
 )
 include_directories_with_host_compiler(${PROJECT_BINARY_DIR}/inc)
 
-configure_file(
-    "${PROJECT_SOURCE_DIR}/README.binary.in"
-    "${PROJECT_BINARY_DIR}/README"
-)
-
 if(ZENDNN_INSTALL_MODE STREQUAL "BUNDLE" AND NOT DEFINED CMAKE_INSTALL_LIBDIR)
     # define CMAKE_INSTALL_LIBDIR as "lib" in the case of bundle
     set(CMAKE_INSTALL_LIBDIR "lib")
@@ -180,10 +175,10 @@ add_subdirectory(tests)
 if(ZENDNN_INSTALL_MODE STREQUAL "BUNDLE")
     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_PREFIX})
     install(FILES THIRD-PARTY-PROGRAMS DESTINATION ${CMAKE_INSTALL_PREFIX})
-    install(FILES ${PROJECT_BINARY_DIR}/README DESTINATION ${CMAKE_INSTALL_PREFIX})
+    install(FILES README.md DESTINATION ${CMAKE_INSTALL_PREFIX})
 else()
     # Cannot use CMAKE_INSTALL_DOCDIR since it uses PROJECT_NAME and not ZENDNN_LIBRARY_NAME
     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
     install(FILES THIRD-PARTY-PROGRAMS DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
-    install(FILES ${PROJECT_BINARY_DIR}/README DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
+    install(FILES README.md DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
 endif()

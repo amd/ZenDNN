@@ -29,6 +29,7 @@
 #include "common/primitive.hpp"
 #include "zendnn_logging.hpp"
 #include "common/zendnn_private.hpp"
+#include "zendnn_helper.hpp"
 #include "zendnn.hpp"
 
 using namespace zendnn;
@@ -488,7 +489,7 @@ int ref_woq_bf16(
         }
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32('r', trans, 'B', wei_bf16, reorder_filter, K,
                                      N, ldb);
@@ -648,7 +649,7 @@ int ref_woq_f32(
         }
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
                                           'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (float *) aligned_alloc(64,
+        reorder_filter = (float *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_f32f32f32of32('r', trans, 'B', wei_f32, reorder_filter, K,
                                    N, ldb);
@@ -968,7 +969,7 @@ int aocl_woq_bf16(
             found_obj == matmul_weight_caching_map_aocl_woq_bf16.end()) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16s4f32of32(
                                           'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int8_t *) aligned_alloc(64,
+        reorder_filter = (int8_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16s4f32of32('r', trans, 'B', weights, reorder_filter, K,
                                    N, ldb);

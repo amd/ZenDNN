@@ -28,6 +28,12 @@
 #include <unordered_map>
 #include <tuple>
 
+#ifndef _WIN32
+#include <sys/time.h>
+#else
+#include <windows.h>
+#endif
+
 #ifndef ZENDNN_USE_AOCL_BLIS_API
     #include <cblas.h>
 #else // ZENDNN_USE_AOCL_BLIS_API
@@ -37,6 +43,7 @@
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
 #include "common/type_helpers.hpp"
+#include "zendnn_helper.hpp"
 #include "common/utils.hpp"
 #include "common/weight_cache.hpp"
 #include "cpu/cpu_primitive.hpp"
@@ -447,7 +454,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
     if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
@@ -584,7 +591,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B', filter, reorder_filter, k,
                                      n, ldb);
@@ -739,7 +746,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
@@ -877,7 +884,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           order, trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) aligned_alloc(64,
+        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
                          b_reorder_buf_siz_req);
         aocl_reorder_bf16bf16f32of32(order, trans, 'B',filter, reorder_filter, k,
                                      n, ldb);
