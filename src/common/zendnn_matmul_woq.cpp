@@ -444,7 +444,7 @@ int ref_woq_bf16(
     bool is_weights_const
 ) {
     zendnnEnv zenEnvObj = readEnv();
-    zendnnVerbose(ZENDNN_PROFLOG,"aocl kernel bf16 kernel");
+    zendnnVerbose(ZENDNN_PROFLOG,"aocl bf16 kernel");
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     Key_matmul key_obj;
@@ -1132,25 +1132,33 @@ int matmul_woq_wrapper(
             // This is based on heuristic with different models and difference BS
             // For skinny matrix sizes i.e M <=16 Blocked JIT Kernels gives optimal
             // performance.
-            if (M >= 64 && N >= 1024 && K >= 1024) {
+            if (M == 4) {
+                // AOCL S4 Kernel
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
             }
+            else if (M >= 64 && N >= 1024 && K >= 1024) {
+                // AOCL BF16 Kernel with Zen Weights Conversion
+                zenEnvObj.zenBF16GEMMalgo = 3;
+            }
             else if (M <= 16) {
+                // Blocked BRGEMM BF16 Kernel with Zen Weights Conversion
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
             }
             else {
                 // For 16 < M < 64, where N size is smaller than K BLIS AOCL kernel gives
                 // optimal performance.
                 if (N < K) {
-                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+                    // AOCL BF16 Kernel with Zen Weights Conversion
+                    zenEnvObj.zenBF16GEMMalgo = 3;
                 }
                 else {
+                    // Blocked BRGEMM BF16 with Zen Weights Conversion
                     zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
                 }
             }
         }
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-        if (zenEnvObj.zenBF16GEMMalgo == 3 && weights_type == zendnn_s4 && !use_jit)
+        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4 && !use_jit)
 #else
         if (0)
 #endif
@@ -1162,7 +1170,7 @@ int matmul_woq_wrapper(
                           wei_scale, 0, scale_size, do_sum,
                           is_weights_const);
         }
-        else if (zenEnvObj.zenBF16GEMMalgo == 1 && !use_jit) {
+        else if (zenEnvObj.zenBF16GEMMalgo == 3 && !use_jit) {
             ref_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                          transA, transB,
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
