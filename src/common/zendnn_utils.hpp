@@ -41,6 +41,22 @@ typedef unsigned int uint;
 
 using namespace zendnn;
 
+void float_to_bf16(float *float_value, bfloat16 *bf16_val);
+
+float bf16_to_float(int16_t bf16_val);
+
+int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
+                     float *scales, int scale_size);
+
+int cvt_int8_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
+                     float *scales, int scale_size);
+
+int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
+                    float *scales, int scale_size);
+
+int cvt_int8_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
+                    float *scales, int scale_size);
+
 //Enable/disable Direct Convolution
 //TODO: Make below two MACRO as ZENDNN_BLOCKED_FORMAT
 #define ZENDNN_DIRECT_CONV              1

@@ -78,20 +78,6 @@ matmul_kernel_map_bf16;
 std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
 matmul_kernel_map_bf16_helper;
 
-static inline float bf16_to_float(int16_t bf16_val) {
-    int32_t inter_temp = *((int16_t *) &bf16_val);
-    inter_temp = inter_temp << 16;
-    float float_value = 0.0;
-    memcpy(&float_value, &inter_temp, sizeof(int32_t));
-    return float_value;
-}
-
-static inline void float_to_bf16(float *float_value, bfloat16 *bf16_val) {
-    /*Set offset 2 to copy most significant 2 bytes of float
-    to convert float values to bf16 values*/
-    memcpy((bf16_val), (char *)(float_value) + 2, sizeof(int16_t));
-}
-
 template<typename T>
 aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                                    const impl::post_ops_t &po,
