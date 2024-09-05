@@ -35,11 +35,12 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 using namespace data_type;
-template<>
-inline void avx512_embedding_bag_t<f32>::ebvec_prefetch(float const *input,
-        indices_type *indices,
-        const int64_t width, offsets_type *offsets, const int32_t index,
-        const int32_t offsz, const int32_t indsz) const {
+template<data_type_t in_data_type, data_type_t out_data_type>
+void avx512_embedding_bag_t<in_data_type, out_data_type>::ebvec_prefetch(
+    input_type const *input,
+    indices_type *indices,
+    const int64_t width, offsets_type *offsets, const int32_t index,
+    const int32_t offsz, const int32_t indsz) const {
 
     auto prefetch_distance = PREFETCH_DISTANCE;
     //if((index+PREFETCH_DISTANCE)>=offsz)
@@ -49,17 +50,19 @@ inline void avx512_embedding_bag_t<f32>::ebvec_prefetch(float const *input,
     auto olast  = index < (offsz -1) ? offsets[index+prefetch_distance+1] : indsz;
 
     for (auto i = ofirst; i < olast; ++i) {
-        float const *prefetch_addr = input + (indices[i] * width);
+        input_type const *prefetch_addr = input + (indices[i] * width);
         _mm_prefetch(prefetch_addr, _MM_HINT_T0);
     }
 }
 
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::execute(const exec_ctx_t &ctx) const {
+avx512_embedding_bag_t<in_data_type, out_data_type>::execute(
+    const exec_ctx_t &ctx) const {
 #if ZENDNN_CPU_THREADING_RUNTIME != ZENDNN_RUNTIME_OMP
     assert(!"threading env need to be omp for embedding_bag");
 #endif
+
     status_t status;
     // initialize
     emb_params_t  params;
@@ -82,10 +85,11 @@ avx512_embedding_bag_t<data_type>::execute(const exec_ctx_t &ctx) const {
 /*
  * extract embedding bag parameters
  */
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
-        emb_params_t &params) const {
+avx512_embedding_bag_t<in_data_type, out_data_type>::pre_process(
+    const exec_ctx_t &ctx,
+    emb_params_t &params) const {
     status_t status = status::success;
     // get algorithm params
     params.padidx         = pd()->desc()->padding_idx;
@@ -131,9 +135,10 @@ avx512_embedding_bag_t<data_type>::pre_process(const exec_ctx_t &ctx,
 /*
  * sum without weights
  */
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_sum(const emb_params_t &params)
+avx512_embedding_bag_t<in_data_type, out_data_type>::avx512_sum(
+    const emb_params_t &params)
 const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
@@ -173,7 +178,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -196,7 +201,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -220,7 +225,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -243,7 +248,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -267,7 +272,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -290,7 +295,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -314,7 +319,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -337,7 +342,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -361,7 +366,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -384,7 +389,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -408,7 +413,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_add_ps(input + (indices[i] * width));
@@ -431,7 +436,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -440,6 +445,7 @@ const {
         }
         return status::success;
     }
+
     // slow path, no avx instructions
     if (padidx >= 0) {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
@@ -459,7 +465,7 @@ const {
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
                     uint32_t input_offset = indices[i]*width;
-                    emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+                    emb_sum<dst_type,input_type>(sum.data(), input, width, input_offset, 1.0);
                 }
             }
             for (auto j = 0; j < width; ++j) {
@@ -484,7 +490,7 @@ const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
                 uint32_t input_offset = indices[i]*width;
-                emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+                emb_sum<dst_type, input_type>(sum.data(), input, width, input_offset, 1.0);
             }
 
             for (auto j = 0; j < width; ++j) {
@@ -497,9 +503,10 @@ const {
 /*
  * sum with weights
  */
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_sum_wt(const emb_params_t &params)
+avx512_embedding_bag_t<in_data_type, out_data_type>::avx512_sum_wt(
+    const emb_params_t &params)
 const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     float        const *wts      = static_cast<float *>(params.weights);
@@ -540,7 +547,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -563,7 +570,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -587,7 +594,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -610,7 +617,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -634,7 +641,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -657,7 +664,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -681,7 +688,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -704,7 +711,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -728,7 +735,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -751,7 +758,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -775,7 +782,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
                         sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
@@ -798,7 +805,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_fmadd_ps(input + (indices[i] * width), wts[i]);
                 }
@@ -807,6 +814,7 @@ const {
         }
         return status::success;
     }
+
     // slow path, no avx instructions
     if (padidx >= 0) {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
@@ -826,7 +834,7 @@ const {
             for (auto i = ofirst; i < olast; ++i) {
                 if (indices[i] != padidx) {
                     uint32_t input_offset = indices[i]*width;
-                    emb_sum<input_type>(sum.data(), input, width, input_offset,wts[i]);
+                    emb_sum<dst_type, input_type>(sum.data(), input, width, input_offset,wts[i]);
                 }
             }
             for (auto j = 0; j < width; ++j) {
@@ -851,7 +859,7 @@ const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
                 uint32_t input_offset = indices[i]*width;
-                emb_sum<input_type>(sum.data(), input, width, input_offset, wts[i]);
+                emb_sum<dst_type, input_type>(sum.data(), input, width, input_offset, wts[i]);
             }
 
             for (auto j = 0; j < width; ++j) {
@@ -864,9 +872,10 @@ const {
 /*
  * mean without weights
  */
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_mean(const emb_params_t &params)
+avx512_embedding_bag_t<in_data_type, out_data_type>::avx512_mean(
+    const emb_params_t &params)
 const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
@@ -907,7 +916,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -932,7 +941,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -957,7 +966,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -982,7 +991,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1007,7 +1016,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1032,7 +1041,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1057,7 +1066,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1082,7 +1091,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1107,7 +1116,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1132,7 +1141,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1157,7 +1166,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1>  sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1>  sum;
                 int32_t         count = 0;
                 for (auto i = ofirst; i < olast; ++i) {
                     if (indices[i] != padidx) {
@@ -1182,7 +1191,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 for (auto i = ofirst; i < olast; ++i) {
                     sum.fetch_add_ps(input + (indices[i] * width));
                 }
@@ -1192,6 +1201,7 @@ const {
         }
         return status::success;
     }
+
     // slow path, no avx instructions
     if (padidx >= 0) {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
@@ -1213,7 +1223,7 @@ const {
                 if (indices[i] != padidx) {
                     count++;
                     uint32_t input_offset = indices[i]*width;
-                    emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+                    emb_sum<dst_type, input_type>(sum.data(), input, width, input_offset, 1.0);
                 }
             }
             float dn = 1.0/float(count);
@@ -1239,7 +1249,7 @@ const {
             std::vector<dst_type> sum(width,0.0);
             for (auto i = ofirst; i < olast; ++i) {
                 uint32_t input_offset = indices[i]*width;
-                emb_sum<input_type>(sum.data(), input, width, input_offset, 1.0);
+                emb_sum<dst_type, input_type>(sum.data(), input, width, input_offset, 1.0);
             }
 
             float dn = (ofirst!=indsz) ? (1.0/float(olast - ofirst)) : 1.0;
@@ -1253,9 +1263,10 @@ const {
 /*
  * max without weights
  */
-template<data_type_t data_type>
+template<data_type_t in_data_type, data_type_t out_data_type>
 status_t
-avx512_embedding_bag_t<data_type>::avx512_max(const emb_params_t &params)
+avx512_embedding_bag_t<in_data_type, out_data_type>::avx512_max(
+    const emb_params_t &params)
 const {
     input_type   const *input    = static_cast<input_type *>(params.input);
     indices_type       *indices  = static_cast<indices_type *>(params.indices);
@@ -1295,7 +1306,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1326,7 +1337,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 32> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 32> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1353,7 +1364,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1384,7 +1395,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 16> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 16> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1411,7 +1422,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1442,7 +1453,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 8> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 8> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1469,7 +1480,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1500,7 +1511,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 4> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 4> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1527,7 +1538,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 int32_t         nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1558,7 +1569,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 2> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 2> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1585,7 +1596,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 int32_t        nfirst = ofirst;
                 while (nfirst < olast) {
                     if (nfirst != padidx) {
@@ -1616,7 +1627,7 @@ const {
 #if PREFETCH_EN
                 ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
-                zenmmAVX512_ext_ps<input_type, 1> sum;
+                zenmmAVX512_ext_ps<input_type, dst_type, 1> sum;
                 if (ofirst!=indsz) {
                     sum.load_ps(input + (indices[ofirst] * width));
                 }
@@ -1628,6 +1639,7 @@ const {
         }
         return status::success;
     }
+
     // slow path, no avx instructions
     if (padidx >= 0) {
         #pragma omp parallel for num_threads(nthr) //proc_bind(master)
@@ -1647,22 +1659,19 @@ const {
             int32_t               nfirst = ofirst;
             while (nfirst < olast) {
                 if (nfirst != padidx) {
-                    for (auto j = 0; j < width; ++j) {
-                        sum[j]  = input[j + (indices[nfirst] * width)];
-                    }
+                    uint32_t input_offset = indices[nfirst]*width;
+                    emb_max<dst_type,input_type>(sum.data(), input, width, input_offset);
                     break;
                 }
                 nfirst++;
             }
             for (auto i = nfirst+1; i < olast; ++i) {
                 if (indices[i] != padidx) {
-                    for (auto j = 0; j < width; ++j) {
-                        if (sum[j]  < input[j + (indices[i] * width)]) {
-                            sum[j] = input[j + (indices[i] * width)];
-                        }
-                    }
+                    uint32_t input_offset = indices[i]*width;
+                    emb_max<dst_type,input_type>(sum.data(), input, width, input_offset);
                 }
             }
+
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
             }
@@ -1683,17 +1692,14 @@ const {
             ebvec_prefetch(input, indices, width, offsets, oi, offsz, indsz);
 #endif
             std::vector<dst_type> sum(width,0.0);
-            for (auto j = 0; j < width; ++j) {
-                if (ofirst!=indsz) {
-                    sum[j]  = input[j + (indices[ofirst] * width)];
-                }
+            if (ofirst!=indsz) {
+                uint32_t input_offset = indices[ofirst]*width;
+                emb_max<dst_type,input_type>(sum.data(), input, width, input_offset);
             }
-            for (auto i = ofirst+1; i < olast; ++i)
-                for (auto j = 0; j < width; ++j) {
-                    if (sum[j]  < input[j + (indices[i] * width)]) {
-                        sum[j] = input[j + (indices[i] * width)];
-                    }
-                }
+            for (auto i = ofirst+1; i < olast; ++i) {
+                uint32_t input_offset = indices[i]*width;
+                emb_max<dst_type,input_type>(sum.data(), input, width, input_offset);
+            }
             for (auto j = 0; j < width; ++j) {
                 dst[j + oi*stride] = sum[j];
             }
@@ -1702,9 +1708,10 @@ const {
     return status::success;
 }
 
-template struct avx512_embedding_bag_t<f32>;
+template struct avx512_embedding_bag_t<f32, f32>;
 #if AVX512_BF16_EN
-    template struct avx512_embedding_bag_t<s16>;
+    template struct avx512_embedding_bag_t<bf16, bf16>;
+    template struct avx512_embedding_bag_t<bf16, f32>;
 #endif
 } //namespace cpu
 }

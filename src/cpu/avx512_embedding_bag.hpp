@@ -32,7 +32,6 @@
 
 #include "cpu/platform.hpp"
 #include "cpu/primitive_attr_postops.hpp"
-#include "cpu/x64/cpu_isa_traits.hpp"
 
 #include "cpu/cpu_embedding_bag_pd.hpp"
 #include "cpu/avx2_embedding_bag.hpp"
@@ -41,11 +40,11 @@ namespace zendnn {
 namespace impl {
 namespace cpu {
 
-template <impl::data_type_t data_type>
+template <impl::data_type_t in_data_type, impl::data_type_t out_data_type>
 struct avx512_embedding_bag_t : public primitive_t {
     struct pd_t : public cpu_embedding_bag_pd_t {
         using cpu_embedding_bag_pd_t::cpu_embedding_bag_pd_t;
-        using input_type   = typename prec_traits<data_type>::type;
+        using input_type   = typename prec_traits<in_data_type>::type;
         using indices_type = int32_t;
         using offsets_type = int32_t;
 
@@ -55,8 +54,7 @@ struct avx512_embedding_bag_t : public primitive_t {
         DECLARE_COMMON_PD_T("avx512:any", avx512_embedding_bag_t);
 
         status_t init(engine_t *engine) {
-            if (! platform::has_data_type_support(data_type) ||
-                    !x64::mayiuse(x64::avx512_core)) {
+            if (! platform::has_data_type_support(in_data_type)) {
                 return status::unimplemented;
             }
 
@@ -75,10 +73,10 @@ struct avx512_embedding_bag_t : public primitive_t {
         return status::success;
     }
 
-    using input_type   = typename prec_traits<data_type>::type;
+    using input_type   = typename prec_traits<in_data_type>::type;
     using indices_type = int32_t;
     using offsets_type = int32_t;
-    using dst_type     = float; //input_type;
+    using dst_type     = typename prec_traits<out_data_type>::type;
 
     // exec() override from primitive_t
     status_t execute(const exec_ctx_t &ctx) const override;
@@ -95,7 +93,7 @@ struct avx512_embedding_bag_t : public primitive_t {
 
     status_t avx512_mean(const emb_params_t &params) const;
     status_t avx512_max(const emb_params_t &params) const;
-    void ebvec_prefetch(float const *input, indices_type *indices,
+    void ebvec_prefetch(input_type const *input, indices_type *indices,
                         const int64_t width, offsets_type *offsets, const int32_t index,
                         const int32_t offsz, const int32_t indsz) const;
 

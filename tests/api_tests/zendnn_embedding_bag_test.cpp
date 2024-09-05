@@ -45,8 +45,8 @@
 #include <string.h>
 #include <cstring>
 #ifndef _WIN32
-#include <unistd.h>
-#include <sys/time.h>
+    #include <unistd.h>
+    #include <sys/time.h>
 #endif
 #include "cmd_parser.hpp"
 #include "zendnn_logging.hpp"
@@ -75,34 +75,38 @@ std::vector<float> exp_max_npd_128{337.28,593.28,849.28,1105.28,1361.28};
 
 /* precision conversion class */
 class precision_converter {
-public:
-    int fp32_to_bf16_tensor(memory& output, memory& input) {
+  public:
+    int fp32_to_bf16_tensor(memory &output, memory &input) {
 
         // sanity check on input and output
         auto input_desc  = input.get_desc();
         auto output_desc = output.get_desc();
 
-        if (input_desc.data_type() != memory::data_type::f32)
+        if (input_desc.data_type() != memory::data_type::f32) {
             return API_FAILURE;
+        }
 
         if ((output_desc.data_type() != memory::data_type::s16) &&
-            (output_desc.data_type() != memory::data_type::bf16))
+                (output_desc.data_type() != memory::data_type::bf16)) {
             return API_FAILURE;
+        }
 
         auto input_dims  = input_desc.dims();
         auto output_dims = output_desc.dims();
 
-        if (input_dims != output_dims)
+        if (input_dims != output_dims) {
             return API_FAILURE;
+        }
 
         // number of elements in the tensor
         uint32_t nelem = 1;
-        for (auto dim : input_dims)
+        for (auto dim : input_dims) {
             nelem *= dim;
+        }
 
         // conversion (little endian)
-        uint8_t* inptr  = reinterpret_cast<uint8_t *>(input.get_data_handle());
-        uint8_t* outptr = reinterpret_cast<uint8_t *>(output.get_data_handle());
+        uint8_t *inptr  = reinterpret_cast<uint8_t *>(input.get_data_handle());
+        uint8_t *outptr = reinterpret_cast<uint8_t *>(output.get_data_handle());
         for (auto i = 0; i < nelem; ++i) {
             std::memcpy(outptr, inptr +2, 2);
             inptr  += 4;
@@ -112,33 +116,37 @@ public:
         return API_SUCCESS;
     }
 
-    int bf16_to_fp32_tensor(memory& output, memory& input) {
+    int bf16_to_fp32_tensor(memory &output, memory &input) {
 
         // sanity check on input and output
         auto input_desc  = input.get_desc();
         auto output_desc = output.get_desc();
 
         if ((input_desc.data_type() != memory::data_type::s16) &&
-            (input_desc.data_type() != memory::data_type::bf16))
+                (input_desc.data_type() != memory::data_type::bf16)) {
             return API_FAILURE;
+        }
 
-        if (output_desc.data_type() != memory::data_type::f32)
+        if (output_desc.data_type() != memory::data_type::f32) {
             return API_FAILURE;
+        }
 
         auto input_dims  = input_desc.dims();
         auto output_dims = output_desc.dims();
 
-        if (input_dims != output_dims)
+        if (input_dims != output_dims) {
             return API_FAILURE;
+        }
 
         // number of elements in the tensor
         uint32_t nelem = 1;
-        for (auto dim : input_dims)
+        for (auto dim : input_dims) {
             nelem *= dim;
+        }
 
         // conversion (little endian)
-        uint8_t* inptr  = reinterpret_cast<uint8_t *>(input.get_data_handle());
-        uint8_t* outptr = reinterpret_cast<uint8_t *>(output.get_data_handle());
+        uint8_t *inptr  = reinterpret_cast<uint8_t *>(input.get_data_handle());
+        uint8_t *outptr = reinterpret_cast<uint8_t *>(output.get_data_handle());
 
         std::memset(outptr, 0, 4*nelem);
         for (auto i = 0; i < nelem; ++i) {
@@ -151,8 +159,8 @@ public:
 
     uint16_t fp32_to_bf16(float a) {
         uint16_t bf16_a;
-        char*    bf16_a_ptr = reinterpret_cast<char *>(&bf16_a);
-        char*    a_ptr      = reinterpret_cast<char *>(&a);
+        char    *bf16_a_ptr = reinterpret_cast<char *>(&bf16_a);
+        char    *a_ptr      = reinterpret_cast<char *>(&a);
 
         // little endian machine. last two bytes.
         std::memcpy(bf16_a_ptr, a_ptr +2, 2);
@@ -162,8 +170,8 @@ public:
 
     float bf16_to_fp32(uint16_t bf16_a) {
         float    a = 0;
-        char*    bf16_a_ptr = reinterpret_cast<char *>(&bf16_a);
-        char*    a_ptr      = reinterpret_cast<char *>(&a);
+        char    *bf16_a_ptr = reinterpret_cast<char *>(&bf16_a);
+        char    *a_ptr      = reinterpret_cast<char *>(&a);
 
         // little endian machine. last two bytes.
         std::memcpy(a_ptr +2, bf16_a_ptr, 2);
@@ -174,29 +182,32 @@ public:
 
 /* functor for float comparison */
 class compare_float_t {
-public:
+  public:
     compare_float_t(float tol = 1e-05):tolerance{tol} {}
 
     bool operator()(float a, float b) {
-        if(isnan(a) || isnan(b))
+        if (isnan(a) || isnan(b)) {
             return false;
+        }
 
         a = a > 0 ? a : -a;
 
-        if((a -b)/a > tolerance)
+        if ((a -b)/a > tolerance) {
             return false;
-        if((b -a)/a > tolerance)
+        }
+        if ((b -a)/a > tolerance) {
             return false;
+        }
 
         return true;
     }
 
-private:
+  private:
     float tolerance;
 };
 
 /* compare two vectors */
-bool compare_vectors(const std::vector<float>& a, const std::vector<float>& b) {
+bool compare_vectors(const std::vector<float> &a, const std::vector<float> &b) {
 
     compare_float_t cmp_op{1e-02};
 
@@ -214,13 +225,14 @@ bool compare_vectors(const std::vector<float>& a, const std::vector<float>& b) {
 };
 
 /* display a vector */
-std::string vec_str(std::string vd, const std::vector<float>& a) {
+std::string vec_str(std::string vd, const std::vector<float> &a) {
 
     auto sz = a.size();
 
     std::string out = vd + "{";
-    for (auto i = 0; i < sz -1; ++i)
+    for (auto i = 0; i < sz -1; ++i) {
         out = out + std::to_string(a[i]) + ";";
+    }
 
     out = out + std::to_string(a[sz -1]) + "}";
 
@@ -233,13 +245,13 @@ memory create_embedding_table(engine eng, uint32_t rows, uint32_t width) {
     const float incr         = 0.01;
 
     auto table = memory({{rows, width},
-            memory::data_type::f32,
-            memory::format_tag::ab}, eng);
+        memory::data_type::f32,
+        memory::format_tag::ab}, eng);
 
     float *hndl = (float *)table.get_data_handle();
 
-    for(auto i = 0; i < rows ; ++i) {
-        for(auto j = 0; j < width; ++j) {
+    for (auto i = 0; i < rows ; ++i) {
+        for (auto j = 0; j < width; ++j) {
             hndl[j + i*width] = (i + 1.0 + j*incr);
         }
     }
@@ -257,7 +269,7 @@ memory create_indices(engine eng, uint32_t len) {
     int32_t *hndl = (int32_t *)indices.get_data_handle();
 
     /* indices should be in the range of 0 to rows */
-    for(auto i = 0; i < len; ++i) {
+    for (auto i = 0; i < len; ++i) {
         hndl[i] = i;
     }
 
@@ -278,7 +290,7 @@ memory create_offsets(engine eng, uint32_t len) {
 
     /* first offset should always be zero */
     uint32_t offset = 0;
-    for(auto i = 0; i < bags; ++i) {
+    for (auto i = 0; i < bags; ++i) {
         hndl[i] = offset;
         offset += incr;
     }
@@ -297,7 +309,7 @@ memory create_weights(engine eng, uint32_t len) {
 
     float *hndl = (float *)weights.get_data_handle();
 
-    for(auto i = 0; i < len; ++i) {
+    for (auto i = 0; i < len; ++i) {
         hndl[i]  = 1.0 + float(i % modulo);
     }
 
@@ -306,19 +318,27 @@ memory create_weights(engine eng, uint32_t len) {
 }
 
 /* create output */
-memory create_output(engine eng, uint32_t rows, uint32_t width) {
+memory create_output(engine eng, uint32_t rows, uint32_t width,
+                     std::string precision) {
 
     /* create destination buffer */
-    auto dst = memory({{rows, width},
-        memory::data_type::f32,
-        memory::format_tag::ab}, eng);
+    memory dst;
+    if (precision == std::string("bf16")) {
+        dst = memory({{rows, width},
+            memory::data_type::bf16,
+            memory::format_tag::ab}, eng);
+    }
+    else {
+        dst = memory({{rows, width},
+            memory::data_type::f32,
+            memory::format_tag::ab}, eng);
+    }
 
     return dst;
 }
 
 /* sum the bags for verification */
-std::vector<float> sum_bags(memory &dst)
-{
+std::vector<float> sum_bags(memory &dst) {
     std::vector<float> sum;
 
     auto dst_dims       = dst.get_desc().dims();
@@ -328,9 +348,9 @@ std::vector<float> sum_bags(memory &dst)
     float *hndl         = (float *)dst.get_data_handle();
 
     int32_t idx_base    = 0;
-    for(auto bag = 0; bag < num_bags; ++bag) {
+    for (auto bag = 0; bag < num_bags; ++bag) {
         float bag_sum = 0.0;
-        for(auto j = 0; j < dim_embedding; ++j) {
+        for (auto j = 0; j < dim_embedding; ++j) {
             bag_sum += hndl[idx_base +j];
         }
 
@@ -355,8 +375,8 @@ void exec_embedding_bag(engine eng, stream s, memory table,
 
     auto emdb_d = embedding_bag::desc();
 
-    if(!is_weights) {
-        if(padding_idx < 0)
+    if (!is_weights) {
+        if (padding_idx < 0)
             emdb_d = embedding_bag::desc(prop_kind::forward_inference,
                                          alg,
                                          num_threads,
@@ -373,8 +393,9 @@ void exec_embedding_bag(engine eng, stream s, memory table,
                                          offsets_md,
                                          bags_md,
                                          padding_idx);
-    } else {
-        if(padding_idx < 0)
+    }
+    else {
+        if (padding_idx < 0)
             emdb_d = embedding_bag::desc(prop_kind::forward_inference,
                                          alg,
                                          num_threads,
@@ -398,13 +419,14 @@ void exec_embedding_bag(engine eng, stream s, memory table,
     auto emdb_pd = embedding_bag::primitive_desc(emdb_d, eng);
     auto emdb    = embedding_bag(emdb_pd);
 
-    if(!is_weights) {
+    if (!is_weights) {
         emdb.execute(s, {{ZENDNN_ARG_SRC_0, table},
             {ZENDNN_ARG_SRC_1, indices},
             {ZENDNN_ARG_SRC_2, offsets},
             {ZENDNN_ARG_DST, bags}
         });
-    } else {
+    }
+    else {
         emdb.execute(s, {{ZENDNN_ARG_SRC_0, table},
             {ZENDNN_ARG_SRC_1, indices},
             {ZENDNN_ARG_SRC_2, offsets},
@@ -415,8 +437,8 @@ void exec_embedding_bag(engine eng, stream s, memory table,
 }
 
 int run_test(std::string test_id, engine eng, stream s, uint32_t width,
-              algorithm alg, bool is_wt, int32_t padidx,
-              std::vector<float>& expected, std::string precision) {
+             algorithm alg, bool is_wt, int32_t padidx,
+             std::vector<float> &expected, std::string precision) {
 
     //parameters
     uint32_t emb_rows  = 10;
@@ -425,12 +447,12 @@ int run_test(std::string test_id, engine eng, stream s, uint32_t width,
     /* create embedding table */
     memory fp32_table = create_embedding_table(eng, emb_rows, width);
     memory bf16_table = memory({{emb_rows, width}, memory::data_type::bf16,
-            memory::format_tag::ab}, eng);
+        memory::format_tag::ab}, eng);
 
     /* convert embedding table to required precision */
     if (precision == std::string("bf16")) {
         precision_converter converter;
-        if (converter.fp32_to_bf16_tensor(bf16_table, fp32_table) == API_FAILURE){
+        if (converter.fp32_to_bf16_tensor(bf16_table, fp32_table) == API_FAILURE) {
             zendnnError(ZENDNN_TESTLOG, "unsupported data type of embedding table");
             return API_FAILURE;
         }
@@ -447,7 +469,7 @@ int run_test(std::string test_id, engine eng, stream s, uint32_t width,
 
     /* create output */
     auto   bag_count      = offsets.get_desc().dims()[0];
-    memory bags           = create_output(eng, bag_count, width);
+    memory bags           = create_output(eng, bag_count, width, precision);
 
     /* execute emb */
     if (precision == std::string("bf16")) {
@@ -461,7 +483,17 @@ int run_test(std::string test_id, engine eng, stream s, uint32_t width,
     }
 
     /* compare against ground truth */
-    auto actual = sum_bags(bags);
+    std::vector<float> actual;
+    if (precision == std::string("bf16")) {
+        memory bags_fp32 = memory({{bag_count, width}, memory::data_type::f32,
+            memory::format_tag::ab}, eng);
+        precision_converter converter;
+        converter.bf16_to_fp32_tensor(bags_fp32, bags);
+        actual = sum_bags(bags_fp32);
+    }
+    else {
+        actual = sum_bags(bags);
+    }
 
     if (!compare_vectors(expected, actual)) {
         zendnnError(ZENDNN_TESTLOG, test_id, ":", vec_str("exp", expected),":",
@@ -469,7 +501,6 @@ int run_test(std::string test_id, engine eng, stream s, uint32_t width,
 
         return API_FAILURE;
     }
-
     return API_SUCCESS;
 }
 
@@ -484,15 +515,17 @@ int main(int argc, char **argv) {
     try {
         cmd_parser.ParseArgs(argc, argv);
         cmd_parser.SanityCheck();
-    } catch (std::exception& err) {
+    }
+    catch (std::exception &err) {
         zendnnError(ZENDNN_TESTLOG, err.what());
         return API_FAILURE;
     }
     auto args = cmd_parser.GetArgs();
 
     engine::kind engine_kind;
-    if (args.engine_kind_str == "cpu")
+    if (args.engine_kind_str == "cpu") {
         engine_kind = engine::kind::cpu;
+    }
     engine eng(engine_kind, 0);
     zendnnVerbose(ZENDNN_TESTLOG, "cpu engine created");
 
@@ -506,44 +539,52 @@ int main(int argc, char **argv) {
 
     /* run tests */
     if (run_test("sm_nw_np_128", eng, s, 128, algorithm::embedding_bag_sum,
-                  false, -1, exp_sum_nwt_npd_128, precision))
+                 false, -1, exp_sum_nwt_npd_128, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("sm_w_np_128", eng, s, 128, algorithm::embedding_bag_sum,
-                  true, -1, exp_sum_wt_npd_128, precision))
+                 true, -1, exp_sum_wt_npd_128, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("sm_nw_np_64", eng, s, 64, algorithm::embedding_bag_sum,
-                  false, -1, exp_sum_nwt_npd_64, precision))
+                 false, -1, exp_sum_nwt_npd_64, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("sm_w_np_64", eng, s, 64, algorithm::embedding_bag_sum,
-                  true, -1, exp_sum_wt_npd_64, precision))
+                 true, -1, exp_sum_wt_npd_64, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("sm_nw_np_10", eng, s, 10, algorithm::embedding_bag_sum,
-                  false, -1, exp_sum_nwt_npd_10, precision))
+                 false, -1, exp_sum_nwt_npd_10, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("sm_w_np_10", eng, s, 10, algorithm::embedding_bag_sum,
-                  true, -1, exp_sum_wt_npd_10, precision))
+                 true, -1, exp_sum_wt_npd_10, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("mn_np_128", eng, s, 128, algorithm::embedding_bag_mean,
-                  false, -1, exp_mean_npd_128, precision))
+                 false, -1, exp_mean_npd_128, precision)) {
         status = API_FAILURE;
+    }
 
     if (run_test("mx_w_np_128", eng, s, 128, algorithm::embedding_bag_max,
-                  false, -1, exp_max_npd_128, precision))
+                 false, -1, exp_max_npd_128, precision)) {
         status = API_FAILURE;
+    }
 
 
     if (status == API_SUCCESS)
-      zendnnInfo(ZENDNN_TESTLOG,
-                 "ZenDNN API test for embedding_bag successful.");
+        zendnnInfo(ZENDNN_TESTLOG,
+                   "ZenDNN API test for embedding_bag successful.");
     else
-      zendnnInfo(ZENDNN_TESTLOG,
-                 "ZenDNN API test for embedding_bag fails.");
+        zendnnInfo(ZENDNN_TESTLOG,
+                   "ZenDNN API test for embedding_bag fails.");
 
     return status;
 }

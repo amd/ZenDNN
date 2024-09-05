@@ -35,7 +35,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
     REG_EMBEDDING_BAG_P({
         {   {forward, f32, s32, f32}, {
 #if AVX512_EB_EN
-                CPU_INSTANCE(avx512_embedding_bag_t<f32>)
+                CPU_INSTANCE(avx512_embedding_bag_t<f32, f32>)
 #endif
                 CPU_INSTANCE(avx2_embedding_bag_t<f32>)
                 CPU_INSTANCE(ref_embedding_bag_t<f32>)
@@ -43,9 +43,9 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
                 nullptr,
             }
         },
-        {   {forward, s16, s32, f32}, {
+        {   {forward, bf16, s32, bf16}, {
 #if AVX512_EB_EN && AVX512_BF16_EN
-                CPU_INSTANCE(avx512_embedding_bag_t<s16>)
+                CPU_INSTANCE(avx512_embedding_bag_t<bf16, bf16>)
 #endif
                 /* eol */
                 nullptr,
@@ -53,7 +53,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
         },
         {   {forward, bf16, s32, f32}, {
 #if AVX512_EB_EN && AVX512_BF16_EN
-                CPU_INSTANCE(avx512_embedding_bag_t<s16>)
+                CPU_INSTANCE(avx512_embedding_bag_t<bf16, f32>)
 #endif
                 /* eol */
                 nullptr,
@@ -76,7 +76,7 @@ const impl_list_item_t *get_embedding_bag_impl_list(
     const memory_desc_t *src_md = &desc->input_desc;
     const memory_desc_t *dst_md = &desc->dst_desc;
 
-    pk_dt_impl_key_t key {prop_kind, src_md->data_type, s32, f32};
+    pk_dt_impl_key_t key {prop_kind, src_md->data_type, s32, dst_md->data_type};
 
     const auto impl_list_it = impl_list_map().find(key);
     return impl_list_it != impl_list_map().cend() ? impl_list_it->second.data()

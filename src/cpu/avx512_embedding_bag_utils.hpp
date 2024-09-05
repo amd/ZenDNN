@@ -20,6 +20,7 @@
 #define AVX512_EMBEDDING_BAG_UTILS_HPP
 
 #include <immintrin.h>
+using namespace zendnn::impl;
 
 #if AVX512_EB_EN
 
@@ -27,12 +28,12 @@
 #define ZEN_MM_STRIDE_BF16_256    (16)
 #define ZEN_MM_STRIDE_BF16_512    (32)
 
-template<typename input_type, uint32_t DIM>
+template<typename input_type, typename dst_type, uint32_t DIM>
 struct zenmmAVX512_ext_ps;
 
 //fp32 type embedding bag
 template<uint32_t DIM>
-struct zenmmAVX512_ext_ps<float, DIM> {
+struct zenmmAVX512_ext_ps<float, float, DIM> {
 
     zenmmAVX512_ext_ps() {
         for (auto i = 0; i< unroll_factor; ++i) {
@@ -100,7 +101,7 @@ struct zenmmAVX512_ext_ps<float, DIM> {
 #if AVX512_BF16_EN
 //bf16 type embedding bag
 template<uint32_t DIM>
-struct zenmmAVX512_ext_ps<int16_t, DIM> {
+struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
     zenmmAVX512_ext_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
@@ -113,17 +114,17 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
         }
     };
 
-    inline void load_ps(int16_t const *mem) {
+    inline void load_ps(bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
-            __m256bh tbh = (__m256bh)(_mm256_load_epi32((void const*)mem));
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             v[i]         = _mm512_cvtpbh_ps(tbh);
             mem         += ZEN_MM_STRIDE_BF16_256;
         }
     };
 
-    inline void fetch_add_ps(int16_t const *mem) {
+    inline void fetch_add_ps(bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
-            __m256bh tbh = (__m256bh)(_mm256_load_epi32((void const*)mem));
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
             v[i]         = _mm512_add_ps(tps, v[i]);
             mem         += ZEN_MM_STRIDE_BF16_256;
@@ -131,10 +132,10 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
     };
 
 
-    inline void fetch_fmadd_ps(int16_t const *mem, const float mfactor) {
+    inline void fetch_fmadd_ps(bfloat16_t const *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
-            __m256bh tbh = (__m256bh)(_mm256_load_epi32((void const*)mem));
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
             v[i]         = _mm512_fmadd_ps(tps, mm, v[i]);
             mem         += ZEN_MM_STRIDE_BF16_256;
@@ -142,9 +143,9 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
 
     };
 
-    inline void fetch_max_ps(int16_t const *mem) {
+    inline void fetch_max_ps(bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
-            __m256bh tbh = (__m256bh)(_mm256_load_epi32((void const*)mem));
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
             v[i]         = _mm512_max_ps(tps, v[i]);
             mem         += ZEN_MM_STRIDE_BF16_256;
@@ -153,7 +154,7 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
 
     inline void store_ps(float *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
-            _mm512_store_ps(mem, v[i]);
+            _mm512_storeu_ps(mem, v[i]);
             mem += ZEN_MM_STRIDE_FP32_512;
         }
     };
@@ -162,8 +163,83 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_mul_ps(v[i], mm);
-            _mm512_store_ps(mem,v[i]);
+            _mm512_storeu_ps(mem,v[i]);
             mem += ZEN_MM_STRIDE_FP32_512;
+        }
+    };
+
+  private:
+    __m512             v[DIM];
+    const uint32_t     unroll_factor = DIM;
+};
+
+template<uint32_t DIM>
+struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
+    zenmmAVX512_ext_ps() {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            v[i]     = _mm512_setzero_ps();
+        }
+    }
+
+    inline void setzero_ps() {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            v[i]     = _mm512_setzero_ps();
+        }
+    };
+
+    inline void load_ps(bfloat16_t const *mem) {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
+            v[i]         = _mm512_cvtpbh_ps(tbh);
+            mem         += ZEN_MM_STRIDE_BF16_256;
+        }
+    };
+
+    inline void fetch_add_ps(bfloat16_t const *mem) {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
+            __m512   tps = _mm512_cvtpbh_ps(tbh);
+            v[i]         = _mm512_add_ps(tps, v[i]);
+            mem         += ZEN_MM_STRIDE_BF16_256;
+        }
+    };
+
+
+    inline void fetch_fmadd_ps(bfloat16_t const *mem, const float mfactor) {
+        __m512 mm = _mm512_set1_ps(mfactor);
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
+            __m512   tps = _mm512_cvtpbh_ps(tbh);
+            v[i]         = _mm512_fmadd_ps(tps, mm, v[i]);
+            mem         += ZEN_MM_STRIDE_BF16_256;
+        }
+
+    };
+
+    inline void fetch_max_ps(bfloat16_t const *mem) {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
+            __m512   tps = _mm512_cvtpbh_ps(tbh);
+            v[i]         = _mm512_max_ps(tps, v[i]);
+            mem         += ZEN_MM_STRIDE_BF16_256;
+        }
+    };
+
+    inline void store_ps(bfloat16_t *mem) {
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            __m256bh res_bf16 = _mm512_cvtneps_pbh(v[i]);
+            _mm256_storeu_epi32((void *)mem, (__m256i)res_bf16);
+            mem += ZEN_MM_STRIDE_BF16_256;
+        }
+    };
+
+    inline void scale_store_ps(bfloat16_t *mem, const float mfactor) {
+        __m512 mm = _mm512_set1_ps(mfactor);
+        for (uint32_t i = 0; i< unroll_factor; ++i) {
+            v[i] = _mm512_mul_ps(v[i], mm);
+            __m256bh res_bf16 = _mm512_cvtneps_pbh(v[i]);
+            _mm256_storeu_epi32((void *)mem, (__m256i)res_bf16);
+            mem += ZEN_MM_STRIDE_BF16_256;
         }
     };
 
@@ -173,42 +249,48 @@ struct zenmmAVX512_ext_ps<int16_t, DIM> {
 };
 #endif
 
-template<typename input_type>
-void emb_sum(float* sum, const input_type* input, uint32_t width, uint32_t input_offset, float wt);
-
-template<>
-void emb_sum<float>(float* sum, const float* input, uint32_t width, uint32_t input_offset, float wt){
-    for (auto j = 0; j < width; ++j) {
-        sum[j] += wt*input[j + input_offset];
+// Templated embedding bag sum function
+template <typename dst_type, typename input_type>
+void emb_sum(dst_type *sum, const input_type *input, uint32_t width,
+             uint32_t input_offset, float wt) {
+    for (uint32_t j = 0; j < width; ++j) {
+        //Convert input to float, multiply by wt, and add to sum
+        sum[j] += dst_type(input[j + input_offset]) * wt;
     }
 }
 
-template<>
-void emb_sum<int16_t>(float* sum, const int16_t* input, uint32_t width, uint32_t input_offset, float wt) {
-    for (auto j = 0; j < width; ++j) {
-        float   input_fp32;
-        int16_t input_bf16     = input[j + input_offset];
-        char*   input_bf16_ptr = reinterpret_cast<char*>(&input_bf16);
-        char*   input_fp32_ptr = reinterpret_cast<char*>(&input_fp32);
-        std::memcpy(input_fp32_ptr +2, input_bf16_ptr, 2);
-
-        sum[j] += wt*input_fp32;
+// Templated embedding bag sum function
+template <typename dst_type, typename input_type>
+void emb_max(dst_type *sum, const input_type *input, uint32_t width,
+             uint32_t input_offset) {
+    for (uint32_t j = 0; j < width; ++j) {
+        // Convert input to float, multiply by wt, and add to sum
+        if (sum[j] < dst_type(input[j + input_offset])) {
+            sum[j] = dst_type(input[j + input_offset]);
+        }
     }
 }
 
-using zenmmAVX512_ext_ps16   = zenmmAVX512_ext_ps<float, 1>;
-using zenmmAVX512_ext_ps32   = zenmmAVX512_ext_ps<float, 2>;
-using zenmmAVX512_ext_ps64   = zenmmAVX512_ext_ps<float, 4>;
-using zenmmAVX512_ext_ps128  = zenmmAVX512_ext_ps<float, 8>;
-using zenmmAVX512_ext_ps256  = zenmmAVX512_ext_ps<float, 16>;
-using zenmmAVX512_ext_ps512  = zenmmAVX512_ext_ps<float, 32>;
+using zenmmAVX512_ext_ps16   = zenmmAVX512_ext_ps<float, float, 1>;
+using zenmmAVX512_ext_ps32   = zenmmAVX512_ext_ps<float, float, 2>;
+using zenmmAVX512_ext_ps64   = zenmmAVX512_ext_ps<float, float, 4>;
+using zenmmAVX512_ext_ps128  = zenmmAVX512_ext_ps<float, float, 8>;
+using zenmmAVX512_ext_ps256  = zenmmAVX512_ext_ps<float, float, 16>;
+using zenmmAVX512_ext_ps512  = zenmmAVX512_ext_ps<float, float, 32>;
 
-using zenmmAVX512_ext_pbf16  = zenmmAVX512_ext_ps<int16_t, 1>;
-using zenmmAVX512_ext_pbf32  = zenmmAVX512_ext_ps<int16_t, 2>;
-using zenmmAVX512_ext_pbf64  = zenmmAVX512_ext_ps<int16_t, 4>;
-using zenmmAVX512_ext_pbf128 = zenmmAVX512_ext_ps<int16_t, 8>;
-using zenmmAVX512_ext_pbf256 = zenmmAVX512_ext_ps<int16_t, 16>;
-using zenmmAVX512_ext_pbf512 = zenmmAVX512_ext_ps<int16_t, 32>;
+using zenmmAVX512_ext_pbf16  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 1>;
+using zenmmAVX512_ext_pbf32  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 2>;
+using zenmmAVX512_ext_pbf64  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 4>;
+using zenmmAVX512_ext_pbf128 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 8>;
+using zenmmAVX512_ext_pbf256 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 16>;
+using zenmmAVX512_ext_pbf512 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 32>;
+
+using zenmmAVX512_ext_pbf_ps16  = zenmmAVX512_ext_ps<bfloat16_t, float, 1>;
+using zenmmAVX512_ext_pbf_ps32  = zenmmAVX512_ext_ps<bfloat16_t, float, 2>;
+using zenmmAVX512_ext_pbf_ps64  = zenmmAVX512_ext_ps<bfloat16_t, float, 4>;
+using zenmmAVX512_ext_pbf_ps128 = zenmmAVX512_ext_ps<bfloat16_t, float, 8>;
+using zenmmAVX512_ext_pbf_ps256 = zenmmAVX512_ext_ps<bfloat16_t, float, 16>;
+using zenmmAVX512_ext_pbf_ps512 = zenmmAVX512_ext_ps<bfloat16_t, float, 32>;
 
 #endif //AVX512_EB_EN
 #endif

@@ -146,7 +146,7 @@ else ifeq ($(FORCE_ARCH), 4)
     AVX512_BF16_EN=1
     AVX512_FLAG=-mavx512f
     AVX512_BF16_FLAG=-mavx512bf16
-    GXX_COMPILER=g++-13
+    GXX_COMPILER=g++-12
 endif
 
 ifeq ($(RELEASE), 0)
