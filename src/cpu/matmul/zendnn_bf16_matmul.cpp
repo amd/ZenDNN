@@ -1738,22 +1738,17 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
         // If M >=64, N and K >=1024 AOCL BLIS kernels gives optimal performance.
         // This is based on heuristic with different models and difference BS
-        // For skinny matrix sizes i.e M <=16 Blocked JIT Kernels gives optimal
-        // performance.
         if (M >= 64 && N >= 1024 && K >= 1024) {
             zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
         }
-        else if (M <= 16) {
-            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
-        }
         else {
-            // For 16 < M < 64, where N size is smaller than K BLIS AOCL kernel gives
+            // For M < 64, where K size is smaller than N AOCL BLIS kernel gives
             // optimal performance.
-            if (N < K) {
-                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+            if (N <= K) {
+                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
             }
             else {
-                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
             }
         }
         matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,

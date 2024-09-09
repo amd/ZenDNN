@@ -1130,8 +1130,6 @@ int matmul_woq_wrapper(
         if (zenEnvObj.zenBF16GEMMalgo == 0) {
             // If M >=64, N and K >=1024 AOCL BLIS kernels gives optimal performance.
             // This is based on heuristic with different models and difference BS
-            // For skinny matrix sizes i.e M <=16 Blocked JIT Kernels gives optimal
-            // performance.
             if (M == 4) {
                 // AOCL S4 Kernel
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
@@ -1140,20 +1138,16 @@ int matmul_woq_wrapper(
                 // AOCL BF16 Kernel with Zen Weights Conversion
                 zenEnvObj.zenBF16GEMMalgo = 3;
             }
-            else if (M <= 16) {
-                // Blocked BRGEMM BF16 Kernel with Zen Weights Conversion
-                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
-            }
             else {
-                // For 16 < M < 64, where N size is smaller than K BLIS AOCL kernel gives
+                // For M < 64, where K size is smaller than N AOCL BLIS kernel gives
                 // optimal performance.
-                if (N < K) {
-                    // AOCL BF16 Kernel with Zen Weights Conversion
-                    zenEnvObj.zenBF16GEMMalgo = 3;
-                }
-                else {
+                if (N <= K) {
                     // Blocked BRGEMM BF16 with Zen Weights Conversion
                     zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+                }
+                else {
+                    // AOCL BF16 Kernel with Zen Weights Conversion
+                    zenEnvObj.zenBF16GEMMalgo = 3;
                 }
             }
         }
