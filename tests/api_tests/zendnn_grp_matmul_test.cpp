@@ -37,35 +37,77 @@ void matmul_execute(engine &eng, stream &s, memory &src, memory &weights,
                     const float &alpha,
                     const float &beta,
                     const bool &bias_defined,
-                    const int64_t &fuse,
+                    const std::vector<int64_t> &z_post_op_ids,
+                    const std::vector<memory> &z_post_op_buffers,
                     memory &dst) {
 
     primitive_attr matmul_attr;
-    post_ops matmul_ops;
+    post_ops po;
 
+    int post_op_idx = 0;
     if (beta != 0.0f && !bias_defined) {
         // sets post_ops as add or sum
-        matmul_ops.append_sum(beta);
+        post_op_idx++;
+        po.append_sum(beta);
     }
     if (alpha != 1.0f) {
         matmul_attr.set_output_scales(0, {alpha});
     }
 
-    if (fuse == 1) {
-        matmul_ops.append_eltwise(1.0f, algorithm::eltwise_relu, 0.f, 0.f);
+    int post_op_ids_size = z_post_op_ids.size();
+    int post_op_buffers_size = z_post_op_buffers.size();
+    std::unordered_map<int, memory> execute_args;
+    int post_op_buffer_idx = 0;
+    for (int i = 0; i < post_op_ids_size; i++) {
+        int arg_position;
+        // set the post-ops or fusion-ops;
+        switch (z_post_op_ids[i]) {
+        case 1:
+            po.append_eltwise(1.0f, algorithm::eltwise_relu, 0.f, 0.f);
+            break;
+        case 2:
+            po.append_eltwise(1.0f, algorithm::eltwise_gelu_tanh, 1.f, 0.f);
+            break;
+        case 3:
+            po.append_eltwise(1.0f, algorithm::eltwise_gelu_erf, 1.f, 0.f);
+            break;
+        case 4:
+            po.append_eltwise(1.0f, algorithm::eltwise_swish, 1.f, 0.f);
+            break;
+        case 5:
+            po.append_binary(algorithm::binary_mul,
+                             z_post_op_buffers[post_op_buffer_idx].get_desc());
+            arg_position = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(post_op_idx) | ZENDNN_ARG_SRC_1;
+            execute_args.insert(
+            {arg_position, z_post_op_buffers[post_op_buffer_idx]});
+            post_op_buffer_idx++;
+            break;
+        case 6:
+            po.append_binary(algorithm::binary_add,
+                             z_post_op_buffers[post_op_buffer_idx].get_desc());
+            arg_position = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(post_op_idx) | ZENDNN_ARG_SRC_1;
+            execute_args.insert(
+            {arg_position, z_post_op_buffers[post_op_buffer_idx]});
+            post_op_buffer_idx++;
+            break;
+        default:
+            break;
+        }
+        post_op_idx++;
     }
-    if (fuse == 2) {
-        matmul_ops.append_eltwise(1.0f, algorithm::eltwise_gelu_tanh, 1.f, 0.f);
-    }
-    if (fuse == 3) {
-        matmul_ops.append_eltwise(1.0f, algorithm::eltwise_gelu_erf, 1.f, 0.f);
-    }
-    matmul_attr.set_post_ops(matmul_ops);
 
-    matmul::desc matmul_desc(src.get_desc(), weights.get_desc(), dst.get_desc());
-    matmul::primitive_desc matmul_pd(matmul_desc,matmul_attr, eng);
-    matmul matmul_prim(matmul_pd);
-    matmul_prim.execute(s, {{ZENDNN_ARG_SRC, src}, {ZENDNN_ARG_WEIGHTS, weights}, {ZENDNN_ARG_DST, dst}});
+    matmul_attr.set_post_ops(po);
+
+    matmul::desc pdesc = matmul::desc(src.get_desc(), weights.get_desc(),
+                                      dst.get_desc());
+
+    matmul::primitive_desc pd =
+        matmul::primitive_desc(pdesc, matmul_attr, eng);
+
+    execute_args.insert({ZENDNN_ARG_SRC, src});
+    execute_args.insert({ZENDNN_ARG_WEIGHTS, weights});
+    execute_args.insert({ZENDNN_ARG_DST, dst});
+    matmul(pd).execute(eng, execute_args);
 }
 
 int main(int argc, char *argv[]) {
@@ -103,6 +145,7 @@ int main(int argc, char *argv[]) {
     std::vector<memory> input_mem;
     std::vector<memory> weight_mem(num_layers);
     std::vector<memory> out_mem(num_layers);
+    std::vector<memory> add_mem(num_layers);
 
     input_mem.push_back(create_memory(memory::desc({batch_size, dims[0]},
                                       memory::data_type::f32,
@@ -115,12 +158,16 @@ int main(int argc, char *argv[]) {
         out_mem[i] = create_memory(memory::desc({batch_size, dims[i+1]},
                                                 memory::data_type::f32,
                                                 memory::format_tag::ab), eng);
+        add_mem[i] = create_memory(memory::desc({batch_size, dims[i+1]},
+                                                memory::data_type::f32,
+                                                memory::format_tag::ab), eng);
     }
 
     // Create BF16 memory descriptors and memory objects for input, weight, output matrices
     std::vector<memory> input_mem_bf16;
     std::vector<memory> weight_mem_bf16(num_layers);
     std::vector<memory> out_mem_bf16(num_layers);
+    std::vector<memory> add_mem_bf16(num_layers);
 
     input_mem_bf16.push_back(create_memory(memory::desc({batch_size, dims[0]},
                                            memory::data_type::bf16,
@@ -132,6 +179,9 @@ int main(int argc, char *argv[]) {
                                            memory::format_tag::ab), eng);
 
         out_mem_bf16[i] = create_memory(memory::desc({batch_size, dims[i+1]},
+                                        memory::data_type::bf16,
+                                        memory::format_tag::ab), eng);
+        add_mem_bf16[i] = create_memory(memory::desc({batch_size, dims[i+1]},
                                         memory::data_type::bf16,
                                         memory::format_tag::ab), eng);
     }
@@ -162,11 +212,36 @@ int main(int argc, char *argv[]) {
                 weight_mem_bf16[i]);
     }
 
+    std::vector<float> add_data;
+    for (int i = 0; i < num_layers; ++i) {
+        add_data.resize(batch_size * dims[i + 1]);
+        for (auto &w : add_data) {
+            w = dis_weights(gen);
+        }
+        write_to_zendnn_memory(add_data.data(), add_mem[i]);
+        //reorder the f32 to bf16 and execute
+        reorder(add_mem[i], add_mem_bf16[i]).execute(s,add_mem[i],
+                add_mem_bf16[i]);
+    }
+
     std::vector<float> alpha(num_layers, 1.f);
     std::vector<float> beta(num_layers, 0.f);
     std::vector<memory> bias(num_layers);
     std::vector<bool> bias_defined(num_layers, 0);
     std::vector<int64_t> fuse(num_layers, 1);
+    std::vector<std::vector<int64_t>> po_id(num_layers);
+    std::vector<std::vector<memory>> po_mem_buff(num_layers);
+
+    //ReLU -> ADD post-ops
+    for (int i=0; i<num_layers; i++) {
+        po_id[i] = {1,6};
+        //Buffer for Add
+#if BF16_ENABLE
+        po_mem_buff[i] = {add_mem_bf16[i]};
+#else
+        po_mem_buff[i] = {add_mem[i]};
+#endif
+    }
 
 #if !WEIGHT_CACHING
     // Execute the MLP layers
@@ -175,11 +250,11 @@ int main(int argc, char *argv[]) {
 #if BF16_ENABLE
             matmul_execute(eng, s, input_mem_bf16[i], weight_mem_bf16[i], alpha[i], beta[i],
                            bias_defined[i],
-                           fuse[i], out_mem_bf16[i]);
+                           po_id[i], po_mem_buff[i], out_mem_bf16[i]);
 #else
             matmul_execute(eng, s, input_mem[i], weight_mem[i], alpha[i], beta[i],
                            bias_defined[i],
-                           fuse[i], out_mem[i]);
+                           po_id[i], po_mem_buff[i], out_mem[i]);
 
 #endif
         }
@@ -187,10 +262,10 @@ int main(int argc, char *argv[]) {
 #if BF16_ENABLE
             matmul_execute(eng, s, out_mem_bf16[i-1], weight_mem_bf16[i], alpha[i], beta[i],
                            bias_defined[i],
-                           fuse[i], out_mem_bf16[i]);
+                           po_id[i], po_mem_buff[i], out_mem_bf16[i]);
 #else
             matmul_execute(eng, s, out_mem[i-1], weight_mem[i], alpha[i], beta[i],
-                           bias_defined[i], fuse[i], out_mem[i]);
+                           bias_defined[i], po_id[i], po_mem_buff[i], out_mem[i]);
 #endif
         }
     }
@@ -226,10 +301,10 @@ int main(int argc, char *argv[]) {
 #endif
         zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_bf16, bias, alpha,
                                          beta,
-                                         bias_defined, fuse, out_grp_mem_bf16, "lib::zendnn_grp_mlp");
+                                         bias_defined, po_id, po_mem_buff, out_grp_mem_bf16, "lib::zendnn_grp_mlp");
 #else
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem, bias, alpha, beta,
-                                     bias_defined, fuse, out_grp_mem, "lib::zendnn_grp_mlp");
+                                     bias_defined, po_id, po_mem_buff, out_grp_mem, "lib::zendnn_grp_mlp");
 #endif
 #if !WEIGHT_CACHING
     // Read data from memory object for the final output of grp Matmul
@@ -315,10 +390,10 @@ int main(int argc, char *argv[]) {
 #if BF16_ENABLE
         matmul_execute(eng, s, input_mem_bf16[i], weight_mem_parallel_bf16[i], alpha[i],
                        beta[i],
-                       bias_defined[i], fuse[i], out_mem_parallel[i]);
+                       bias_defined[i], po_id[i], po_mem_buff[i], out_mem_parallel[i]);
 #else
         matmul_execute(eng, s, input_mem[i], weight_mem_parallel[i], alpha[i], beta[i],
-                       bias_defined[i], fuse[i], out_mem_parallel[i]);
+                       bias_defined[i], po_id[i], po_mem_buff[i], out_mem_parallel[i]);
 #endif
 
     }
@@ -329,11 +404,11 @@ int main(int argc, char *argv[]) {
     zendnn_custom_op::zendnn_grp_mlp(input_mem_bf16, weight_mem_parallel_bf16, bias,
                                      alpha,
                                      beta,
-                                     bias_defined, fuse, out_mem_parallel, "lib::zendnn_grp_mlp");
+                                     bias_defined, po_id, po_mem_buff, out_mem_parallel, "lib::zendnn_grp_mlp");
 #else
     zendnn_custom_op::zendnn_grp_mlp(input_mem, weight_mem_parallel, bias, alpha,
                                      beta,
-                                     bias_defined, fuse, out_mem_parallel, "lib::zendnn_grp_mlp");
+                                     bias_defined, po_id, po_mem_buff, out_mem_parallel, "lib::zendnn_grp_mlp");
 #endif
     std::vector<float> output_grp_parallel(batch_size*dims[1]);
     read_from_zendnn_memory(output_grp_parallel.data(), out_mem_parallel[1]);

@@ -120,6 +120,17 @@ enum zenEBThreadType {
     CCD_THREADED = 4,
 };
 
+//enum for post-ops
+enum class zendnnPostOp {
+    NONE = 0,
+    RELU = 1,
+    GELU_TANH = 2,
+    GELU_ERF = 3,
+    SILU = 4,
+    MUL = 5,
+    ADD = 6,
+};
+
 //class to read environment variables for zendnnn
 //In future this will be used with operator memory desc
 class zendnnEnv {

@@ -782,7 +782,8 @@ class zendnn_custom_op {
                                const std::vector<float> &z_alpha,
                                const std::vector<float> &z_beta,
                                const std::vector<bool> &z_bias_defined,
-                               const std::vector<int64_t> &z_fuse,
+                               const std::vector<std::vector<int64_t>> &z_post_op_ids,
+                               const std::vector<std::vector<memory>> &z_post_op_buffers,
                                const std::vector<memory> &z_result, const char* plugin_op="");
 //Group Embedding_Bag and MLP op API
     static void zendnn_grp_ebag_mlp(std::vector <memory> &z_eb_input,
@@ -801,7 +802,8 @@ class zendnn_custom_op {
                                     const std::vector<float> &z_mm_alpha,
                                     const std::vector<float> &z_mm_beta,
                                     const std::vector<bool> &z_mm_bias_defined,
-                                    const std::vector<int64_t> &z_mm_fuse,
+                                    const std::vector<std::vector<int64_t>> &z_post_op_ids,
+                                    const std::vector<std::vector<memory>> &z_post_op_buffers,
                                     const std::vector<memory> &z_mm_result, const char* plugin_op="");
 
 //Group Embedding and MLP op API
@@ -817,7 +819,8 @@ class zendnn_custom_op {
                                          const std::vector<float> &z_mm_alpha,
                                          const std::vector<float> &z_mm_beta,
                                          const std::vector<bool> &z_mm_bias_defined,
-                                         const std::vector<int64_t> &z_mm_fuse,
+                                         const std::vector<std::vector<int64_t>> &z_post_op_ids,
+                                         const std::vector<std::vector<memory>> &z_post_op_buffers,
                                          const std::vector<memory> &z_mm_result);
 };
 

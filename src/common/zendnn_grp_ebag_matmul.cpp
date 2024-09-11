@@ -36,7 +36,8 @@ void zen_matmul_impl(
     const float &z_alpha,
     const float &z_beta,
     const bool &z_bias_defined,
-    const int64_t &z_fuse,
+    const std::vector<int64_t> &z_post_op_ids,
+    const std::vector<memory> &z_post_op_buffers,
     const memory &z_result,
     engine eng,
     stream engine_stream, const char *plugin_op) {
@@ -45,52 +46,81 @@ void zen_matmul_impl(
     std::string op_name=plugin_op;
     op_attr.set_plugin_op_name(op_name);
     post_ops po;
+    int post_op_idx = 0;
     if (z_beta != 0.0f && !z_bias_defined) {
         // sets post_ops as add or sum
+        post_op_idx++;
         po.append_sum(z_beta);
     }
     if (z_alpha != 1.0f) {
         op_attr.set_output_scales(0, {z_alpha});
     }
 
-    // set the post-ops or fusion-ops;
-    // by default, fuse = 0,
-    // fuse = 1 for relu op,
-    // fuse = 2 for gelu approximate (tanh)
-    // fuse = 3 for gelu exact (erf)
-    if (z_fuse == 1) {
-        po.append_eltwise(1.0f, algorithm::eltwise_relu, 0.f, 0.f);
+    int post_op_ids_size = z_post_op_ids.size();
+    int post_op_buffers_size = z_post_op_buffers.size();
+    std::unordered_map<int, memory> execute_args;
+    int post_op_buffer_idx = 0;
+    for (int i = 0; i < post_op_ids_size; i++) {
+        int arg_position;
+        // set the post-ops or fusion-ops;
+        zendnnPostOp po_enum = static_cast<zendnnPostOp>(z_post_op_ids[i]);
+        switch (po_enum) {
+        case zendnnPostOp::RELU:
+            po.append_eltwise(1.0f, algorithm::eltwise_relu, 0.f, 0.f);
+            break;
+        case zendnnPostOp::GELU_TANH:
+            po.append_eltwise(1.0f, algorithm::eltwise_gelu_tanh, 1.f, 0.f);
+            break;
+        case zendnnPostOp::GELU_ERF:
+            po.append_eltwise(1.0f, algorithm::eltwise_gelu_erf, 1.f, 0.f);
+            break;
+        case zendnnPostOp::SILU:
+            po.append_eltwise(1.0f, algorithm::eltwise_swish, 1.f, 0.f);
+            break;
+        case zendnnPostOp::MUL:
+            po.append_binary(algorithm::binary_mul,
+                             z_post_op_buffers[post_op_buffer_idx].get_desc());
+            arg_position = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(post_op_idx) | ZENDNN_ARG_SRC_1;
+            execute_args.insert(
+            {arg_position, z_post_op_buffers[post_op_buffer_idx]});
+            post_op_buffer_idx++;
+            break;
+        case zendnnPostOp::ADD:
+            po.append_binary(algorithm::binary_add,
+                             z_post_op_buffers[post_op_buffer_idx].get_desc());
+            arg_position = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(post_op_idx) | ZENDNN_ARG_SRC_1;
+            execute_args.insert(
+            {arg_position, z_post_op_buffers[post_op_buffer_idx]});
+            post_op_buffer_idx++;
+            break;
+        case zendnnPostOp::NONE:
+            break;
+        default:
+            ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
+                               "Unsupported post-op for group MLP");
+            break;
+        }
+        post_op_idx++;
     }
-    if (z_fuse == 2) {
-        po.append_eltwise(1.0f, algorithm::eltwise_gelu_tanh, 1.f, 0.f);
-    }
-    if (z_fuse == 3) {
-        po.append_eltwise(1.0f, algorithm::eltwise_gelu_erf, 1.f, 0.f);
-    }
+
     op_attr.set_post_ops(po);
 
-    matmul::desc pdesc =
-        z_bias_defined
-        ? matmul::desc(z_input.get_desc(), z_weight.get_desc(),
-                       z_bias.get_desc(),
-                       z_result.get_desc())
-        : matmul::desc(z_input.get_desc(), z_weight.get_desc(),
-                       z_result.get_desc());
+    matmul::desc pdesc = z_bias_defined
+                         ? matmul::desc(z_input.get_desc(), z_weight.get_desc(),
+                                        z_bias.get_desc(),
+                                        z_result.get_desc())
+                         : matmul::desc(z_input.get_desc(), z_weight.get_desc(),
+                                        z_result.get_desc());
 
     matmul::primitive_desc pd =
         matmul::primitive_desc(pdesc, op_attr, eng);
 
-    std::unordered_map<int, memory> execute_args =
-        z_bias_defined
-    ? std::unordered_map<int, memory>({
-        {ZENDNN_ARG_SRC, z_input},
-        {ZENDNN_ARG_WEIGHTS, z_weight},
-        {ZENDNN_ARG_BIAS, z_bias},
-        {ZENDNN_ARG_DST, z_result}})
-        : std::unordered_map<int, memory>({
-        {ZENDNN_ARG_SRC, z_input},
-        {ZENDNN_ARG_WEIGHTS, z_weight},
-        {ZENDNN_ARG_DST, z_result}});
+    execute_args.insert({ZENDNN_ARG_SRC, z_input});
+    execute_args.insert({ZENDNN_ARG_WEIGHTS, z_weight});
+    if (z_bias_defined) {
+        execute_args.insert({ZENDNN_ARG_BIAS, z_bias});
+    }
+    execute_args.insert({ZENDNN_ARG_DST, z_result});
     matmul(pd).execute(engine_stream, execute_args);
 
 }
@@ -126,7 +156,8 @@ void zendnn_custom_op::zendnn_grp_mlp(
     const std::vector<float> &z_alpha,
     const std::vector<float> &z_beta,
     const std::vector<bool> &z_bias_defined,
-    const std::vector<int64_t> &z_fuse,
+    const std::vector<std::vector<int64_t>> &z_post_op_ids,
+    const std::vector<std::vector<memory>> &z_post_op_buffers,
     const std::vector<memory> &z_result, const char *plugin_op)
 
 {
@@ -147,11 +178,13 @@ void zendnn_custom_op::zendnn_grp_mlp(
             }
             if (i==0) {
                 zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+                                z_bias_defined[i], z_post_op_ids[i], z_post_op_buffers[i], z_result[i], eng,
+                                stream, plugin_op);
             }
             else {
                 zen_matmul_impl(z_result[i-1], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+                                z_bias_defined[i], z_post_op_ids[i], z_post_op_buffers[i], z_result[i], eng,
+                                stream, plugin_op);
             }
         }
     }
@@ -185,7 +218,8 @@ void zendnn_custom_op::zendnn_grp_mlp(
                 else {
                     zen_matmul_impl(z_input[threadOffset], z_weight[threadOffset],
                                     z_bias[threadOffset], z_alpha[threadOffset], z_beta[threadOffset],
-                                    z_bias_defined[threadOffset], z_fuse[threadOffset], z_result[threadOffset], eng,
+                                    z_bias_defined[threadOffset], z_post_op_ids[threadOffset],
+                                    z_post_op_buffers[threadOffset], z_result[threadOffset], eng,
                                     stream, plugin_op);
                 }
             }
@@ -202,7 +236,8 @@ void zendnn_custom_op::zendnn_grp_mlp(
                 // Launch the top-level threads asynchronously
                 futures.push_back(std::async(std::launch::async,zen_matmul_impl, z_input[i],
                                              z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                             z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op));
+                                             z_bias_defined[i], z_post_op_ids[i], z_post_op_buffers[i], z_result[i], eng,
+                                             stream, plugin_op));
             }
             for (auto &fut : futures) {
                 fut.get();
@@ -219,7 +254,8 @@ void zendnn_custom_op::zendnn_grp_mlp(
                 }
                 threads.emplace_back(zen_matmul_impl, z_input[i], z_weight[i], z_bias[i],
                                      z_alpha[i], z_beta[i],
-                                     z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+                                     z_bias_defined[i], z_post_op_ids[i], z_post_op_buffers[i], z_result[i], eng,
+                                     stream, plugin_op);
             }
             for (auto &thread : threads) {
                 thread.join();
@@ -235,7 +271,8 @@ void zendnn_custom_op::zendnn_grp_mlp(
                     continue;
                 }
                 zen_matmul_impl(z_input[i], z_weight[i], z_bias[i], z_alpha[i], z_beta[i],
-                                z_bias_defined[i], z_fuse[i], z_result[i], eng, stream, plugin_op);
+                                z_bias_defined[i], z_post_op_ids[i], z_post_op_buffers[i], z_result[i], eng,
+                                stream, plugin_op);
             }
         }
     }
@@ -264,7 +301,8 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
     const std::vector<float> &z_mm_alpha,
     const std::vector<float> &z_mm_beta,
     const std::vector<bool> &z_mm_bias_defined,
-    const std::vector<int64_t> &z_mm_fuse,
+    const std::vector<std::vector<int64_t>> &z_post_op_ids,
+    const std::vector<std::vector<memory>> &z_post_op_buffers,
     const std::vector<memory> &z_mm_result, const char *plugin_op)
 
 {
@@ -276,7 +314,8 @@ void zendnn_custom_op::zendnn_grp_ebag_mlp(
         z_eb_include_last_offset, z_eb_padding_idx, z_eb_destination, plugin_op, 1);
 
     zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
-                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result, plugin_op);
+                                     z_mm_beta, z_mm_bias_defined, z_post_op_ids, z_post_op_buffers, z_mm_result,
+                                     plugin_op);
 
     double duration_ms = impl::get_msec() - start_ms;
 
@@ -326,7 +365,8 @@ void zendnn_custom_op::zendnn_grp_embedding_mlp(
     const std::vector<float> &z_mm_alpha,
     const std::vector<float> &z_mm_beta,
     const std::vector<bool> &z_mm_bias_defined,
-    const std::vector<int64_t> &z_mm_fuse,
+    const std::vector<std::vector<int64_t>> &z_post_op_ids,
+    const std::vector<std::vector<memory>> &z_post_op_buffers,
     const std::vector<memory> &z_mm_result)
 
 {
@@ -336,7 +376,8 @@ void zendnn_custom_op::zendnn_grp_embedding_mlp(
         z_embed_sparse, z_embed_destination,"zendnn_grp_embedding_mlp",1);
 
     zendnn_custom_op::zendnn_grp_mlp(z_mm_input, z_mm_weight, z_mm_bias, z_mm_alpha,
-                                     z_mm_beta, z_mm_bias_defined, z_mm_fuse, z_mm_result, "zendnn_grp_ebag_mlp");
+                                     z_mm_beta, z_mm_bias_defined, z_post_op_ids, z_post_op_buffers, z_mm_result,
+                                     "zendnn_grp_ebag_mlp");
 }
 
 }
