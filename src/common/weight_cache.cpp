@@ -142,5 +142,7 @@ typename lru_weight_cache_t<VALUE_T>::value_t lru_weight_cache_t<VALUE_T>::get(
 
 template struct lru_weight_cache_t <memory>;
 template struct lru_weight_cache_t <int16_t *>;
+template struct lru_weight_cache_t <int8_t *>;
+template struct lru_weight_cache_t <float *>;
 }
 }
