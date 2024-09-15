@@ -1128,26 +1128,36 @@ int matmul_woq_wrapper(
 
     if (src_type == zendnn_bf16) {
         if (zenEnvObj.zenBF16GEMMalgo == 0) {
-            // If M >=64, N and K >=1024 AOCL BLIS kernels gives optimal performance.
+            // If M <= 16 AOCL S4 Kernel gives Optimal Performance.
+            // If M >= 128, N and K >=1024 AOCL BLIS kernels with Zen weights conversion
+            // gives optimal performance.
             // This is based on heuristic with different models and difference BS
-            if (M == 4) {
+            if (M <= 16) {
                 // AOCL S4 Kernel
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
             }
-            else if (M >= 64 && N >= 1024 && K >= 1024) {
+            else if (M >= 128 && N >= 1024 && K >= 1024) {
                 // AOCL BF16 Kernel with Zen Weights Conversion
                 zenEnvObj.zenBF16GEMMalgo = 3;
             }
-            else {
-                // For M < 64, where K size is smaller than N AOCL BLIS kernel gives
-                // optimal performance.
+            else if (M == 32) {
                 if (N <= K) {
                     // Blocked BRGEMM BF16 with Zen Weights Conversion
                     zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
                 }
                 else {
+                    // AOCL S4 Kernel
+                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+                }
+            }
+            else {
+                if (N <= K) {
                     // AOCL BF16 Kernel with Zen Weights Conversion
                     zenEnvObj.zenBF16GEMMalgo = 3;
+                }
+                else {
+                    // Blocked BRGEMM BF16 with Zen Weights Conversion
+                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
                 }
             }
         }
