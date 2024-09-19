@@ -29,9 +29,9 @@
 #include <tuple>
 
 #ifndef _WIN32
-#include <sys/time.h>
+    #include <sys/time.h>
 #else
-#include <windows.h>
+    #include <windows.h>
 #endif
 
 #ifndef ZENDNN_USE_AOCL_BLIS_API
@@ -76,7 +76,7 @@ matmul_kernel_map_bf16;
 
 //AutoTuner Helper map
 std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
-matmul_kernel_map_bf16_helper;
+        matmul_kernel_map_bf16_helper;
 
 template<typename T>
 aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
@@ -1019,7 +1019,7 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::bf16,
                                      b_strides);
     memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::bf16,
-        tag::any);
+            tag::any);
 
     memory::desc bias_md;
     //Bias type bf16 or f32
@@ -1096,9 +1096,9 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     //MatMul desc
     auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
                        blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                           blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
-                               matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                                   matmul_weights_md, dst_md);
+                               blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
+                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                                               matmul_weights_md, dst_md);
 
     //MatMul primitive desc
     auto matmul_prim_disc =
@@ -1118,7 +1118,7 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     //weight caching
     static zendnn::impl::lru_weight_cache_t<zendnn::memory> matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
-  
+
     if (blocked_format) {
         if (!is_weights_const || !found_obj_reorder) {
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
@@ -1563,8 +1563,10 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm || (obj.is_ref_gemm_bf16 &&
-            weights_md()->data_type == bf16)) {
+    bool check_algo_desc = obj.is_brgemm || ((obj.is_ref_gemm_bf16 ||
+                           !weights_md()->is_memory_const) &&
+                           weights_md()->data_type == bf16);
+    if (check_algo_desc) {
         return status::unimplemented;
     }
 
@@ -1646,13 +1648,13 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     zendnnEnv zenEnvObj = readEnv();
     const gemm_based::params_t &params = pd()->params();
-    bool is_weights_const = zenEnvObj.zenWeightCache ||
+    bool is_weights_const = zenEnvObj.zenWeightCache &&
                             pd()->weights_md()->is_memory_const;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
     const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
-                                  2];
+                                                2];
     // In case of normal matrices, the stride of the last dimension will always be 1,
     // as the elements are contiguous. However in case of transposed matrix, the
     // stride of the last dimension will be greater than 1.

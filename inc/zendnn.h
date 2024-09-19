@@ -1112,7 +1112,7 @@ zendnn_status_t ZENDNN_API zendnn_post_ops_get_params_prelu(
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_memory_desc_init_by_strides(
         zendnn_memory_desc_t *memory_desc, int ndims, const zendnn_dims_t dims,
-        zendnn_data_type_t data_type, const zendnn_dims_t strides, bool is_memory_const = false);
+        zendnn_data_type_t data_type, const zendnn_dims_t strides, bool is_memory_const = true);
 
 /// Initializes a memory descriptor using dimensions and memory format tag.
 ///
@@ -1134,7 +1134,7 @@ zendnn_status_t ZENDNN_API zendnn_memory_desc_init_by_strides(
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_memory_desc_init_by_tag(
         zendnn_memory_desc_t *memory_desc, int ndims, const zendnn_dims_t dims,
-        zendnn_data_type_t data_type, zendnn_format_tag_t tag, bool is_memory_const = false);
+        zendnn_data_type_t data_type, zendnn_format_tag_t tag, bool is_memory_const = true);
 
 /// Initializes a memory descriptor for a region inside an area
 /// described by an existing memory descriptor.

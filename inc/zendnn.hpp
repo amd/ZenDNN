@@ -2619,7 +2619,7 @@ struct memory : public handle<zendnn_memory_t> {
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, format_tag aformat_tag, bool is_memory_const = false,
+        desc(const dims &adims, data_type adata_type, format_tag aformat_tag, bool is_memory_const = true,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
@@ -2650,7 +2650,7 @@ struct memory : public handle<zendnn_memory_t> {
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, const dims &strides, bool is_memory_const = false,
+        desc(const dims &adims, data_type adata_type, const dims &strides, bool is_memory_const = true,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
