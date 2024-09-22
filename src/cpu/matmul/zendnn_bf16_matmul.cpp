@@ -404,17 +404,19 @@ void zenMatMul_gemm_bf16bf16f32of32(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    //TODO: Create cleaner key for weight caching map
+    //Putting hardcoded values for now
     Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_input = false;
     key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
+    key_obj.m = 0;
     key_obj.k = k;
     key_obj.n = n;
-    key_obj.lda = lda;
+    key_obj.lda = 0;
     key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
+    key_obj.ldc = 0;
     key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
+    key_obj.thread_count = 0;
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -541,17 +543,19 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = (zenEnvObj.omp_num_threads>m)?m:
                               zenEnvObj.omp_num_threads;
+    //TODO: Create cleaner key for weight caching map
+    //Putting hardcoded values for now
     Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_input = 0;
     key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
+    key_obj.m = 0;
     key_obj.k = k;
     key_obj.n = n;
-    key_obj.lda = lda;
+    key_obj.lda = 0;
     key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
+    key_obj.ldc = 0;
     key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
+    key_obj.thread_count = 0;
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -697,17 +701,19 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    //TODO: Create cleaner key for weight caching map
+    //Putting hardcoded values for now
     Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_input = false;
     key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
+    key_obj.m = 0;
     key_obj.k = k;
     key_obj.n = n;
-    key_obj.lda = lda;
+    key_obj.lda = 0;
     key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
+    key_obj.ldc = 0;
     key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
+    key_obj.thread_count = 0;
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -835,17 +841,19 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = (zenEnvObj.omp_num_threads>m)?m:
                               zenEnvObj.omp_num_threads;
+    //TODO: Create cleaner key for weight caching map
+    //Putting hardcoded values for now
     Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
+    key_obj.transpose_input = false;
     key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
+    key_obj.m = 0;
     key_obj.k = k;
     key_obj.n = n;
-    key_obj.lda = lda;
+    key_obj.lda = 0;
     key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
+    key_obj.ldc = 0;
     key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
+    key_obj.thread_count = 0;
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -985,17 +993,19 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
+    //TODO: Create cleaner key for weight caching map
+    //Putting hardcoded values for now
     Key_matmul key_obj_reorder;
-    key_obj_reorder.transpose_input = TransA;
+    key_obj_reorder.transpose_input = false;
     key_obj_reorder.transpose_weights = TransB;
-    key_obj_reorder.m = M;
+    key_obj_reorder.m = 0;
     key_obj_reorder.k = K;
     key_obj_reorder.n = N;
-    key_obj_reorder.lda = lda;
+    key_obj_reorder.lda = 0;
     key_obj_reorder.ldb = ldb;
-    key_obj_reorder.ldc = ldc;
+    key_obj_reorder.ldc = 0;
     key_obj_reorder.weights = B_Array;
-    key_obj_reorder.thread_count = zenEnvObj.omp_num_threads;
+    key_obj_reorder.thread_count = 0;
 
     std::unordered_map<int, memory> net_args;
 
