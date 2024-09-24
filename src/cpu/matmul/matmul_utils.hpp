@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -30,6 +30,56 @@ namespace impl {
 namespace cpu {
 
 namespace matmul {
+
+//Checks datatype for post-ops, bias, and dst
+inline bool check_dt_(post_ops_t po_ops, int dst_type, int bias_type){
+    //For AOCL APIs
+    // if bias exist
+    // and bias_dt == dst_dt
+    if(bias_type && bias_type != dst_type)
+        return false;
+
+    //Check buffer based post-ops data type
+    for (auto idx = 0; idx < po_ops.len(); ++idx) {
+        const auto &e = po_ops.entry_[idx];
+        switch (e.kind) {
+            case primitive_kind::binary:
+                if((e.binary.src1_desc.data_type != dst_type )){
+                    return false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return true;
+}
+
+//Checks for supported post-ops in aocl and blocked brgemm
+inline status_t check_post_ops_(post_ops_t po_ops){
+    for (auto idx = 0; idx < po_ops.len(); ++idx) {
+        const auto &e = po_ops.entry_[idx];
+        switch (e.kind) {
+            case primitive_kind::sum:
+                break;
+            case primitive_kind::eltwise:
+                if(!utils::one_of(e.eltwise.alg, alg_kind::eltwise_relu,
+                    alg_kind::eltwise_swish, alg_kind::eltwise_gelu,
+                    alg_kind::eltwise_gelu_erf)){
+                        return status::unimplemented;
+                    }
+                break;
+            case primitive_kind::binary:
+                if(!utils::one_of(e.binary.alg, alg_kind::binary_add,
+                    alg_kind::binary_mul)){
+                    return status::unimplemented;
+                }
+                break;
+            default: return status::unimplemented;
+        }
+    }
+    return status::success;
+}
 
 struct matmul_helper_t {
     using mdw_t = const memory_desc_wrapper;

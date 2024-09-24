@@ -28,6 +28,7 @@
 
 #include "common/primitive.hpp"
 #include "zendnn_logging.hpp"
+#include "cpu/matmul/matmul_utils.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn_helper.hpp"
 #include "common/weight_cache.hpp"
@@ -398,7 +399,7 @@ int ref_woq_bf16(
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
-        int16_t *wei_bf16 = (int16_t *)malloc(sizeof(int16_t)*K*N);
+        int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to BF16
             cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
@@ -562,7 +563,7 @@ int ref_woq_f32(
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
-        float *wei_f32 = (float *)malloc(sizeof(float)*K*N);
+        float *wei_f32 = (float *)zendnn_aligned_alloc(64, sizeof(float)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to FP32
             cvt_int4_to_f32(weights, wei_f32, K, N, wei_scale, scale_size);
@@ -792,7 +793,7 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
     if (!is_weights_const || !found_obj_reorder) {
-        int16_t *wei_bf16 = (int16_t *)malloc(sizeof(int16_t)*K*N);
+        int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to BF16
             cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
@@ -1052,6 +1053,9 @@ int matmul_woq_wrapper(
     zendnnEnv zenEnvObj = readEnv();
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
 
+    //Check data_types of bias, dst, post-ops
+    bool can_run_aocl = impl::cpu::matmul::check_dt_(po_ops, dst_type, bias_type);
+
     //Due to limitation of current aocl kernels
     //using jit call for cases where BIAS, alpha and beta
     //all are available
@@ -1092,8 +1096,15 @@ int matmul_woq_wrapper(
                 }
             }
         }
+
+        //If algo is AOCL but can't execute due to limited mixed_data type support
+        //then run blocked brgemm
+        if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM
+                || zenEnvObj.zenBF16GEMMalgo == 3) && (use_jit || !can_run_aocl)) {
+            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+        }
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4 && !use_jit)
+        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4)
 #else
         if (0)
 #endif
@@ -1105,7 +1116,7 @@ int matmul_woq_wrapper(
                           wei_scale, 0, scale_size, do_sum,
                           is_weights_const);
         }
-        else if (zenEnvObj.zenBF16GEMMalgo == 3 && !use_jit) {
+        else if (zenEnvObj.zenBF16GEMMalgo == 3) {
             ref_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                          transA, transB,
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,

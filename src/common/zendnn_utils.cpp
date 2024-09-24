@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ float bf16_to_float(int16_t bf16_val) {
 int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                      float *scales, int scale_size) {
     int val_idx = 0;
-    float *wei_f32 = (float*)aligned_alloc(64, k*n*sizeof(float));
+    float *wei_f32 = (float*)zendnn_aligned_alloc(64, k*n*sizeof(float));
     for (int i=0; i<k*n; i++) {
         int t1 = impl::int4_t::extract(weights[val_idx],
                                        impl::int4_extract_t::low_half);
@@ -66,7 +66,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
 
 int cvt_int8_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                      float *scales, int scale_size) {
-    float *wei_f32 = (float*)aligned_alloc(64,k*n*sizeof(float));
+    float *wei_f32 = (float*)zendnn_aligned_alloc(64,k*n*sizeof(float));
     #pragma omp parallel for
     for (int i=0; i<k*n; i++) {
         wei_f32[i] = scales[i%scale_size]*(weights[i]);

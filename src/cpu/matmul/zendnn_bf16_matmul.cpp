@@ -1185,6 +1185,15 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
                         bool is_weights_const) {
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    //Check data_types of bias, dst, post-ops
+    bool can_run_aocl = check_dt_(po_ops, dst_type, bias_type);
+    //If algo is AOCL but can't execute due to limited mixed_data type support
+    //then run blocked brgemm
+    if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM) &&
+            !can_run_aocl) {
+        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+    }
+
     obj.is_log = true;
     float *bias_f32 = NULL;
     if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM ||
@@ -1354,7 +1363,7 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
         obj.is_log = true;
         obj.is_brgemm = false;
     }
-    return 0;
+    return zenEnvObj.zenBF16GEMMalgo;
 }
 
 /*AutoTuner
@@ -1630,7 +1639,9 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::check_and_configure_attributes() 
     // set state
     params_.has_pp_kernel_ = !params_.dst_is_acc_ || with_bias()
                              || !params_.pp_attr_.has_default_values();
-    return status::success;
+
+    //Checks supported post-ops
+    return check_post_ops_(po);
 }
 
 template <impl::data_type_t dst_type>
@@ -1756,7 +1767,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
             }
         }
-        matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
+        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
                             "N"),
                             strcmp(transB, "N"), M, K, N, alpha, src, lda, weights, ldb, bias,
                             has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
@@ -1764,7 +1775,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     }
     else {
-        matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
+        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
                             "N"),
                             strcmp(transB, "N"), M, K, N, alpha, src, lda, weights, ldb, bias,
                             has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
