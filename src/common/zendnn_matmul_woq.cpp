@@ -661,12 +661,12 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj_reorder;
-    key_obj_reorder.transpose_input = false;
+    key_obj_reorder.transpose_input = TransA;
     key_obj_reorder.transpose_weights = TransB;
-    key_obj_reorder.m = 0;
+    key_obj_reorder.m = M;
     key_obj_reorder.k = K;
     key_obj_reorder.n = N;
-    key_obj_reorder.lda = 0;
+    key_obj_reorder.lda = lda;
     key_obj_reorder.ldb = ldb;
     key_obj_reorder.ldc = 0;
     key_obj_reorder.weights = B_Array;

@@ -996,12 +996,12 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj_reorder;
-    key_obj_reorder.transpose_input = false;
+    key_obj_reorder.transpose_input = TransA;
     key_obj_reorder.transpose_weights = TransB;
-    key_obj_reorder.m = 0;
+    key_obj_reorder.m = M;
     key_obj_reorder.k = K;
     key_obj_reorder.n = N;
-    key_obj_reorder.lda = 0;
+    key_obj_reorder.lda = lda;
     key_obj_reorder.ldb = ldb;
     key_obj_reorder.ldc = 0;
     key_obj_reorder.weights = B_Array;
@@ -1679,18 +1679,16 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
     // In case of normal matrices, the stride of the last dimension will always be 1,
     // as the elements are contiguous. However in case of transposed matrix, the
     // stride of the last dimension will be greater than 1.
-    const char *transA
-        = src_strides[1] == 1 && (src_strides[0] == K)? "N" : "T";
-    const char *transB
-        = weights_strides[1] == 1 && (weights_strides[0] == N) ? "N" : "T";
+    const char transA = helper.transA();
+    const char transB = helper.transB();
 
     const dim_t M_s32 = (dim_t)M;
     const dim_t N_s32 = (dim_t)N;
     const dim_t K_s32 = (dim_t)K;
 
-    const dim_t lda = (dim_t)src_strides[*transA == 'N' ? 0 : 1];
-    const dim_t ldb = (dim_t)weights_strides[*transB == 'N' ? 0 : 1];
-    const dim_t ldc = (dim_t)dst_bd.strides[dst_d.ndims() - 2];
+    const dim_t lda = helper.lda();
+    const dim_t ldb = helper.ldb();
+    const dim_t ldc = helper.ldc();
 
     float alpha = params.get_gemm_alpha(scales);
     const float beta = params.gemm_beta_;
@@ -1734,8 +1732,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
         woq_scale_size = woq_scale_size > scales_d.dims()[0] ? woq_scale_size :
                          scales_d.dims()[0];
         matmul_woq_wrapper(ctx, src_type, weights_type, dst_type, bias_dt, Layout,
-                           strcmp(transA, "N"),
-                           strcmp(transB, "N"),
+                           transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                            M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
                            pd()->attr()->post_ops_, has_eltwise_relu,
                            geluType, beta, (char *)dst, ldc, woq_scales, 0, woq_scale_size,
@@ -1767,19 +1764,19 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
             }
         }
-        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
-                            "N"),
-                            strcmp(transB, "N"), M, K, N, alpha, src, lda, weights, ldb, bias,
-                            has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
-                            geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
+        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout,
+                                        transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                                        M, K, N, alpha, src, lda, weights, ldb, bias,
+                                        has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
+                                        geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
 
     }
     else {
-        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout, strcmp(transA,
-                            "N"),
-                            strcmp(transB, "N"), M, K, N, alpha, src, lda, weights, ldb, bias,
-                            has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
-                            geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
+        algo_type = matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_dt, Layout,
+                                        transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                                        M, K, N, alpha, src, lda, weights, ldb, bias,
+                                        has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
+                                        geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
     }
 
     zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul auto_tuner=",
