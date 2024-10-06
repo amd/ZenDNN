@@ -32,7 +32,7 @@
 
 #include "cpu/platform.hpp"
 #include "cpu/primitive_attr_postops.hpp"
-
+#include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/cpu_embedding_bag_pd.hpp"
 #include "cpu/avx2_embedding_bag.hpp"
 
@@ -54,7 +54,8 @@ struct avx512_embedding_bag_t : public primitive_t {
         DECLARE_COMMON_PD_T("avx512:any", avx512_embedding_bag_t);
 
         status_t init(engine_t *engine) {
-            if (! platform::has_data_type_support(in_data_type)) {
+            if (! platform::has_data_type_support(in_data_type) ||
+                    !x64::mayiuse(x64::avx512_core)) {
                 return status::unimplemented;
             }
 

@@ -20,7 +20,6 @@
 #define AVX512_EMBEDDING_BAG_UTILS_HPP
 
 #include <immintrin.h>
-using namespace zendnn::impl;
 
 #if AVX512_EB_EN
 
@@ -101,7 +100,7 @@ struct zenmmAVX512_ext_ps<float, float, DIM> {
 #if AVX512_BF16_EN
 //bf16 type embedding bag
 template<uint32_t DIM>
-struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
+struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
     zenmmAVX512_ext_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
@@ -114,7 +113,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
         }
     };
 
-    inline void load_ps(bfloat16_t const *mem) {
+    inline void load_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             v[i]         = _mm512_cvtpbh_ps(tbh);
@@ -122,7 +121,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
         }
     };
 
-    inline void fetch_add_ps(bfloat16_t const *mem) {
+    inline void fetch_add_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
@@ -132,7 +131,8 @@ struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
     };
 
 
-    inline void fetch_fmadd_ps(bfloat16_t const *mem, const float mfactor) {
+    inline void fetch_fmadd_ps(zendnn::impl::bfloat16_t const *mem,
+                               const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -143,7 +143,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
 
     };
 
-    inline void fetch_max_ps(bfloat16_t const *mem) {
+    inline void fetch_max_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
@@ -174,7 +174,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, float, DIM> {
 };
 
 template<uint32_t DIM>
-struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
+struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DIM> {
     zenmmAVX512_ext_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
@@ -187,7 +187,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
         }
     };
 
-    inline void load_ps(bfloat16_t const *mem) {
+    inline void load_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             v[i]         = _mm512_cvtpbh_ps(tbh);
@@ -195,7 +195,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
         }
     };
 
-    inline void fetch_add_ps(bfloat16_t const *mem) {
+    inline void fetch_add_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
@@ -205,7 +205,8 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
     };
 
 
-    inline void fetch_fmadd_ps(bfloat16_t const *mem, const float mfactor) {
+    inline void fetch_fmadd_ps(zendnn::impl::bfloat16_t const *mem,
+                               const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -216,7 +217,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
 
     };
 
-    inline void fetch_max_ps(bfloat16_t const *mem) {
+    inline void fetch_max_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
             __m512   tps = _mm512_cvtpbh_ps(tbh);
@@ -225,7 +226,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
         }
     };
 
-    inline void store_ps(bfloat16_t *mem) {
+    inline void store_ps(zendnn::impl::bfloat16_t *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh res_bf16 = _mm512_cvtneps_pbh(v[i]);
             _mm256_storeu_epi32((void *)mem, (__m256i)res_bf16);
@@ -233,7 +234,7 @@ struct zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, DIM> {
         }
     };
 
-    inline void scale_store_ps(bfloat16_t *mem, const float mfactor) {
+    inline void scale_store_ps(zendnn::impl::bfloat16_t *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_mul_ps(v[i], mm);
@@ -278,19 +279,31 @@ using zenmmAVX512_ext_ps128  = zenmmAVX512_ext_ps<float, float, 8>;
 using zenmmAVX512_ext_ps256  = zenmmAVX512_ext_ps<float, float, 16>;
 using zenmmAVX512_ext_ps512  = zenmmAVX512_ext_ps<float, float, 32>;
 
-using zenmmAVX512_ext_pbf16  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 1>;
-using zenmmAVX512_ext_pbf32  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 2>;
-using zenmmAVX512_ext_pbf64  = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 4>;
-using zenmmAVX512_ext_pbf128 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 8>;
-using zenmmAVX512_ext_pbf256 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 16>;
-using zenmmAVX512_ext_pbf512 = zenmmAVX512_ext_ps<bfloat16_t, bfloat16_t, 32>;
+using zenmmAVX512_ext_pbf16  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 1>;
+using zenmmAVX512_ext_pbf32  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 2>;
+using zenmmAVX512_ext_pbf64  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 4>;
+using zenmmAVX512_ext_pbf128 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 8>;
+using zenmmAVX512_ext_pbf256 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 16>;
+using zenmmAVX512_ext_pbf512 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 32>;
 
-using zenmmAVX512_ext_pbf_ps16  = zenmmAVX512_ext_ps<bfloat16_t, float, 1>;
-using zenmmAVX512_ext_pbf_ps32  = zenmmAVX512_ext_ps<bfloat16_t, float, 2>;
-using zenmmAVX512_ext_pbf_ps64  = zenmmAVX512_ext_ps<bfloat16_t, float, 4>;
-using zenmmAVX512_ext_pbf_ps128 = zenmmAVX512_ext_ps<bfloat16_t, float, 8>;
-using zenmmAVX512_ext_pbf_ps256 = zenmmAVX512_ext_ps<bfloat16_t, float, 16>;
-using zenmmAVX512_ext_pbf_ps512 = zenmmAVX512_ext_ps<bfloat16_t, float, 32>;
+using zenmmAVX512_ext_pbf_ps16  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 1>;
+using zenmmAVX512_ext_pbf_ps32  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 2>;
+using zenmmAVX512_ext_pbf_ps64  =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 4>;
+using zenmmAVX512_ext_pbf_ps128 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 8>;
+using zenmmAVX512_ext_pbf_ps256 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 16>;
+using zenmmAVX512_ext_pbf_ps512 =
+    zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 32>;
 
 #endif //AVX512_EB_EN
 #endif
