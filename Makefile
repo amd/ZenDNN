@@ -27,7 +27,6 @@ ARCHIVE ?= 0
 BLIS_API ?= 0
 
 # build for forced architecture. zero indicates arch is not forced
-FORCE_ARCH ?= 0
 GXX_COMPILER = g++
 
 # Set ZENDNN_STANDALONE_BUILD to 1 to build ZenDNN stanalone library
@@ -127,27 +126,7 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 #Rome processors   : 7xx2
 #Milan processors  : 7xx3
 
-ZNVER=znver2 #Default value
-AVX512_EB_EN = 0
-AVX512_BF16_EN = 0
-ifeq ($(FORCE_ARCH), 0)
-    EPYC_FAMILY_LAST_DIGIT := $(shell cat /proc/cpuinfo | grep 'model name' -m1 | awk '{print substr($$6, length($$6), 1)}')
-    ifeq ($(EPYC_FAMILY_LAST_DIGIT), 4)
-        AVX512_EB_EN = 1
-        AVX512_FLAG = -mavx512f
-    else ifeq ($(EPYC_FAMILY_LAST_DIGIT), 3)
-        ZNVER=znver3 # For Milan
-    endif
-else ifeq ($(FORCE_ARCH), 3)
-    ZNVER=znver3 # For Milan
-else ifeq ($(FORCE_ARCH), 4)
-    ZNVER=znver4 # For Genoa
-    AVX512_EB_EN=1
-    AVX512_BF16_EN=1
-    AVX512_FLAG=-mavx512f
-    AVX512_BF16_FLAG=-mavx512bf16
-    GXX_COMPILER=g++-12
-endif
+ZNVER=znver3 #Default value
 
 ifeq ($(RELEASE), 0)
 ifeq ($(AOCC), 0)
@@ -156,7 +135,7 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
-	COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=$(ZNVER)
 	else
@@ -168,7 +147,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -march=$(ZNVER) -g -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1
 endif #AOCC
 else #RELEASE = 1
 ifeq ($(AOCC), 0)
@@ -180,7 +159,7 @@ ifeq ($(AOCC), 0)
 	ifeq ($(LPGEMM), 1)
 	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
 	else
-	     COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	     COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
 	endif
 	ifeq "$(GCCVERSIONGTEQ9)" "1"
 		COMMONFLAGS += -march=$(ZNVER)
@@ -193,7 +172,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE)
 endif #AOCC
 endif #RELEASE = 1
 
@@ -304,10 +283,6 @@ $(EXECUTABLE_ARCHIVE): $(OBJECT_FILES)
 	$(AR_COMMAND) $@ $^
 	@# ^^^ http://www.gnu.org/software/make/manual/make.html#Automatic-Variables
 	@echo "Build successful (archive)!"
-
-ifeq ($(AVX512_EB_EN), 1)
-$(OUTDIR)/$(OBJDIR)/src/cpu/avx512_embedding_bag.o: CXX += $(AVX512_FLAG)
-endif
 
 # http://www.gnu.org/software/make/manual/make.html#Static-Pattern
 $(OBJECT_FILES): $(OUTDIR)/$(OBJDIR)/%.o: %.cpp

@@ -34,9 +34,7 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
     static const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> the_map =
     REG_EMBEDDING_BAG_P({
         {   {forward, f32, s32, f32}, {
-#if AVX512_EB_EN
                 CPU_INSTANCE(avx512_embedding_bag_t<f32, f32>)
-#endif
                 CPU_INSTANCE(avx2_embedding_bag_t<f32>)
                 CPU_INSTANCE(ref_embedding_bag_t<f32>)
                 /* eol */
@@ -44,17 +42,13 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>>
             }
         },
         {   {forward, bf16, s32, bf16}, {
-#if AVX512_EB_EN && AVX512_BF16_EN
                 CPU_INSTANCE(avx512_embedding_bag_t<bf16, bf16>)
-#endif
                 /* eol */
                 nullptr,
             }
         },
         {   {forward, bf16, s32, f32}, {
-#if AVX512_EB_EN && AVX512_BF16_EN
                 CPU_INSTANCE(avx512_embedding_bag_t<bf16, f32>)
-#endif
                 /* eol */
                 nullptr,
             }

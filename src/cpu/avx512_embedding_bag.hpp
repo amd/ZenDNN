@@ -15,8 +15,6 @@
 *
 *******************************************************************************/
 
-#if AVX512_EB_EN
-
 #ifndef CPU_AVX512_EMBEDDING_BAG_HPP
 #define CPU_AVX512_EMBEDDING_BAG_HPP
 
@@ -105,5 +103,4 @@ struct avx512_embedding_bag_t : public primitive_t {
 } // namespace impl
 } // namespace zendnn
 
-#endif
 #endif

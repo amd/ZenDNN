@@ -21,8 +21,6 @@
 
 #include <immintrin.h>
 
-#if AVX512_EB_EN
-
 #define ZEN_MM_STRIDE_FP32_512    (16)
 #define ZEN_MM_STRIDE_BF16_256    (16)
 #define ZEN_MM_STRIDE_BF16_512    (32)
@@ -33,26 +31,26 @@ struct zenmmAVX512_ext_ps;
 //fp32 type embedding bag
 template<uint32_t DIM>
 struct zenmmAVX512_ext_ps<float, float, DIM> {
-
+    __attribute__((target("avx512f")))
     zenmmAVX512_ext_ps() {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_setzero_ps();
         }
     }
-
+    __attribute__((target("avx512f")))
     inline void setzero_ps() {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_setzero_ps();
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void load_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_loadu_ps(mem);
             mem += ZEN_MM_STRIDE_FP32_512;
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void fetch_add_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_add_ps(_mm512_loadu_ps(mem), v[i]);
@@ -60,7 +58,7 @@ struct zenmmAVX512_ext_ps<float, float, DIM> {
         }
     };
 
-
+    __attribute__((target("avx512f")))
     inline void fetch_fmadd_ps(float const *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (auto i = 0; i< unroll_factor; ++i) {
@@ -69,21 +67,21 @@ struct zenmmAVX512_ext_ps<float, float, DIM> {
         }
 
     };
-
+    __attribute__((target("avx512f")))
     inline void fetch_max_ps(float const *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             v[i] = _mm512_max_ps(_mm512_loadu_ps(mem), v[i]);
             mem += ZEN_MM_STRIDE_FP32_512;
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void store_ps(float *mem) {
         for (auto i = 0; i< unroll_factor; ++i) {
             _mm512_storeu_ps(mem,v[i]);
             mem += ZEN_MM_STRIDE_FP32_512;
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void scale_store_ps(float *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (auto i = 0; i< unroll_factor; ++i) {
@@ -97,22 +95,23 @@ struct zenmmAVX512_ext_ps<float, float, DIM> {
     __m512           v[DIM];
     const uint32_t   unroll_factor = DIM;
 };
-#if AVX512_BF16_EN
+
 //bf16 type embedding bag
 template<uint32_t DIM>
 struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
+    __attribute__((target("avx512f")))
     zenmmAVX512_ext_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
         }
     }
-
+    __attribute__((target("avx512f")))
     inline void setzero_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void load_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -120,7 +119,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
             mem         += ZEN_MM_STRIDE_BF16_256;
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_add_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -130,7 +129,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
         }
     };
 
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_fmadd_ps(zendnn::impl::bfloat16_t const *mem,
                                const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
@@ -142,7 +141,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
         }
 
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_max_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -151,14 +150,14 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
             mem         += ZEN_MM_STRIDE_BF16_256;
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void store_ps(float *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             _mm512_storeu_ps(mem, v[i]);
             mem += ZEN_MM_STRIDE_FP32_512;
         }
     };
-
+    __attribute__((target("avx512f")))
     inline void scale_store_ps(float *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
@@ -175,18 +174,19 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
 
 template<uint32_t DIM>
 struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DIM> {
+    __attribute__((target("avx512f")))
     zenmmAVX512_ext_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
         }
     }
-
+    __attribute__((target("avx512f")))
     inline void setzero_ps() {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             v[i]     = _mm512_setzero_ps();
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void load_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -194,7 +194,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
             mem         += ZEN_MM_STRIDE_BF16_256;
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_add_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -204,7 +204,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
         }
     };
 
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_fmadd_ps(zendnn::impl::bfloat16_t const *mem,
                                const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
@@ -216,7 +216,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
         }
 
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void fetch_max_ps(zendnn::impl::bfloat16_t const *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh tbh = (__m256bh)(_mm256_loadu_epi32((void const *)mem));
@@ -225,7 +225,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
             mem         += ZEN_MM_STRIDE_BF16_256;
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void store_ps(zendnn::impl::bfloat16_t *mem) {
         for (uint32_t i = 0; i< unroll_factor; ++i) {
             __m256bh res_bf16 = _mm512_cvtneps_pbh(v[i]);
@@ -233,7 +233,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
             mem += ZEN_MM_STRIDE_BF16_256;
         }
     };
-
+    __attribute__((target("avx512vl,avx512bf16")))
     inline void scale_store_ps(zendnn::impl::bfloat16_t *mem, const float mfactor) {
         __m512 mm = _mm512_set1_ps(mfactor);
         for (uint32_t i = 0; i< unroll_factor; ++i) {
@@ -248,7 +248,6 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
     __m512             v[DIM];
     const uint32_t     unroll_factor = DIM;
 };
-#endif
 
 // Templated embedding bag sum function
 template <typename dst_type, typename input_type>
@@ -305,5 +304,4 @@ using zenmmAVX512_ext_pbf_ps256 =
 using zenmmAVX512_ext_pbf_ps512 =
     zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 32>;
 
-#endif //AVX512_EB_EN
 #endif
