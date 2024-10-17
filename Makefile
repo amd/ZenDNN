@@ -101,8 +101,8 @@ else
 	USE_FBGEMM:= -DFBGEMM_ENABLE=0
 endif
 
-#Set LIBXSMM PATH
-ifeq "$(ZENDNN_ENABLE_TPP)" "1"
+#Set LIBXSMM PATH(retained for future libxsmm integration)
+ifeq "$(ZENDNN_ENABLE_LIBXSMM)" "1"
 	LIBXSMM_PATH:= $(ZENDNN_LIBXSMM_PATH)
 	LIBXSMM_INCLUDE_PATH:= -I$(LIBXSMM_PATH)/include
 	LIBXSMM_LIB_PATH:= -L$(LIBXSMM_PATH)/lib -ldl -lxsmm -lxsmmnoblas -lxsmmext
@@ -242,17 +242,6 @@ SRCS := $(wildcard src/common/*.cpp \
 	src/cpu/x64/rnn/*.cpp \
 	src/cpu/x64/shuffle/*.cpp \
 	src/cpu/x64/utils/*.cpp)
-
-ifeq "$(ZENDNN_ENABLE_TPP)" "1"
-	SRCS_TPP := $(wildcard 	src/tpp/zen/*.cpp \
-	src/tpp/dyndisp/*.cpp \
-	src/tpp/isa/*.cpp \
-	src/tpp/tpp/*.cpp \
-	src/tpp/aten/*.cpp \
-	src/tpp/aten/kernels/*.cpp)
-
-	SRCS += $(SRCS_TPP)
-endif
 
 #$(info SRCS is $(SRCS))
 
@@ -394,13 +383,6 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
 
-ifeq "$(ZENDNN_ENABLE_TPP)" "1"
-	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/tpp_integrataion_test $(INCDIRS) \
-		-Itests/api_tests tests/api_tests/zendnn_tpp_integration_test.cpp -L_out/lib -lamdZenDNN \
-                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
-                $(CK_LINK_FLAGS)
-endif
-
 test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_conv_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_conv_test.cpp $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
@@ -465,12 +447,5 @@ test_archive: $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_mlp_test $(INCDIRS) \
                 -Itests/api_tests tests/api_tests/zendnn_grp_embedding_mlp_test.cpp  $(OUTDIR)/$(LIBDIR)/$(PRODUCT_ARCHIVE) \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH)
-
-ifeq "$(ZENDNN_ENABLE_TPP)" "1"
-	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/tpp_integrataion_test $(INCDIRS) \
-		-Itests/api_tests tests/api_tests/zendnn_tpp_integration_test.cpp -L_out/lib -lamdZenDNN \
-                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
-                $(CK_LINK_FLAGS)
-endif
 
 .PHONY: all build_so test clean

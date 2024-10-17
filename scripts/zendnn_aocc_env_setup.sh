@@ -336,10 +336,11 @@ echo "ZENDNN_PRIMITIVE_CACHE_CAPACITY: $ZENDNN_PRIMITIVE_CACHE_CAPACITY"
 export ZENDNN_PRIMITIVE_LOG_ENABLE=0
 echo "ZENDNN_PRIMITIVE_LOG_ENABLE: $ZENDNN_PRIMITIVE_LOG_ENABLE"
 
-export ZENDNN_ENABLE_TPP=0
-echo "ZENDNN_ENABLE_TPP: $ZENDNN_ENABLE_TPP"
+# libxsmm integration(retained for future use)
+export ZENDNN_ENABLE_LIBXSMM=0
+echo "ZENDNN_ENABLE_LIBXSMM: $ZENDNN_ENABLE_LIBXSMM"
 
-if [ "$ZENDNN_ENABLE_TPP" = "1" ];
+if [ "$ZENDNN_ENABLE_LIBXSMM" = "1" ];
 then
     if [ -z ${ZENDNN_LIBXSMM_PATH+x} ];
     then
@@ -378,7 +379,7 @@ else
     export LD_LIBRARY_PATH=$ZENDNN_BLIS_PATH/lib:$LD_LIBRARY_PATH
 fi
 
-if [ "$ZENDNN_ENABLE_TPP" = "1" ];
+if [ "$ZENDNN_ENABLE_LIBXSMM" = "1" ];
 then
     echo -n "checking and adding ZENDNN_LIBXSMM path..."
     if [ ! -z ${ZENDNN_LIBXSMM_PATH+x} ];
