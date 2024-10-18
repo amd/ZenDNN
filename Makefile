@@ -126,7 +126,7 @@ GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
 #Rome processors   : 7xx2
 #Milan processors  : 7xx3
 
-ZNVER=znver3 #Default value
+ZNVER=znver2 #Default value
 
 ifeq ($(RELEASE), 0)
 ifeq ($(AOCC), 0)
