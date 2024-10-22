@@ -481,10 +481,10 @@ int ref_woq_bf16(
             free(post_ops->sum);
         }
         if (post_ops->matrix_add != NULL) {
-            post_ops->matrix_add = NULL;
+            free(post_ops->matrix_add);
         }
         if (post_ops->matrix_mul != NULL) {
-            post_ops->matrix_mul = NULL;
+            free(post_ops->matrix_mul);
         }
 #endif
         free(post_ops->seq_vector);
@@ -627,10 +627,10 @@ int ref_woq_f32(
             free(post_ops->sum);
         }
         if (post_ops->matrix_add != NULL) {
-            post_ops->matrix_add = NULL;
+            free(post_ops->matrix_add);
         }
         if (post_ops->matrix_mul != NULL) {
-            post_ops->matrix_mul = NULL;
+            free(post_ops->matrix_mul);
         }
 #endif
         free(post_ops->seq_vector);
@@ -997,10 +997,10 @@ int aocl_woq_bf16(
             free(post_ops->sum);
         }
         if (post_ops->matrix_add != NULL) {
-            post_ops->matrix_add = NULL;
+            free(post_ops->matrix_add);
         }
         if (post_ops->matrix_mul != NULL) {
-            post_ops->matrix_mul = NULL;
+            free(post_ops->matrix_mul);
         }
         if (post_ops->seq_vector) {
             free(post_ops->seq_vector);

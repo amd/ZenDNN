@@ -285,7 +285,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const gemm_based::params_t &params = pd()->params();
     zendnnEnv zenEnvObj = readEnv();
-    bool is_weights_const = zenEnvObj.zenWeightCache ||
+    bool is_weights_const = zenEnvObj.zenWeightCache &&
                             pd()->weights_md()->is_memory_const;
 
     const auto &dst_bd = dst_d.blocking_desc();

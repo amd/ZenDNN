@@ -257,7 +257,7 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const dim_t ldc = (dim_t)dst_bd.strides[dst_d.ndims() - 2];
 
     zendnnEnv zenEnvObj = readEnv();
-    bool is_weights_const = zenEnvObj.zenWeightCache ||
+    bool is_weights_const = zenEnvObj.zenWeightCache &&
                             pd()->weights_md()->is_memory_const;
 
     const float alpha = params.get_gemm_alpha(scales);

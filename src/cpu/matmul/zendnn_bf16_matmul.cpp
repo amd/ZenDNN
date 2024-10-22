@@ -505,10 +505,10 @@ void zenMatMul_gemm_bf16bf16f32of32(
     free(post_ops->sum->zero_point);
     free(post_ops->sum);
     if (post_ops->matrix_add != NULL) {
-        post_ops->matrix_add = NULL;
+        free(post_ops->matrix_add);
     }
     if (post_ops->matrix_mul != NULL) {
-        post_ops->matrix_mul = NULL;
+        free(post_ops->matrix_mul);
     }
 #endif
     free(post_ops->seq_vector);
@@ -662,10 +662,10 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     free(post_ops->sum->zero_point);
     free(post_ops->sum);
     if (post_ops->matrix_add != NULL) {
-        post_ops->matrix_add = NULL;
+        free(post_ops->matrix_add);
     }
     if (post_ops->matrix_mul != NULL) {
-        post_ops->matrix_mul = NULL;
+        free(post_ops->matrix_mul);
     }
 #endif
     free(post_ops->seq_vector);
@@ -801,10 +801,10 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     free(post_ops->sum->zero_point);
     free(post_ops->sum);
     if (post_ops->matrix_add != NULL) {
-        post_ops->matrix_add = NULL;
+        free(post_ops->matrix_add);
     }
     if (post_ops->matrix_mul != NULL) {
-        post_ops->matrix_mul = NULL;
+        free(post_ops->matrix_mul);
     }
 #endif
     free(post_ops->seq_vector);
@@ -960,10 +960,10 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     free(post_ops->sum->zero_point);
     free(post_ops->sum);
     if (post_ops->matrix_add != NULL) {
-        post_ops->matrix_add=NULL;
+        free(post_ops->matrix_add);
     }
     if (post_ops->matrix_mul != NULL) {
-        post_ops->matrix_mul=NULL;
+        free(post_ops->matrix_mul);
     }
 #endif
     free(post_ops->seq_vector);

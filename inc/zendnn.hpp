@@ -79,6 +79,7 @@
 /// ZENDNN namespace
 namespace zendnn {
 
+typedef int16_t bfloat16;
 /// @addtogroup zendnn_api_utils Utilities
 /// Utility types and definitions.
 /// @{
