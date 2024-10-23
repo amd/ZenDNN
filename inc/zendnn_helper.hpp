@@ -205,7 +205,7 @@ class zendnnEnv {
         zenLibMemPoolEnable = zendnn_getenv_int("ZENDNN_ENABLE_MEMPOOL", 1);
         //Enabling different threading implementation.
         zenEBThreadAlgo = zendnn_getenv_int("ZENDNN_EB_THREAD_TYPE",
-                                            zenEBThreadType::TABLE_THREADED);
+                                            zenEBThreadType::BATCH_THREADED);
         if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED ||
                 zenEBThreadAlgo<zenEBThreadType::AUTO_ALGO) {
             zenEBThreadAlgo = zenEBThreadType::TABLE_THREADED;

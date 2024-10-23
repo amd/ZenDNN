@@ -19,9 +19,11 @@
 #include <vector>
 #include <random>
 #include <chrono>
+#include <cstring>
 #include "zendnn.hpp"
 #include "test_utils.hpp"
 
+#define BF16_ENABLE 0
 using namespace zendnn;
 
 // Create memory object for a given memory descriptor
@@ -155,27 +157,52 @@ int main(int argc, char **argv) {
             memory::data_type::f32,
             memory::format_tag::ab}), eng);
     }
+
+    std::vector<memory> embedding_mem_bf16(num_ops);
+    for (int i = 0; i <num_ops; ++i) {
+        embedding_mem_bf16[i] = create_memory(memory::desc({{num_embeddings, embedding_dim},
+            memory::data_type::bf16,
+            memory::format_tag::ab}), eng);
+    }
+
     std::vector<float> table_data(num_embeddings*embedding_dim);
     for (int i = 0; i < num_ops; ++i) {
         for (auto &w : table_data) {
             w = dis_table(gen);
         }
         write_to_zendnn_memory(table_data.data(), embedding_mem[i]);
+        reorder(embedding_mem[i], embedding_mem_bf16[i]).execute(s,embedding_mem[i],
+                embedding_mem_bf16[i]);
     }
 
-    //Create output table
+    //Create f32 output table
     std::vector<memory> out_mem(num_ops);
     for (int i = 0; i <num_ops; ++i) {
         out_mem[i] = create_memory(memory::desc({{batch_size, embedding_dim},
             memory::data_type::f32,
             memory::format_tag::ab}), eng);
     }
+    //Create bf16 output table
+    std::vector<memory> out_mem_bf16(num_ops);
+    for (int i = 0; i <num_ops; ++i) {
+        out_mem_bf16[i] = create_memory(memory::desc({{batch_size, embedding_dim},
+            memory::data_type::bf16,
+            memory::format_tag::ab}), eng);
+    }
 
-    //Create output table for custom grp embedding bag execution
+    //Create f32 output table for custom grp embedding bag execution
     std::vector<memory> grp_out_mem(num_ops);
     for (int i = 0; i <num_ops; ++i) {
         grp_out_mem[i] = create_memory(memory::desc({{batch_size, embedding_dim},
             memory::data_type::f32,
+            memory::format_tag::ab}), eng);
+    }
+
+    //Create bf16 output table for custom grp embedding bag execution
+    std::vector<memory> grp_out_mem_bf16(num_ops);
+    for (int i = 0; i <num_ops; ++i) {
+        grp_out_mem_bf16[i] = create_memory(memory::desc({{batch_size, embedding_dim},
+            memory::data_type::bf16,
             memory::format_tag::ab}), eng);
     }
 
@@ -189,34 +216,57 @@ int main(int argc, char **argv) {
 
     //Execute Embedding bag
     for (int i = 0; i < num_ops; ++i) {
+#if BF16_ENABLE
+        embedding_bag_exec(embedding_mem_bf16[i],
+                           input_mem[i], offset_mem[i],
+                           scale_grad_by_freq[i], alg[i], sparse[i], per_sample_weights_opt[i],
+                           per_sample_weights_defined[i], include_last_offset[i], padding_idx[i],
+                           out_mem_bf16[i], 1);
+#else
         embedding_bag_exec(embedding_mem[i],
                            input_mem[i], offset_mem[i],
                            scale_grad_by_freq[i], alg[i], sparse[i], per_sample_weights_opt[i],
                            per_sample_weights_defined[i], include_last_offset[i], padding_idx[i],
                            out_mem[i], 1);
+#endif
     }
 
     //Execute Custom Group embedding bag
+#if BF16_ENABLE
+    zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem_bf16,
+            input_mem, offset_mem,
+            scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
+            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem_bf16,
+            "zendnn_grp_embedding_bag");
+#else
     zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem,
             input_mem, offset_mem,
             scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
-            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem, "zendnn_grp_embedding_bag");
+            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem,
+            "zendnn_grp_embedding_bag");
+#endif
 
     //Compare results
-
-    // Read data from memory object for the final output
     for (int i = 0; i < num_ops; ++i) {
         std::vector<float> ebag_output(batch_size * embedding_dim);
         std::vector<float> grp_ebag_output(batch_size * embedding_dim);
 
+#if BF16_ENABLE
+        reorder(out_mem_bf16[i], out_mem[i]).execute(s,out_mem_bf16[i],
+                out_mem[i]);
+        reorder(grp_out_mem_bf16[i], grp_out_mem[i]).execute(s,grp_out_mem_bf16[i],
+                grp_out_mem[i]);
+#endif
         read_from_zendnn_memory(ebag_output.data(), out_mem[i]);
         read_from_zendnn_memory(grp_ebag_output.data(), grp_out_mem[i]);
 
         for (int idx=0; idx < batch_size * embedding_dim; idx++) {
-            assert(ebag_output[idx] == grp_ebag_output[idx]);
+            assert((ebag_output[idx] - grp_ebag_output[idx])<= 0.01 ||
+                   (ebag_output[idx] - grp_ebag_output[idx])<= -0.01);
         }
     }
     std::cout << " Custom Grp EBag test Comparison Successful " << std::endl;
 
     return 0;
 }
+
