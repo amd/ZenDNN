@@ -42,63 +42,123 @@ float bf16_to_float(int16_t bf16_val) {
 }
 
 int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
-                     float *scales, int scale_size) {
-    int val_idx = 0;
-    float *wei_f32 = (float*)zendnn_aligned_alloc(64, k*n*sizeof(float));
-    for (int i=0; i<k*n; i++) {
+                     float *scales, int scale_size, int group_size,
+                     zendnn_data_type_t scale_dt) {
+    float *wei_f32 = (float *)zendnn_aligned_alloc(64, k*n*sizeof(float));
+    #pragma omp parallel for
+    for (int j=0; j<((k*n)/2) + 1;j++) {
+        int idx_buff = 0;
+        int weight_idx = j * 2;
+        int val_idx = weight_idx / 2;
         int t1 = impl::int4_t::extract(weights[val_idx],
                                        impl::int4_extract_t::low_half);
         int t2 = impl::int4_t::extract(weights[val_idx],
                                        impl::int4_extract_t::high_half);
-
-        wei_f32[i] = scales[i%scale_size]*((float)(t1));
-
-        i++;
-        if (i < k*n) {
-            wei_f32[i] = scales[i%scale_size]*((float)(t2));
+        if (weight_idx < k*n) {
+            if (scale_size == 1) {
+                wei_f32[weight_idx] = scales[0] * ((float)(t1));
+            }
+            else {
+                idx_buff = (weight_idx / (group_size * n)) * n;
+                int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                            scale_offset) * ((float)(t1));
+            }
         }
-        val_idx++;
+        weight_idx++;
+        if (weight_idx < k*n) {
+            if (scale_size == 1) {
+                wei_f32[weight_idx] = scales[0] * ((float)(t2));
+            }
+            else {
+                idx_buff = (weight_idx / (group_size * n)) * n;
+                int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                             scale_offset) * ((float)(t2));
+            }
+        }
     }
-    cvt_float_to_bfloat16((impl::bfloat16_t*)wei_bf16, wei_f32, k*n);
+    cvt_float_to_bfloat16((impl::bfloat16_t *)wei_bf16, wei_f32, k*n);
     free(wei_f32);
     return 0;
 }
 
 int cvt_int8_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
-                     float *scales, int scale_size) {
-    float *wei_f32 = (float*)zendnn_aligned_alloc(64,k*n*sizeof(float));
+                     float *scales, int scale_size, int group_size,
+                     zendnn_data_type_t scale_dt) {
+    float *wei_f32 = (float *)zendnn_aligned_alloc(64,k*n*sizeof(float));
     #pragma omp parallel for
     for (int i=0; i<k*n; i++) {
-        wei_f32[i] = scales[i%scale_size]*(weights[i]);
+        if (scale_size == 1) {
+            wei_f32[i] = scales[0] * (weights[i]);
+        }
+        else {
+            int idx_buff = 0;
+            idx_buff = (i / (group_size * n)) * n;
+            int scale_offset = ((i%scale_size) % n) + idx_buff;
+            wei_f32[i] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                         scale_offset) * (weights[i]);
+        }
     }
-    cvt_float_to_bfloat16((impl::bfloat16_t*)wei_bf16, wei_f32, k*n);
+    cvt_float_to_bfloat16((impl::bfloat16_t *)wei_bf16, wei_f32, k*n);
     free(wei_f32);
     return 0;
 }
 
 int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
-                    float *scales, int scale_size) {
-    int val_idx = 0;
-    for (int i=0; i<k*n; i++) {
+                    float *scales, int scale_size, int group_size,
+                    zendnn_data_type_t scale_dt) {
+    #pragma omp parallel for
+    for (int j=0; j<((k*n)/2) + 1; j++) {
+        int idx_buff = 0;
+        int weight_idx = j * 2;
+        int val_idx = weight_idx / 2;
         int t1 = impl::int4_t::extract(weights[val_idx],
                                        impl::int4_extract_t::low_half);
         int t2 = impl::int4_t::extract(weights[val_idx],
                                        impl::int4_extract_t::high_half);
-        wei_f32[i] = scales[i%scale_size]*((float)(t1));
-        i++;
-        if (i < k*n) {
-            wei_f32[i] = scales[i%scale_size]*((float)(t2));
+        if (weight_idx < k*n) {
+            if (scale_size == 1) {
+                wei_f32[weight_idx] = scales[0] * ((float)(t1));
+            }
+            else {
+                idx_buff = (weight_idx / (group_size * n)) * n;
+                int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                            scale_offset) * ((float)(t1));
+            }
         }
-        val_idx++;
+        weight_idx++;
+        if (weight_idx < k*n) {
+            if (scale_size == 1) {
+                wei_f32[weight_idx] = scales[0] * ((float)(t2));
+            }
+            else {
+                idx_buff = (weight_idx / (group_size * n)) * n;
+                int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                             scale_offset) * ((float)(t2));
+            }
+        }
     }
     return 0;
 }
 
 int cvt_int8_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
-                    float *scales, int scale_size) {
+                    float *scales, int scale_size, int group_size,
+                    zendnn_data_type_t scale_dt) {
     #pragma omp parallel for
     for (int i=0; i<k*n; i++) {
-        wei_f32[i] = scales[i%scale_size]*(weights[i]);
+        if (scale_size == 1) {
+            wei_f32[i] = scales[0] * (weights[i]);
+        }
+        else {
+            int idx_buff = 0;
+            idx_buff = (i / (group_size * n)) * n;
+            int scale_offset = ((i%scale_size) % n) + idx_buff;
+            wei_f32[i] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
+                         scale_offset) * (weights[i]);
+        }
     }
     return 0;
 }
@@ -312,12 +372,13 @@ void im2rowNHWC(const float *input_data, const int depth, const int height,
 
 // Used in zenConvolution2Dbase_LPGEMM1x1() (u8, s8, s32)
 // TODO: Verify correctness of this function; currently, not in use.
-void im2rowNHWCsplit_lpgemm(const uint8_t *input_data, const int depth, const int height,
-                     const int width, const int filter_h, const int filter_w,
-                     const int pad_t, const int pad_l, const int pad_b, const int pad_r,
-                     const int stride_h, const int stride_w, uint8_t *col_data,
-                     const int heightColOffset,
-                     const int heightStart, const int no_of_threads) {
+void im2rowNHWCsplit_lpgemm(const uint8_t *input_data, const int depth,
+                            const int height,
+                            const int width, const int filter_h, const int filter_w,
+                            const int pad_t, const int pad_l, const int pad_b, const int pad_r,
+                            const int stride_h, const int stride_w, uint8_t *col_data,
+                            const int heightColOffset,
+                            const int heightStart, const int no_of_threads) {
 
     int width_col = (width + pad_l + pad_r - filter_w) / stride_w + 1;
     int out_width = ((width + pad_l + pad_r - filter_w) / stride_w + 1)*filter_h*

@@ -354,14 +354,15 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_autoTunerEnable(
 /// Sets the woq Scale primitive attributes.
 ///
 /// @param attr Primitive attributes.
-/// @param count Output length of the array of WOQ scaling factors @p scales.
 /// @param mask WOQ scaling factors correspondence mask.
-/// @param scales WOQ weights pointer to a constant array of scaling factors.
+/// @param ndims group_dims dimensions.
+/// @param group_dims WOQ group dims
+/// @param data_type Data Type of WOQ scales
 /// @returns #zendnn_success on success and a status describing the error
 ///     otherwise.
 zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_woq_weight_scale(
-        zendnn_primitive_attr_t attr, zendnn_dim_t count, int mask,
-        const float *scales);
+    zendnn_primitive_attr_t attr, int mask, int ndims,
+    const zendnn_dims_t group_dims, zendnn_data_type_t data_type);
 
 /// Sets the Plugin op name primitive attributes.
 ///

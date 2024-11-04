@@ -38,6 +38,11 @@ const primitive_attr_t &default_attr() {
     return default_attr_instance;
 }
 
+const runtime_scales_t &default_runtime_scale() {
+    static const runtime_scales_t default_runtime_scale_instance;
+    return default_runtime_scale_instance;
+}
+
 status_t scales_t::set(dim_t count, int mask, const float *scales) {
     cleanup();
 
@@ -427,11 +432,14 @@ status_t zendnn_primitive_attr_set_autoTunerEnable(
         return attr->set_autoTunerEnable(flag);
 }
 
-status_t zendnn_primitive_attr_set_woq_weight_scale(primitive_attr_t *attr, dim_t count, int mask, const float* scales) {
-    bool ok = !any_null(attr, scales) && count > 0;
+status_t zendnn_primitive_attr_set_woq_weight_scale(
+    primitive_attr_t *attr, int mask, int ndims,
+    const dims_t group_dims, data_type_t data_type) {
+    bool ok = attr && ndims >= 0 && mask >= 0 &&
+                checkGroup(ndims, group_dims);
     if (!ok) return invalid_arguments;
 
-    return attr->woqScales_.set(count, mask, scales);
+    return attr->woqScales_.set(ndims, mask, group_dims, data_type);
 }
 
 status_t zendnn_primitive_attr_set_plugin_op_name(

@@ -25,7 +25,6 @@
 #include <assert.h>
 
 #include "zendnn_types.h"
-
 #include "common/c_types_map.hpp"
 #include "common/primitive_attr.hpp"
 #include "common/primitive_exec_types.hpp"
@@ -34,19 +33,22 @@
 
 #define DEFINE_WOQ_SCALES_BUFFER(woqscales) \
     alignas(16) float CONCAT2(woqscales, _buf16)[16] = {0}; \
-    const float *woqscales; \
-    if (pd()->attr()->woqScales_.defined()) { \
-        woqscales = pd()->attr()->woqScales_.scales_; \
+    const float *woqscales {nullptr}; \
+    if (pd()->attr()->woqScales_.has_default_values()) { \
+        utils::array_set(CONCAT2(woqscales, _buf16), 1.0f, 16); \
+        woqscales = CONCAT2(woqscales, _buf16); \
     } else { \
         woqscales = CTX_IN_MEM(const float *, ZENDNN_ARG_ATTR_WOQ_SCALES); \
         if (woqscales == nullptr) return status::invalid_arguments; \
-        const auto scales_de = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES); \
-        bool ok = scales_de.data_type() == data_type::f32 \
-                && scales_de.ndims() == 1; \
+        const auto scales_des = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES); \
+        bool ok = utils::one_of(scales_des.data_type(), data_type::f32, \
+                            data_type::bf16); \
         if (!ok) return status::invalid_arguments; \
-        if (scales_de.dims()[0] == 1) { \
-            utils::array_set(CONCAT2(woqscales, _buf16), woqscales[0], 16); \
-            scales = CONCAT2(woqscales, _buf16); \
+        if (scales_des.nelems() == 1) { \
+            const float s = zendnn::impl::cpu::io::load_float_value( \
+                        scales_des.data_type(), woqscales, 0); \
+            utils::array_set(CONCAT2(woqscales, _buf16), s, 16); \
+            woqscales = CONCAT2(woqscales, _buf16); \
         } \
     } \
     MAYBE_UNUSED(woqscales);

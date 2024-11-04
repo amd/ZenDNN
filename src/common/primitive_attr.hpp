@@ -36,6 +36,8 @@ namespace zendnn {
 namespace impl {
 
 const primitive_attr_t &default_attr();
+struct runtime_scales_t;
+const runtime_scales_t &default_runtime_scale();
 
 struct rnn_data_qparams_t : public c_compatible {
     rnn_data_qparams_t() : scale_(1.), shift_(0.) {}
@@ -133,6 +135,54 @@ struct rnn_tparams_t : public c_compatible {
 
   private:
     ZENDNN_DISALLOW_COPY_AND_ASSIGN(rnn_tparams_t);
+};
+struct runtime_scales_t : public c_compatible {
+    runtime_scales_t() {}
+
+    runtime_scales_t &operator=(const runtime_scales_t &rhs) {
+        mask_ = rhs.mask_;
+        is_set_ = rhs.is_set_;
+        ndims_ = rhs.ndims_;
+        if (ndims_ > 0) utils::array_copy(group_dims_, rhs.group_dims_, ndims_);
+        data_type_ = rhs.data_type_;
+        return *this;
+    }
+
+    status_t set(int mask) { return set(0, mask, {}, data_type::f32); }
+
+    status_t set(int ndims, int mask, const dims_t group_dims,
+            data_type_t data_type = data_type::f32) {
+        mask_ = mask;
+        is_set_ = true;
+        ndims_ = ndims;
+        if (ndims > 0) utils::array_copy(group_dims_, group_dims, ndims);
+        data_type_ = data_type;
+        return status::success;
+    }
+
+    bool operator==(const runtime_scales_t &rhs) const {
+        return mask_ == rhs.mask_ && is_set_ == rhs.is_set_
+                && ndims_ == rhs.ndims_
+                && IMPLICATION(ndims_ > 0,
+                        utils::array_cmp(group_dims_, rhs.group_dims_, ndims_))
+                && data_type_ == rhs.data_type_;
+    }
+
+    bool has_default_values() const { return *this == default_runtime_scale(); }
+
+    bool has_default_groups() const { return 0 == ndims_; }
+    bool has_default_data_type() const { return data_type_ == data_type::f32; }
+
+    bool defined() const { return has_default_values(); }
+
+    void reset() { *this = default_runtime_scale(); }
+
+    // TODO: replace with `-1` to remove `is_set_`.
+    int mask_ = 0;
+    bool is_set_ = false;
+    int ndims_ = 0;
+    dims_t group_dims_ = {};
+    data_type_t data_type_ = data_type::f32;
 };
 
 struct scales_t : public c_compatible {
@@ -723,7 +773,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                   other.rnn_weights_projection_qparams_));
         CHECK(rnn_tparams_.copy_from(other.rnn_tparams_));
         autoTunerEnable = other.autoTunerEnable;
-        CHECK(woqScales_.copy_from(other.woqScales_));
+        woqScales_ = other.woqScales_;
         plugin_op = other.plugin_op;
         return zendnn::impl::status::success;
     }
@@ -819,7 +869,7 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn::impl::rnn_tparams_t rnn_tparams_;
     bool autoTunerEnable;
     std::string plugin_op;
-    zendnn::impl::scales_t woqScales_;
+    zendnn::impl::runtime_scales_t woqScales_;
 
     zendnn_primitive_attr &operator=(const zendnn_primitive_attr &other) = delete;
 };

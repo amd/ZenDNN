@@ -3625,17 +3625,21 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     }
 
     /// Sets woq weight sacle.
-    /// @param scales Constant vector of woq weights scaling factors. If the
-    ///     scaling factors are known at the time of this call, the following
-    ///     equality must hold:
-    ///     \f$scales.size() = \prod\limits_{d \in mask} output.dims[d].\f$
-    ///     If the scaling factors are not known at the time of the call,
-    ///     this vector must contain a single #ZENDNN_RUNTIME_F32_VAL value and
-    ///     the woq weights scaling factors must be passed at execution time as an
-    ///     argument with index #ZENDNN_ARG_ATTR_WOQ_SCALES.
-    void set_woq_scale(int mask, const std::vector<float> &scales) {
+    /// @param mask Scales correspondence mask that defines the
+    ///     correspondence between the tensor dimensions and the @p
+    ///     scales vector. The set i-th bit indicates that a dedicated 0100 {K*N}
+    ///     scale is used for each index along that dimension. Set the
+    ///     mask to 0 to use a common scale for the whole output tensor.
+    /// @param groups Scaling factors correspondence groups that define the
+    ///     correspondence between the tensor dimensions and the scales array.
+    ///     The set i-th dimension indicates a number of groups of scaling
+    ///     factors used for that logical dimension in a memory indicated by @p arg.
+    /// @param data_type Scaling factors data_type.
+    void set_woq_scale(int mask, const memory::dims &groups,
+            memory::data_type data_type = memory::data_type::f32) {
         error::wrap_c_api(zendnn_primitive_attr_set_woq_weight_scale(
-                              get(), (zendnn_dim_t)scales.size(), mask, scales.data()),
+                              get(), mask, (int)groups.size(), groups.data(),
+                                  memory::convert_to_c(data_type)),
                           "could not set WOQ weight scale primitive attribute");
     }
 

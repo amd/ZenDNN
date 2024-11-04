@@ -217,7 +217,13 @@ inline void array_set(T *arr, const U &val, size_t size) {
     for (size_t i = 0; i < size; ++i)
         arr[i] = static_cast<T>(val);
 }
-
+inline bool checkGroup(int ndims, const dims_t group_dims){
+    for(int idx=0;idx<ndims;idx++){
+        if(group_dims[idx] <= 0)
+            return false;
+    }
+    return true;
+}
 namespace product_impl {
 template <size_t>
 struct int2type {};

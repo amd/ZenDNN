@@ -48,6 +48,7 @@
 #include "common/weight_cache.hpp"
 #include "cpu/cpu_primitive.hpp"
 #include "cpu/platform.hpp"
+#include "cpu/ref_io_helper.hpp"
 
 #include "cpu/gemm/gemm.hpp"
 
@@ -1519,12 +1520,20 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
             && is_bias_1xN());
     };
 
+    auto check_group = [&]() -> bool {
+        if (attr()->woqScales_.ndims_ == 0) {
+            return true;
+        }
+        return !(weights_md()->dims[0] % attr()->woqScales_.group_dims_[0]);
+    };
+
     bool ok = src_md()->data_type == src_type
               && utils::one_of(weights_md()->data_type, bf16, s8, s4)
               && desc()->accum_data_type == acc_type
               && dst_md()->data_type == dst_type
               && platform::has_data_type_support(data_type::bf16) && check_bias()
               && (ndims() - 2) < 1 /*Condition to check batched matmul*/
+              && check_group()
               && attr()->has_default_values(
                   primitive_attr_t::skip_mask_t::oscale_runtime
                   | primitive_attr_t::skip_mask_t::post_ops)
@@ -1684,16 +1693,18 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
     if (weights_type == s4 || weights_type == s8) {
         DEFINE_WOQ_SCALES_BUFFER(woqscales);
         float *woq_scales = const_cast<float *>(woqscales);
-        int woq_scale_size = pd()->attr()->woqScales_.count_;
+        int woq_scale_mask = pd()->attr()->woqScales_.mask_;
         const auto scales_d = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES);
-        woq_scale_size = woq_scale_size > scales_d.dims()[0] ? woq_scale_size :
-                         scales_d.dims()[0];
+        int woq_scale_size = woq_scale_mask ? scales_d.dims()[0] : 1;
+        const auto group_dims = pd()->attr()->woqScales_.group_dims_;
+        int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
+        data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
         matmul_woq_wrapper(ctx, src_type, weights_type, dst_type, bias_dt, Layout,
                            transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                            M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
                            pd()->attr()->post_ops_, has_eltwise_relu,
                            geluType, beta, (char *)dst, ldc, woq_scales, 0, woq_scale_size,
-                           beta, is_weights_const);
+                           beta, is_weights_const, group_size, woq_scales_type);
         return status::success;
     }
     else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {

@@ -30,6 +30,7 @@
 #include "common/zendnn_thread.hpp"
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
+#include "cpu/ref_io_helper.hpp"
 
 #include "cpu/cpu_primitive.hpp"
 
@@ -57,8 +58,16 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
         || (weights_md(1)->data_type == f32 && is_bias_1xN());
     };
 
+    auto check_group = [&]() -> bool {
+	if(attr()->woqScales_.ndims_ == 0){
+	    return true;
+	}
+        return !(weights_md()->dims[0] % attr()->woqScales_.group_dims_[0]);
+    };
+
     bool ok = src_md()->data_type == src_type
               && utils::one_of(weights_md()->data_type, f32, s8, s4)
+	       && check_group()
               && desc()->accum_data_type == acc_type
               && dst_md()->data_type == dst_type && check_bias()
               && attr()->has_default_values(
@@ -371,9 +380,14 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int weights_type = pd()->weights_md()->data_type;
 
     if (weights_type == s4 || weights_type == s8) {
-        float *woq_scales {nullptr};
-        woq_scales = pd()->attr()->woqScales_.scales_;
-        int woq_scale_size = pd()->attr()->woqScales_.count_;
+        DEFINE_WOQ_SCALES_BUFFER(woqscales);
+        float *woq_scales = const_cast<float *>(woqscales);
+        int woq_scale_mask = pd()->attr()->woqScales_.mask_;
+        const auto scales_d = ctx.memory_mdw(ZENDNN_ARG_ATTR_WOQ_SCALES);
+        int woq_scale_size = woq_scale_mask ? scales_d.dims()[0] : 1;
+        const auto group_dims = pd()->attr()->woqScales_.group_dims_;
+        int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
+        data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
         matmul_woq_wrapper(ctx, zendnn_f32, weights_type, zendnn_f32, zendnn_f32, Layout,
                            strcmp(transA, "N"),
                            strcmp(transB, "N"),
@@ -381,7 +395,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            bias == NULL ? NULL :(char *)bias,
                            pd()->attr()->post_ops_, has_eltwise_relu,
                            geluType, beta, (char *)dst, ldc, woq_scales, 0/*zp*/,
-                           woq_scale_size, beta, is_weights_const);
+                           woq_scale_size, beta, is_weights_const, group_size,
+                           woq_scales_type);
     }
     else if ((float *)bias == NULL) {
         //MatMul without Bias

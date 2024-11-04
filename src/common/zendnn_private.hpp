@@ -1209,7 +1209,9 @@ extern "C"
         const int32_t zero_point_weights,
         int scale_size,
         float do_sum,
-        bool is_weights_const
+        bool is_weights_const,
+        int group_size,
+        zendnn_data_type_t scale_dt
     );
 }
 

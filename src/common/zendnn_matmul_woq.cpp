@@ -358,7 +358,9 @@ int ref_woq_bf16(
     const int32_t zero_point_weights,
     int scale_size,
     float do_sum,
-    bool is_weights_const
+    bool is_weights_const,
+    int group_size,
+    zendnn_data_type_t scale_dt
 ) {
     zendnnEnv zenEnvObj = readEnv();
     zendnnVerbose(ZENDNN_PROFLOG,"aocl bf16 kernel");
@@ -394,10 +396,12 @@ int ref_woq_bf16(
         int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to BF16
-            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
+            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
         }
         else { //Convert S8 to BF16
-            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
+            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
         }
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
                                           'r', trans, reorder_param0, reorder_param1, reorder_param2);
@@ -516,7 +520,9 @@ int ref_woq_f32(
     const int32_t zero_point_weights,
     int scale_size,
     float do_sum,
-    bool is_weights_const
+    bool is_weights_const,
+    int group_size,
+    zendnn_data_type_t scale_dt
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -550,10 +556,12 @@ int ref_woq_f32(
         float *wei_f32 = (float *)zendnn_aligned_alloc(64, sizeof(float)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to FP32
-            cvt_int4_to_f32(weights, wei_f32, K, N, wei_scale, scale_size);
+            cvt_int4_to_f32(weights, wei_f32, K, N, wei_scale, scale_size, group_size,
+                            scale_dt);
         }
         else { //Convert S8 to FP32
-            cvt_int8_to_f32(weights, wei_f32, K, N, wei_scale, scale_size);
+            cvt_int8_to_f32(weights, wei_f32, K, N, wei_scale, scale_size, group_size,
+                            scale_dt);
         }
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
                                           'r', trans, reorder_param0, reorder_param1, reorder_param2);
@@ -638,7 +646,8 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
                                       const int ldc, const impl::post_ops_t &po_ops,
                                       bool blocked_format, float *wei_scale,
                                       const int32_t zero_point_weights, int scale_size,
-                                      bool is_weights_const) {
+                                      bool is_weights_const, int group_size,
+                                      zendnn_data_type_t scale_dt) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
     zendnnVerbose(ZENDNN_PROFLOG,"JIT kernel woq");
@@ -781,10 +790,12 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
         int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to BF16
-            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
+            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
         }
         else { //Convert S8 to BF16
-            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size);
+            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
         }
         user_weights_memory = memory(matmul_weights_md, eng, wei_bf16);
 
@@ -841,7 +852,9 @@ int aocl_woq_bf16(
     const int32_t zero_point_weights,
     int scale_size,
     float do_sum,
-    bool is_weights_const
+    bool is_weights_const,
+    int group_size,
+    zendnn_data_type_t scale_dt
 ) {
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
     zendnnEnv zenEnvObj = readEnv();
@@ -907,13 +920,13 @@ int aocl_woq_bf16(
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
         (post_ops->pre_ops)->b_scl = (aocl_pre_op_sf *)malloc(sizeof(aocl_pre_op_sf));
         /* Only int8_t zero point supported in pre-ops. */
-        int8_t zp = 0;
-        ((post_ops->pre_ops)->b_zp)->zero_point = (int8_t *)&zp;
-        ((post_ops->pre_ops)->b_zp)->zero_point_len = 1;
+        ((post_ops->pre_ops)->b_zp)->zero_point = NULL;
+        ((post_ops->pre_ops)->b_zp)->zero_point_len = 0;
         /* Only float scale factor supported in pre-ops. */
         ((post_ops->pre_ops)->b_scl)->scale_factor = (float *)wei_scale;
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         (post_ops->pre_ops)->seq_length = 1;
+        (post_ops->pre_ops)->group_size = group_size;
 
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16s4f32obf16(Layout? 'r' : 'c',
@@ -937,13 +950,13 @@ int aocl_woq_bf16(
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
         (post_ops->pre_ops)->b_scl = (aocl_pre_op_sf *)malloc(sizeof(aocl_pre_op_sf));
         /* Only int8_t zero point supported in pre-ops. */
-        int8_t zp = 0;
-        ((post_ops->pre_ops)->b_zp)->zero_point = (int8_t *)&zp;
-        ((post_ops->pre_ops)->b_zp)->zero_point_len = 1;
+        ((post_ops->pre_ops)->b_zp)->zero_point = NULL;
+        ((post_ops->pre_ops)->b_zp)->zero_point_len = 0;
         /* Only float scale factor supported in pre-ops. */
         ((post_ops->pre_ops)->b_scl)->scale_factor = (float *)wei_scale;
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         (post_ops->pre_ops)->seq_length = 1;
+        (post_ops->pre_ops)->group_size = group_size;
 
         aocl_gemm_bf16s4f32of32(Layout? 'r' : 'c',
                                 transA ? 't' : 'n',
@@ -1024,7 +1037,9 @@ int matmul_woq_wrapper(
     const int32_t zero_point_weights,
     int scale_size,
     float do_sum,
-    bool is_weights_const
+    bool is_weights_const,
+    int group_size,
+    zendnn_data_type_t scale_dt
 ) {
     //WOQ kernel
     zendnnEnv zenEnvObj = readEnv();
@@ -1086,6 +1101,12 @@ int matmul_woq_wrapper(
                 || zenEnvObj.zenBF16GEMMalgo == 3) && (use_jit || !can_run_aocl)) {
             zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
         }
+        //TODO: Should be removed once update from BLIS
+        //CHECK scale_dt and odd K value
+        if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM &&
+                scale_dt == zendnn_bf16) || K%2 != 0) {
+            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+        }
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
         if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4)
 #else
@@ -1097,7 +1118,7 @@ int matmul_woq_wrapper(
                           M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
                           has_eltwise_relu, geluType, beta, (char *)dst, ldc,
                           wei_scale, 0, scale_size, do_sum,
-                          is_weights_const);
+                          is_weights_const, group_size, scale_dt);
         }
         else if (zenEnvObj.zenBF16GEMMalgo == 3) {
             ref_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
@@ -1105,7 +1126,7 @@ int matmul_woq_wrapper(
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
                          has_eltwise_relu, geluType, beta, (char *)dst, ldc,
                          wei_scale, 0, scale_size, do_sum,
-                         is_weights_const);
+                         is_weights_const, group_size, scale_dt);
         }
         else {
             obj.is_brgemm = true;
@@ -1113,7 +1134,8 @@ int matmul_woq_wrapper(
             zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,
                                              bias_type, Layout, transA, transB, M, N, K,
                                              (int16_t *)src, (int8_t *)weights, bias, dst, alpha, beta, lda, ldb, ldc,
-                                             po_ops, true, wei_scale, 0, scale_size, is_weights_const);
+                                             po_ops, true, wei_scale, 0, scale_size, is_weights_const, group_size,
+                                             scale_dt);
             obj.is_brgemm = false;
             obj.is_log = true;
         }
@@ -1124,7 +1146,7 @@ int matmul_woq_wrapper(
                     M, K, N, alpha, (float *)src, lda, (int8_t *)weights, ldb, (const float *)bias,
                     has_eltwise_relu, geluType, beta, (float *)dst, ldc,
                     wei_scale, 0, scale_size, do_sum,
-                    is_weights_const);
+                    is_weights_const, group_size, scale_dt);
     }
     zendnnVerbose(ZENDNN_PROFLOG,"zendnn_woq_matmul auto_tuner=",
                   0 ? "True": "False", " Weights=", weights_type == zendnn_s4 ? "s4": "s8",
