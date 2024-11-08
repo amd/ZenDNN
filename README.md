@@ -7,10 +7,9 @@ ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference app
 ZenDNN depends on:
 - AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS).
 - Composable Kernel for convolutions using an implicit GEMM algorithm
-- LIBXSMM is a library for specialized dense and sparse matrix operations as well as for deep learning primitives.
 - FBGEMM (Facebook GEneral Matrix Multiplication) is a low-precision, high-performance matrix-matrix multiplications and convolution library for server-side inference.
 
-AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel is an optional dependency.
+AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel and FBGEMM are an optional dependency.
 
 # Table of Contents
 - [Zen Deep Neural Network Library (ZenDNN)](#zen-deep-neural-network-library-zendnn)
@@ -44,10 +43,10 @@ The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® plat
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.17 (Plugin), ONNXRT v1.18.0, and PyTorch v2.3 (Plugin).
+* ZenDNN library is integrated with TensorFlow v2.17 (Plugin), ONNXRT v1.19.2, and PyTorch v2.4 (Plugin).
 * Python v3.9-v3.12 has been used to generate the TensorFlow v2.17 (Plugin) wheel files (*.whl).
-* Python v3.8-v3.11 has been used to generate the ONNXRT v1.18.0 wheel files (*.whl).
-* Python v3.8-v3.11 has been used to generate the PyTorch v2.3 (Plugin) wheel files (*.whl).
+* Python v3.8-v3.11 has been used to generate the ONNXRT v1.19.2 wheel files (*.whl).
+* Python v3.8-v3.11 has been used to generate the PyTorch v2.4 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -56,14 +55,15 @@ The latest information on the ZenDNN release and installers is available on AMD.
 # Supported OS and Compilers
 This release of ZenDNN supports the following Operating Systems (OS) and compilers:
 ## OS
-* Ubuntu® 22.04 LTS and later
-* Red Hat® Enterprise Linux® (RHEL) 9.2 and later
-* SLES15 SP5 and later
-* CentOS Stream 8.4
-* PyTorch v2.1 wheel files are supported on Anolis OS 8.8
+* Ubuntu® 20.04, 22.04, 24.04
+* Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
+* Anolis 8.8, 8.9
+* SLES15 SP6, SP3
+* RockyLinux 9.4
+* CentOS 8.4
 
 ## Compilers
-* GCC 12.2 and later
+* GCC 12.2
 
 Theoretically, for wheel files any Linux based OS with GLIBC version later than 2.28 could be supported.
 
@@ -165,8 +165,8 @@ ZenDNN has the following runtime dependencies:
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
 * Python v3.9-v3.12 for TensorFlow v2.17 (Plugin)
-* Python v3.8-v3.11 for PyTorch v2.3 (Plugin)
-* Python v3.8-v3.11 for ONNXRT v1.18.0
+* Python v3.8-v3.11 for PyTorch v2.4 (Plugin)
+* Python v3.8-v3.11 for ONNXRT v1.19.2
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
