@@ -436,7 +436,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -575,7 +575,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -732,7 +732,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -872,7 +872,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -1126,7 +1126,7 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     zendnn::memory reordered_weights_memory;
 
     //weight caching
-    static zendnn::impl::lru_weight_cache_t<zendnn::memory> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory> matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
     if (blocked_format) {

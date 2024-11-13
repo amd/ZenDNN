@@ -29,21 +29,21 @@
 namespace zendnn {
 namespace impl {
 
-template <typename VALUE_T>
-lru_weight_cache_t<VALUE_T>::lru_weight_cache_t(int capacity) : capacity_(capacity) {
+template <typename KEY_T, typename VALUE_T>
+lru_weight_cache_t<KEY_T, VALUE_T>::lru_weight_cache_t(int capacity) : capacity_(capacity) {
     cache_mapper_ = std::make_unique<
                     std::unordered_map<w_key_t, timed_entry_t>>();
 }
 
-template <typename VALUE_T>
-lru_weight_cache_t<VALUE_T>::~lru_weight_cache_t() {
+template <typename KEY_T, typename VALUE_T>
+lru_weight_cache_t<KEY_T, VALUE_T>::~lru_weight_cache_t() {
    evict();
     return;
 }
 
 
-template <typename VALUE_T>
-void lru_weight_cache_t<VALUE_T>::set_capacity(int capacity) {
+template <typename KEY_T, typename VALUE_T>
+void lru_weight_cache_t<KEY_T, VALUE_T>::set_capacity(int capacity) {
     if (capacity < 0) {
         throw std::invalid_argument("Capacity cannot be negative");
     }
@@ -53,13 +53,13 @@ void lru_weight_cache_t<VALUE_T>::set_capacity(int capacity) {
     }
 }
 
-template <typename VALUE_T>
-int lru_weight_cache_t<VALUE_T>::get_capacity() const {
+template <typename KEY_T, typename VALUE_T>
+int lru_weight_cache_t<KEY_T, VALUE_T>::get_capacity() const {
     return static_cast<int>(capacity_);
 }
 
-template <typename VALUE_T>
-typename lru_weight_cache_t<VALUE_T>::value_t lru_weight_cache_t<VALUE_T>::get_or_add(
+template <typename KEY_T, typename VALUE_T>
+typename lru_weight_cache_t<KEY_T, VALUE_T>::value_t lru_weight_cache_t<KEY_T, VALUE_T>::get_or_add(
     const w_key_t &key,
     const value_t &value) {
     if (cache_mapper_->find(key) == cache_mapper_->end()) {
@@ -68,31 +68,31 @@ typename lru_weight_cache_t<VALUE_T>::value_t lru_weight_cache_t<VALUE_T>::get_o
     return get(key);
 }
 
-template <typename VALUE_T>
-bool lru_weight_cache_t<VALUE_T>::find_key(const w_key_t &key) const {
+template <typename KEY_T, typename VALUE_T>
+bool lru_weight_cache_t<KEY_T, VALUE_T>::find_key(const w_key_t &key) const {
     return (cache_mapper_->find(key) != cache_mapper_->end());
 }
 
-template <typename VALUE_T>
-void lru_weight_cache_t<VALUE_T>::remove_if_invalidated(const w_key_t &key) {
+template <typename KEY_T, typename VALUE_T>
+void lru_weight_cache_t<KEY_T, VALUE_T>::remove_if_invalidated(const w_key_t &key) {
     auto it = cache_mapper_->find(key);
     if (it != cache_mapper_->end()) {
         cache_mapper_->erase(it);
     }
 }
 
-template <typename VALUE_T>
-int lru_weight_cache_t<VALUE_T>::get_size() const {
+template <typename KEY_T, typename VALUE_T>
+int lru_weight_cache_t<KEY_T, VALUE_T>::get_size() const {
     return static_cast<int>(cache_mapper_->size());
 }
 
-template <typename VALUE_T>
-lru_weight_cache_t<VALUE_T>::timed_entry_t::timed_entry_t(const value_t &value,
+template <typename KEY_T, typename VALUE_T>
+lru_weight_cache_t<KEY_T, VALUE_T>::timed_entry_t::timed_entry_t(const value_t &value,
         size_t timestamp)
     : value_(value), timestamp_(timestamp) {}
 
-template <typename VALUE_T>
-void lru_weight_cache_t<VALUE_T>::evict(size_t n) {
+template <typename KEY_T, typename VALUE_T>
+void lru_weight_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
     while (capacity_ < std::numeric_limits<int>::max() &&
             cache_mapper_->size() > capacity_ - n) {
         auto oldest = std::min_element(
@@ -107,8 +107,8 @@ void lru_weight_cache_t<VALUE_T>::evict(size_t n) {
     }
 }
 
-template <typename VALUE_T>
-void lru_weight_cache_t<VALUE_T>::evict() {
+template <typename KEY_T, typename VALUE_T>
+void lru_weight_cache_t<KEY_T, VALUE_T>::evict() {
     // Free memory for all entries in the cache
     for (auto &entry : *cache_mapper_) {
         // Assuming VALUE_T is a pointer type
@@ -120,8 +120,8 @@ void lru_weight_cache_t<VALUE_T>::evict() {
     cache_mapper_->clear();
 }
 
-template <typename VALUE_T>
-void lru_weight_cache_t<VALUE_T>::add(const w_key_t &key, const value_t &value) {
+template <typename KEY_T, typename VALUE_T>
+void lru_weight_cache_t<KEY_T, VALUE_T>::add(const w_key_t &key, const value_t &value) {
     evict(1);
     size_t timestamp = current_timestamp_++;
     cache_mapper_->emplace(std::piecewise_construct,
@@ -129,8 +129,8 @@ void lru_weight_cache_t<VALUE_T>::add(const w_key_t &key, const value_t &value) 
                            std::forward_as_tuple(value, timestamp));
 }
 
-template <typename VALUE_T>
-typename lru_weight_cache_t<VALUE_T>::value_t lru_weight_cache_t<VALUE_T>::get(
+template <typename KEY_T, typename VALUE_T>
+typename lru_weight_cache_t<KEY_T, VALUE_T>::value_t lru_weight_cache_t<KEY_T, VALUE_T>::get(
     const w_key_t &key) {
     auto it = cache_mapper_->find(key);
     if (it != cache_mapper_->end()) {
@@ -140,9 +140,9 @@ typename lru_weight_cache_t<VALUE_T>::value_t lru_weight_cache_t<VALUE_T>::get(
     throw std::runtime_error("Key not found in cache.");
 }
 
-template struct lru_weight_cache_t <memory>;
-template struct lru_weight_cache_t <int16_t *>;
-template struct lru_weight_cache_t <int8_t *>;
-template struct lru_weight_cache_t <float *>;
+template struct lru_weight_cache_t <Key_matmul, memory>;
+template struct lru_weight_cache_t <Key_matmul, int16_t *>;
+template struct lru_weight_cache_t <Key_matmul, int8_t *>;
+template struct lru_weight_cache_t <Key_matmul, float *>;
 }
 }

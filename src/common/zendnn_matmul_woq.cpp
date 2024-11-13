@@ -395,7 +395,7 @@ int ref_woq_bf16(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -559,7 +559,7 @@ int ref_woq_f32(
     float *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<float *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, float *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -789,7 +789,7 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     zendnn::memory reordered_weights_memory;
 
     //Weight reordering
-    static zendnn::impl::lru_weight_cache_t<zendnn::memory> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory> matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
     if (!is_weights_const || !found_obj_reorder) {
@@ -894,7 +894,7 @@ int aocl_woq_bf16(
     int8_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<int8_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {

@@ -31,9 +31,9 @@
 
 namespace zendnn {
 namespace impl {
-template <typename VALUE_T>
+template <typename KEY_T, typename VALUE_T>
 struct lru_weight_cache_t {
-    using w_key_t = Key_matmul;
+    using w_key_t = KEY_T;
     using value_t = VALUE_T;
 
     //Constructor
