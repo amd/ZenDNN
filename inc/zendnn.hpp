@@ -826,6 +826,12 @@ class zendnn_custom_op {
                                          const std::vector<std::vector<int64_t>> &z_post_op_ids,
                                          const std::vector<std::vector<memory>> &z_post_op_buffers,
                                          const std::vector<memory> &z_mm_result);
+    //SDPA OP API
+    static void zendnn_sdpa_attention(
+                const memory& input_Q_mem, const memory& input_K_mem,
+                const memory& input_V_mem,
+                memory& input_mask_mem,
+                memory& output_mem);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.
@@ -14179,6 +14185,8 @@ inline void primitive::execute(const stream &astream,
                       (int)c_args.size(), c_args.data()),
                       "could not execute a primitive");
 }
+
+
 
 /// @endcond
 
