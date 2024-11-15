@@ -55,12 +55,21 @@ The latest information on the ZenDNN release and installers is available on AMD.
 # Supported OS and Compilers
 This release of ZenDNN supports the following Operating Systems (OS) and compilers:
 ## OS
+Binaires will be supported on
 * Ubuntu® 20.04, 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
 * Anolis 8.8, 8.9
 * SLES15 SP6, SP3
 * RockyLinux 9.4
 * CentOS 8.4
+>Note: PyTorch v2.4 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
+
+Build from source will be supported on
+* Ubuntu® 22.04, 24.04
+* Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
+* Anolis 8.8,8.9
+* SLES15 SP6, SP3
+* RockyLinux 9.4
 
 ## Compilers
 * GCC 12.2
