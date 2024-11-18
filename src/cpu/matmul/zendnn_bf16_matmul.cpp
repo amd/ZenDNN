@@ -405,18 +405,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
-    //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = 0;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = filter;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -436,7 +426,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -545,17 +536,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
                               zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = 0;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = 0;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = filter;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -575,7 +557,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -702,18 +685,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
-    //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = 0;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = filter;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -732,7 +705,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -842,18 +816,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     unsigned int thread_qty = (zenEnvObj.omp_num_threads>m)?m:
                               zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
-    //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = 0;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = filter;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -872,7 +836,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
 
     int16_t *reorder_filter = NULL;
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -1126,7 +1091,8 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     zendnn::memory reordered_weights_memory;
 
     //weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
     if (blocked_format) {
@@ -1407,16 +1373,8 @@ int auto_compute_matmul_bf16(
     bool is_weights_const
 ) {
 
-    Key_matmul key_obj_auto;
-
-    key_obj_auto.transpose_input = transpose_input;
-    key_obj_auto.transpose_weights = transpose_filter;
-    key_obj_auto.m = M;
-    key_obj_auto.k = K;
-    key_obj_auto.n = N;
-    key_obj_auto.lda = lda;
-    key_obj_auto.ldb = ldb;
-    key_obj_auto.ldc = ldc;
+    Key_matmul key_obj_auto(transpose_input, transpose_filter, M, K, N, lda, ldb,
+                            ldc, weights, zenEnvObj.omp_num_threads, false);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
@@ -1424,7 +1382,6 @@ int auto_compute_matmul_bf16(
         zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",0);
     key_obj_auto.weights =
         map_type == 1 ? weights : NULL;
-    key_obj_auto.thread_count = zenEnvObj.omp_num_threads;
 
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;

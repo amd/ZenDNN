@@ -37,6 +37,7 @@
 
 #include "zendnn_logging.hpp"
 #include "zendnn_private.hpp"
+#include "common/weight_cache.hpp"
 #include "zendnn_helper.hpp"
 #include "zendnn.hpp"
 
@@ -49,13 +50,6 @@ using tag = memory::format_tag;
 using dt = memory::data_type;
 extern int graph_exe_count;
 extern std::mutex map_mutex;
-//Map for weight caching of jit Primitive(reordered memory)
-std::unordered_map<Key_matmul, zendnn::memory >
-matmul_weight_caching_map_jit_int8;
-
-//AOCL weight caching map
-std::unordered_map<Key_matmul, int8_t * >
-matmul_weight_caching_map_aocl_int8;
 
 // //AutoTuner Simplified Map having Key as struct and value as Algo.
 // std::unordered_map<Key_matmul, unsigned int>
@@ -77,21 +71,8 @@ void zenMatMulPrimitiveINT8(int thread_qty, int src_type, int dst_type,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
-    Key_matmul key_obj_reorder;
-    key_obj_reorder.transpose_input = TransA;
-    key_obj_reorder.transpose_weights = TransB;
-    key_obj_reorder.m = M;
-    key_obj_reorder.k = K;
-    key_obj_reorder.n = N;
-    key_obj_reorder.lda = lda;
-    key_obj_reorder.ldb = ldb;
-    key_obj_reorder.ldc = ldc;
-    key_obj_reorder.weights = B_Array;
-    key_obj_reorder.thread_count = thread_qty;
-
-    //finds object in map
-    auto found_obj_reorder = matmul_weight_caching_map_jit_int8.find(
-                                 key_obj_reorder);
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                               thread_qty, false);
 
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
@@ -183,21 +164,26 @@ void zenMatMulPrimitiveINT8(int thread_qty, int src_type, int dst_type,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
+
+    //weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
+    auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
+
     if (blocked_format) {
-        if (!is_weights_const ||
-                found_obj_reorder == matmul_weight_caching_map_jit_int8.end()) {
+        if (!is_weights_const || !found_obj_reorder) {
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
-            if(is_weights_const) {
+            if (is_weights_const) {
                 //Save in map
                 map_mutex.lock();
-                matmul_weight_caching_map_jit_int8[key_obj_reorder] = reordered_weights_memory;
+                matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
                 map_mutex.unlock();
             }
         }
         else {
-            reordered_weights_memory = matmul_weight_caching_map_jit_int8[key_obj_reorder];
+            reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
         }
     }
 
@@ -269,7 +255,7 @@ aocl_post_op *create_aocl_post_ops(
             //int bias_size = n * sizeof(int32_t);
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
             post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
-                            aocl_post_op_bias));
+                                 aocl_post_op_bias));
             (post_ops->bias + bias_index)->bias = (int32_t *) bias;
 #else
             post_ops->bias.bias = (int32_t *) bias;
@@ -329,10 +315,11 @@ aocl_post_op *create_aocl_post_ops(
         if (do_sum) {
             post_ops->seq_vector[post_op_i++] = MATRIX_ADD;
             post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
-                            aocl_post_op_matrix_add));
+                                       aocl_post_op_matrix_add));
             //post_ops->matrix_add.matrix = NULL;
             (post_ops->matrix_add + add_index)->ldm = n;
-            (post_ops->matrix_add + add_index)->matrix = (T *)add_buffer;//malloc( m * n * ele_dsize );
+            (post_ops->matrix_add + add_index)->matrix = (T *)
+                    add_buffer;//malloc( m * n * ele_dsize );
         }
 #endif
         if (relu) {
@@ -399,20 +386,8 @@ void zenMatMul_gemm_s8s8s32os8(
     float do_sum,
     bool is_weights_const
 ) {
-    Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
-
-    //finds object in map
-    auto found_obj = matmul_weight_caching_map_aocl_int8.find(key_obj);
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     const char transa = 'n', transb = 'n';
     char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
@@ -422,23 +397,28 @@ void zenMatMul_gemm_s8s8s32os8(
     const char order = 'r';
     const char trans = 'n';
 
-    int8_t *b_reorder = NULL;
-    if (!is_weights_const ||
-            found_obj == matmul_weight_caching_map_aocl_int8.end()) {
+    int8_t *reorder_filter = NULL;
+
+    //Weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
+    matmul_weight_cache;
+    auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+    if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        if(is_weights_const) {
+        reorder_filter = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_s8s8s32os32(order, trans, 'B', filter, reorder_filter,k,n,ldb);
+        if (is_weights_const) {
             //Create new entry
             map_mutex.lock();
-            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            matmul_weight_cache.add(key_obj, reorder_filter);
             map_mutex.unlock();
         }
     }
     else {
-        b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
+        reorder_filter = matmul_weight_cache.get(key_obj);
     }
 
 
@@ -450,7 +430,7 @@ void zenMatMul_gemm_s8s8s32os8(
     aocl_gemm_s8s8s32os8(storage, transa, transb, m,
                          n,
                          k, alpha, input,
-                         lda, mem_format_a, b_reorder,
+                         lda, mem_format_a, reorder_filter,
                          ldb, mem_format_b, beta, output,
                          ldc, post_ops);
     // Free memory for reordered filter and postops.
@@ -459,7 +439,7 @@ void zenMatMul_gemm_s8s8s32os8(
     }
     //if weights are not constant
     if (!is_weights_const) {
-        free(b_reorder);
+        free(reorder_filter);
     }
     // Scale postop is always enabled so deleted directly.
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
@@ -467,11 +447,11 @@ void zenMatMul_gemm_s8s8s32os8(
     free((post_ops->sum)->zero_point);
     free(post_ops->sum);
     //Bias free
-    if(post_ops->bias != NULL){
+    if (post_ops->bias != NULL) {
         free(post_ops->bias);
     }
     //Matrix add
-    if(post_ops->matrix_add != NULL){
+    if (post_ops->matrix_add != NULL) {
         free(post_ops->matrix_add);
     }
 #else
@@ -507,20 +487,8 @@ void zenMatMul_gemm_s8s8s32os32(
     float do_sum,
     bool is_weights_const
 ) {
-    Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
-
-    //finds object in map
-    auto found_obj = matmul_weight_caching_map_aocl_int8.find(key_obj);
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     const char transa = 'n', transb = 'n';
     char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
@@ -529,23 +497,28 @@ void zenMatMul_gemm_s8s8s32os32(
     const dim_t reorder_param2 = n;
     const char order = 'r';
     const char trans = 'n';
-    int8_t *b_reorder = NULL;
-    if (!is_weights_const ||
-            found_obj == matmul_weight_caching_map_aocl_int8.end()) {
+    int8_t *reorder_filter = NULL;
+
+    //Weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
+    matmul_weight_cache;
+    auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+    if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_s8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_s8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        if(is_weights_const) {
+        reorder_filter = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_s8s8s32os32(order, trans, 'B', filter, reorder_filter,k,n,ldb);
+        if (is_weights_const) {
             //Create new entry
             map_mutex.lock();
-            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            matmul_weight_cache.add(key_obj, reorder_filter);
             map_mutex.unlock();
         }
     }
     else {
-        b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
+        reorder_filter = matmul_weight_cache.get(key_obj);
     }
     aocl_post_op *post_ops = NULL;
     //Create post_ops
@@ -555,7 +528,7 @@ void zenMatMul_gemm_s8s8s32os32(
     aocl_gemm_s8s8s32os32(storage, transa, transb, m,
                           n,
                           k, alpha, input,
-                          lda, mem_format_a, b_reorder,
+                          lda, mem_format_a, reorder_filter,
                           ldb, mem_format_b, beta, output,
                           ldc, post_ops);
     // Free memory for reordered filter and postops.
@@ -564,7 +537,7 @@ void zenMatMul_gemm_s8s8s32os32(
     }
     //if weights are not constant
     if (!is_weights_const) {
-        free(b_reorder);
+        free(reorder_filter);
     }
     // Scale postop is always enabled so deleted directly.
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
@@ -572,11 +545,11 @@ void zenMatMul_gemm_s8s8s32os32(
     free((post_ops->sum)->zero_point);
     free(post_ops->sum);
     //Bias free
-    if(post_ops->bias != NULL){
+    if (post_ops->bias != NULL) {
         free(post_ops->bias);
     }
     //Matrix add
-    if(post_ops->matrix_add != NULL){
+    if (post_ops->matrix_add != NULL) {
         free(post_ops->matrix_add);
     }
 #else
@@ -612,20 +585,8 @@ void zenMatMul_gemm_u8s8s32os8(
     float do_sum,
     bool is_weights_const
 ) {
-    Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
-
-    //finds object in map
-    auto found_obj = matmul_weight_caching_map_aocl_int8.find(key_obj);
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     const char transa = 'n', transb = 'n';
     char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
@@ -634,23 +595,28 @@ void zenMatMul_gemm_u8s8s32os8(
     const dim_t reorder_param2 = n;
     const char order = 'r';
     const char trans = 'n';
-    int8_t *b_reorder = NULL;
-    if (!is_weights_const ||
-            found_obj == matmul_weight_caching_map_aocl_int8.end()) {
+    int8_t *reorder_filter = NULL;
+
+    //Weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
+    matmul_weight_cache;
+    auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+    if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        if(is_weights_const) {
+        reorder_filter = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_u8s8s32os32(order, trans, 'B', filter, reorder_filter,k,n,ldb);
+        if (is_weights_const) {
             //Create new entry
             map_mutex.lock();
-            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            matmul_weight_cache.add(key_obj, reorder_filter);
             map_mutex.unlock();
         }
     }
     else {
-        b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
+        reorder_filter = matmul_weight_cache.get(key_obj);
     }
     aocl_post_op *post_ops = NULL;
     //Create post_ops
@@ -660,7 +626,7 @@ void zenMatMul_gemm_u8s8s32os8(
     aocl_gemm_u8s8s32os8(storage, transa, transb, m,
                          n,
                          k, alpha, input,
-                         lda, mem_format_a, b_reorder,
+                         lda, mem_format_a, reorder_filter,
                          ldb, mem_format_b, beta, output,
                          ldc, post_ops);
     // Free memory for reordered filter and postops.
@@ -669,7 +635,7 @@ void zenMatMul_gemm_u8s8s32os8(
     }
     //if weights are not constant
     if (!is_weights_const) {
-        free(b_reorder);
+        free(reorder_filter);
     }
     // Scale postop is always enabled so deleted directly.
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
@@ -677,11 +643,11 @@ void zenMatMul_gemm_u8s8s32os8(
     free((post_ops->sum)->zero_point);
     free(post_ops->sum);
     //Bias free
-    if(post_ops->bias != NULL){
+    if (post_ops->bias != NULL) {
         free(post_ops->bias);
     }
     //Matrix add
-    if(post_ops->matrix_add != NULL){
+    if (post_ops->matrix_add != NULL) {
         free(post_ops->matrix_add);
     }
 #else
@@ -717,20 +683,8 @@ void zenMatMul_gemm_u8s8s32os32(
     float do_sum,
     bool is_weights_const
 ) {
-    Key_matmul key_obj;
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_filter;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = filter;
-    key_obj.thread_count = thread_qty;
-
-    //finds object in map
-    auto found_obj = matmul_weight_caching_map_aocl_int8.find(key_obj);
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, thread_qty, true);
 
     const char transa = 'n', transb = 'n';
     char mem_format_a = 'n', mem_format_b = 'r', storage = 'r';
@@ -739,23 +693,27 @@ void zenMatMul_gemm_u8s8s32os32(
     const dim_t reorder_param2 = n;
     const char order = 'r';
     const char trans = 'n';
-    int8_t *b_reorder = NULL;
-    if (!is_weights_const ||
-            found_obj == matmul_weight_caching_map_aocl_int8.end()) {
+    int8_t *reorder_filter = NULL;
+
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
+    matmul_weight_cache;
+    auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+    if (!is_weights_const || !found_obj) {
         siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_u8s8s32os32(
                                           order, trans,
                                           reorder_param0, reorder_param1, reorder_param2);
-        b_reorder = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
-        aocl_reorder_u8s8s32os32(order, trans, 'B', filter, b_reorder,k,n,ldb);
-        if(is_weights_const) {
+        reorder_filter = (int8_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
+        aocl_reorder_u8s8s32os32(order, trans, 'B', filter, reorder_filter,k,n,ldb);
+        if (is_weights_const) {
             //Create new entry
             map_mutex.lock();
-            matmul_weight_caching_map_aocl_int8[key_obj] = b_reorder;
+            matmul_weight_cache.add(key_obj, reorder_filter);
             map_mutex.unlock();
         }
     }
     else {
-        b_reorder = matmul_weight_caching_map_aocl_int8[key_obj];
+        reorder_filter = matmul_weight_cache.get(key_obj);
     }
     aocl_post_op *post_ops = NULL;
     //Create post_ops
@@ -765,7 +723,7 @@ void zenMatMul_gemm_u8s8s32os32(
     aocl_gemm_u8s8s32os32(storage, transa, transb, m,
                           n,
                           k, alpha, input,
-                          lda, mem_format_a, b_reorder,
+                          lda, mem_format_a, reorder_filter,
                           ldb, mem_format_b, beta, output,
                           ldc, post_ops);
     // Free memory for reordered filter and postops.
@@ -774,7 +732,7 @@ void zenMatMul_gemm_u8s8s32os32(
     }
     //if weights are not constant
     if (!is_weights_const) {
-        free(b_reorder);
+        free(reorder_filter);
     }
     // Scale postop is always enabled so deleted directly.
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
@@ -782,11 +740,11 @@ void zenMatMul_gemm_u8s8s32os32(
     free((post_ops->sum)->zero_point);
     free(post_ops->sum);
     //Bias free
-    if(post_ops->bias != NULL){
+    if (post_ops->bias != NULL) {
         free(post_ops->bias);
     }
     //Matrix add
-    if(post_ops->matrix_add != NULL){
+    if (post_ops->matrix_add != NULL) {
         free(post_ops->matrix_add);
     }
 #else

@@ -366,17 +366,8 @@ int ref_woq_bf16(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transB;
-    key_obj.m = 0;
-    key_obj.k = K;
-    key_obj.n = N;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = weights;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
+                       true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -395,7 +386,8 @@ int ref_woq_bf16(
     int16_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -530,17 +522,8 @@ int ref_woq_f32(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transB;
-    key_obj.m = 0;
-    key_obj.k = K;
-    key_obj.n = N;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = weights;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
+                       true);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -559,7 +542,8 @@ int ref_woq_f32(
     float *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, float *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, float *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -789,7 +773,8 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     zendnn::memory reordered_weights_memory;
 
     //Weight reordering
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
     if (!is_weights_const || !found_obj_reorder) {
@@ -863,17 +848,8 @@ int aocl_woq_bf16(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
-    Key_matmul key_obj;
-    key_obj.transpose_input = false;
-    key_obj.transpose_weights = transB;
-    key_obj.m = 0;
-    key_obj.k = K;
-    key_obj.n = N;
-    key_obj.lda = 0;
-    key_obj.ldb = ldb;
-    key_obj.ldc = 0;
-    key_obj.weights = weights;
-    key_obj.thread_count = 0;
+    Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
+                       true);
 
     zendnnVerbose(ZENDNN_PROFLOG,"aocl_bf16s4 kernel");
 
@@ -894,7 +870,8 @@ int aocl_woq_bf16(
     int8_t *reorder_filter = NULL;
 
     //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *> matmul_weight_cache;
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
+    matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     if (!is_weights_const || !found_obj) {
@@ -1066,7 +1043,8 @@ int matmul_woq_wrapper(
             // For Higher thread count(i.e >128) AOCL S4 Kernels gives optimal performance
             if (zenEnvObj.omp_num_threads > 128) {
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
-            } else {
+            }
+            else {
                 // If M <= 16 AOCL S4 Kernel gives Optimal Performance.
                 // If M >= 128, N and K >=1024 AOCL BLIS kernels with Zen weights conversion
                 // gives optimal performance.

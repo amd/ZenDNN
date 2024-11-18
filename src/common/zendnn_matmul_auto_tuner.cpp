@@ -260,25 +260,16 @@ int auto_compute_matmul_int8(
     float do_sum,
     bool is_weights_const
 ) {
-    Key_matmul key_obj;
-
     //It is used to know if weights address should be enabled or not for map.
     //0: disable, 1: enable.
     unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",0);
 
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_weights;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
+    Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
+                       weights, zenEnvObj.omp_num_threads, false);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
     key_obj.weights = mapType == 1 ? (int8_t *)weights : NULL;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
 
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
@@ -947,7 +938,8 @@ int auto_compute_matmul(
 ) {
     unsigned int algo_type;
 
-    Key_matmul key_obj;
+    Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
+                       weights, zenEnvObj.omp_num_threads, false);
 
     //Persistent Map
     //{ 0: disable, 1: write, 2:read }
@@ -972,20 +964,10 @@ int auto_compute_matmul(
     //only when needed.
     static std::pair<unsigned int, unsigned int> persistent_map_flag = {persistent_map, 1};
 
-    key_obj.transpose_input = transpose_input;
-    key_obj.transpose_weights = transpose_weights;
-    key_obj.m = m;
-    key_obj.k = k;
-    key_obj.n = n;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
     key_obj.weights = mapType == 1 &&
                       persistent_map == persistentMapType::DISABLE ? weights : NULL;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
 
     //Read operation from File (Persistent Map)
     if (persistent_map == persistentMapType::READ) {

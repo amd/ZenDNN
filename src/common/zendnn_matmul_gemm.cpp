@@ -16,6 +16,7 @@
 *******************************************************************************/
 
 #include "common/zendnn_private.hpp"
+#include "common/weight_cache.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
     #include <cblas.h>
@@ -41,14 +42,6 @@ using dt = memory::data_type;
 
 extern float gelu_const;
 extern int graph_exe_count;
-
-//Simplified Map having Key as struct and value as Blocked Weight matrix address.
-std::unordered_map<Key_matmul, float * >
-matmul_weight_caching_map;
-
-//Map for weight caching(reordered memory) for JIT Primitive
-std::unordered_map<Key_matmul, zendnn::memory >
-matmul_weight_caching_map_jit_kernel;
 
 void zenMatMul_gemm_blocked(
     zendnnEnv zenEnvObj,
@@ -76,20 +69,9 @@ void zenMatMul_gemm_blocked(
     if (!transpose_filter && !transpose_input) {
         zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
-        Key_matmul key_obj;
-        key_obj.transpose_input = transpose_input;
-        key_obj.transpose_weights = transpose_filter;
-        key_obj.m = m;
-        key_obj.k = k;
-        key_obj.n = n;
-        key_obj.lda = lda;
-        key_obj.ldb = ldb;
-        key_obj.ldc = ldc;
-        key_obj.weights = filter;
-        key_obj.thread_count = thread_qty;
+        Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                           filter, zenEnvObj.omp_num_threads, true);
 
-        //finds object in map
-        auto found_obj = matmul_weight_caching_map.find(key_obj);
         // Blocked BLIS API for matmul
         // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
         // Define dimentions of B matrix as reorder_param1 and reorder_param2
@@ -103,23 +85,26 @@ void zenMatMul_gemm_blocked(
         char mem_format_a = 'n', mem_format_b = 'r';
         float_t *reorder_filter = NULL;
 
-        //Weight caching based on is_weights_const
-        if (!is_weights_const || found_obj == matmul_weight_caching_map.end()) {
+        static zendnn::impl::lru_weight_cache_t<Key_matmul, float *>
+        matmul_weight_cache;
+        auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+        if (!is_weights_const || !found_obj) {
             zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
             siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
                                               order, trans, reorder_param0, reorder_param1, reorder_param2);
             reorder_filter = (float_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
             aocl_reorder_f32f32f32of32(order, trans, 'B', filter, reorder_filter, k,
                                        n, ldb);
-            if(is_weights_const) {
+            if (is_weights_const) {
                 //Create new entry
                 map_mutex.lock();
-                matmul_weight_caching_map[key_obj] = reorder_filter;
+                matmul_weight_cache.add(key_obj, reorder_filter);
                 map_mutex.unlock();
             }
         }
         else {
-            reorder_filter = matmul_weight_caching_map[key_obj];
+            reorder_filter = matmul_weight_cache.get(key_obj);
         }
 
         // Currently 4.2 blis post ops are used
@@ -217,16 +202,18 @@ void zenMatMul_gemm_blocked(
         if (bias != NULL) {
             //Bias is directly passed
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-            if(alpha != 1.0){
-                delete((float*)post_ops->bias->bias);
-            } else {
+            if (alpha != 1.0) {
+                delete ((float *)post_ops->bias->bias);
+            }
+            else {
                 post_ops->bias->bias = NULL;
             }
             free(post_ops->bias);
 #else
-            if(alpha != 1.0){
-                delete(post_ops->bias.bias);
-            } else {
+            if (alpha != 1.0) {
+                delete (post_ops->bias.bias);
+            }
+            else {
                 post_ops->bias.bias = NULL;
             }
 #endif
@@ -269,20 +256,8 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
-    Key_matmul key_obj;
-    key_obj.transpose_input = TransA;
-    key_obj.transpose_weights = TransB;
-    key_obj.m = M;
-    key_obj.k = K;
-    key_obj.n = N;
-    key_obj.lda = lda;
-    key_obj.ldb = ldb;
-    key_obj.ldc = ldc;
-    key_obj.weights = B_Array;
-    key_obj.thread_count = zenEnvObj.omp_num_threads;
-
-    //finds object in map
-    auto found_obj = matmul_weight_caching_map_jit_kernel.find(key_obj);
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                               zenEnvObj.omp_num_threads, false);
 
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
@@ -365,20 +340,25 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
+
+    //weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
+    auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
+
     if (blocked_format) {
-        if (!is_weights_const ||
-                found_obj == matmul_weight_caching_map_jit_kernel.end()) {
+        if (!is_weights_const || !found_obj_reorder) {
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
-            if(is_weights_const) {
+            if (is_weights_const) {
                 map_mutex.lock();
-                matmul_weight_caching_map_jit_kernel[key_obj] = reordered_weights_memory;
+                matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
                 map_mutex.unlock();
             }
         }
         else {
-            reordered_weights_memory = matmul_weight_caching_map_jit_kernel[key_obj];
+            reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
         }
     }
     net.push_back(zendnn::matmul(matmul_prim_disc));
