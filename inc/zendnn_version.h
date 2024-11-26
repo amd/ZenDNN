@@ -31,7 +31,7 @@
 #define ZENDNN_VERSION_MINOR 0
 
 /// Patch version
-#define ZENDNN_VERSION_PATCH 0
+#define ZENDNN_VERSION_PATCH 1
 
 /// Git commit hash
 #define ZENDNN_VERSION_HASH  "N/A"
