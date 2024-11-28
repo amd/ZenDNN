@@ -67,9 +67,6 @@ ifeq ($(DEPEND_ON_CK), 1)
 	CK_DEFINES:= -DCK_NOGPU -DENABLE_CK
 	CK_COMMON_FLAGS:= -Wno-attributes -Wno-ignored-attributes -Wno-write-strings
 	CK_INCLUDES := -I$(CK_PATH) -I$(CK_PATH)/include -I$(CK_PATH)/library/include
-	CPP_STD := c++17
-else
-	CPP_STD := c++14
 endif
 
 #Set uProf path
@@ -118,8 +115,15 @@ else
 	USE_CUSTOM_BLIS:= -DUSE_CUSTOM_BLIS=0
 endif
 #Compare if GCC version is 9 or above, so that we can use -march=znver2
-GCCVERSIONGTEQ9 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 9)
+GCCVERSIONGTEQ12 := $(shell expr `g++ -dumpversion | cut -f1 -d.` \>= 12)
 
+ifeq "$(GCCVERSIONGTEQ12)" "1"
+	CPP_STD := c++17
+	AVX512_BF16_EN=1
+else
+	CPP_STD := c++14
+	AVX512_BF16_EN=0
+endif
 #Select appropriate znver based on EPYC Model name
 #Naming convention:
 #model name        : AMD EPYC 7543 32-Core Processor
@@ -136,7 +140,7 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
 	COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
-	ifeq "$(GCCVERSIONGTEQ9)" "1"
+	ifeq "$(GCCVERSIONGTEQ12)" "1"
 		COMMONFLAGS += -march=$(ZNVER)
 	else
 		COMMONFLAGS += -march=znver1
@@ -157,11 +161,11 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -fPIC -fopenmp
 	ifeq ($(LPGEMM), 1)
-	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_EB_EN=$(AVX512_EB_EN) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	     COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
 	else
 	     COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
 	endif
-	ifeq "$(GCCVERSIONGTEQ9)" "1"
+	ifeq "$(GCCVERSIONGTEQ12)" "1"
 		COMMONFLAGS += -march=$(ZNVER)
 	else
 		COMMONFLAGS += -march=znver1
@@ -172,7 +176,7 @@ else
 	CXXFLAGSGTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES)
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O3 -march=$(ZNVER) -fPIC -fopenmp
-	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE)
+	COMMONFLAGS := -Wreturn-type -DZENDNN_X64=1 $(LPGEMM_ENABLE) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
 endif #AOCC
 endif #RELEASE = 1
 
@@ -180,11 +184,6 @@ ifeq ($(BLIS_API), 0)
 	COMMONFLAGS += -UZENDNN_USE_AOCL_BLIS_API
 else
 	COMMONFLAGS += -DZENDNN_USE_AOCL_BLIS_API
-endif
-
-ifeq ($(FORCE_ARCH), 4)
-	COMMONFLAGS += $(AVX512_FLAG)
-	COMMONFLAGS += $(AVX512_BF16_FLAG)
 endif
 
 COMMONFLAGS += -Wno-format-zero-length -Wno-format-truncation

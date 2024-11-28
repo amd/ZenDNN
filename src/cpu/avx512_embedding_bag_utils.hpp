@@ -95,7 +95,7 @@ struct zenmmAVX512_ext_ps<float, float, DIM> {
     __m512           v[DIM];
     const uint32_t   unroll_factor = DIM;
 };
-
+#if AVX512_BF16_EN
 //bf16 type embedding bag
 template<uint32_t DIM>
 struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, DIM> {
@@ -248,6 +248,7 @@ struct zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, DI
     __m512             v[DIM];
     const uint32_t     unroll_factor = DIM;
 };
+#endif
 
 // Templated embedding bag sum function
 template <typename dst_type, typename input_type>
@@ -278,6 +279,7 @@ using zenmmAVX512_ext_ps128  = zenmmAVX512_ext_ps<float, float, 8>;
 using zenmmAVX512_ext_ps256  = zenmmAVX512_ext_ps<float, float, 16>;
 using zenmmAVX512_ext_ps512  = zenmmAVX512_ext_ps<float, float, 32>;
 
+#if AVX512_BF16_EN
 using zenmmAVX512_ext_pbf16  =
     zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, zendnn::impl::bfloat16_t, 1>;
 using zenmmAVX512_ext_pbf32  =
@@ -303,5 +305,5 @@ using zenmmAVX512_ext_pbf_ps256 =
     zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 16>;
 using zenmmAVX512_ext_pbf_ps512 =
     zenmmAVX512_ext_ps<zendnn::impl::bfloat16_t, float, 32>;
-
+#endif
 #endif

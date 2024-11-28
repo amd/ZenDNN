@@ -1708,9 +1708,10 @@ const {
 }
 
 template struct avx512_embedding_bag_t<f32, f32>;
+#if AVX512_BF16_EN
 template struct avx512_embedding_bag_t<bf16, bf16>;
 template struct avx512_embedding_bag_t<bf16, f32>;
-
+#endif
 } //namespace cpu
 }
 }
