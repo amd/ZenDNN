@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@
 #include "common/zendnn_private.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
-#include <cblas.h>
+    #include <cblas.h>
 #else // ZENDNN_USE_AOCL_BLIS_API
-#include "cblas_with_blis_api.hpp"
+    #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include "zendnn_logging.hpp"
@@ -69,11 +69,13 @@ void zenConvolution2D_ver2(
 ) {
     zendnnVerbose(ZENDNN_ALGOLOG, "zenConvolution2D ver2 [zendnn convolution]");
 #if 1
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     //Need to change this for latency optimization
-    if (thread_qty > no_of_images) {
+    if (no_of_images > 0 && thread_qty > no_of_images) {
         thread_qty = no_of_images;
     }
 
@@ -83,12 +85,13 @@ void zenConvolution2D_ver2(
     //if(no_of_images > cpuVitualCores)
     //  bufferBucket = cpuVitualCores;
 
-    unsigned long size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                         thread_qty;
+    unsigned long size = thread_qty * (kernel_h*kernel_w*channels)
+                         * (out_height*out_width);
     float *data_col = (float *)malloc(size * sizeof(float));
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_ver2 Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
 
@@ -184,23 +187,25 @@ void convolution2D_ver3(
     //#New Implementation with im2col and gemm function.
     //im2col().....parallel version is also available
     //unsigned int  size = (kernel_h*kernel_w*channels)*(out_height*out_width) * no_of_images;
-    unsigned long  filterMatrixSize = (kernel_h*kernel_w*no_of_filter) * channels;
+    unsigned long filterMatrixSize = (kernel_h*kernel_w*no_of_filter) * channels;
     float *filter_row = (float *)malloc(filterMatrixSize * sizeof(float));
 
     unsigned long  outMatrixSize = (kernel_h*kernel_w*no_of_filter)* (height*width);
     float *outMatrix = (float *)malloc(outMatrixSize * sizeof(float));
-    float *outMatrixNew = (float *)malloc(no_of_filter * height*width * sizeof(
-            float));
-    if (filter_row == NULL || outMatrix == NULL || outMatrixNew == NULL) {
+    if (filter_row == NULL || outMatrix == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "convolution2D_ver3 Memory Error while allocating patch matrix");
+        free(filter_row);
+        free(outMatrix);
         return;
     }
 
     //NCHW2HWNC(filter, no_of_filter, channels, kernel_h, kernel_w, filter_row);
 
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    if (thread_qty == 0) {
+        thread_qty = 1;
+    }
     unsigned int loopCount = (no_of_images%thread_qty)==0 ?
                              no_of_images/thread_qty : (no_of_images/thread_qty)+1;
     #pragma omp parallel num_threads(thread_qty)
@@ -274,11 +279,13 @@ void zenConvolution2D_ver4(
 
 #if 1
     //unsigned short cpuVitualCores = get_nprocs();
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     //Need to change this for latency optimization
-    if (thread_qty > no_of_images) {
+    if (no_of_images > 0 && thread_qty > no_of_images) {
         thread_qty = no_of_images;
     }
 
@@ -288,8 +295,8 @@ void zenConvolution2D_ver4(
     //if(no_of_images > cpuVitualCores)
     //  bufferBucket = cpuVitualCores;
 
-    unsigned long  size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                          no_of_images;
+    unsigned long  size = no_of_images * (kernel_h*kernel_w*channels)
+                          * (out_height*out_width);
     float *data_col = (float *)malloc(size * sizeof(float));
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -407,20 +414,23 @@ void zenConvolution2D_ver5(
 
 #if 1
     //unsigned short cpuVitualCores = get_nprocs();
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     unsigned int loopCount = (no_of_images%thread_qty)==0 ?
                              no_of_images/thread_qty : (no_of_images/thread_qty)+1;
     //if(no_of_images > cpuVitualCores)
     //  bufferBucket = cpuVitualCores;
 
-    unsigned long  size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                          thread_qty;
+    unsigned int  size = thread_qty * (kernel_h*kernel_w*channels)
+                         *(out_height*out_width);
     float *data_col = (float *)malloc(size * sizeof(float));
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_ver5 Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
 
@@ -548,16 +558,18 @@ void zenConvolution2D_ver6(
 
 #if 1
     //unsigned short cpuVitualCores = get_nprocs();
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     unsigned int loopCount = (no_of_images%thread_qty)==0 ?
                              no_of_images/thread_qty : (no_of_images/thread_qty)+1;
     //if(no_of_images > cpuVitualCores)
     //  bufferBucket = cpuVitualCores;
 
-    unsigned long  size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                          thread_qty;
+    unsigned long size = thread_qty * (kernel_h*kernel_w*channels)
+                         * (out_height*out_width);
     float *data_col = (float *)malloc(size * sizeof(float));
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
@@ -719,7 +731,9 @@ void zenConvolution2DbaseRef(
 #if 0
     unsigned short cpuVitualCores = get_nprocs();
     unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    if (thread_qty == 0) {
+        thread_qty = 1;
+    }
 
     struct timeval start, end;
     gettimeofday(&start, 0);
@@ -740,16 +754,16 @@ void zenConvolution2DbaseRef(
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2DbaseRef Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
     //Running Ref version as single threaded
-    thread_qty = 1;
+    thread_qty = 1U;
     #pragma omp parallel num_threads(thread_qty)
     {
-        unsigned int loopCount = (no_of_images%thread_qty)==0 ?
-                                 no_of_images/thread_qty : (no_of_images/thread_qty)+1;
+        unsigned int loopCount = no_of_images;
         for (int i=0; i<loopCount; i++) {
-            int threadOffset = omp_get_thread_num()+ (i*thread_qty);
+            int threadOffset = omp_get_thread_num()+ i;
             if (threadOffset >= no_of_images) {
                 break;
             }
@@ -813,11 +827,11 @@ void zenConvolution2DbaseRef(
     float elapsed;
     elapsed = timedifference_msec(start, end);
     zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_best, no_of_images=", no_of_images,
-               " channels=", channels, " height=", height, " width=", width,
-               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_h=", pad_h, " pad_w=", pad_w,
-               " stride_h=", stride_h, " stride_w=",stride_w,
-               " Time=", elapsed, "ms");
+                  " channels=", channels, " height=", height, " width=", width,
+                  " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_h=", pad_h, " pad_w=", pad_w,
+                  " stride_h=", stride_h, " stride_w=",stride_w,
+                  " Time=", elapsed, "ms");
 #endif
 
 }
@@ -856,21 +870,23 @@ void zenConvolution2D_SmallGemm(
 
 #if 1
     //unsigned short cpuVitualCores = get_nprocs();
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     //Need to change this for latency optimization
-    if (thread_qty > no_of_images) {
+    if (no_of_images > 0 && thread_qty > no_of_images) {
         thread_qty = no_of_images;
     }
 
-
-    unsigned long  size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                          thread_qty;
+    unsigned long size = thread_qty * (kernel_h*kernel_w*channels)
+                         * (out_height*out_width);
     float *data_col = (float *)malloc(size * sizeof(float));
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_SmallGemm Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
 
@@ -907,6 +923,7 @@ void zenConvolution2D_SmallGemm(
             //                                                       data_col+patchInputOffset, channels*kernel_h*kernel_w, filter, no_of_filter, 0.0f, out_layer+outputOffset, no_of_filter);
             //int workSize = no_of_filter*4096;
             int workSize = (out_height*out_width)/2;
+            assert(workSize>0 && "workSize can not be zero.\n");
             int rowloop = ((out_height*out_width)%workSize)==0?(out_height*out_width)/
                           (workSize):((out_height*out_width)/(workSize))+1;
             for (int j=0; j<rowloop; j++) {
@@ -983,21 +1000,25 @@ void zenConvolution2D_BigGemm(
 
 #if 1
     //unsigned short cpuVitualCores = get_nprocs();
-    unsigned int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
-    if (thread_qty == 0) thread_qty = 1;
+    int thread_qty = zendnn_getenv_int("OMP_NUM_THREADS");
+    if (thread_qty <= 0) {
+        thread_qty = 1;
+    }
 
     //Need to change this for latency optimization
-    if (thread_qty > no_of_images) {
+    if (no_of_images > 0 && thread_qty > no_of_images) {
         thread_qty = no_of_images;
     }
 
 
-    unsigned long  size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
-                          no_of_images;
-    float *data_col = (float *)malloc(size * sizeof(float));
+    size_t size = (kernel_h*kernel_w*channels)*(out_height*out_width) *
+                  no_of_images;
+    size_t size_col = size * sizeof(float);
+    float *data_col = (float *)malloc(size_col);
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_BigGemm Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
 
@@ -1056,6 +1077,7 @@ void zenConvolution2D_BigGemm(
             //int workSize = no_of_filter*4096;
             if (!flag) {
                 int workSize = (out_height*out_width*gemmBatchSize)/32;
+                assert(workSize>0 && "workSize can not be zero.\n");
                 int rowloop = ((out_height*out_width*gemmBatchSize)%workSize)==0?
                               (out_height*out_width*gemmBatchSize)/(workSize):((
                                           out_height*out_width*gemmBatchSize)/(workSize))+1;
@@ -1149,7 +1171,7 @@ void zenConvolution2DgemmRef(
                             kernel_h, kernel_w, pad_t, pad_l, pad_b, pad_r, stride_h, stride_w, bias,
                             out_layer, out_height, out_width, relu, scale);
 
-float elapsed;
+    float elapsed;
 #ifdef _WIN32
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> difference = end - start;
@@ -1159,12 +1181,12 @@ float elapsed;
     elapsed = timedifference_msec(start, end);
 #endif
     zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2DbaseRef, no_of_images=", batchsize,
-               " channels=", channels, " height=", height, " width=", width,
-               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_t=", pad_t, " pad_l=", pad_l,
-               " pad_b=", pad_b, " pad_r=", pad_r,
-               " stride_h=", stride_h, " stride_w=",stride_w,
-               " Time=", elapsed, "ms");
+                  " channels=", channels, " height=", height, " width=", width,
+                  " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_t=", pad_t, " pad_l=", pad_l,
+                  " pad_b=", pad_b, " pad_r=", pad_r,
+                  " stride_h=", stride_h, " stride_w=",stride_w,
+                  " Time=", elapsed, "ms");
 }
 
 void zenConvolution2DRef(

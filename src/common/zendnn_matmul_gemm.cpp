@@ -67,86 +67,97 @@ void zenMatMul_gemm_blocked(
     bool blocked_format = false
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    if (!transpose_filter && !transpose_input) {
-        zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
+    zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
-        Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                           filter, zenEnvObj.omp_num_threads, true);
+    Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
+                       filter, zenEnvObj.omp_num_threads, true);
 
-        // Blocked BLIS API for matmul
-        // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
-        // Define dimentions of B matrix as reorder_param1 and reorder_param2
-        // Define memory format as 'n'(non reordered) for A matrix and 'r'(reordered) for B matrix
-        char mem_format_a = 'n', mem_format_b = 'r';
-        aocl_post_op *post_ops = NULL;
-        float_t *reorder_filter = NULL;
+    // Blocked BLIS API for matmul
+    // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
+    // Define dimentions of B matrix as reorder_param1 and reorder_param2
+    // Define memory format as 'n'(non reordered) for A matrix and 'r'(reordered) for B matrix
+    char mem_format_a = 'n', mem_format_b = 'r';
+    aocl_post_op *post_ops = NULL;
+    float_t *reorder_filter = NULL;
 
-        if (blocked_format) {
-            const char reorder_param0 = 'B';
-            const dim_t reorder_param1 = k;
-            const dim_t reorder_param2 = n;
-            const char order = 'r';
-            const char trans = 'n';
+    if (blocked_format) {
+        const char reorder_param0 = 'B';
+        const dim_t reorder_param1 = k;
+        const dim_t reorder_param2 = n;
+        const char order = 'r';
+        const char trans = transpose_filter ? 't':'n';
+        reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
+                                      ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0,
+                                      reorder_param1,
+                                      reorder_param2,
+                                      aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
+                                     );
+    }
+    else {
+        mem_format_b = 'n';
+    }
 
-            reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
-                                          ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0,
-                                          reorder_param1,
-                                          reorder_param2,
-                                          aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
-                                         );
+    int postop_count = 0;
+    if (bias != NULL) {
+        ++postop_count;
+    }
+    if (relu|| gelu) {
+        ++postop_count;
+    }
+
+    // Create postop for LPGEMM
+    // Order of postops: BIAS -> RELU -> SCALE
+    if (postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        if (post_ops == NULL) {
+            return;
         }
-        else {
-            mem_format_b = 'n';
-        }
+        post_ops->eltwise = NULL;
+        post_ops->bias = NULL;
+        dim_t max_post_ops_seq_length = postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
 
-        // Currently 4.2 blis post ops are used
-        int postop_count = 0;
+        // Iterate through each postop, check and add it if needed.
+        int post_op_i = 0;
+        dim_t bias_index = 0;
+        dim_t sum_index = 0;
+        dim_t scale_index = 0;
         if (bias != NULL) {
-            ++postop_count;
-        }
-        if (relu|| gelu) {
-            ++postop_count;
-        }
-
-        // Create postop for LPGEMM
-        // Order of postops: BIAS -> RELU -> SCALE
-        if (postop_count > 0) {
-            post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
-            dim_t max_post_ops_seq_length = postop_count;
-            post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
-                                   sizeof(AOCL_POST_OP_TYPE));
-
-            // Iterate through each postop, check and add it if needed.
-            int post_op_i = 0;
-            dim_t bias_index = 0;
-            dim_t sum_index = 0;
-            dim_t scale_index = 0;
-            if (bias != NULL) {
-                // Add bias postop
-                float *bias_ = NULL;
-                if (alpha != 1.0f) {
-                    bias_ = new float[n]();
-                    #pragma omp parallel for num_threads(thread_qty)
-                    for (int i=0; i<n; ++i) {
-                        bias_[i] = alpha * bias[i];
-                    }
+            // Add bias postop
+            float *bias_ = NULL;
+            if (alpha != 1.0f) {
+                bias_ = new float[n]();
+                #pragma omp parallel for num_threads(thread_qty)
+                for (int i=0; i<n; ++i) {
+                    bias_[i] = alpha * bias[i];
                 }
-                post_ops->seq_vector[post_op_i++] = BIAS;
+            }
+            post_ops->seq_vector[post_op_i++] = BIAS;
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
-                post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
-                                     aocl_post_op_bias));
-                (post_ops->bias + bias_index)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
+            post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
+                                 aocl_post_op_bias));
+
+            (post_ops->bias)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
 #else
-                post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float *)bias;
+            post_ops->bias.bias = (alpha!=1.0f) ? bias_ : (float *)bias;
 #endif
-                bias_index++;
+        }
+        if (relu || gelu) {
+            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
+                                    aocl_post_op_eltwise));
+            if (post_ops->eltwise==NULL) {
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return;
             }
             if (relu) {
                 // Add ReLU postop
                 dim_t eltwise_index = 0;
                 post_ops->seq_vector[post_op_i++] = ELTWISE;
-                post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                        aocl_post_op_eltwise));
                 (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                 (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
                 (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
@@ -158,8 +169,6 @@ void zenMatMul_gemm_blocked(
                 // Add ReLU postop
                 dim_t eltwise_index = 0;
                 post_ops->seq_vector[post_op_i++] = ELTWISE;
-                post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                        aocl_post_op_eltwise));
                 (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                 (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
                 (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
@@ -170,29 +179,28 @@ void zenMatMul_gemm_blocked(
                 // Add ReLU postop
                 dim_t eltwise_index = 0;
                 post_ops->seq_vector[post_op_i++] = ELTWISE;
-                post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                        aocl_post_op_eltwise));
                 (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                 (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
                 (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
                 (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
                 (post_ops->eltwise + eltwise_index)->algo.algo_type = GELU_ERF;
             }
-            post_ops->seq_length = postop_count;
         }
-        //Perform MatMul using AMD BLIS
-        aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
-                                transpose_input ? 't' : 'n',
-                                transpose_filter ? 't' : 'n', m, n, k, alpha,
-                                input, lda, mem_format_a, blocked_format ? reorder_filter : filter, ldb,
-                                mem_format_b,
-                                beta,
-                                output, ldc,
-                                post_ops);
+        post_ops->seq_length = postop_count;
+    }
+    //Perform MatMul using AMD BLIS
+    aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
+                            transpose_input ? 't' : 'n',
+                            transpose_filter ? 't' : 'n', m, n, k, alpha,
+                            input, lda, mem_format_a, blocked_format ? reorder_filter : filter, ldb,
+                            mem_format_b,
+                            beta,
+                            output, ldc,
+                            post_ops);
 
-        // Currently 4.2 blis post ops are used
-        // Free memory for postops.
-        if (bias != NULL) {
+    // Free memory for postops.
+    if (post_ops != NULL) {
+        if (post_ops->bias != NULL) {
             //Bias is directly passed
 #ifdef ZENDNN_ENABLE_LPGEMM_V5_0
             if (alpha != 1.0) {
@@ -211,30 +219,14 @@ void zenMatMul_gemm_blocked(
             }
 #endif
         }
-        if (relu || gelu) {
+        if (post_ops->eltwise != NULL) {
             free(post_ops->eltwise);
         }
-        if (postop_count > 0) {
-            free(post_ops->seq_vector);
-            free(post_ops);
-        }
-        if (!is_weights_const && blocked_format) {
-            free(reorder_filter);
-        }
+        free(post_ops->seq_vector);
+        free(post_ops);
     }
-    else {
-        zendnnVerbose(ZENDNN_PROFLOG,"cblas is used");
-        cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
-                    transpose_input ? CblasTrans : CblasNoTrans,
-                    transpose_filter ? CblasTrans : CblasNoTrans, m, n, k, alpha,
-                    input, lda, filter, ldb, beta, output, ldc);
-
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty, alpha);
-        }
+    if (!is_weights_const && blocked_format) {
+        free(reorder_filter);
     }
 }
 

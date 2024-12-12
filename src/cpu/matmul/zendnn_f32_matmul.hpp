@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -45,10 +45,12 @@ struct zendnn_f32_matmul_t : public primitive_t {
         DECLARE_COMMON_PD_T("zendnn", zendnn_f32_matmul_t);
 
         status_t init(engine_t *engine);
-        const gemm_based::params_t &params() const { return params_; }
-        int nthr_; // To not exceed the limit in execute used for set up.
+        const gemm_based::params_t &params() const {
+            return params_;
+        }
+        int nthr_ {1}; // To not exceed the limit in execute used for set up.
         bool set_default_formats();
-    private:
+      private:
         status_t check_and_configure_attributes();
         gemm_based::params_t params_;
     };
@@ -59,11 +61,11 @@ struct zendnn_f32_matmul_t : public primitive_t {
         if (pd()->params().has_pp_kernel_) {
             const int nthr = pd()->nthr_;
             CHECK(safe_ptr_assign(pp_kernel_,
-                        inner_product_utils::pp_kernel_t::create(pd()->N(),
-                            pd()->M(), pd()->ldc(), &pd()->params().pp_attr_,
-                            pd()->desc()->bias_desc.data_type,
-                            pd()->desc()->accum_data_type, pd()->dst_md(),
-                            false)));
+                                  inner_product_utils::pp_kernel_t::create(pd()->N(),
+                                          pd()->M(), pd()->ldc(), &pd()->params().pp_attr_,
+                                          pd()->desc()->bias_desc.data_type,
+                                          pd()->desc()->accum_data_type, pd()->dst_md(),
+                                          false)));
             return pp_kernel_->create_kernel();
         }
 
@@ -84,8 +86,10 @@ struct zendnn_f32_matmul_t : public primitive_t {
         return execute_ref(ctx);
     }
 
-private:
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
+  private:
+    const pd_t *pd() const {
+        return (const pd_t *)primitive_t::pd().get();
+    }
     status_t execute_ref(const exec_ctx_t &ctx) const;
 
     std::unique_ptr<inner_product_utils::pp_kernel_t> pp_kernel_;

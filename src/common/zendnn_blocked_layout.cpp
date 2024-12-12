@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@
 #include "common/zendnn_private.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
-#include <cblas.h>
+    #include <cblas.h>
 #else  // ZENDNN_USE_AOCL_BLIS_API
-#include "cblas_with_blis_api.hpp"
+    #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include "zendnn_logging.hpp"
@@ -86,6 +86,8 @@ void zenConvolution2D_Latency_blocked_layout(
     }
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG, "zenConvolution2D_Latency_blocked_layout Memory Error while allocating patch matrix");
+        free(data_col);
+        free(out_col);
         return;
     }
 
@@ -126,9 +128,6 @@ void zenConvolution2D_Latency_blocked_layout(
     }
     // free the intermediate result
     free(out_col);
-    out_col =NULL;
-
-
 
 #if BIAS_ENABLED
     for (int r=0; r<no_of_filter; r++) {
@@ -185,6 +184,9 @@ void zenConvolution2D_Filterwise_Latency(
 
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG, "zenConvolution2D_Filterwise_Latency Memory Error while allocating patch matrix");
+        free(data_col);
+        free(out_col);
+        free(filter_col);
         return;
     }
 
@@ -213,7 +215,10 @@ void zenConvolution2D_Filterwise_Latency(
                 filter_col[index]=filter[j*no_of_filter+i];
             }
             else {
-                int index = kernel_h*kernel_w*channels*out_ch_per_group*channel_group + j*remainder + (i%no_of_filter)%remainder ;
+                int index = kernel_h*kernel_w*channels*out_ch_per_group*channel_group + j*remainder;
+                if (no_of_filter && remainder) {
+                    index += (i%no_of_filter)%remainder ;
+                }
                 filter_col[index]=filter[j*no_of_filter+i];
 
             }
@@ -263,13 +268,14 @@ void zenConvolution2D_Filterwise_Latency(
                     out_layer[offset + j*no_of_filter + l]=out_col[offset + index];
                 }
                 else {
-                    int index = o_h_w*out_ch_per_group*channel_group + j*remainder + (l%no_of_filter)%remainder ;
+                    int index = o_h_w*out_ch_per_group*channel_group + j*remainder;
+                    if (no_of_filter && remainder) {
+                        index += (l%no_of_filter)%remainder;
+                    }
                     out_layer[offset + j*no_of_filter + l]=out_col[offset + index];
-
                 }
             }
         }
-
 
         if (bias && !relu) {
             #pragma omp parallel for num_threads(thread_qty)

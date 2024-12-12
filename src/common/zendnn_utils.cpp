@@ -46,7 +46,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                      zendnn_data_type_t scale_dt) {
     float *wei_f32 = (float *)zendnn_aligned_alloc(64, k*n*sizeof(float));
     #pragma omp parallel for
-    for (int j=0; j<((k*n)/2) + 1;j++) {
+    for (int j=0; j<((k*n)/2) + 1; j++) {
         int idx_buff = 0;
         int weight_idx = j * 2;
         int val_idx = weight_idx / 2;
@@ -62,7 +62,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                 idx_buff = (weight_idx / (group_size * n)) * n;
                 int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
                 wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
-                            scale_offset) * ((float)(t1));
+                                      scale_offset) * ((float)(t1));
             }
         }
         weight_idx++;
@@ -74,7 +74,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                 idx_buff = (weight_idx / (group_size * n)) * n;
                 int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
                 wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
-                             scale_offset) * ((float)(t2));
+                                      scale_offset) * ((float)(t2));
             }
         }
     }
@@ -125,7 +125,7 @@ int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
                 idx_buff = (weight_idx / (group_size * n)) * n;
                 int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
                 wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
-                            scale_offset) * ((float)(t1));
+                                      scale_offset) * ((float)(t1));
             }
         }
         weight_idx++;
@@ -137,7 +137,7 @@ int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
                 idx_buff = (weight_idx / (group_size * n)) * n;
                 int scale_offset = ((weight_idx%scale_size) % n) + idx_buff;
                 wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, (void *)scales,
-                             scale_offset) * ((float)(t2));
+                                      scale_offset) * ((float)(t2));
             }
         }
     }
@@ -711,6 +711,7 @@ float *transpose(const float *matrix, int n, int m) {
     float *transposed=(float *)malloc(sizeof(float)*n*m);
     if (transposed == NULL) {
         zendnnError(ZENDNN_ALGOLOG, "transpose Memory Error");
+        return transposed;
     }
     while (i < n) {
         j = 0;

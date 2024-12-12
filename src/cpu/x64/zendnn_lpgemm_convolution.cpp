@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2021-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -245,12 +245,12 @@ void zendnnConvolutionLPGEMM(
             stream s(eng);
 
             convolution_direct_lp<int8_t *, uint8_t *>(eng,
-                                  (uint8_t *)src, no_of_images,
-                                  channels, height, width,
-                                  (int8_t *)filter,
-                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
-                                  (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
-                                  scale_size);
+                    (uint8_t *)src, no_of_images,
+                    channels, height, width,
+                    (int8_t *)filter,
+                    no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                    (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
+                    scale_size);
         }
 #endif
     }
@@ -294,12 +294,12 @@ void zendnnConvolutionLPGEMM(
             stream s(eng);
 
             convolution_direct_lp<int32_t *, uint8_t *>(eng,
-                                  (uint8_t *)src, no_of_images,
-                                  channels, height, width,
-                                  (int8_t *)filter,
-                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
-                                  (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
-                                  scale_size);
+                    (uint8_t *)src, no_of_images,
+                    channels, height, width,
+                    (int8_t *)filter,
+                    no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                    (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
+                    scale_size);
         }
 #endif
     }
@@ -333,34 +333,34 @@ void zendnnConvolutionLPGEMM(
         );
     }
     else if (supportedPath == 7) {
-	    zenConvolution2D_u8s8s16ou8(
-                (uint8_t *)src,
-                no_of_images,
-                channels,
-                height,
-                width,
-                (int8_t *)filter,
-                no_of_filter,
-                kernel_h,
-                kernel_w,
-                pad_t,
-                pad_l,
-                pad_b,
-                pad_r,
-                stride_h,
-                stride_w,
-                (int16_t *)bias,
-                (uint8_t *)dst,
-                out_height,
-                out_width,
-                concat,
-                filter_offset,
-                total_filters,
-                reluFused,
-                output_scales,
-                zero_point_dst,
-                scale_size
-            );
+        zenConvolution2D_u8s8s16ou8(
+            (uint8_t *)src,
+            no_of_images,
+            channels,
+            height,
+            width,
+            (int8_t *)filter,
+            no_of_filter,
+            kernel_h,
+            kernel_w,
+            pad_t,
+            pad_l,
+            pad_b,
+            pad_r,
+            stride_h,
+            stride_w,
+            (int16_t *)bias,
+            (uint8_t *)dst,
+            out_height,
+            out_width,
+            concat,
+            filter_offset,
+            total_filters,
+            reluFused,
+            output_scales,
+            zero_point_dst,
+            scale_size
+        );
 
     }
     else if (supportedPath == 3) {
@@ -430,39 +430,6 @@ void zendnnConvolutionLPGEMM(
                 scale_size
             );
         }
-        else if (supportedPath == 7) {
-
-            zenConvolution2D_u8s8s16ou8(
-                (uint8_t *)src,
-                no_of_images,
-                channels,
-                height,
-                width,
-                (int8_t *)filter,
-                no_of_filter,
-                kernel_h,
-                kernel_w,
-                pad_t,
-                pad_l,
-                pad_b,
-                pad_r,
-                stride_h,
-                stride_w,
-                (int16_t *)bias,
-                (uint8_t *)dst,
-                out_height,
-                out_width,
-                concat,
-                filter_offset,
-                total_filters,
-                reluFused,
-                output_scales,
-                zero_point_dst,
-                scale_size
-            );
-
-        }
-
 #ifdef ZENDNN_ENABLE_LPGEMM
         else {
 
@@ -472,12 +439,12 @@ void zendnnConvolutionLPGEMM(
             stream s(eng);
 
             convolution_direct_lp<int8_t *, int8_t *>(eng,
-                                  (int8_t *)src, no_of_images,
-                                  channels, height, width,
-                                  (int8_t *)filter,
-                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
-                                  (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
-                                  scale_size);
+                    (int8_t *)src, no_of_images,
+                    channels, height, width,
+                    (int8_t *)filter,
+                    no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                    (int32_t *)bias,(int8_t *)dst, out_height, out_width, reluFused, output_scales,
+                    scale_size);
         }
 #endif
     }
@@ -523,12 +490,12 @@ void zendnnConvolutionLPGEMM(
             stream s(eng);
 
             convolution_direct_lp<int32_t *, int8_t *>(eng,
-                                  (int8_t *)src, no_of_images,
-                                  channels, height, width,
-                                  (int8_t *)filter,
-                                  no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
-                                  (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
-                                  scale_size);
+                    (int8_t *)src, no_of_images,
+                    channels, height, width,
+                    (int8_t *)filter,
+                    no_of_filter, kernel_h, kernel_w, pad_t, pad_l, stride_h, stride_w,
+                    (int32_t *)bias,(int32_t *)dst, out_height, out_width, reluFused, output_scales,
+                    scale_size);
         }
 #endif
     }

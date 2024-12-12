@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -51,7 +51,7 @@ struct zendnn_x8s8s32x_matmul_t : public primitive_t {
             return params_;
         }
 
-        int nthr_; // To not exceed the limit in execute used for set up.
+        int nthr_ {1}; // To not exceed the limit in execute used for set up.
 
       private:
         gemm_based::params_t params_;

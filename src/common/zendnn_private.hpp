@@ -66,7 +66,10 @@ struct Key_matmul {
     bool is_aocl_based;
 
     // Default constructor
-    Key_matmul() {}
+    Key_matmul() : transpose_input(false), transpose_weights(false), m(1), k(1),
+        n(1),
+        lda(1), ldb(1), ldc(1), thread_count(1), weights(nullptr),
+        is_aocl_based(false) {}
 
     // Constructor to initialize all member variables
     Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,

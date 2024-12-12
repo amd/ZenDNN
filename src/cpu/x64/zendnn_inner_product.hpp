@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -72,7 +72,7 @@ struct zendnn_inner_product_fwd_t : public primitive_t {
     };
 
     zendnn_inner_product_fwd_t(const pd_t *apd)
-        : primitive_t(apd), postops_in_ip_(false) {}
+        : primitive_t(apd), postops_in_ip_(false), beta_(0) {}
 
     status_t init(engine_t *engine) override {
         const bool has_bias = pd()->with_bias();
@@ -82,7 +82,8 @@ struct zendnn_inner_product_fwd_t : public primitive_t {
             = pd()->attr()->post_ops_.find(primitive_kind::binary) >= 0;
         postops_in_ip_ = has_bias || has_eltwise || has_binary;
 
-        CHECK(safe_ptr_assign(pp_kernel_, inner_product_utils::pp_kernel_t::create(pd(), true)));
+        CHECK(safe_ptr_assign(pp_kernel_, inner_product_utils::pp_kernel_t::create(pd(),
+                              true)));
 
         auto sum_idx = pd()->attr()->post_ops_.find(primitive_kind::sum);
         beta_ = sum_idx >= 0 ? pd()->attr()->post_ops_.entry_[sum_idx].sum.scale

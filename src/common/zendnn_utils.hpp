@@ -74,8 +74,8 @@ AOCL_PARAMS_STORAGE_TYPES getAOCLstoreType(zendnn_data_type_t dt);
 class blis_expert {
 
   public:
-    rntm_t rntm;
-    obj_t a, b, c;
+    rntm_t rntm{};
+    obj_t a{}, b{}, c{};
     obj_t alpha, beta;
     num_t dt;
 
@@ -97,6 +97,12 @@ class blis_expert {
 
         bli_rntm_set_pack_a(supA, &rntm);
         bli_rntm_set_pack_b(supB, &rntm);
+    }
+    ~blis_expert() {
+        bli_obj_free(&alpha);
+        bli_obj_free(&beta);
+        //free(rntm.sba_pool);
+        //free(rntm.pba);
     }
 };
 #endif
@@ -156,9 +162,13 @@ class ZenLibMemoryPool {
         //  used accordingly.
         max_size_enable = zendnn_getenv_int("ZENDNN_LIB_BUF_MAXSIZE_ENABLE", 0);
         //Getting max pool limit from env variable
-        zenLibBufPoolLimit = zendnn_getenv_int("ZENDNN_LIB_BUF_POOL_LIMIT",
-                                               ZEN_LIB_BUF_POOL_LIMIT);
-        zenLibBufPoolLimit = (zenLibBufPoolLimit <=0)?1:zenLibBufPoolLimit;
+        int buf = zendnn_getenv_int("ZENDNN_LIB_BUF_POOL_LIMIT", ZEN_LIB_BUF_POOL_LIMIT);
+        if (buf<=0) {
+            zenLibBufPoolLimit = 1U;
+        }
+        else {
+            zenLibBufPoolLimit = (unsigned int)buf;
+        }
 
         zenLibBufPoolArr = (zenLibBufPool *) malloc(zenLibBufPoolLimit * sizeof(
                                zenLibBufPool));

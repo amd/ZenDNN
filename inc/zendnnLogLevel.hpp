@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2021 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,10 +22,14 @@
 #include <sstream>
 #include <string>
 #include <cassert>
+#include <cstdlib>
 
 #if !defined(LOG_LEVEL_DEFAULT)
     #define LOG_LEVEL_DEFAULT LOG_LEVEL_ERROR
 #endif
+
+using std::string;
+using std::stringstream;
 
 enum LogLevel {
     LOG_LEVEL_DISABLED  = -1,
@@ -39,7 +43,7 @@ enum LogLevel {
 
 #define LOG_LEVEL_VERBOSE(n) (LOG_LEVEL_VERBOSE0 + n)
 
-static inline const std::string logLevelToStr(int logLevel) {
+static inline const string logLevelToStr(int logLevel) {
     if (logLevel == LOG_LEVEL_ERROR) {
         return "E";
     }
@@ -50,7 +54,7 @@ static inline const std::string logLevelToStr(int logLevel) {
         return "I";
     }
     else if (logLevel >= LOG_LEVEL_VERBOSE0) {
-        std::stringstream ss;
+        stringstream ss;
         ss << "V" << logLevel - LOG_LEVEL_VERBOSE0;
         return ss.str();
     }
@@ -59,40 +63,37 @@ static inline const std::string logLevelToStr(int logLevel) {
     }
 }
 
-static inline int zendnnGetLogLevel(const std::string &name) {
+static inline int zendnnGetLogLevel(const string &name) {
 #ifdef _WIN32
     size_t sz = 0;
     static char *logCstr;
     _dupenv_s(&logCstr, &sz, "ZENDNN_LOG_OPTS");
 #else
-    static char *logCstr = std::getenv("ZENDNN_LOG_OPTS");
+    static char *logCstr = getenv("ZENDNN_LOG_OPTS");
 #endif
     if (!logCstr) {
         return LOG_LEVEL_DEFAULT;
     }
-    std::string logStr(logCstr);
+    string logStr(logCstr);
 
-    size_t pos, epos;
-
-    std::string namePlusColon(name + ":");
-    pos = logStr.find(namePlusColon);
-    if (pos == std::string::npos) {
+    string namePlusColon(name + ":");
+    size_t pos = logStr.find(namePlusColon);
+    if (pos == string::npos) {
         namePlusColon = "ALL:";
         pos = logStr.find(namePlusColon);
     }
 
-    if (pos == std::string::npos) {
+    if (pos == string::npos) {
         return LOG_LEVEL_DEFAULT;
     }
 
-    epos = pos+ namePlusColon.size();
-    long x;
+    size_t epos = pos+ namePlusColon.size();
     char *ep;
     if (epos >= logStr.size()) {
         assert(epos == logStr.size());
     }
     else {
-        x = strtol(logStr.c_str() + epos, &ep, 0);
+        long x = strtol(logStr.c_str() + epos, &ep, 0);
         size_t fpos = ep - logStr.c_str();
         if (fpos - epos > 0) {
             return x;

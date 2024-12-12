@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -51,7 +51,7 @@ struct zendnn_bf16_matmul_t : public primitive_t {
             return params_;
         }
 
-        int nthr_; // To not exceed the limit in execute used for set up.
+        int nthr_ {1}; // To not exceed the limit in execute used for set up.
         //bool set_default_formats();
       private:
         status_t check_and_configure_attributes();

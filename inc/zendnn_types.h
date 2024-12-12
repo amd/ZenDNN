@@ -4,7 +4,7 @@
 *******************************************************************************/
 
 /*******************************************************************************
-* Copyright 2016-2022 Intel Corporation
+* Copyright 2016-2025 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -1492,7 +1492,7 @@ typedef enum {
     /// Eltwise: clip
     zendnn_eltwise_clip = 0xff,
     /// Eltwise: clip version 2
-    zendnn_eltwise_clip_v2 = 0x10,
+    zendnn_eltwise_clip_v2 = 0xc,
     /// Eltwise: pow
     zendnn_eltwise_pow = 0x20,
     /// Eltwise: erf-based gelu
@@ -2632,8 +2632,8 @@ typedef struct {
     zendnn_prop_kind_t prop_kind;
 
     /// The kind of attention algorithm.
-	/// Implements cross, self, (un)masked, single/multihead, encoder & decoder side attention variants.
-	/// Possible values:
+    /// Implements cross, self, (un)masked, single/multihead, encoder & decoder side attention variants.
+    /// Possible values:
     ///     #zendnn_multihead_attention, #zendnn_multihead_attention_flash_v1, #zendnn_multihead_attention_flash_v2
     ///     #zendnn_multiquery_attention
     ///     #zendnn_groupedquery_attention
@@ -2711,7 +2711,7 @@ typedef struct zendnn_primitive_desc_iterator *zendnn_primitive_desc_iterator_t;
 
 /// @brief A constant primitive descriptor iterator handle.
 typedef const struct zendnn_primitive_desc_iterator
-        *const_zendnn_primitive_desc_iterator_t;
+    *const_zendnn_primitive_desc_iterator_t;
 
 /// @struct zendnn_primitive_desc
 /// @brief An opaque structure to describe a primitive descriptor.

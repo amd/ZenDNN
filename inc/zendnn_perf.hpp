@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -100,7 +100,7 @@ inline  std::string ToString(event_type v) {
 }
 // single event attribute creation
 perf_event_attr event_attr(event_type ev) {
-    struct perf_event_attr pea;
+    struct perf_event_attr pea {};
     std::memset(&pea, 0, sizeof(struct perf_event_attr));
 
     switch (ev) {
@@ -222,7 +222,6 @@ struct  single_event {
         uint8_t  open:1;
         uint8_t  start:1;
         uint8_t  stop:1;
-        uint8_t  unused:5;
     } status;
 
     // read format struct
@@ -239,16 +238,16 @@ struct  single_event {
     // double _read_counter();
 
     // make default constructor private
-    event_type              ev;
-    int                     sfd1, sfd2;
-    uint64_t                sid1, sid2;
+    event_type              ev{};
+    int                     sfd1 = 0, sfd2 = 0;
+    uint64_t                sid1 = 0, sid2 = 0;
     char buf[4096];
     struct read_format *rf = (struct read_format *) buf;
     // read_format             prev;
     // read_format             curr;
     int32_t                 error_no;
     std::string             error_msg;
-    perf_event_attr         pea_t;
+    perf_event_attr         pea_t{};
 };
 
 single_event::single_event() {
@@ -397,7 +396,7 @@ bool single_event::stop_event() {
     return false;
 }
 double single_event::read_event() {
-    double val1,val2;
+    double val1=0.0, val2=0.0;
     if (status.stop) {
         if (read(sfd1, buf, sizeof(buf))==-1) {
             error_no = errno;
@@ -408,10 +407,14 @@ double single_event::read_event() {
             if (rf->values[itr].id == sid1) {
                 val1 = rf->values[itr].value;
             }
-            else {
-                (rf->values[itr].id == sid2);
+            else if (rf->values[itr].id == sid2) {
                 val2 = rf->values[itr].value;
             }
+        }
+
+        if (val2 == 0.0) {
+            zendnnError(ZENDNN_ALGOLOG, "Val2 can not be Zero");
+            return -1;
         }
 
         if (ev==event_type::IPC) {

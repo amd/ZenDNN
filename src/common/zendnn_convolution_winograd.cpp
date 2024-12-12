@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@
 #include <cmath>
 #include <cassert>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
-#include <cblas.h>
+    #include <cblas.h>
 #else // ZENDNN_USE_AOCL_BLIS_API
-#include "cblas_with_blis_api.hpp"
+    #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <iostream>
 #include <algorithm>
@@ -710,7 +710,7 @@ void winograd_2x2_3x3(
                 if (gemm_output) {
                     free(gemm_output);
                 }
-                assert(0);
+                return;
             }
         }
         else {
@@ -811,14 +811,14 @@ void winograd_2x2_3x3(
     int total = d1+d2+d3+d4;
 
     zendnnVerbose(ZENDNN_ALGOLOG, "winograd_2x2_3x3, no_of_images=", num_images,
-               " channels=", num_channels, " height=", height, " width=", width,
-               " no_of_filter=", num_filters, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_t=", pad_t, " pad_b=", pad_b, " pad_l=", pad_l, " pad_r=", pad_r,
-               " Time=", total, "ms",
-               " Filter transform time =", 100.0f * d1/total, "%",
-               " Input transform time =", 100.0f*d2/total,"%",
-               " Gemm time =", 100.0f*d3/total, "%",
-               " Output transform time =", 100.0f*d4/total,"%");
+                  " channels=", num_channels, " height=", height, " width=", width,
+                  " no_of_filter=", num_filters, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_t=", pad_t, " pad_b=", pad_b, " pad_l=", pad_l, " pad_r=", pad_r,
+                  " Time=", total, "ms",
+                  " Filter transform time =", 100.0f * d1/total, "%",
+                  " Input transform time =", 100.0f*d2/total,"%",
+                  " Gemm time =", 100.0f*d3/total, "%",
+                  " Output transform time =", 100.0f*d4/total,"%");
 
 
     //If ZenMemPool Optimization is enabled(default), update the state of

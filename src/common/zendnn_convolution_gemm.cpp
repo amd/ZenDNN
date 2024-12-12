@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
     #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
+#include <cassert>
 #include "zendnn_convolution_winograd.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn_logging.hpp"
@@ -1970,8 +1971,11 @@ void zenConvolution2Dbase(
     }
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads/blis_num_threads;
+    if (thread_qty == 0U) {
+        thread_qty = 1U;
+    }
     //Need to change this for latency optimization
-    if (thread_qty > images) {
+    if (images>0 && thread_qty > images) {
         thread_qty = images;
     }
 
@@ -1989,10 +1993,10 @@ void zenConvolution2Dbase(
 
     #pragma omp parallel num_threads(thread_qty)
     {
-        unsigned int loopCount = (images%thread_qty)==0 ? images/thread_qty :
-                                 (images/thread_qty)+1;
-        for (int i=0; i<loopCount; i++) {
-            int threadOffset = omp_get_thread_num()+ (i*thread_qty);
+        unsigned long loopCount = (images%thread_qty)==0 ? images/thread_qty :
+                                  (images/thread_qty)+1;
+        for (unsigned long i=0; i<loopCount; i++) {
+            unsigned long threadOffset = omp_get_thread_num()+ (i*thread_qty);
             if (threadOffset >= images) {
                 break;
             }
@@ -2000,7 +2004,7 @@ void zenConvolution2Dbase(
             unsigned long patchInputOffset = ((unsigned long)(kernel_h*kernel_w*channels)*
                                               (out_height*out_width) * omp_get_thread_num());
             unsigned long outputOffset = ((unsigned long)no_of_filter*
-                                          (out_height*out_width)* threadOffset);
+                                          (unsigned long)(out_height*out_width)* threadOffset);
 
             //im2row is more efficient than im2col with NHWC
             //im2rowNHWC(in_layer+inputOffset, channels, height, width, kernel_h, kernel_w,
@@ -2377,6 +2381,9 @@ void zenConvolution2DsmallGemmVer2(
     }
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    if (thread_qty==0) {
+        thread_qty = 1U;
+    }
 
     int height_col =
         out_height;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
@@ -2387,12 +2394,9 @@ void zenConvolution2DsmallGemmVer2(
 #if BLIS_EXPERT
     //Enable Nested parallelism when patch matrix outer loop is not able to use all threads
     //TODO: Need to try with Forced nested parallelism for all sizes, try with various blis_num_threads values
-    if (thread_qty > images) {
+    if (images>0 && thread_qty > images) {
         blis_num_threads = (thread_qty%images)==0?(thread_qty/images):((
                                thread_qty/images)+1);
-    }
-    else {
-        blis_num_threads = thread_qty<1?thread_qty:1;
     }
     thread_qty = (thread_qty%blis_num_threads)==0?(thread_qty/blis_num_threads):
                  (thread_qty/blis_num_threads)+1;
@@ -2501,7 +2505,7 @@ void zenConvolution2DsmallGemmVer2(
                         im2rowNHWCsplit(in_layer+inputOffset, channels, height, width, kernel_h,
                                         kernel_w, pad_t, pad_l, pad_b, pad_r,
                                         stride_h, stride_w, data_col + patchInputOffset + patchHeightOffset,
-                                        gemmRowsLast, gemmRows*k, blis_num_threads);
+                                        gemmRowsLast, gemmRows*(height_colLoop-1), blis_num_threads);
                     unsigned long offset = ((unsigned long)width_col*ldc*gemmRows*k) +
                                            filter_offset;
 #if BLIS_EXPERT
@@ -2833,6 +2837,9 @@ void zenConvolution2DsmallGemmMerge(
     }
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    if (thread_qty<1U) {
+        thread_qty=1U;
+    }
 
     int height_col =
         out_height;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
@@ -2844,6 +2851,8 @@ void zenConvolution2DsmallGemmMerge(
     unsigned int no_of_images = images;
 
     //Merging image in order to make SGEMM M close to N
+    assert(width_col>0 && "width of out_image can not be zero.");
+    assert(height_col>0 && "height of out_image can not be zero.");
     image_merge_count = (no_of_filter/(width_col*height_col))==0?1:
                         (no_of_filter/(width_col*height_col));
     //Merging images beyond 4 degrades the performance
@@ -2855,12 +2864,9 @@ void zenConvolution2DsmallGemmMerge(
 #if BLIS_EXPERT
     //Enable Nested parallelism when patch matrix outer loop is not able to use all threads
     //TODO: Need to try with Forced nested parallelism for all sizes, try with various blis_num_threads values
-    if (thread_qty > no_of_images) {
+    if (no_of_images>0 && thread_qty > no_of_images) {
         blis_num_threads = (thread_qty%no_of_images)==0?(thread_qty/no_of_images):((
                                thread_qty/no_of_images)+1);
-    }
-    else {
-        blis_num_threads = thread_qty<1?thread_qty:1;
     }
     thread_qty = (thread_qty%blis_num_threads)==0?(thread_qty/blis_num_threads):
                  (thread_qty/blis_num_threads)+1;
@@ -2879,7 +2885,6 @@ void zenConvolution2DsmallGemmMerge(
     float *data_col = NULL;
     int zenLibPoolEnable = zenEnvObj.zenLibMemPoolEnable;
     ZenLibMemoryPool *zenLibPoolBuffer;
-
     if ((kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
             out_width == width)) {
         data_col = (float *)in_layer;
@@ -3249,8 +3254,8 @@ void zenConvolution2DsmallGemmSplit(
     const int stride_w,
     const float *bias,
     float *out_layer,
-    const int out_height,
-    const int out_width,
+    const int output_height,
+    const int output_width,
     const bool relu,
     const bool sum_fused,
     const float *scale,
@@ -3276,8 +3281,11 @@ void zenConvolution2DsmallGemmSplit(
     }
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    int height_col = out_height;
-    int width_col = out_width;
+    if (thread_qty<1U) {
+        thread_qty=1U;
+    }
+    const int height_col = output_height;
+    const int width_col = output_width;
 
     //Merging image tranformation height in order to make SGEMM M close to N
     //int merge_height1 = ((no_of_filter/height_col)==0?1:(no_of_filter/height_col));
@@ -3295,6 +3303,8 @@ void zenConvolution2DsmallGemmSplit(
     //TODO: Test with fp32 path for perf improvement with CNN models, expected
     //  performance gains(10-40%) for fist later but no luck,
     //  However no regression with fp32 patch on ROME.
+    assert(width_col>0 && "width of out_image can not be zero.");
+    assert(height_col>0 && "height of out_image can not be zero.");
     if (zendnn_getenv_int("ZENDNN_INT8_SUPPORT") == 1) {
         merge_height1 = (BLIS_SMALL_MATRIX_MILAN/height_col)?
                         (BLIS_SMALL_MATRIX_MILAN/height_col):1;
@@ -3354,7 +3364,7 @@ void zenConvolution2DsmallGemmSplit(
                                thread_qty/images)+1);
     }
     else {
-        blis_num_threads = thread_qty<1?thread_qty:1;
+        blis_num_threads = thread_qty<1U?1U:thread_qty;
     }
     thread_qty = (thread_qty%blis_num_threads)==0?(thread_qty/blis_num_threads):
                  (thread_qty/blis_num_threads)+1;
@@ -3397,12 +3407,12 @@ void zenConvolution2DsmallGemmSplit(
             unsigned long patchInputOffset = (((unsigned long)kernel_h*kernel_w*channels*
                                                width_col*merge_height) * omp_get_thread_num());
 
-            if ((kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
-                    out_width == width)) {
+            if ((kernel_h == 1 && kernel_w == 1 &&  output_height == height &&
+                    output_width == width)) {
                 patchInputOffset = inputOffset;
             }
             unsigned long outputOffset = ((unsigned long)ldc*
-                                          (out_height*out_width)* threadOffset);
+                                          (output_height*output_width)* threadOffset);
 
             float *data_col_tmp = data_col + patchInputOffset;
             unsigned int data_col_offset = 0;
@@ -3628,9 +3638,9 @@ void zenConvolution2DsmallGemmSplit(
                                 out_layer + outputOffset + offset, ldc);
 #endif
 
-                    unsigned biasOffset = outputOffset + offset;
-                    zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, merge_height,
-                               no_of_filter, ldc,
+                    unsigned long biasOffset = outputOffset + offset;
+                    zenPostOps(zenEnvObj, out_layer, elementwise_input, width_col,
+                               (const int)merge_height, no_of_filter, ldc,
                                biasOffset, bias,
                                relu, 0, scale, blis_num_threads);
                     merge_count = 0;
@@ -3933,8 +3943,8 @@ void zenConvolution2DlatencyVer3(
     const int stride_w,
     const float *bias,
     float *out_layer,
-    const int out_height,
-    const int out_width,
+    const int output_height,
+    const int output_width,
     const bool relu,
     const float *scale,
     const float *elementwise_input,
@@ -3964,8 +3974,8 @@ void zenConvolution2DlatencyVer3(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
     int height_col =
-        out_height;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
-    int width_col = out_width;//(width + pad_h + pad_w - kernel_w) / stride_w + 1;
+        output_height;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
+    int width_col = output_width;//(width + pad_h + pad_w - kernel_w) / stride_w + 1;
 
     int blis_num_threads = 1;
 #if BLIS_EXPERT
@@ -3983,7 +3993,7 @@ void zenConvolution2DlatencyVer3(
 
     int threads = height_col<thread_qty?height_col:thread_qty;
     unsigned long data_col_size = ((unsigned long)(kernel_h*kernel_w*channels)*
-                                   (out_width)*sizeof(float)*threads);
+                                   (output_width)*sizeof(float)*threads);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
     float *data_col = (float *)zendnn_aligned_alloc(ALIGNED_OFFSET, data_col_size);
@@ -4086,8 +4096,8 @@ void zenConvolution2DlatencyVer4(
     const int stride_w,
     const float *bias,
     float *out_layer,
-    const int out_height,
-    const int out_width,
+    const int output_height_,
+    const int output_width_,
     const bool relu,
     const bool sum_fused,
     const float *scale,
@@ -4126,8 +4136,8 @@ void zenConvolution2DlatencyVer4(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
     int height_col =
-        out_height;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
-    int width_col = out_width;//(width + pad_h + pad_w - kernel_w) / stride_w + 1;
+        output_height_;//(height + pad_h + pad_w - kernel_h) / stride_h + 1;
+    const int width_col = output_width_;//(width + pad_h + pad_w - kernel_w) / stride_w + 1;
 
     int blis_num_threads = 1;
 #if BLIS_EXPERT
@@ -4149,15 +4159,15 @@ void zenConvolution2DlatencyVer4(
     unsigned int height_alloc_count = (height_col%threads==0)?1:2;
 
     unsigned long data_col_size = ((unsigned long)(kernel_h*kernel_w*channels)*
-                                   (out_width)*height_alloc_count*sizeof(float)*threads);
+                                   (output_width_)*height_alloc_count*sizeof(float)*threads);
     data_col_size = (data_col_size%ALIGNED_OFFSET == 0) ?  data_col_size :
                     (data_col_size/ALIGNED_OFFSET)*ALIGNED_OFFSET + (ALIGNED_OFFSET);
     float *data_col = NULL;
     int zenLibPoolEnable = zenEnvObj.zenLibMemPoolEnable;
     ZenLibMemoryPool *zenLibPoolBuffer;
 
-    if ((kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
-            out_width == width)) {
+    if ((kernel_h == 1 && kernel_w == 1 &&  output_height_ == height &&
+            output_width_ == width)) {
         data_col = (float *)in_layer;
     }
     else {
@@ -4230,8 +4240,8 @@ void zenConvolution2DlatencyVer4(
             unsigned long patchHeightOffset = (unsigned long)threadOffset
                                               *width_col*(kernel_h*kernel_w*channels);
 
-            if (!(kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
-                    out_width == width)) {
+            if (!(kernel_h == 1 && kernel_w == 1 &&  output_height_ == height &&
+                    output_width_ == width)) {
                 patchHeightOffset = (unsigned long)omp_get_thread_num()
                                     *width_col*height_alloc_count*(kernel_h*kernel_w*channels);
                 im2rowNHWCsplit(in_layer, channels, height, width, kernel_h, kernel_w, pad_t,
@@ -4264,14 +4274,14 @@ void zenConvolution2DlatencyVer4(
 #endif
 
             unsigned long biasOffset = outputOffset;
-            zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col, height_count,
-                       no_of_filter, ldc,
+            zenPostOps(zenEnvObj, out_layer, elementwise_input,width_col,
+                       (const int)height_count, no_of_filter, ldc,
                        biasOffset, bias,
                        relu, 0, scale, inner_threads);
         }
     }
-    if (!(kernel_h == 1 && kernel_w == 1 &&  out_height == height &&
-            out_width == width)) {
+    if (!(kernel_h == 1 && kernel_w == 1 &&  output_height_ == height &&
+            output_width_ == width)) {
         //If ZenMemPool Optimization is enabled(default), update the state of
         //  Memory pool based on input_array address
         if (zenLibPoolEnable) {

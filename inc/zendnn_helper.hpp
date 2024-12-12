@@ -47,7 +47,18 @@ namespace zendnn {
 /// return actual value.
 inline int zendnn_getenv_int(const char *name, int default_value = 0) {
     char *val = std::getenv(name);
-    return val == NULL ? default_value : atoi(val);
+    if (val==NULL) {
+        return (default_value);
+    }
+    try {
+        int x = std::stoi(val);
+        return x;
+    }
+    //Out_of_range Error, and Not a number error
+    catch (...) {
+        return default_value;
+    }
+    //return val == NULL ? default_value : atoi(val);
 }
 
 /// Read an float from the environment variable
@@ -55,7 +66,17 @@ inline int zendnn_getenv_int(const char *name, int default_value = 0) {
 /// return actual value.
 inline float zendnn_getenv_float(const char *name, float default_value = 0.0f) {
     char *val = std::getenv(name);
-    return val == NULL ? default_value : (float)atof(val);
+    if (val==NULL) {
+        return default_value;
+    }
+    try {
+        float x = std::stof(val);
+        return x;
+    }
+    catch (...) {
+        return default_value;
+    }
+    //return val == NULL ? default_value : (float)atof(val);
 }
 
 /// Read an string from the environment variable
@@ -211,8 +232,7 @@ class zendnnEnv {
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_JIT_INT8)
 
         zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
-        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 ||
-                zenINT8GEMMalgo <zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8) {
             zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
@@ -231,14 +251,12 @@ class zendnnEnv {
         //Enabling different threading implementation.
         zenEBThreadAlgo = zendnn_getenv_int("ZENDNN_EB_THREAD_TYPE",
                                             zenEBThreadType::BATCH_THREADED);
-        if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED ||
-                zenEBThreadAlgo<zenEBThreadType::AUTO_ALGO) {
+        if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED) {
             zenEBThreadAlgo = zenEBThreadType::TABLE_THREADED;
         }
         zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
                                       zenEBAlgoType::EB_OP_ZENDNN);
-        if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN ||
-                zenEBAlgo<zenEBAlgoType::EB_OP_FBGEMM) {
+        if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN) {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
         }
 

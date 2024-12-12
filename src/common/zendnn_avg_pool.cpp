@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -45,17 +45,18 @@ void avg_pooling_v1(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
 
     zendnnVerbose(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
-               number_of_images,
-               " channels=", number_of_channel, " height=", height, " width=", width,
-               " kernel_h=", kernel_height, " kernel_w=", kernel_width,
-               " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
-               " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
-               " stride_h=", stride_height, " stride_w=", stride_width);
+                  number_of_images,
+                  " channels=", number_of_channel, " height=", height, " width=", width,
+                  " kernel_h=", kernel_height, " kernel_w=", kernel_width,
+                  " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
+                  " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
+                  " stride_h=", stride_height, " stride_w=", stride_width);
 
     // TensorFlow does not support NCHW data format
     // TODO: Validate this C++ API (NCHW) using MKLDNN and make changes accordingly
     if (data_format == DATA_FORMAT_NCHW) {
-        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NCHW [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG,
+                      "zendnn avgpool DATA_FORMAT_NCHW [zendnn avg_pool]");
         int out_index = 0;
         int kernel_HxW = kernel_height*kernel_width;
         for (int n=0; n<number_of_images; n++) {
@@ -87,7 +88,8 @@ void avg_pooling_v1(
         }
     }
     else if (data_format == DATA_FORMAT_NHWC) { // NHWC
-        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG,
+                      "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
 
         int height_col = (height + padding_height_top + padding_height_bottom -
                           kernel_height) / stride_height + 1;
@@ -160,6 +162,9 @@ void avg_pooling_v1(
                                     }
                                 }
                             }
+
+                            avg_count = avg_count==0? 1 : avg_count;
+
                             #pragma omp simd
                             for (int k=0; k<number_of_channel; k++) {
                                 tmp_output[k] = tmp_output[k]/avg_count;
@@ -206,6 +211,10 @@ void avg_pooling_v1(
                             }
                         }
                     }
+
+                    avg_count = avg_count==0? 1 : avg_count;
+
+
                     #pragma omp simd
                     for (int k=0; k<number_of_channel; k++) {
                         tmp_output[k] = tmp_output[k]/avg_count;
@@ -268,11 +277,11 @@ void avg_pooling(
     elapsed = timedifference_msec(start, end);
 #endif
     zendnnVerbose(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
-               number_of_images,
-               " channels=", number_of_channel, " height=", height, " width=", width,
-               " kernel_h=", kernel_height, " kernel_w=", kernel_width,
-               " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
-               " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
-               " stride_h=", stride_height, " stride_w=", stride_width,
-               " Time=", elapsed, "ms");
+                  number_of_images,
+                  " channels=", number_of_channel, " height=", height, " width=", width,
+                  " kernel_h=", kernel_height, " kernel_w=", kernel_width,
+                  " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
+                  " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
+                  " stride_h=", stride_height, " stride_w=", stride_width,
+                  " Time=", elapsed, "ms");
 }

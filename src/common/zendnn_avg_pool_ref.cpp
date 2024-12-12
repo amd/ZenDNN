@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -45,16 +45,17 @@ void avgPoolingRefV1(
     unsigned int thread_qty = 1;//zenEnvObj.omp_num_threads;
 
     zendnnVerbose(ZENDNN_ALGOLOG, "ZENDNN AvgPool profile, no_of_images=",
-               number_of_images,
-               " channels=", number_of_channel, " height=", height, " width=", width,
-               " kernel_h=", kernel_height, " kernel_w=", kernel_width,
-               " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
-               " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
-               " stride_h=", stride_height, " stride_w=", stride_width);
+                  number_of_images,
+                  " channels=", number_of_channel, " height=", height, " width=", width,
+                  " kernel_h=", kernel_height, " kernel_w=", kernel_width,
+                  " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
+                  " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
+                  " stride_h=", stride_height, " stride_w=", stride_width);
 
     // TensorFlow does not support NCHW data format
     if (data_format == DATA_FORMAT_NHWC) { // NHWC
-        zendnnVerbose(ZENDNN_ALGOLOG, "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
+        zendnnVerbose(ZENDNN_ALGOLOG,
+                      "zendnn avgpool DATA_FORMAT_NHWC [zendnn avg_pool]");
 
         int height_col = (height + padding_height_top + padding_height_bottom -
                           kernel_height) / stride_height + 1;
@@ -123,6 +124,9 @@ void avgPoolingRefV1(
                                     }
                                 }
                             }
+
+                            avg_count = avg_count==0? 1 : avg_count;
+
                             for (int k=0; k<number_of_channel; k++) {
                                 tmp_output[k] = tmp_output[k]/avg_count;
                             }
@@ -165,6 +169,9 @@ void avgPoolingRefV1(
                             }
                         }
                     }
+
+                    avg_count = avg_count==0? 1 : avg_count;
+
                     for (int k=0; k<number_of_channel; k++) {
                         tmp_output[k] = tmp_output[k]/avg_count;
                     }
@@ -203,17 +210,17 @@ void avgPoolingRef(
     gettimeofday(&start, 0);
 #endif
     avgPoolingRefV1(zenEnvObj, input, number_of_images, number_of_channel, height,
-                   width, kernel_height,
-                   kernel_width,
-                   stride_height,
-                   stride_width,
-                   padding_height_top,
-                   padding_height_bottom,
-                   padding_width_left,
-                   padding_width_right,
-                   output,
-                   data_format // 1 for NCHW and 0 for NHWC
-                  );
+                    width, kernel_height,
+                    kernel_width,
+                    stride_height,
+                    stride_width,
+                    padding_height_top,
+                    padding_height_bottom,
+                    padding_width_left,
+                    padding_width_right,
+                    output,
+                    data_format // 1 for NCHW and 0 for NHWC
+                   );
 
     float elapsed;
 #ifdef _WIN32
@@ -225,11 +232,11 @@ void avgPoolingRef(
     elapsed = timedifference_msec(start, end);
 #endif
     zendnnVerbose(ZENDNN_PROFLOG, "ZENDNN AvgPool profile, no_of_images=",
-               number_of_images,
-               " channels=", number_of_channel, " height=", height, " width=", width,
-               " kernel_h=", kernel_height, " kernel_w=", kernel_width,
-               " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
-               " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
-               " stride_h=", stride_height, " stride_w=", stride_width,
-               " Time=", elapsed, "ms");
+                  number_of_images,
+                  " channels=", number_of_channel, " height=", height, " width=", width,
+                  " kernel_h=", kernel_height, " kernel_w=", kernel_width,
+                  " pad_h_t=", padding_height_top, " pad_h_b=", padding_height_bottom,
+                  " pad_w_l=", padding_width_left, " pad_w_r=",padding_width_right,
+                  " stride_h=", stride_height, " stride_w=", stride_width,
+                  " Time=", elapsed, "ms");
 }

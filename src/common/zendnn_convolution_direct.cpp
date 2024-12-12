@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@
 #include "common/zendnn_private.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
-#include <cblas.h>
+    #include <cblas.h>
 #else  // ZENDNN_USE_AOCL_BLIS_API
-#include "cblas_with_blis_api.hpp"
+    #include "cblas_with_blis_api.hpp"
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include "zendnn_logging.hpp"
@@ -62,12 +62,12 @@ void zenConvolution2D_direct(
 ) {
 
     zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_direct, no_of_images=",
-               no_of_images,
-               " channels=", channels, " height=", height, " width=", width,
-               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_t=", pad_t, " pad_l=", pad_l,
-               " pad_b=", pad_b, " pad_r=", pad_r,
-               " stride_h=", stride_h, " stride_w=",stride_w);
+                  no_of_images,
+                  " channels=", channels, " height=", height, " width=", width,
+                  " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_t=", pad_t, " pad_l=", pad_l,
+                  " pad_b=", pad_b, " pad_r=", pad_r,
+                  " stride_h=", stride_h, " stride_w=",stride_w);
 
     printf(" CblasRowMajor CblasTrans M, N, LDA \t%d\t%d\t%d\n",
            channels*kernel_h*kernel_w, no_of_filter, no_of_filter);
@@ -209,12 +209,12 @@ void zenConvolution2D_directVer2(
 ) {
 
     zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_directVer2, no_of_images=",
-               no_of_images,
-               " channels=", channels, " height=", height, " width=", width,
-               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_t=", pad_t, " pad_l=", pad_l,
-               " pad_b=", pad_b, " pad_r=", pad_r,
-               " stride_h=", stride_h, " stride_w=",stride_w);
+                  no_of_images,
+                  " channels=", channels, " height=", height, " width=", width,
+                  " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_t=", pad_t, " pad_l=", pad_l,
+                  " pad_b=", pad_b, " pad_r=", pad_r,
+                  " stride_h=", stride_h, " stride_w=",stride_w);
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //Need to change this for latency optimization
@@ -230,6 +230,7 @@ void zenConvolution2D_directVer2(
     if (data_col == NULL) {
         zendnnError(ZENDNN_ALGOLOG,
                     "zenConvolution2D_directVer2 Memory Error while allocating patch matrix");
+        free(data_col);
         return;
     }
 
@@ -322,7 +323,7 @@ void zenConvolution2D_directVer2(
     }
     //free(directOut);
     free(data_col);
-
+    free(filterNew);
 }
 
 
@@ -358,12 +359,12 @@ void zenConvolution2D_directVer3(
 ) {
 
     zendnnVerbose(ZENDNN_PROFLOG, "zenConvolution2D_directiVer3, no_of_images=",
-               no_of_images,
-               " channels=", channels, " height=", height, " width=", width,
-               " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
-               " pad_t=", pad_t, " pad_l=", pad_l,
-               " pad_b=", pad_b, " pad_r=", pad_r,
-               " stride_h=", stride_h, " stride_w=",stride_w);
+                  no_of_images,
+                  " channels=", channels, " height=", height, " width=", width,
+                  " no_of_filter=", no_of_filter, " kernel_h=", kernel_h, " kernel_w=", kernel_w,
+                  " pad_t=", pad_t, " pad_l=", pad_l,
+                  " pad_b=", pad_b, " pad_r=", pad_r,
+                  " stride_h=", stride_h, " stride_w=",stride_w);
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //Need to change this for latency optimization

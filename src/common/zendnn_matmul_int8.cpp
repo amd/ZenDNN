@@ -55,15 +55,25 @@ void mul_add_quantize_matrix(float *dst_data, char *C_Array, float dst_scale,
                              int N, const int32_t zero_point_dst, int dst_type, T *mul_buf,
                              T *add_buf, int buffer_type) {
     float result = 0.0f;
-    #pragma omp parallel for
-    for (int idx = 0; idx < M * N; idx++) {
-        result = (((dst_data[idx] * zendnn::impl::cpu::io::load_float_value((
-                        zendnn::impl::data_type_t)buffer_type, (void *)mul_buf,
-                    idx)) + zendnn::impl::cpu::io::load_float_value((zendnn::impl::data_type_t)
-                            buffer_type, (void *)add_buf, idx))* dst_scale) +
-                 zero_point_dst;
-        zendnn::impl::cpu::io::store_float_value((zendnn::impl::data_type_t)dst_type,
-                result, C_Array, idx);
+    if (mul_buf == nullptr || add_buf == nullptr) {
+        #pragma omp parallel for
+        for (int idx = 0; idx < M * N; idx++) {
+            result = dst_data[idx] * dst_scale + zero_point_dst;
+            zendnn::impl::cpu::io::store_float_value((zendnn::impl::data_type_t)dst_type,
+                    result, C_Array, idx);
+        }
+    }
+    else {
+        #pragma omp parallel for
+        for (int idx = 0; idx < M * N; idx++) {
+            result = (((dst_data[idx] * zendnn::impl::cpu::io::load_float_value((
+                            zendnn::impl::data_type_t)buffer_type, (void *)mul_buf,
+                        idx)) + zendnn::impl::cpu::io::load_float_value((zendnn::impl::data_type_t)
+                                buffer_type, (void *)add_buf, idx))* dst_scale) +
+                     zero_point_dst;
+            zendnn::impl::cpu::io::store_float_value((zendnn::impl::data_type_t)dst_type,
+                    result, C_Array, idx);
+        }
     }
 }
 

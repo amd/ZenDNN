@@ -56,9 +56,16 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
     // Order of postops: BIAS -> RELU
     if (po.len() + postop_count > 0) {
         post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        if (post_ops == NULL) {
+            return NULL;
+        }
         dim_t max_post_ops_seq_length = po.len() + postop_count;
         post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
                                sizeof(AOCL_POST_OP_TYPE));
+        if (post_ops->seq_vector == NULL) {
+            free(post_ops);
+            return NULL;
+        }
 
         // Iterate through each postop, check and add it if needed.
         int post_op_i = 0;
@@ -81,6 +88,11 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
             post_ops->seq_vector[post_op_i++] = BIAS;
             post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
                                  aocl_post_op_bias));
+            if (post_ops->bias == NULL) {
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return NULL;
+            }
             if (bias_type == zendnn_bf16) {
                 (post_ops->bias + bias_index)->bias = (int16_t *)bias;
                 (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
@@ -93,7 +105,6 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
                 zendnnError(ZENDNN_ALGOLOG,
                             "Check Bias data type, only f32 and bf16 are supported");
             }
-            bias_index++;
         }
 
         //Scale post-op
@@ -101,6 +112,14 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
             post_ops->sum = (aocl_post_op_sum *) malloc(sizeof(
                                 aocl_post_op_sum));
 
+            if (post_ops->sum == NULL) {
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return NULL;
+            }
             post_ops->seq_vector[post_op_i++] = SCALE;
             (post_ops->sum + scale_index)->is_power_of_2 = FALSE;
             (post_ops->sum + scale_index)->scale_factor = NULL;
@@ -146,21 +165,64 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
         if (mem_count[0] > 0) {
             post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
                                     aocl_post_op_eltwise)*mem_count[0]);
+            if (post_ops->eltwise == NULL) {
+                if (post_ops->sum != NULL) {
+                    free(post_ops->sum);
+                }
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return NULL;
+            }
         }
         if (mem_count[1] > 0) {
             post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
                                        aocl_post_op_matrix_add)*mem_count[1]);
+            if (post_ops->matrix_add == NULL) {
+                if (post_ops->eltwise != NULL) {
+                    free(post_ops->eltwise);
+                }
+                if (post_ops->sum != NULL) {
+                    free(post_ops->sum);
+                }
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return NULL;
+            }
         }
         if (mem_count[2] > 0) {
             post_ops->matrix_mul = (aocl_post_op_matrix_mul *) malloc(sizeof(
                                        aocl_post_op_matrix_mul)*mem_count[2]);
+            if (post_ops->matrix_mul == NULL) {
+                if (post_ops->matrix_add != NULL) {
+                    free(post_ops->matrix_add);
+                }
+                if (post_ops->eltwise != NULL) {
+                    free(post_ops->eltwise);
+                }
+                if (post_ops->sum != NULL) {
+                    free(post_ops->sum);
+                }
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return NULL;
+            }
         }
 
         //Add eltwise and binary post-ops in given sequence
         for (auto idx = 0; idx < po.len(); ++idx) {
 
             const auto po_type = po.entry_[idx];
-            if (po_type.kind == impl::primitive_kind::eltwise) {
+            if (po_type.kind == impl::primitive_kind::eltwise &&
+                    post_ops->eltwise != NULL) {
 
                 if (po_type.eltwise.alg == impl::alg_kind::eltwise_relu) {
                     // Add ReLU postop
@@ -220,7 +282,8 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
                 }
             }
             else if (po_type.kind == impl::primitive_kind::binary) {
-                if (po_type.binary.alg == impl::alg_kind::binary_add) {
+                if (po_type.binary.alg == impl::alg_kind::binary_add &&
+                        post_ops->matrix_add != NULL) {
                     post_ops->seq_vector[post_op_i++] = MATRIX_ADD;
                     (post_ops->matrix_add + add_index)->ldm = n;
                     auto binary_po = CTX_IN_MEM(const void *,
@@ -243,7 +306,8 @@ aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
                     }
                     add_index++;
                 }
-                else if (po_type.binary.alg == impl::alg_kind::binary_mul) {
+                else if (po_type.binary.alg == impl::alg_kind::binary_mul &&
+                         post_ops->matrix_mul != NULL) {
                     post_ops->seq_vector[post_op_i++] = MATRIX_MUL;
                     (post_ops->matrix_mul + mul_index)->ldm = n;
                     auto binary_po = CTX_IN_MEM(const void *,
@@ -787,6 +851,9 @@ int aocl_woq_bf16(
                    &dummy_scale);
 
         //Add pre-op for S4 API
+        if (post_ops == NULL) {
+            return 0;
+        }
         post_ops->pre_ops = NULL;
         post_ops->pre_ops = (aocl_pre_op *)malloc(sizeof(aocl_pre_op));
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
@@ -831,6 +898,9 @@ int aocl_woq_bf16(
                    NULL/*sum with beta*/, postop_count,
                    bias !=NULL ? &alpha : &val, &dummy_scale);
         //Add pre-op for S4 API
+        if (post_ops == NULL) {
+            return 0;
+        }
         post_ops->pre_ops = NULL;
         post_ops->pre_ops = (aocl_pre_op *)malloc(sizeof(aocl_pre_op));
         (post_ops->pre_ops)->b_zp = (aocl_pre_op_zp *)malloc(sizeof(aocl_pre_op_zp));
@@ -869,8 +939,8 @@ int aocl_woq_bf16(
                                 post_ops);
     }
     // Free memory for postops.
-    if (post_ops) {
-        if (bias != NULL) {
+    if (post_ops != NULL) {
+        if (post_ops->bias != NULL) {
             post_ops->bias->bias=NULL;
             free(post_ops->bias);
         }
