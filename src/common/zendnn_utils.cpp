@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
                                        impl::int4_extract_t::high_half);
         if (weight_idx < k*n) {
             if (scale_size == 1) {
-                wei_f32[weight_idx] = scales[0] * ((float)(t1));
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * ((float)(t1));
             }
             else {
                 idx_buff = (weight_idx / (group_size * n)) * n;
@@ -68,7 +68,7 @@ int cvt_int4_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
         weight_idx++;
         if (weight_idx < k*n) {
             if (scale_size == 1) {
-                wei_f32[weight_idx] = scales[0] * ((float)(t2));
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * ((float)(t2));
             }
             else {
                 idx_buff = (weight_idx / (group_size * n)) * n;
@@ -90,7 +90,7 @@ int cvt_int8_to_bf16(const int8_t *weights, int16_t *wei_bf16, int k, int n,
     #pragma omp parallel for
     for (int i=0; i<k*n; i++) {
         if (scale_size == 1) {
-            wei_f32[i] = scales[0] * (weights[i]);
+            wei_f32[i] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * (weights[i]);
         }
         else {
             int idx_buff = 0;
@@ -119,7 +119,7 @@ int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
                                        impl::int4_extract_t::high_half);
         if (weight_idx < k*n) {
             if (scale_size == 1) {
-                wei_f32[weight_idx] = scales[0] * ((float)(t1));
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * ((float)(t1));
             }
             else {
                 idx_buff = (weight_idx / (group_size * n)) * n;
@@ -131,7 +131,7 @@ int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
         weight_idx++;
         if (weight_idx < k*n) {
             if (scale_size == 1) {
-                wei_f32[weight_idx] = scales[0] * ((float)(t2));
+                wei_f32[weight_idx] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * ((float)(t2));
             }
             else {
                 idx_buff = (weight_idx / (group_size * n)) * n;
@@ -150,7 +150,7 @@ int cvt_int8_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
     #pragma omp parallel for
     for (int i=0; i<k*n; i++) {
         if (scale_size == 1) {
-            wei_f32[i] = scales[0] * (weights[i]);
+            wei_f32[i] = zendnn::impl::cpu::io::load_float_value(scale_dt, scales, 0) * (weights[i]);
         }
         else {
             int idx_buff = 0;

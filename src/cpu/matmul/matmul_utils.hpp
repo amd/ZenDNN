@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -32,13 +32,7 @@ namespace cpu {
 namespace matmul {
 
 //Checks datatype for post-ops, bias, and dst
-inline bool check_dt_(post_ops_t po_ops, int dst_type, int bias_type){
-    //For AOCL APIs
-    // if bias exist
-    // and bias_dt == dst_dt
-    if(bias_type && bias_type != dst_type)
-        return false;
-
+inline bool check_dt_(post_ops_t po_ops, int dst_type){
     //Check buffer based post-ops data type
     for (auto idx = 0; idx < po_ops.len(); ++idx) {
         const auto &e = po_ops.entry_[idx];

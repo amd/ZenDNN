@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -45,9 +45,7 @@
                             data_type::bf16); \
         if (!ok) return status::invalid_arguments; \
         if (scales_des.nelems() == 1) { \
-            const float s = zendnn::impl::cpu::io::load_float_value( \
-                        scales_des.data_type(), woqscales, 0); \
-            utils::array_set(CONCAT2(woqscales, _buf16), s, 16); \
+            utils::array_set(CONCAT2(woqscales, _buf16), woqscales[0], 16); \
             woqscales = CONCAT2(woqscales, _buf16); \
         } \
     } \
