@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -285,7 +285,10 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int sum_idx = po.find(primitive_kind::sum);
     float do_sum = sum_idx >= 0 ? po.entry_[sum_idx].sum.scale: 0.0f;
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
-    if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {
+
+    //TODO: Seperate Implementation of Decision Tree for INT8 (MATMUL_DT_INT8)
+    if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8 ||
+            algo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
         auto_tuner = 1;
         algo = auto_compute_matmul_int8(zenEnvObj, src_type, dst_type, bias_type, 0,
                                         strcmp(transA,

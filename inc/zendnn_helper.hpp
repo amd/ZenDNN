@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -68,7 +68,8 @@ inline std::string zendnn_getenv_string(const char *name,
 }
 
 enum zenMatMulAlgoType {
-    MATMUL_AUTO = 0,
+    MATMUL_AUTO_FP32 = -1,
+    MATMUL_DT_FP32 = 0,
     MATMUL_BLIS_GEMM1 = 1,
     MATMUL_BLIS_GEMM2 = 2,
     MATMUL_ZENDNN_GEMM1 = 3,
@@ -78,7 +79,8 @@ enum zenMatMulAlgoType {
 };
 
 enum zenBF16MatMulAlgoType {
-    MATMUL_AUTO_BF16 = 0,
+    MATMUL_AUTO_BF16 = -1,
+    MATMUL_DT_BF16 = 0,
     MATMUL_AOCL_GEMM = 1,
     MATMUL_BLOCKED_JIT = 2,
     MATMUL_JIT = 3,
@@ -88,7 +90,8 @@ enum zenBF16MatMulAlgoType {
 };
 
 enum zenINT8MatMulAlgoType {
-    MATMUL_AUTO_INT8 = 0,
+    MATMUL_AUTO_INT8 = -1,
+    MATMUL_DT_INT8 = 0,
     MATMUL_AOCL_GEMM_INT8 = 1,
     MATMUL_BLOCKED_JIT_INT8 = 2,
     MATMUL_JIT_INT8 = 3,

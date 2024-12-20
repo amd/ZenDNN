@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -61,8 +61,8 @@
 #include "zendnn.hpp"
 
 #define NUM_BF16_ALGO 3
-#define MATMUL_SKIP_ITER_BF16 10
-#define MATMUL_EVALUATE_ITER_BF16 10
+#define MATMUL_SKIP_ITER_BF16 3
+#define MATMUL_EVALUATE_ITER_BF16 3
 
 using namespace zendnn;
 using namespace zendnn::impl::cpu;
@@ -1380,7 +1380,7 @@ int auto_compute_matmul_bf16(
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
     unsigned int map_type =
-        zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",0);
+        zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
     key_obj_auto.weights =
         map_type == 1 ? weights : NULL;
 
@@ -1441,8 +1441,9 @@ int auto_compute_matmul_bf16(
             matmul_kernel_map_bf16_helper[key_obj_auto] = {1, cur_algo_time, zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM}; // {iter_count, time, algo}
             matmul_kernel_map_bf16[key_obj_auto] = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
         }
-        //If key found then increment the iter_count and run aocl algo.
+        //If key found then increment the iter_count and run next algo.
         else {
+            zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%NUM_BF16_ALGO) +1;
             std::get<0>(found_obj->second) += 1;
             matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_type, Layout,
                                 transpose_input,
@@ -1709,14 +1710,13 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
     }
     else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
         auto_tuner = true;
-        /*
         algo_type = auto_compute_matmul_bf16(ctx, zenEnvObj, dst_type, bias_dt,Layout,
-                                             strcmp(transA, "N"),strcmp(transB, "N"),
+                                             transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                              M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
                                              pd()->attr()->post_ops_, has_binary_index, geluType, beta,
                                              dst, ldc, output_scales, scale_size, is_weights_const);
-        */
-
+    }
+    else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) {
         // If M >=64, N and K >=2048 AOCL BLIS kernels gives optimal performance.
         // This is based on heuristic with different models and difference BS
         if (M >= 64) {

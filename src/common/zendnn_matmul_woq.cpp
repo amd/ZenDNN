@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -1053,8 +1053,10 @@ int matmul_woq_wrapper(
     //all are available
     int use_jit = (bias && alpha != 1.0 && beta != 0.0);
 
+    //TODO: Seperate Implementation of Autotuner for WOQ(MATMUL_AUTO_BF16)
     if (src_type == zendnn_bf16) {
-        if (zenEnvObj.zenBF16GEMMalgo == 0) {
+        if (zenEnvObj.zenBF16GEMMalgo == MATMUL_AUTO_BF16 ||
+                zenEnvObj.zenBF16GEMMalgo == MATMUL_DT_BF16) {
             // For Higher thread count(i.e >128) AOCL S4 Kernels gives optimal performance
             if (zenEnvObj.omp_num_threads > 128) {
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;

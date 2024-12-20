@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -503,7 +503,9 @@ void zenMatMul_gemm_wrapper(
 #endif
 
     //Experimental version for auto tuner
-    if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO) {
+    //TODO: Seperate Implementation of Decision Tree for FP32 (MATMUL_DT_FP32)
+    if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO_FP32 ||
+            zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_DT_FP32) {
         auto_tuner=true;
 
         if (false == Layout) { //CblasColMajor
