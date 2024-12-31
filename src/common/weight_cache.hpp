@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -22,12 +22,39 @@
 #ifndef COMMON_WEIGHT_CACHE_HPP
 #define COMMON_WEIGHT_CACHE_HPP
 
+#include "common/zendnn_private.hpp"
 #include <zendnn.hpp>
 #include <unordered_map>
 #include <memory>
 #include <atomic>
 #include <stdexcept>
-#include "common/zendnn_private.hpp"
+
+// Define a function pointer type for getting the reorder buffer size.
+using GetReorderBufSizeFunc = siz_t (*)(const char, const char, const char,
+                                        const dim_t, const dim_t);
+
+// Define a template function pointer type for reordering.
+template <typename T>
+using ReorderFunc = void (*)(const char, const char, const char, const T *, T *,
+                             const dim_t, const dim_t, const dim_t);
+
+template <typename T>
+void reorderAndCacheWeights(
+    const Key_matmul &key_obj,
+    const T *filter,
+    T *&reorder_filter,
+    const int k,
+    const int n,
+    const int ldb,
+    const bool is_weights_const,
+    const char order,
+    const char trans,
+    const char reorder_param0,
+    const dim_t reorder_param1,
+    const dim_t reorder_param2,
+    GetReorderBufSizeFunc get_reorder_buf_size,
+    ReorderFunc<T> reorder_func
+);
 
 namespace zendnn {
 namespace impl {
@@ -39,7 +66,7 @@ struct lru_weight_cache_t {
     //Constructor
     lru_weight_cache_t(int capacity=
                            zendnn::impl::getenv_int("ZENDNN_WEIGHT_CACHE_CAPACITY",
-                               std::numeric_limits<int>::max()));
+                                   std::numeric_limits<int>::max()));
     // Destructor
     ~lru_weight_cache_t();
 

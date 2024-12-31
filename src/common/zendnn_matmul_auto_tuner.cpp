@@ -289,7 +289,7 @@ int auto_compute_matmul_int8(
             std::get<0>(found_obj->second) < skip_iteration) {
 
         //Set AOCL GEMM algo for skip iterations.
-        zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8;
+        zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
 
         //If Key not found in map then time the algo and add new element to map
         if (found_obj == matmul_kernel_map1_helper.end()) {
@@ -320,8 +320,8 @@ int auto_compute_matmul_int8(
 #endif
 
             //Create new entry
-            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8}; // {iter_count, time, algo}
-            matmul_kernel_map[key_obj] = zenINT8MatMulAlgoType::MATMUL_AOCL_GEMM_INT8;
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8}; // {iter_count, time, algo}
+            matmul_kernel_map[key_obj] = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
         }
         //If key found then increment the iter_count and run next algo.
         else {
@@ -452,7 +452,7 @@ int auto_compute_matmul_fp32(
             std::get<0>(found_obj->second) < skip_iteration) {
 
         //Set algo 3 initially
-        zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
+        zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
 
         //If Key not found in map then time the algo and add new element to map
         if (found_obj == matmul_kernel_map1_helper.end()) {
@@ -480,8 +480,8 @@ int auto_compute_matmul_fp32(
 #endif
 
             //Create new entry
-            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1}; // {iter_count, time, algo}
-            matmul_kernel_map[key_obj] = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32}; // {iter_count, time, algo}
+            matmul_kernel_map[key_obj] = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
         }
         //If key found then increment the iter_count and run next algo.
         else {
@@ -637,7 +637,7 @@ int auto_compute_matmul(
         }
         else {
 
-            zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1;
+            zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
                            k,

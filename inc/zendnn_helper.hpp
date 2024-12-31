@@ -68,33 +68,35 @@ inline std::string zendnn_getenv_string(const char *name,
 }
 
 enum zenMatMulAlgoType {
-    MATMUL_AUTO_FP32 = -1,
+    MATMUL_AUTO_FP32 = 100,
     MATMUL_DT_FP32 = 0,
-    MATMUL_BLIS_GEMM1 = 1,
-    MATMUL_BLIS_GEMM2 = 2,
-    MATMUL_ZENDNN_GEMM1 = 3,
-    MATMUL_ZENDNN_GEMM2 = 4,
-    MATMUL_BLIS_BLOCKED_GEMM1 = 5,
-    MATMUL_BLIS_BLOCKED_GEMM2 = 6,
+    MATMUL_BLOCKED_AOCL_FP32 = 1,
+    MATMUL_BLOCKED_JIT_FP32 = 2,
+    MATMUL_AOCL_FP32 = 3,
+    MATMUL_JIT_FP32 = 4,
+    MATMUL_BLOCKED_AOCL_PAR_FP32 = 5,
 };
 
 enum zenBF16MatMulAlgoType {
-    MATMUL_AUTO_BF16 = -1,
+    MATMUL_AUTO_BF16 = 100,
     MATMUL_DT_BF16 = 0,
-    MATMUL_AOCL_GEMM = 1,
-    MATMUL_BLOCKED_JIT = 2,
-    MATMUL_JIT = 3,
-    MATMUL_AOCL_GEMM_PAR = 4,
-    MATMUL_BLOCKED_JIT_PAR = 5,
-    MATMUL_JIT_PAR = 6,
+    MATMUL_BLOCKED_AOCL_BF16 = 1,
+    MATMUL_BLOCKED_JIT_BF16 = 2,
+    MATMUL_AOCL_BF16 = 3,
+    MATMUL_JIT_BF16 = 4,
+    MATMUL_BLOCKED_AOCL_PAR_BF16 = 5,
+    MATMUL_BLOCKED_JIT_PAR_BF16 = 6,
+    MATMUL_AOCL_PAR_BF16 = 7,
+    MATMUL_JIT_PAR_BF16 = 8,
 };
 
 enum zenINT8MatMulAlgoType {
-    MATMUL_AUTO_INT8 = -1,
+    MATMUL_AUTO_INT8 = 100,
     MATMUL_DT_INT8 = 0,
-    MATMUL_AOCL_GEMM_INT8 = 1,
+    MATMUL_BLOCKED_AOCL_INT8 = 1,
     MATMUL_BLOCKED_JIT_INT8 = 2,
-    MATMUL_JIT_INT8 = 3,
+    MATMUL_AOCL_INT8 = 3,
+    MATMUL_JIT_INT8 = 4,
 };
 // enum containing all supported convolution algo types
 // AUTO - Autotuner path which will be used in future release
@@ -157,51 +159,54 @@ class zendnnEnv {
         omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
         zen_num_threads = zendnn_getenv_int("ZEN_NUM_THREADS", 1);
 
-        //ZENDNN_MATMUL_ALGO=FP32: is to enable specific FP32 MATMUL ALGO.
-        //Currently ZenDNN support three ALGO path for GEMM execution
-        // If value is set to 0, library decide the optimal path
-        // based on the matrix sizes and other parameter settings. However,
-        // this can be overridden with specific path.
-        // 1. DIRECT BLIS: MatMul is redirected to BLIS GEMM directly (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLIS_GEMM1)
-        // 2. ZenDNN+BLIS (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLIS_GEMM2)
-        //      Case 1:
-        //              ZenDNN take care of problem division and thread parallelism
-        //              BLIS is used for single thread GEMM execution
-        //      Case 2:
-        //              MatMul is redirected to BLIS directly
-        // 3. ZenDNN_sgemm: zendnn_sgemm jit based kernel (zenGEMMalgo=zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) (current default)
+        // ZENDNN_MATMUL_ALGO=FP32: This environment variable is used to enable specific FP32 MATMUL algorithms.
+        // The ZenDNN library now supports several algorithm paths for GEMM execution with FP32 precision.
+        // The available paths are as follows:
+        // AUTO. AutoTuner: The library automatically selects the optimal path. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_AUTO_FP32)
+        // 0. Decision Tree (DT): The library uses a decision tree to determine the optimal path based on matrix sizes and other parameters. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_DT_FP32)
+        // 1. Blocked AOCL GEMM: MatMul is executed using a blocked approach with AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32)
+        // 2. Blocked JIT: MatMul is redirected to a blocked JIT (BRGEMM) implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32)
+        // 3. AOCL GEMM: MatMul is executed using AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_AOCL_FP32)
+        // 4. JIT: MatMul is redirected to a JIT implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_JIT_FP32)
+        // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_FP32)
         zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
-            zenGEMMalgo = zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 && zenGEMMalgo!=100) {
+            zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
 
-        //ZENDNN_MATMUL_ALGO=BF16: is to enable specific BF16 MATMUL algo.
-        //Currently ZenDNN support three ALGO path for GEMM execution
-        // 0. AutoTuner, library decide the optimal path
-        // based on the matrix sizes and other parameter settings. However,
-        // this can be overridden with specific path.
-        // 1. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM)
-        // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT)
-        // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT)
-        // 4. AOCL GEMM - Parallel Implementation (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_PAR)
-        // 5. BLOCKED JIT Parallel - MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR)
-        // 6. JIT Parallel - MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR)
+        // ZENDNN_MATMUL_ALGO=BF16: This environment variable is used to enable specific BF16 MATMUL algorithms.
+        // The ZenDNN library now supports several algorithm paths for GEMM execution with BF16 precision.
+        // The available paths are as follows:
+        // AUTO. AutoTuner: The library automatically selects the optimal path. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AUTO_BF16)
+        // 0. Decision Tree (DT): The library uses a decision tree to determine the optimal path based on matrix sizes and other parameters. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_DT_BF16)
+        // 1. Blocked AOCL GEMM: MatMul is executed using a blocked approach with AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16)
+        // 2. Blocked JIT: MatMul is redirected to a blocked JIT (BRGEMM) implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16)
+        // 3. AOCL GEMM: MatMul is executed using AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_BF16)
+        // 4. JIT: MatMul is redirected to a JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_BF16)
+        // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
+        // 6. Blocked JIT - Parallel: MatMul is redirected to a parallel blocked JIT (BRGEMM) implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16)
+        // 7. (TODO)AOCL GEMM - Parallel: MatMul is executed using a parallel AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_PAR_BF16)
+        // 8. (TODO)JIT - Parallel: MatMul is redirected to a parallel JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16)
 
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
-        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_JIT_PAR) {
-            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_PAR;
+        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16 &&
+                zenBF16GEMMalgo!=100) {
+            zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
         }
-        //ZENDNN_MATMUL_ALGO=INT8: is to enable specific INT8 MATMUL algo.
-        //Currently ZenDNN support three ALGO path for GEMM execution
-        // 0. AutoTuner, library decide the optimal path
-        // based on the matrix sizes and other parameter settings. However,
-        // this can be overridden with specific path.
-        // 1. AOCL GEMM (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM_INT8)
-        // 2. BLOCKED JIT : MatMul is redirected to JIT (BRGEMM) (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8)
-        // 3. JIT : MatMul is redirected to JIT (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_INT8)
+
+        // ZENDNN_MATMUL_ALGO=INT8: This environment variable is used to enable specific INT8 MATMUL algorithms.
+        // The ZenDNN library now supports several algorithm paths for GEMM execution with INT8 precision.
+        // The available paths are as follows:
+        // AUTO. AutoTuner: The library automatically selects the optimal path. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_AUTO_INT8)
+        // 0. Decision Tree (DT): The library uses a decision tree to determine the optimal path based on matrix sizes and other parameters. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_DT_INT8)
+        // 1. Blocked AOCL GEMM: MatMul is executed using a blocked approach with AOCL GEMM. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8)
+        // 2. Blocked JIT: MatMul is redirected to a blocked JIT (BRGEMM) implementation. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8)
+        // 3. AOCL GEMM: MatMul is executed using AOCL GEMM. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_AOCL_INT8)
+        // 4. JIT: MatMul is redirected to a JIT implementation. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_JIT_INT8)
 
         zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
-        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8) {
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 &&
+                zenINT8GEMMalgo!=100) {
             zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
@@ -244,10 +249,13 @@ class zendnnEnv {
 
     static int zenMatMulDefaultAlgo(const std::string &name) {
         if (name == "FP32") {
-            return zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2;
+            return zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
         else if (name == "BF16") {
-            return zenBF16MatMulAlgoType::MATMUL_JIT;
+            return zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
+        }
+        else if (name == "INT8") {
+            return zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         else {
             return -1;
@@ -275,21 +283,27 @@ class zendnnEnv {
             return zenMatMulDefaultAlgo(name);
         }
 
-        epos = pos+ namePlusColon.size();
-        long x;
-        char *ep;
+        epos = pos + namePlusColon.size();
         if (epos >= algoStr.size()) {
             assert(epos == algoStr.size());
         }
         else {
-            x = strtol(algoStr.c_str() + epos, &ep, 0);
-            size_t fpos = ep - algoStr.c_str();
-            if (fpos - epos > 0) {
-                return x;
+            std::string valueStr = algoStr.substr(epos);
+            if (valueStr == "AUTO") {
+                return 100;
+            }
+            else {
+                char *ep;
+                long x = strtol(valueStr.c_str(), &ep, 0);
+                size_t fpos = ep - algoStr.c_str();
+                if (fpos - epos > 0) {
+                    return x;
+                }
             }
         }
         return zenMatMulDefaultAlgo(name);
     }
+
 
   public:
     static const zendnnEnv &ZenDNNEnv() {

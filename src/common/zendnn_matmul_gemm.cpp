@@ -63,7 +63,8 @@ void zenMatMul_gemm_blocked(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const = false
+    bool is_weights_const = false,
+    bool blocked_format = false
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     if (!transpose_filter && !transpose_input) {
@@ -76,35 +77,25 @@ void zenMatMul_gemm_blocked(
         // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
         // Define dimentions of B matrix as reorder_param1 and reorder_param2
         // Define memory format as 'n'(non reordered) for A matrix and 'r'(reordered) for B matrix
-        aocl_post_op *post_ops = NULL;
-        const char reorder_param0 = 'B';
-        const dim_t reorder_param1 = k;
-        const dim_t reorder_param2 = n;
-        const char order = 'r';
-        const char trans = 'n';
         char mem_format_a = 'n', mem_format_b = 'r';
+        aocl_post_op *post_ops = NULL;
         float_t *reorder_filter = NULL;
 
-        static zendnn::impl::lru_weight_cache_t<Key_matmul, float *>
-        matmul_weight_cache;
-        auto found_obj = matmul_weight_cache.find_key(key_obj);
+        if (blocked_format) {
+            const char reorder_param0 = 'B';
+            const dim_t reorder_param1 = k;
+            const dim_t reorder_param2 = n;
+            const char order = 'r';
+            const char trans = 'n';
 
-        if (!is_weights_const || !found_obj) {
-            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
-            siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
-                                              order, trans, reorder_param0, reorder_param1, reorder_param2);
-            reorder_filter = (float_t *) zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
-            aocl_reorder_f32f32f32of32(order, trans, 'B', filter, reorder_filter, k,
-                                       n, ldb);
-            if (is_weights_const) {
-                //Create new entry
-                map_mutex.lock();
-                matmul_weight_cache.add(key_obj, reorder_filter);
-                map_mutex.unlock();
-            }
+            reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
+                                          ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                          reorder_param2,
+                                          aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
+                                         );
         }
         else {
-            reorder_filter = matmul_weight_cache.get(key_obj);
+            mem_format_b = 'n';
         }
 
         // Currently 4.2 blis post ops are used
@@ -192,7 +183,8 @@ void zenMatMul_gemm_blocked(
         aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                                 transpose_input ? 't' : 'n',
                                 transpose_filter ? 't' : 'n', m, n, k, alpha,
-                                input, lda, mem_format_a, reorder_filter, ldb, mem_format_b,
+                                input, lda, mem_format_a, blocked_format ? reorder_filter : filter, ldb,
+                                mem_format_b,
                                 beta,
                                 output, ldc,
                                 post_ops);
@@ -225,7 +217,7 @@ void zenMatMul_gemm_blocked(
             free(post_ops->seq_vector);
             free(post_ops);
         }
-        if (!is_weights_const) {
+        if (!is_weights_const && blocked_format) {
             free(reorder_filter);
         }
     }
@@ -413,7 +405,8 @@ void zenMatMul_gemm(
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     obj.is_log = true;
 
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM1) {
+    //We don't have support for MATMUL_BLIS_GEMM1.
+    if (0) {
         //Perform MatMul using AMD BLIS
         cblas_sgemm(Layout? CblasRowMajor : CblasColMajor,
                     transpose_input ? CblasTrans : CblasNoTrans,
@@ -426,39 +419,36 @@ void zenMatMul_gemm(
                        thread_qty, alpha);
         }
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
         //Blocked JIT kernel
         obj.is_brgemm = true;
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, true,
                            is_weights_const);
-        /*
-        //Old functionality of ZENDNN_GEMM1
-        zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
-                     m, n, k, alpha, input, lda, filter, ldb, beta, output, ldc);
-        if (bias || relu || gelu) {
-            zenPostOps(zenEnvObj, output, NULL, m, 1, n,
-                       ldc, 0,
-                       bias, relu, gelu, NULL,
-                       thread_qty, alpha);
-        }
-        */
+
     }
     else if (zenEnvObj.zenGEMMalgo ==
-             zenMatMulAlgoType::MATMUL_BLIS_BLOCKED_GEMM1) {
+             zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
         zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout, transpose_input,
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
-                               output, ldc, is_weights_const);
+                               output, ldc, is_weights_const, true);
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32) {
         //JIT kernel call
         obj.is_brgemm = true;
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, false,
                            is_weights_const);
+    }
+    else if (zenEnvObj.zenGEMMalgo ==
+             zenMatMulAlgoType::MATMUL_AOCL_FP32) {
+        zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout, transpose_input,
+                               transpose_filter,
+                               m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
+                               output, ldc, is_weights_const, false);
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
@@ -896,7 +886,7 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
                 // jit based kernel will be called.
                 // refer src/common/zendnn_utils.cpp
-                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1) {
+                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
                     zendnn_sgemm(transpose_input ? 'T' : 'N',
                                  transpose_filter ? 'T' : 'N', m, n, k,
                                  alpha_Array[i],
@@ -1255,7 +1245,7 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     alpha_Array+group_count, [](int value) {
         return value == 1.0f;
     });
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2 &&
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
             TransA==false && isAlphaOne && group_count==1) {
         //Todo: Fix the BatchedMatMul Primitive
         //Todo: Apply alpha_Array to BatchedMatMul Primitive.
@@ -1404,7 +1394,8 @@ void zenMatmulSplit(
 
         unsigned long gemmRows = m_per_thread;
 
-        if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLIS_GEMM2) {
+        //We don't have support for MATMUL_BLIS_GEMM2.
+        if (0) {
 
 #if BLIS_EXPERT
             if (transpose_input)
@@ -1451,7 +1442,7 @@ void zenMatmulSplit(
                            l2_num_threads, alpha);
             }
         }
-        else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2) {
+        else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32) {
             zendnn_sgemm(transpose_input ? 'T' : 'N', transpose_filter ? 'T' : 'N',
                          gemmRows, n, k, alpha, data_col+inputOffset, lda, filter,
                          ldb, beta, output+outputOffset, ldc);

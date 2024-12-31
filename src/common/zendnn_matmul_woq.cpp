@@ -965,11 +965,11 @@ int matmul_woq_wrapper(
 
     //TODO: Seperate Implementation of Autotuner for WOQ(MATMUL_AUTO_BF16)
     if (src_type == zendnn_bf16) {
-        if (zenEnvObj.zenBF16GEMMalgo == MATMUL_AUTO_BF16 ||
-                zenEnvObj.zenBF16GEMMalgo == MATMUL_DT_BF16) {
+        if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16 ||
+                zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) {
             // For Higher thread count(i.e >128) AOCL S4 Kernels gives optimal performance
             if (zenEnvObj.omp_num_threads > 128) {
-                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+                zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
             }
             else {
                 // If M <= 16 AOCL S4 Kernel gives Optimal Performance.
@@ -978,7 +978,7 @@ int matmul_woq_wrapper(
                 // This is based on heuristic with different models and difference BS
                 if (M <= 16) {
                     // AOCL S4 Kernel
-                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
                 }
                 else if (M >= 128 && N >= 1024 && K >= 1024) {
                     // AOCL BF16 Kernel with Zen Weights Conversion
@@ -987,11 +987,11 @@ int matmul_woq_wrapper(
                 else if (M == 32) {
                     if (N <= K) {
                         // Blocked BRGEMM BF16 with Zen Weights Conversion
-                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
                     }
                     else {
                         // AOCL S4 Kernel
-                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM;
+                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
                     }
                 }
                 else {
@@ -1001,7 +1001,7 @@ int matmul_woq_wrapper(
                     }
                     else {
                         // Blocked BRGEMM BF16 with Zen Weights Conversion
-                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
                     }
                 }
             }
@@ -1009,14 +1009,14 @@ int matmul_woq_wrapper(
 
         //If algo is AOCL but can't execute due to limited mixed_data type support
         //then run blocked brgemm
-        if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_GEMM
+        if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
                 || zenEnvObj.zenBF16GEMMalgo == 3) && (use_jit || !can_run_aocl)) {
-            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
         }
         // AOCL Accepts only even K values & M > 1 and N > 1
         // TODO: Condition checks can be removed once we get a fix for this
         if (K%2 != 0 || M == 1 || N == 1) {
-            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT;
+            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
         }
 
         if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4)
