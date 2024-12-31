@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -77,7 +77,7 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
               && gemm_based::check_gemm_compatible_formats(*this);
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_ZENDNN_GEMM2 &&
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
             weights_md()->data_type == f32) {
         return status::unimplemented;
     }

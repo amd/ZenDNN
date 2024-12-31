@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -415,7 +415,7 @@ int auto_compute_conv_v2(
             //Create new entry
             //initial vector for average time and iteration count for each algorithms.
             std::vector<std::pair<unsigned int,float>> initial_vec(num_of_lpgemm_algo, {0,0.0});
-            conv_kernel_map2_helper[key_obj] = {initial_vec, cur_algo_time, zenMatMulAlgoType::MATMUL_ZENDNN_GEMM1};
+            conv_kernel_map2_helper[key_obj] = {initial_vec, cur_algo_time, zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32};
             conv_kernel_map[key_obj] = supportedPath == 0 ? static_cast<int>
                                        (convolution_os8::convolution_gemm_u8s8s32os8) :static_cast<int>
                                        (convolution_os32::convolution_gemm_u8s8s32os32);
