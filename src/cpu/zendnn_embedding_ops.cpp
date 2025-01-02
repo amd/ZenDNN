@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,13 +20,13 @@
 #include <vector>
 #include <omp.h>
 #include <string.h>
+#include <type_traits>
 #include "zendnn_logging.hpp"
 #include "common/verbose.hpp"
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
 #if FBGEMM_ENABLE
     #include "fbgemm/FbgemmEmbedding.h"
-    using namespace fbgemm;
 #endif
 namespace zendnn {
 
@@ -101,17 +101,19 @@ void fbgemm_embedding_bag_kernel(
     const memory &z_per_sample_weights,
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
-    unsigned int op_num_threads, const char *plugin_op) {
+    unsigned int op_num_threads, const char *plugin_op,
+    const bool &scale_bias_last) {
 
     double start_ms = impl::get_msec();
     auto emd_table_dims = z_input.get_desc().dims();
-    auto dim_embedding  = emd_table_dims[1];
+    auto dim_embedding  = z_dst.get_desc().dims()[1];
     auto num_rows       = emd_table_dims[0];
     int indices_size    = z_indices.get_desc().dims()[0];
     int batch_size      = z_dst.get_desc().dims()[0];
+    int bit_rate;
     bool is_bf16_out;
     bool is_bf16_in;
-    bool use_weight=false;
+    bool use_weight=z_per_sample_weights_defined;
     bool normalize_by_lengths=false;
     bool prefetch=true;
     bool is_wt_positional=false;
@@ -119,6 +121,7 @@ void fbgemm_embedding_bag_kernel(
     std::string in_dtype;
     std::string out_dtype;
     IN_TYPE *table_ptr=NULL;
+    float *weights=nullptr;
     OUT_TYPE *output=NULL;
     int32_t *fbgemm_offsets=nullptr;
     int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
@@ -132,6 +135,8 @@ void fbgemm_embedding_bag_kernel(
     else {
         fbgemm_offsets=offsets;
     }
+
+    //TODO: ADD INT8 Data type for Embedding table
     if ((z_input.get_desc().data_type()==impl::data_type::bf16) &&
             (z_dst.get_desc().data_type()==impl::data_type::bf16)) {
         is_bf16_in=true;
@@ -153,23 +158,67 @@ void fbgemm_embedding_bag_kernel(
         in_dtype="src_f32";
         out_dtype="dst_f32";
     }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_dst.get_desc().data_type()==impl::data_type::bf16)) {
+        bit_rate=4;
+        is_bf16_out=true;
+        in_dtype="src_s4";
+        out_dtype="dst_bf16";
+    }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_dst.get_desc().data_type()==impl::data_type::f32)) {
+        bit_rate=4;
+        is_bf16_out=false;
+        in_dtype="src_s4";
+        out_dtype="dst_f32";
+    }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");
     }
 
     table_ptr = static_cast<IN_TYPE *>(z_input.get_data_handle());
     output    = static_cast<OUT_TYPE *>(z_dst.get_data_handle());
+    if (use_weight==true) {
+        weights   = static_cast<float *>(z_per_sample_weights.get_data_handle());
+    }
 
-    auto kernel =
-        GenerateEmbeddingSpMDM<IN_TYPE, int32_t, int32_t, OUT_TYPE>(
-            dim_embedding,
-            use_weight,
-            normalize_by_lengths,
-            prefetch?16:0,
-            is_wt_positional,
-            use_offsets,
-            is_bf16_out,
-            is_bf16_in);
+    using KernelType = typename std::conditional<
+                       std::is_same<IN_TYPE, uint8_t>::value,
+                       typename fbgemm::EmbeddingSpMDMKernelSignature<uint8_t, int, std::int32_t, OUT_TYPE>::Type,
+                       typename fbgemm::EmbeddingSpMDMKernelSignature<IN_TYPE, int, std::int32_t, OUT_TYPE>::Type>::type;
+
+    KernelType kernel;
+
+    if constexpr(std::is_same<IN_TYPE, uint8_t>::value) {
+        kernel =
+            fbgemm::GenerateEmbeddingSpMDMNBitWithStrides<int32_t, int32_t,
+            OUT_TYPE,
+            true/*TRHEAD_LOCAL=*/>(
+                bit_rate,
+                dim_embedding,
+                use_weight,
+                normalize_by_lengths,
+                prefetch?16:0,
+                is_wt_positional,
+                use_offsets,
+                -1, /*output_stride*/
+                -1, /*input_stride=*/
+                scale_bias_last,
+                is_bf16_out);
+    }
+    else {
+        kernel =
+            fbgemm::GenerateEmbeddingSpMDM<IN_TYPE, int32_t, int32_t, OUT_TYPE>(
+                dim_embedding,
+                use_weight,
+                normalize_by_lengths,
+                prefetch?16:0,
+                is_wt_positional,
+                use_offsets,
+                is_bf16_out,
+                is_bf16_in);
+    }
+
     if (op_num_threads == 1 || batch_size <= 100) {
         kernel(
             batch_size,
@@ -178,7 +227,7 @@ void fbgemm_embedding_bag_kernel(
             table_ptr,
             indices,
             (const int *)fbgemm_offsets,
-            nullptr,
+            weights,
             output);
     }
     else {
@@ -195,10 +244,11 @@ void fbgemm_embedding_bag_kernel(
                 table_ptr,
                 &indices[start_idx],
                 (const int *)&fbgemm_offsets[i],
-                nullptr,
+                weights,
                 &output[i * dim_embedding]);
         }
     }
+
     if (include_last_offset==0) {
         delete[] fbgemm_offsets;
     }
@@ -218,7 +268,8 @@ void zendnn_embedding_bag_exec(
     const memory &z_per_sample_weights,
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
-    const char *plugin_op, unsigned int op_num_threads) {
+    const char *plugin_op, unsigned int op_num_threads,
+    const bool &scale_bias_last) {
 
     zendnnEnv EnvObj = readEnv();
     int batch_size      = z_dst.get_desc().dims()[0];
@@ -227,14 +278,23 @@ void zendnn_embedding_bag_exec(
 // TODO: Generate more heuristics based on batch size and pooling size.
 // Current decision logic is based on the batch size and optimal kernel
 // available from zendnn and fbgemm
+
+//TODO: Add INT4 support for Mean and Max
+    if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+            (z_algorithm!=algorithm::embedding_bag_sum)) {
+        ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
+                           "Mean & Max algo not Supported for INT4 Data Type");
+    }
     if ((EnvObj.zenEBAlgo==zenEBAlgoType::EB_OP_FBGEMM || op_num_threads==1 ||
-            batch_size<=100) && (z_algorithm==algorithm::embedding_bag_sum)) {
+            batch_size<=100 || z_input.get_desc().data_type()==impl::data_type::s4) &&
+            (z_algorithm==algorithm::embedding_bag_sum)) {
+
         fbgemm_embedding_bag_kernel<IN_TYPE, OUT_TYPE>(
             z_input, z_indices, z_offsets, scale_grad_by_freq,
             z_algorithm, sparse, z_per_sample_weights,
             z_per_sample_weights_defined,
             include_last_offset,
-            padding_idx, z_dst, op_num_threads, plugin_op);
+            padding_idx, z_dst, op_num_threads, plugin_op, scale_bias_last);
     }
     else {
         zendnn_embedding_bag_kernel(
@@ -265,7 +325,8 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                                    std::vector <int32_t> &z_per_sample_weights_defined,
                                    std::vector <int32_t> &z_include_last_offset,
                                    std::vector <int32_t> &z_padding_idx,
-                                   std::vector <memory> &z_destination, const char *plugin_op, int thread_qty) {
+                                   std::vector <memory> &z_destination, const char *plugin_op, int thread_qty,
+                                   const bool &scale_bias_last) {
 
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
@@ -307,7 +368,7 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
                     z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op,
-                    inner_threads);
+                    inner_threads, scale_bias_last);
             }
 
         }
@@ -331,7 +392,7 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                 z_per_sample_weights_defined[threadOffset],
                 z_include_last_offset[threadOffset],
                 z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op,
-                inner_threads);
+                inner_threads, scale_bias_last);
         }
     }
 
@@ -352,7 +413,8 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, 1);
+                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, 1,
+                    scale_bias_last);
             }
         }
 
@@ -366,7 +428,7 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                 z_scale_grad_by_freq[i], z_modes[i],
                 z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
                 z_include_last_offset[i],
-                z_padding_idx[i], z_destination[i], plugin_op, eb_thread_qty);
+                z_padding_idx[i], z_destination[i], plugin_op, eb_thread_qty, scale_bias_last);
         }
 
     }
@@ -389,7 +451,8 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
         const memory &z_per_sample_weights_opt,
         const bool &z_per_sample_weights_defined,
         const bool &z_include_last_offset, const int32_t &z_padding_idx,
-        memory &z_destination, const char *plugin_op, int thread_qty) {
+        memory &z_destination, const char *plugin_op, int thread_qty,
+        const bool &scale_bias_last) {
 
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
@@ -403,7 +466,8 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, eb_thread_qty);
+            z_padding_idx, z_destination, plugin_op, eb_thread_qty,
+            scale_bias_last);
     }
     else if ((z_input.get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination.get_desc().data_type()==impl::data_type::f32)) {
@@ -414,7 +478,8 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, eb_thread_qty);
+            z_padding_idx, z_destination, plugin_op, eb_thread_qty,
+            scale_bias_last);
     }
     else if ((z_input.get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination.get_desc().data_type()==impl::data_type::bf16)) {
@@ -425,7 +490,32 @@ void zendnn_custom_op::zendnn_embedding_bag(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, eb_thread_qty);
+            z_padding_idx, z_destination, plugin_op, eb_thread_qty,
+            scale_bias_last);
+    }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination.get_desc().data_type()==impl::data_type::bf16)) {
+
+        zendnn_embedding_bag_exec<uint8_t, uint16_t>(
+            z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
+            z_mode,
+            static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
+            static_cast<int32_t>(z_per_sample_weights_defined),
+            static_cast<int32_t>(z_include_last_offset),
+            z_padding_idx, z_destination, plugin_op, eb_thread_qty,
+            scale_bias_last);
+    }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination.get_desc().data_type()==impl::data_type::f32)) {
+
+        zendnn_embedding_bag_exec<uint8_t, float>(
+            z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
+            z_mode,
+            static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
+            static_cast<int32_t>(z_per_sample_weights_defined),
+            static_cast<int32_t>(z_include_last_offset),
+            z_padding_idx, z_destination, plugin_op, eb_thread_qty,
+            scale_bias_last);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");
@@ -439,7 +529,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         std::vector <int32_t> &z_per_sample_weights_defined,
         std::vector <int32_t> &z_include_last_offset,
         std::vector <int32_t> &z_padding_idx,
-        std::vector <memory> &z_destination, const char *plugin_op, int thread_qty) {
+        std::vector <memory> &z_destination, const char *plugin_op, int thread_qty,
+        const bool &scale_bias_last) {
 
     if ((z_input[0].get_desc().data_type()==impl::data_type::f32) &&
             (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
@@ -448,7 +539,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
@@ -457,7 +548,7 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
@@ -466,7 +557,25 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+    }
+    else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
+
+        zendnn_grp_embedding_bag_impl<uint8_t, uint16_t>(z_input, z_indices, z_offsets,
+                z_scale_grad_by_freq, z_modes,
+                z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
+                z_include_last_offset,
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+    }
+    else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
+
+        zendnn_grp_embedding_bag_impl<uint8_t, float>(z_input, z_indices, z_offsets,
+                z_scale_grad_by_freq, z_modes,
+                z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
+                z_include_last_offset,
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");
@@ -479,7 +588,8 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
                                         const memory &z_indices,
                                         const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                                         const bool &z_sparse,
-                                        memory &z_destination, const char *plugin_op, int thread_qty) {
+                                        memory &z_destination, const char *plugin_op, int thread_qty,
+                                        const bool &scale_bias_last) {
 
     int indices_size = z_indices.get_desc().dims()[0];
     int32_t z_per_sample_weights_defined=0;
@@ -514,7 +624,7 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, num_thread);
+            z_padding_idx, z_destination, plugin_op, num_thread, scale_bias_last);
     }
     else if ((z_input.get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination.get_desc().data_type()==impl::data_type::f32)) {
@@ -525,7 +635,7 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, num_thread);
+            z_padding_idx, z_destination, plugin_op, num_thread, scale_bias_last);
     }
     else if ((z_input.get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination.get_desc().data_type()==impl::data_type::bf16)) {
@@ -536,7 +646,29 @@ void zendnn_custom_op::zendnn_embedding(const memory &z_input,
             static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
             static_cast<int32_t>(z_per_sample_weights_defined),
             static_cast<int32_t>(z_include_last_offset),
-            z_padding_idx, z_destination, plugin_op, num_thread);
+            z_padding_idx, z_destination, plugin_op, num_thread, scale_bias_last);
+    }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination.get_desc().data_type()==impl::data_type::bf16)) {
+
+        zendnn_embedding_bag_exec<uint8_t, uint16_t>(
+            z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
+            z_mode,
+            static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
+            static_cast<int32_t>(z_per_sample_weights_defined),
+            static_cast<int32_t>(z_include_last_offset),
+            z_padding_idx, z_destination, plugin_op, num_thread, scale_bias_last);
+    }
+    else if ((z_input.get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination.get_desc().data_type()==impl::data_type::f32)) {
+
+        zendnn_embedding_bag_exec<uint8_t, float>(
+            z_input, z_indices, z_offsets, static_cast<int32_t>(z_scale_grad_by_freq),
+            z_mode,
+            static_cast<int32_t>(z_sparse), z_per_sample_weights_opt,
+            static_cast<int32_t>(z_per_sample_weights_defined),
+            static_cast<int32_t>(z_include_last_offset),
+            z_padding_idx, z_destination, plugin_op, num_thread, scale_bias_last);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");
@@ -548,7 +680,8 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         std::vector <int32_t> &z_padding_idx,
         std::vector <int32_t> &z_scale_grad_by_freq,
         std::vector <int32_t> &z_sparse,
-        std::vector <memory> &z_destination, const char *plugin_op, int thread_qty) {
+        std::vector <memory> &z_destination, const char *plugin_op, int thread_qty,
+        const bool &scale_bias_last) {
 
     int num_eb_ops = z_input.size();
     std::vector <memory> z_offsets(num_eb_ops);
@@ -588,7 +721,8 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         zendnn_grp_embedding_bag_impl<float, float>(
             z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
             z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
-            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty);
+            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty,
+            scale_bias_last);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
@@ -596,7 +730,8 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         zendnn_grp_embedding_bag_impl<uint16_t, float>(
             z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
             z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
-            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty);
+            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty,
+            scale_bias_last);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
@@ -604,7 +739,26 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
         zendnn_grp_embedding_bag_impl<uint16_t, uint16_t>(
             z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
             z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
-            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty);
+            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty,
+            scale_bias_last);
+    }
+    else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
+
+        zendnn_grp_embedding_bag_impl<uint8_t, uint16_t>(
+            z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
+            z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
+            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty,
+            scale_bias_last);
+    }
+    else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
+             (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
+
+        zendnn_grp_embedding_bag_impl<uint8_t, float>(
+            z_input, z_indices, z_offsets, z_scale_grad_by_freq, z_modes,
+            z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
+            z_include_last_offset, z_padding_idx, z_destination, plugin_op, thread_qty,
+            scale_bias_last);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");

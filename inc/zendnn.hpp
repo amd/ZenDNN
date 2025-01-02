@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -749,7 +749,8 @@ class zendnn_custom_op {
                                      const memory &z_per_sample_weights_opt,
                                      const bool &z_per_sample_weights_defined,
                                      const bool &z_include_last_offset, const int32_t &z_padding_idx,
-                                     memory &z_destination, const char* plugin_op="", int thread_qty=1);
+                                     memory &z_destination, const char *plugin_op="", int thread_qty=1,
+                                     const bool &scale_bias_last=true);
 
 //Group embedding bag op API
     static void zendnn_grp_embedding_bag(std::vector <memory> &z_input,
@@ -759,13 +760,15 @@ class zendnn_custom_op {
                                          std::vector <int32_t> &z_per_sample_weights_defined,
                                          std::vector <int32_t> &z_include_last_offset,
                                          std::vector <int32_t> &z_padding_idx,
-                                         std::vector <memory> &z_destination, const char* plugin_op="", int thread_qty=1);
+                                         std::vector <memory> &z_destination, const char *plugin_op="", int thread_qty=1,
+                                         const bool &scale_bias_last=true);
 
 //Embedding op API
     static void zendnn_embedding(const memory &z_input, const memory &z_indices,
                                  const int32_t &z_padding_idx, const bool &z_scale_grad_by_freq,
                                  const bool  &z_sparse,
-                                 memory &z_destination, const char* plugin_op="", int thread_qty=1);
+                                 memory &z_destination, const char *plugin_op="", int thread_qty=1,
+                                 const bool &scale_bias_last=true);
 
 //Group Embedding op API
     static void zendnn_grp_embedding(std::vector <memory> &z_input,
@@ -773,7 +776,8 @@ class zendnn_custom_op {
                                      std::vector <int32_t> &z_padding_idx,
                                      std::vector <int32_t> &z_scale_grad_by_freq,
                                      std::vector <int32_t> &z_sparse,
-                                     std::vector <memory> &z_destination, const char* plugin_op="", int thread_qty=1);
+                                     std::vector <memory> &z_destination, const char *plugin_op="", int thread_qty=1,
+                                     const bool &scale_bias_last=true);
 
 //Group MLP op API
     static void zendnn_grp_mlp(const std::vector<memory> &z_input,
@@ -784,7 +788,7 @@ class zendnn_custom_op {
                                const std::vector<bool> &z_bias_defined,
                                const std::vector<std::vector<int64_t>> &z_post_op_ids,
                                const std::vector<std::vector<memory>> &z_post_op_buffers,
-                               const std::vector<memory> &z_result, const char* plugin_op="");
+                               const std::vector<memory> &z_result, const char *plugin_op="");
 //Group Embedding_Bag and MLP op API
     static void zendnn_grp_ebag_mlp(std::vector <memory> &z_eb_input,
                                     std::vector <memory> &z_eb_indices, std::vector <memory> &z_eb_offsets,
@@ -804,7 +808,7 @@ class zendnn_custom_op {
                                     const std::vector<bool> &z_mm_bias_defined,
                                     const std::vector<std::vector<int64_t>> &z_post_op_ids,
                                     const std::vector<std::vector<memory>> &z_post_op_buffers,
-                                    const std::vector<memory> &z_mm_result, const char* plugin_op="");
+                                    const std::vector<memory> &z_mm_result, const char *plugin_op="");
 
 //Group Embedding and MLP op API
     static void zendnn_grp_embedding_mlp(std::vector <memory> &z_embed_input,
@@ -2623,7 +2627,8 @@ struct memory : public handle<zendnn_memory_t> {
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, format_tag aformat_tag, bool is_memory_const = true,
+        desc(const dims &adims, data_type adata_type, format_tag aformat_tag,
+             bool is_memory_const = true,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
@@ -2654,7 +2659,8 @@ struct memory : public handle<zendnn_memory_t> {
         ///     allowed to fail without throwing an exception. In this case a
         ///     zero memory descriptor will be constructed. This flag is
         ///     optional and defaults to false.
-        desc(const dims &adims, data_type adata_type, const dims &strides, bool is_memory_const = true,
+        desc(const dims &adims, data_type adata_type, const dims &strides,
+             bool is_memory_const = true,
              bool allow_empty = false)
             : data() {
             validate_dims(adims);
@@ -3639,10 +3645,10 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     factors used for that logical dimension in a memory indicated by @p arg.
     /// @param data_type Scaling factors data_type.
     void set_woq_scale(int mask, const memory::dims &groups,
-            memory::data_type data_type = memory::data_type::f32) {
+                       memory::data_type data_type = memory::data_type::f32) {
         error::wrap_c_api(zendnn_primitive_attr_set_woq_weight_scale(
                               get(), mask, (int)groups.size(), groups.data(),
-                                  memory::convert_to_c(data_type)),
+                              memory::convert_to_c(data_type)),
                           "could not set WOQ weight scale primitive attribute");
     }
 
@@ -9307,13 +9313,13 @@ struct vanilla_rnn_forward : public primitive {
              float beta = 0.0f) {
             error::wrap_c_api(
                 zendnn_vanilla_rnn_forward_desc_init(&data,
-                        zendnn::convert_to_c(aprop_kind),
-                        zendnn::convert_to_c(activation),
-                        zendnn::convert_to_c(direction), &src_layer_desc.data,
-                        &src_iter_desc.data, &weights_layer_desc.data,
-                        &weights_iter_desc.data, &bias_desc.data,
-                        &dst_layer_desc.data, &dst_iter_desc.data,
-                        zendnn::convert_to_c(flags), alpha, beta),
+                    zendnn::convert_to_c(aprop_kind),
+                    zendnn::convert_to_c(activation),
+                    zendnn::convert_to_c(direction), &src_layer_desc.data,
+                    &src_iter_desc.data, &weights_layer_desc.data,
+                    &weights_iter_desc.data, &bias_desc.data,
+                    &dst_layer_desc.data, &dst_iter_desc.data,
+                    zendnn::convert_to_c(flags), alpha, beta),
                 "could not create a descriptor for a vanilla RNN forward "
                 "propagation primitive");
         }
@@ -9502,17 +9508,17 @@ struct vanilla_rnn_backward : public primitive {
              float beta = 0.0f) {
             error::wrap_c_api(
                 zendnn_vanilla_rnn_backward_desc_init(&data,
-                        zendnn::convert_to_c(aprop_kind),
-                        zendnn::convert_to_c(activation),
-                        zendnn::convert_to_c(direction), &src_layer_desc.data,
-                        &src_iter_desc.data, &weights_layer_desc.data,
-                        &weights_iter_desc.data, &bias_desc.data,
-                        &dst_layer_desc.data, &dst_iter_desc.data,
-                        &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                        &diff_weights_layer_desc.data,
-                        &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                        &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                        zendnn::convert_to_c(flags), alpha, beta),
+                    zendnn::convert_to_c(aprop_kind),
+                    zendnn::convert_to_c(activation),
+                    zendnn::convert_to_c(direction), &src_layer_desc.data,
+                    &src_iter_desc.data, &weights_layer_desc.data,
+                    &weights_iter_desc.data, &bias_desc.data,
+                    &dst_layer_desc.data, &dst_iter_desc.data,
+                    &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                    &diff_weights_layer_desc.data,
+                    &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                    &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                    zendnn::convert_to_c(flags), alpha, beta),
                 "could not create a descriptor for a vanilla RNN backward "
                 "propagation primitive");
         }
@@ -13878,25 +13884,25 @@ struct attention : public primitive {
              float scale,
              uint32_t           num_heads,
              uint32_t           num_threads) {
-             error::wrap_c_api(
-                    zendnn_attention_desc_init(&data,
-                                                   convert_to_c(aprop_kind),
-                                                   convert_to_c(aalgorithm),
-                                                   &query_desc.data,
-                                                   &key_desc.data,
-                                                   &value_desc.data,
-                                                   &weights_query_desc.data,
-                                                   &weights_key_desc.data,
-                                                   &weights_value_desc.data,
-                                                   &bias_query_desc.data,
-                                                   &bias_key_desc.data,
-                                                   &bias_value_desc.data,
-                                                   &mask_desc.data,
-                                                   &dst_desc.data,
-                                                   scale,
-                                                   num_heads,
-                                                   num_threads),
-                    "could not create an attention descriptor:1");
+            error::wrap_c_api(
+                zendnn_attention_desc_init(&data,
+                                           convert_to_c(aprop_kind),
+                                           convert_to_c(aalgorithm),
+                                           &query_desc.data,
+                                           &key_desc.data,
+                                           &value_desc.data,
+                                           &weights_query_desc.data,
+                                           &weights_key_desc.data,
+                                           &weights_value_desc.data,
+                                           &bias_query_desc.data,
+                                           &bias_key_desc.data,
+                                           &bias_value_desc.data,
+                                           &mask_desc.data,
+                                           &dst_desc.data,
+                                           scale,
+                                           num_heads,
+                                           num_threads),
+                "could not create an attention descriptor:1");
         }
     };
 
@@ -13913,23 +13919,28 @@ struct attention : public primitive {
         ///     allowed to fail without throwing an exception. In this case an
         ///     empty object will be produced. This flag is optional and
         ///     defaults to false.
-        primitive_desc(const desc &adesc, const primitive_attr &attr, const engine &aengine,
-                bool allow_empty = false)
+        primitive_desc(const desc &adesc, const primitive_attr &attr,
+                       const engine &aengine,
+                       bool allow_empty = false)
             : zendnn::primitive_desc(
-                    &adesc.data, &attr, aengine, nullptr, allow_empty) {}
+                  &adesc.data, &attr, aengine, nullptr, allow_empty) {}
 
         /// Constructs a primitive descriptor for an attention primitive
         /// from a C API primitive descriptor that must have a matching kind.
         ///
         /// @param pd C API primitive descriptor for a attention primitive.
         primitive_desc(zendnn_primitive_desc_t pd)
-          : zendnn::primitive_desc(pd, zendnn::primitive::kind::attention){}
+            : zendnn::primitive_desc(pd, zendnn::primitive::kind::attention) {}
 
         /// @copydoc zendnn::primitive_desc_base::src_desc()const
-        memory::desc src_desc() const { return query_md(query::src_md, 0); }
+        memory::desc src_desc() const {
+            return query_md(query::src_md, 0);
+        }
 
         /// @copydoc zendnn::primitive_desc_base::dst_desc()const
-        memory::desc dst_desc() const { return query_md(query::dst_md, 0); }
+        memory::desc dst_desc() const {
+            return query_md(query::dst_md, 0);
+        }
     };
 
     /// Default constructor. Produces an empty object.
