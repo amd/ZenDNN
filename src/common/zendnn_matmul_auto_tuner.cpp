@@ -229,6 +229,7 @@ int map_read_from_file() {
 */
 //Start
 int auto_compute_matmul_int8(
+    const impl::exec_ctx_t &ctx,
     zendnn::zendnnEnv zenEnvObj,
     int src_type,
     int dst_type,
@@ -245,12 +246,13 @@ int auto_compute_matmul_int8(
     const int8_t *weights,
     const int ldb,
     const char *bias,
-    const bool relu,
-    const int gelu,
+    const impl::post_ops_t &po_ops,
     const float beta,
     char *dst,
     const int ldc,
     float *scale,
+    const int32_t zero_point_src,
+    const int32_t zero_point_wei,
     const int32_t zero_point_dst,
     int out_scale_size,
     float do_sum,
@@ -301,11 +303,11 @@ int auto_compute_matmul_int8(
             gettimeofday(&start_n, 0);
 #endif
 
-            matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
-                                transpose_input,
-                                transpose_weights,
-                                m, k, n, alpha, input, lda, weights, ldb, bias, relu,
-                                gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+            matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
+                                transpose_input, transpose_weights,
+                                m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
+                                beta, (char *)dst, ldc, scale, zero_point_src,
+                                zero_point_wei, zero_point_dst, out_scale_size,
                                 do_sum, is_weights_const);
 
             //Time end
@@ -327,11 +329,11 @@ int auto_compute_matmul_int8(
         else {
             zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_INT8)+1;
             std::get<0>(found_obj->second) += 1;
-            matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
-                                transpose_input,
-                                transpose_weights,
-                                m, k, n, alpha, input, lda, weights, ldb, bias, relu,
-                                gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+            matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
+                                transpose_input, transpose_weights,
+                                m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
+                                beta, (char *)dst, ldc, scale, zero_point_src,
+                                zero_point_wei, zero_point_dst, out_scale_size,
                                 do_sum, is_weights_const);
         }
     }
@@ -341,11 +343,11 @@ int auto_compute_matmul_int8(
 
         //Get best algo for given layer from MAP
         zenEnvObj.zenINT8GEMMalgo = matmul_kernel_map[key_obj];
-        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
-                            transpose_input,
-                            transpose_weights,
-                            m, k, n, alpha, input, lda, weights, ldb, bias, relu,
-                            gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
+        matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
+                            transpose_input, transpose_weights, m, k, n, alpha,
+                            input, lda, weights, ldb, bias, po_ops, beta,
+                            (char *)dst, ldc, scale, zero_point_src,
+                            zero_point_wei, zero_point_dst, out_scale_size,
                             do_sum, is_weights_const);
     }
     //Updates the map values by running different algorithms
@@ -362,12 +364,12 @@ int auto_compute_matmul_int8(
 #else
         gettimeofday(&start_n, 0);
 #endif
-        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, Layout,
-                            transpose_input,
-                            transpose_weights,
-                            m, k, n, alpha, input, lda, weights, ldb, bias, relu,
-                            gelu, beta, (char *)dst, ldc, scale, zero_point_dst, out_scale_size,
-                            do_sum, is_weights_const);
+        matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
+                            transpose_input, transpose_weights,
+                            m, k, n, alpha, input, lda, weights, ldb, bias,
+                            po_ops, beta, (char *)dst, ldc, scale, zero_point_src,
+                            zero_point_wei, zero_point_dst, out_scale_size, do_sum,
+                            is_weights_const);
         //timer end
 #ifdef _WIN32
         auto end_n = std::chrono::high_resolution_clock::now();

@@ -59,7 +59,7 @@ inline status_t check_post_ops_(post_ops_t po_ops){
             case primitive_kind::eltwise:
                 if(!utils::one_of(e.eltwise.alg, alg_kind::eltwise_relu,
                     alg_kind::eltwise_swish, alg_kind::eltwise_gelu,
-                    alg_kind::eltwise_gelu_erf)){
+                    alg_kind::eltwise_gelu_erf, alg_kind::eltwise_logistic)){
                         return status::unimplemented;
                     }
                 break;

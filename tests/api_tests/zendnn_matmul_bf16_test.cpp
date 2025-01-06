@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -303,6 +303,9 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op,
     else if (post_op == 3) {
         matmul_ops.append_eltwise(scale, algorithm::eltwise_swish, 1.0, beta);
         //SiLU(alpha = 1.0)
+    }
+    else if (post_op == 4) {
+        matmul_ops.append_eltwise(scale, algorithm::eltwise_logistic, alpha, beta);
     }
     if (binary_postop=="add") {
         matmul_ops.append_binary(algorithm::binary_add, dst_f32? bin_md_f1: bin_md1);

@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -61,6 +61,8 @@ int cvt_int4_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
 int cvt_int8_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
                     float *scales, int scale_size, int group_size,
                     zendnn_data_type_t scale_dt);
+
+AOCL_PARAMS_STORAGE_TYPES getAOCLstoreType(zendnn_data_type_t dt);
 
 //Enable/disable Direct Convolution
 //TODO: Make below two MACRO as ZENDNN_BLOCKED_FORMAT

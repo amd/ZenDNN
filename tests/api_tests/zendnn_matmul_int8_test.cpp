@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -74,13 +74,14 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
 
     // Tensor dimensions.
     const memory::dim MB = 3, // batch size
-                      M = 128, K = 256, N = 512;
+                      M = 198, K = 256, N = 512;
     //M = 2, K = 5, N = 5;
 
     std::vector<int8_t> src_data(M * K);
     std::vector<int8_t> weights_data(K * N);
     std::vector<int8_t> bias_data(1 * N);
     std::vector<int8_t> dst_data(M * N);
+    std::vector<int8_t> bin_data(M * N);
 
     int8_t x = 0;
     for (int i=0; i<src_data.size(); i++) {
@@ -91,16 +92,22 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
         weights_data[i] = x++ %3;
     }
 
-    int8_t y=0;
+    x=0;
     for (int i=0; i<bias_data.size(); i++) {
-        bias_data[i] = y++ %3;
+        bias_data[i] = x++ %15;
     }
+    x = 0;
     for (int i=0; i<dst_data.size(); i++) {
-        dst_data[i] = y++ %5;
+        dst_data[i] = x++ %5;
+    }
+
+    int8_t w=0;
+    for (int i=0; i<bin_data.size(); i++) {
+        bin_data[i] = w++ %256;
     }
 
     //Set zero_point vals for src and dst
-    int32_t zp_A = 0, zp_C = 0;
+    int32_t zp_A = 0, zp_C = 2;
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -114,11 +121,13 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     auto weights_md = memory::desc(weights_dims, dt::s8, tag::ab, true);
     auto bias_md = memory::desc(bias_dims, dt::s8, tag::ab);
     auto dst_md = memory::desc(dst_dims, dt::s8, tag::ab);
+    auto bin_md = memory::desc(dst_dims, dt::s8, tag::ab);
 
     auto src_mem = memory(src_md, eng);
     auto weights_mem = memory(weights_md, eng);
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
+    auto bin_mem = memory(bin_md, eng);
     memory zp_A_mem({{1}, memory::data_type::s32, {1}}, eng);
     memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng);
 
@@ -128,6 +137,7 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     write_to_zendnn_memory(dst_data.data(), dst_mem);
     write_to_zendnn_memory((void *)&zp_A, zp_A_mem);
     write_to_zendnn_memory((void *)&zp_C, zp_C_mem);
+    write_to_zendnn_memory(bin_data.data(), bin_mem);
 
     // Create operation descriptor
     auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
@@ -141,8 +151,9 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     }
 
     post_ops matmul_ops;
-    matmul_ops.append_sum(1.0);
-    //matmul_ops.append_eltwise(1, algorithm::eltwise_gelu, alpha, beta);
+    //matmul_ops.append_sum(1.0);
+    matmul_ops.append_eltwise(1, algorithm::eltwise_gelu, alpha, beta);
+    matmul_ops.append_binary(algorithm::binary_add, bin_md);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     //Add scale
@@ -157,6 +168,7 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     // Create the primitive.
     auto matmul_prim = matmul(matmul_pd);
 
+    auto t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1;
     // Primitive execution: matrix multiplication with zero_points.
     matmul_prim.execute(engine_stream, {
         {ZENDNN_ARG_SRC, src_mem},
@@ -164,7 +176,8 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
         {ZENDNN_ARG_BIAS, bias_mem},
         {ZENDNN_ARG_DST, dst_mem},
         {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem},
-        {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem}
+        {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem},
+        {t, bin_mem}
     });
     // Wait for the computation to finalize.
     engine_stream.wait();
@@ -187,6 +200,7 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
     std::vector<int8_t> weights_data(K * N);
     std::vector<int32_t> bias_data(1 * N);
     std::vector<int32_t> dst_data(M * N);
+    std::vector<int32_t> bin_data(M * N);
 
     int8_t x = 0;
     for (int i=0; i<src_data.size(); i++) {
@@ -205,8 +219,13 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
         dst_data[i] = y++ %5;
     }
 
+    int32_t qu = 0;
+    for (int i=0; i<bin_data.size(); i++) {
+        bin_data[i] = qu++ %25;
+    }
+
     //Set zero_point vals for src and dst
-    int32_t zp_A = 0, zp_C = 0;
+    int32_t zp_A = 0, zp_C = 5;
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -220,17 +239,20 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
     auto weights_md = memory::desc(weights_dims, dt::s8, tag::ab, true);
     auto bias_md = memory::desc(bias_dims, dt::s32, tag::ab);
     auto dst_md = memory::desc(dst_dims, dt::s32, tag::ab);
+    auto bin_md = memory::desc(dst_dims, dt::s32, tag::ab);
 
     auto src_mem = memory(src_md, eng);
     auto weights_mem = memory(weights_md, eng);
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
+    auto bin_mem = memory(bin_md, eng);
     memory zp_A_mem({{1}, memory::data_type::s32, {1}}, eng);
     memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng);
 
     write_to_zendnn_memory(src_data.data(), src_mem);
     write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
+    write_to_zendnn_memory(bin_data.data(), bin_mem);
     write_to_zendnn_memory(dst_data.data(), dst_mem);
     write_to_zendnn_memory((void *)&zp_A, zp_A_mem);
     write_to_zendnn_memory((void *)&zp_C, zp_C_mem);
@@ -249,6 +271,7 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
     post_ops matmul_ops;
     //matmul_ops.append_sum(1.0);
     matmul_ops.append_eltwise(1, algorithm::eltwise_gelu, alpha, beta);
+    matmul_ops.append_binary(algorithm::binary_add, bin_md);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     //Add scale
@@ -263,6 +286,7 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
     // Create the primitive.
     auto matmul_prim = matmul(matmul_pd);
 
+    auto t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(1) | ZENDNN_ARG_SRC_1;
     // Primitive execution: matrix multiplication with zero_points.
     matmul_prim.execute(engine_stream, {
         {ZENDNN_ARG_SRC, src_mem},
@@ -270,7 +294,8 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
         {ZENDNN_ARG_BIAS, bias_mem},
         {ZENDNN_ARG_DST, dst_mem},
         {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem},
-        {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem}
+        {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem},
+        {t, bin_mem}
     });
     // Wait for the computation to finalize.
     engine_stream.wait();

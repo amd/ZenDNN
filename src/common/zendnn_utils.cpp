@@ -163,6 +163,33 @@ int cvt_int8_to_f32(const int8_t *weights, float *wei_f32, int k, int n,
     return 0;
 }
 
+//Returns AOCL data type
+AOCL_PARAMS_STORAGE_TYPES getAOCLstoreType(zendnn_data_type_t dt) {
+    switch (dt) {
+    case zendnn_f32:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32 ;
+        break;
+    case zendnn_bf16:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16 ;
+        break;
+    case zendnn_s32:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT32 ;
+        break;
+    case zendnn_s8:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT8 ;
+        break;
+    case zendnn_u8:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_UINT8 ;
+        break;
+    case zendnn_s4:
+        return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT4 ;
+        break;
+    default:
+        break;
+    };
+    return AOCL_PARAMS_STORAGE_TYPES::NULLTYPE;
+}
+
 // initialize memory pool static array for use by the kernels
 // declared in zendnn_utils.hpp
 ZenLibMemoryPool *ZenLibMemoryPool::zenLibMemPoolArr[ZEN_LIB_MEM_POOL_LIMIT] = {NULL};
