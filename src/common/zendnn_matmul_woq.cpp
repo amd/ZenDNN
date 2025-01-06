@@ -41,12 +41,12 @@ using dt = memory::data_type;
 extern std::mutex map_mutex;
 
 template<typename T>
-aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
-                                   const zendnn_post_ops &po,
-                                   int n, const float alpha, const char *bias,
-                                   int bias_type, const bool relu, const int gelu,
-                                   T *sum_buff, int &postop_count,
-                                   const float *scale=NULL) {
+aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
+                                       const zendnn_post_ops &po,
+                                       int n, const float alpha, const char *bias,
+                                       int bias_type, const bool relu, const int gelu,
+                                       T *sum_buff, int &postop_count,
+                                       const float *scale, float *dummy_scale) {
     aocl_post_op *post_ops = NULL;
     if (bias != NULL) {
         ++postop_count;
@@ -83,12 +83,15 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                                  aocl_post_op_bias));
             if (bias_type == zendnn_bf16) {
                 (post_ops->bias + bias_index)->bias = (int16_t *)bias;
-                (post_ops->bias)->bias_stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-            } else if (bias_type == zendnn_f32) {
+                (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
+            }
+            else if (bias_type == zendnn_f32) {
                 (post_ops->bias + bias_index)->bias = (float *)bias;
-                (post_ops->bias)->bias_stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-            } else {
-                zendnnError(ZENDNN_ALGOLOG, "Check Bias data type, only f32 and bf16 are supported");
+                (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+            }
+            else {
+                zendnnError(ZENDNN_ALGOLOG,
+                            "Check Bias data type, only f32 and bf16 are supported");
             }
             bias_index++;
         }
@@ -191,6 +194,17 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                     (post_ops->eltwise + eltwise_index)->algo.algo_type = GELU_ERF;
                     eltwise_index++;
                 }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
+                    // Sigmoid
+                    dim_t eltwise_index = 0;
+                    post_ops->seq_vector[post_op_i++] = ELTWISE;
+                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
+                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
+                    (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
+                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
+                    (post_ops->eltwise + eltwise_index)->algo.algo_type = SIGMOID;
+                    eltwise_index++;
+                }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
                     // Gelu erf.
                     dim_t eltwise_index = 0;
@@ -211,8 +225,22 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                     (post_ops->matrix_add + add_index)->ldm = n;
                     auto binary_po = CTX_IN_MEM(const void *,
                                                 (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    auto addA = reinterpret_cast<T *>(const_cast<void *>(binary_po));
-                    (post_ops->matrix_add + add_index)->matrix = (T *)addA;
+                    //Currently putting 1.0 as scale
+                    (post_ops->matrix_add + add_index)->scale_factor = (float *)dummy_scale;
+                    (post_ops->matrix_add + add_index)->scale_factor_len = 1;
+                    auto b_dt = po_type.binary.src1_desc.data_type;
+                    if (b_dt == zendnn_bf16) {
+                        (post_ops->matrix_add + add_index)->stor_type =
+                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
+                        auto addA = reinterpret_cast<int16_t *>(const_cast<void *>(binary_po));
+                        (post_ops->matrix_add + add_index)->matrix = (int16_t *)addA;
+                    }
+                    else if (b_dt == zendnn_f32) {
+                        (post_ops->matrix_add + add_index)->stor_type =
+                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+                        auto addA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
+                        (post_ops->matrix_add + add_index)->matrix = (float *)addA;
+                    }
                     add_index++;
                 }
                 else if (po_type.binary.alg == impl::alg_kind::binary_mul) {
@@ -220,8 +248,22 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                     (post_ops->matrix_mul + mul_index)->ldm = n;
                     auto binary_po = CTX_IN_MEM(const void *,
                                                 (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    auto mulA = reinterpret_cast<T *>(const_cast<void *>(binary_po));
-                    (post_ops->matrix_mul + mul_index)->matrix = (T *)mulA;
+                    //Currently putting 1.0 as scale
+                    (post_ops->matrix_mul + mul_index)->scale_factor = (float *)dummy_scale;
+                    (post_ops->matrix_mul + mul_index)->scale_factor_len = 1;
+                    auto b_dt = po_type.binary.src1_desc.data_type;
+                    if (b_dt == zendnn_bf16) {
+                        (post_ops->matrix_mul + mul_index)->stor_type =
+                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
+                        auto mulA = reinterpret_cast<int16_t *>(const_cast<void *>(binary_po));
+                        (post_ops->matrix_mul + mul_index)->matrix = (int16_t *)mulA;
+                    }
+                    else if (b_dt == zendnn_f32) {
+                        (post_ops->matrix_mul + mul_index)->stor_type =
+                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+                        auto mulA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
+                        (post_ops->matrix_mul + mul_index)->matrix = (float *)mulA;
+                    }
                     mul_index++;
                 }
             }
@@ -325,13 +367,13 @@ int ref_woq_bf16(
         reorder_filter = matmul_weight_cache.get(key_obj);
     }
     aocl_post_op *post_ops = NULL;
-
+    float dummy_scale = (float)1.0;
     if (dst_type == zendnn_bf16) {
         int postop_count = bias == NULL ? 0:1;
-        post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
+        post_ops = create_aocl_post_ops_woq<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type,
                    has_eltwise_relu, geluType, NULL/*sum with beta*/,
-                   postop_count, postop_count ? &alpha : NULL);
+                   postop_count, postop_count ? &alpha : NULL, &dummy_scale);
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
                                    transA ? 't' : 'n',
@@ -346,10 +388,11 @@ int ref_woq_bf16(
     }
     else {
         int postop_count = bias == NULL ? 0:1;
-        post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
-                                               alpha, (const char *)bias, bias_type,
-                                               has_eltwise_relu, geluType, NULL/*sum with beta*/,
-                                               postop_count, postop_count ? &alpha : NULL);
+        post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N,
+                   alpha, (const char *)bias, bias_type,
+                   has_eltwise_relu, geluType, NULL/*sum with beta*/,
+                   postop_count, postop_count ? &alpha : NULL,
+                   &dummy_scale);
         aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                                   transA ? 't' : 'n',
                                   transB ? 't' : 'n', M, N, K,
@@ -482,10 +525,11 @@ int ref_woq_f32(
     }
     aocl_post_op *post_ops = NULL;
     int postop_count = 0;
-    post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
-                                           alpha, bias == NULL ? NULL :(const char *)bias, bias_type, 
-                                           has_eltwise_relu, geluType, (float *)output,
-                                           postop_count, NULL);
+    float dummy_scale = (float)1.0;
+    post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N,
+               alpha, bias == NULL ? NULL :(const char *)bias, bias_type,
+               has_eltwise_relu, geluType, (float *)output,
+               postop_count, NULL, &dummy_scale);
     aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                             transA ? 't' : 'n',
                             transB ? 't' : 'n', M, N, K,
@@ -617,6 +661,12 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
         else if (e.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
             post_attr = true;
             post_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, 1.f, 0.f);
+            po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
+        }
+        else if (e.eltwise.alg == impl::alg_kind::eltwise_logistic) {
+            //Sigmoid
+            post_attr = true;
+            post_ops.append_eltwise(scale, algorithm::eltwise_logistic, 0.f, 0.f);
             po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
         }
         else if (e.kind == impl::primitive_kind::sum) {
@@ -800,13 +850,15 @@ int aocl_woq_bf16(
 
     aocl_post_op *post_ops = NULL;
 
+    float dummy_scale = (float)1.0;
     // postop_count always 1 for WOQ cases
     int postop_count = 1;
     float val = 1.0;
     if (dst_type == zendnn_bf16) {
-        post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
+        post_ops = create_aocl_post_ops_woq<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type, has_eltwise_relu, geluType,
-                   NULL/*sum with beta*/, postop_count, bias !=NULL ? &alpha : &val);
+                   NULL/*sum with beta*/, postop_count, bias !=NULL ? &alpha : &val,
+                   &dummy_scale);
 
         //Add pre-op for S4 API
         post_ops->pre_ops = NULL;
@@ -821,11 +873,16 @@ int aocl_woq_bf16(
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         // Pass the scales datatype
         if (scale_dt == zendnn_bf16) {
-            ((post_ops->pre_ops)->b_scl)->scale_factor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-        } else if (scale_dt == zendnn_f32) {
-            ((post_ops->pre_ops)->b_scl)->scale_factor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-        } else {
-            zendnnError(ZENDNN_ALGOLOG, "Check scales data type, only f32 and bf16 are supported");
+            ((post_ops->pre_ops)->b_scl)->scale_factor_type =
+                AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
+        }
+        else if (scale_dt == zendnn_f32) {
+            ((post_ops->pre_ops)->b_scl)->scale_factor_type =
+                AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+        }
+        else {
+            zendnnError(ZENDNN_ALGOLOG,
+                        "Check scales data type, only f32 and bf16 are supported");
         }
         (post_ops->pre_ops)->seq_length = 1;
         (post_ops->pre_ops)->group_size = group_size;
@@ -843,10 +900,10 @@ int aocl_woq_bf16(
                                  post_ops);
     }
     else {
-        post_ops = create_aocl_post_ops<float>(ctx, po_ops, N, alpha,
-                                               (const char *)bias, bias_type, has_eltwise_relu, geluType,
-                                               NULL/*sum with beta*/, postop_count,
-                                               bias !=NULL ? &alpha : &val);
+        post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N, alpha,
+                   (const char *)bias, bias_type, has_eltwise_relu, geluType,
+                   NULL/*sum with beta*/, postop_count,
+                   bias !=NULL ? &alpha : &val, &dummy_scale);
         //Add pre-op for S4 API
         post_ops->pre_ops = NULL;
         post_ops->pre_ops = (aocl_pre_op *)malloc(sizeof(aocl_pre_op));
@@ -860,11 +917,16 @@ int aocl_woq_bf16(
         ((post_ops->pre_ops)->b_scl)->scale_factor_len = scale_size;
         // Pass the scales datatype
         if (scale_dt == zendnn_bf16) {
-            ((post_ops->pre_ops)->b_scl)->scale_factor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-        } else if (scale_dt == zendnn_f32) {
-            ((post_ops->pre_ops)->b_scl)->scale_factor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-        } else {
-            zendnnError(ZENDNN_ALGOLOG, "Check scales data type, only f32 and bf16 are supported");
+            ((post_ops->pre_ops)->b_scl)->scale_factor_type =
+                AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
+        }
+        else if (scale_dt == zendnn_f32) {
+            ((post_ops->pre_ops)->b_scl)->scale_factor_type =
+                AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+        }
+        else {
+            zendnnError(ZENDNN_ALGOLOG,
+                        "Check scales data type, only f32 and bf16 are supported");
         }
         (post_ops->pre_ops)->seq_length = 1;
         (post_ops->pre_ops)->group_size = group_size;
@@ -1009,18 +1071,13 @@ int matmul_woq_wrapper(
 
         //If algo is AOCL but can't execute due to limited mixed_data type support
         //then run blocked brgemm
-        if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
+        if ((zenEnvObj.zenBF16GEMMalgo ==
+                zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
                 || zenEnvObj.zenBF16GEMMalgo == 3) && (use_jit || !can_run_aocl)) {
             zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
         }
-        // AOCL Accepts only even K values & M > 1 and N > 1
-        // TODO: Condition checks can be removed once we get a fix for this
-        if (K%2 != 0 || M == 1 || N == 1) {
-            zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
-        }
 
-        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4)
-        {
+        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4) {
             aocl_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                           transA, transB,
                           M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,

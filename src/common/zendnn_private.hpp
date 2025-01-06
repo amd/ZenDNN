@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -1124,6 +1124,7 @@ extern "C"
     );
 
     int matmul_int8_wrapper(
+        const zendnn::impl::exec_ctx_t &ctx,
         zendnn::zendnnEnv zenEnvObj,
         int src_type,
         int dst_type,
@@ -1140,12 +1141,13 @@ extern "C"
         const int8_t *weights,
         const int ldb,
         const char *bias,
-        const bool has_eltwise_relu,
-        const int geluType,
+        const zendnn::impl::post_ops_t &po_ops,
         const float beta,
         char *dst,
         const int ldc,
         float *scale,
+        const int32_t zero_point_src,
+        const int32_t zero_point_wei,
         const int32_t zero_point_dst,
         int out_scale_size,
         float do_sum,
@@ -1153,6 +1155,7 @@ extern "C"
     );
 
     int auto_compute_matmul_int8(
+        const zendnn::impl::exec_ctx_t &ctx,
         zendnn::zendnnEnv zenEnvObj,
         int src_type,
         int dst_type,
@@ -1169,12 +1172,13 @@ extern "C"
         const int8_t *weights,
         const int ldb,
         const char *bias,
-        const bool relu,
-        const int gelu,
+        const zendnn::impl::post_ops_t &po_ops,
         const float beta,
         char *output,
         const int ldc,
         float *scale,
+        const int32_t zero_point_src,
+        const int32_t zero_point_wei,
         const int32_t zero_point_dst,
         int out_scale_size,
         float do_sum,

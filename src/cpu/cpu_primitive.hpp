@@ -54,8 +54,10 @@
 #define DEFINE_SCALES_BUFFER(scales) \
     alignas(16) float CONCAT2(scales, _buf16)[16] = {0}; \
     const float *scales; \
+    int oscale_size; \
     if (pd()->attr()->output_scales_.defined()) { \
         scales = pd()->attr()->output_scales_.scales_; \
+        oscale_size = pd()->attr()->output_scales_.count_; \
     } else { \
         scales = CTX_IN_MEM(const float *, ZENDNN_ARG_ATTR_OUTPUT_SCALES); \
         if (scales == nullptr) return status::invalid_arguments; \
@@ -63,6 +65,7 @@
         bool ok = scales_d.data_type() == data_type::f32 \
                 && scales_d.ndims() == 1; \
         if (!ok) return status::invalid_arguments; \
+        oscale_size = (int)(scales_d.dims()[0]); \
         if (scales_d.dims()[0] == 1) { \
             utils::array_set(CONCAT2(scales, _buf16), scales[0], 16); \
             scales = CONCAT2(scales, _buf16); \

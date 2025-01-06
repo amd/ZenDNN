@@ -108,9 +108,9 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
 
     bool ok = one_of(src_md()->data_type, s8, u8)
               && weights_md()->data_type == s8 && desc()->accum_data_type == s32
-              && one_of(dst_md()->data_type, f32, s32, s8)
+              && one_of(dst_md()->data_type, f32, s32, s8, bf16)
               && IMPLICATION(with_bias(),
-                             one_of(weights_md(1)->data_type, f32, s32, s8)
+                             one_of(weights_md(1)->data_type, f32, s32, s8, bf16)
                              && is_bias_1xN())
               && (ndims() - 2) < 1 /*Condition to check batched matmul*/
               && attr()->has_default_values(
@@ -138,8 +138,8 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
 
     params_.gemm_applies_output_scales_ = false;
     params_.gemm_beta_ = 0.f;
-
-    bool do_sum = params_.pp_attr_.post_ops_.find(primitive_kind::sum) >= 0;
+    auto &po = params_.pp_attr_.post_ops_;
+    bool do_sum = po.find(primitive_kind::sum) >= 0;
     params_.dst_is_acc_
         = utils::one_of(dst_md()->data_type, s32, f32) && !do_sum;
 
@@ -148,10 +148,11 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
     nthr_ = zendnn_get_max_threads();
     gemm_based::book_acc_scratchpad(*this, params_, sizeof(int32_t), nthr_);
 
-    return status::success;
+    return check_post_ops_(po);
 }
 
-//Processing the constant values for the quantization
+// TODO:Processing the constant values for the quantization
+/*
 void zendnn_x8s8s32x_matmul_t::post_process_src_and_weights_zero_points(
     std::vector<int32_t> &src_comp, std::vector<int32_t> &wei_comp, dim_t M,
     dim_t N, dim_t K, const char *src, dim_t src_s0, dim_t src_s1,
@@ -183,6 +184,7 @@ void zendnn_x8s8s32x_matmul_t::post_process_src_and_weights_zero_points(
                             - wei_zero_point * src_comp[m]
                             + src_zero_point * wei_zero_point * (int)K;
 }
+*/
 
 status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     using namespace binary_injector_utils;
@@ -207,54 +209,25 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int dst_type = dst_d.data_type();
     int bias_type = pd()->weights_md(1)->data_type;
 
-    //check if src and weights zero point
-    int8_t gemm_off_a_int8 = static_cast<int8_t>(src_zero_point);
-    uint8_t gemm_off_a_uint8 = static_cast<uint8_t>(src_zero_point);
-    int8_t gemm_off_b = static_cast<int8_t>(weights_zero_point);
-    const bool ok = IMPLICATION(src_d.data_type() == data_type::s8,
-                                gemm_off_a_int8 == src_zero_point)
-                    && IMPLICATION(src_d.data_type() == data_type::u8,
-                                   gemm_off_a_uint8 == src_zero_point)
-                    && gemm_off_b == weights_zero_point;
-    const bool post_process_src_and_weights_zero_points_outside_of_gemm = !ok;
-    if (post_process_src_and_weights_zero_points_outside_of_gemm) {
-        gemm_off_a_int8 = gemm_off_a_uint8 = gemm_off_b = 0;
-    }
     zendnnInfo(ZENDNN_PROFLOG, "zendnn_int8_matmul_t::execute");
 
     matmul_helper_t helper(src_d, weights_d, dst_d);
     const int ndims = pd()->ndims();
-    const int batch_ndims = ndims - 2;
     dim_t M = helper.M();
     const dim_t N = helper.N();
     const dim_t K = helper.K();
 
-    //Check if needed (only for processing src weights zero point)
-    const int ldx_dim_idx = pd()->ndims() - 2;
-
-    const int nthr = pd()->nthr_;
-    const auto &dst_bd = dst_d.blocking_desc();
-    const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
-    const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
-                                                2];
-
     const gemm_based::params_t &params = pd()->params();
-
+    const bool Layout = true;
     // In case of normal matrices, the stride of the last dimension will always be 1,
     // as the elements are contiguous. However in case of transposed matrix, the
     // stride of the last dimension will be greater than 1.
-    const char *transA
-        = src_strides[1] == 1 ? "N" : "T";
-    const char *transB
-        = weights_strides[1] == 1 ? "N" : "T";
+    const char transA = helper.transA();
+    const char transB = helper.transB();
 
-    const dim_t M_s32 = (dim_t)M;
-    const dim_t N_s32 = (dim_t)N;
-    const dim_t K_s32 = (dim_t)K;
-
-    const dim_t lda = (dim_t)src_strides[*transA == 'N' ? 0 : 1];
-    const dim_t ldb = (dim_t)weights_strides[*transB == 'N' ? 0 : 1];
-    const dim_t ldc = (dim_t)dst_bd.strides[dst_d.ndims() - 2];
+    const dim_t lda = helper.lda();
+    const dim_t ldb = helper.ldb();
+    const dim_t ldc = helper.ldc();
 
     zendnnEnv zenEnvObj = readEnv();
     bool is_weights_const = zenEnvObj.zenWeightCache &&
@@ -262,26 +235,7 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const float alpha = params.get_gemm_alpha(scales);
     const float beta = params.gemm_beta_;
-    //const float dst_zero_point_f32 = static_cast<float>(dst_zero_point);
-    float *output_scales {nullptr};
-    output_scales = pd()->attr()->output_scales_.scales_;
-    int scale_size = pd()->attr()->output_scales_.count_;
-
-    int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
-    //int elementwise_index =  po.find(primitive_kind::eltwise);
-    bool has_eltwise_relu = elementwise_index>=0 ?
-                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
-                            alg_kind::eltwise_relu : 0;
-
-    bool has_eltwise_gelu = elementwise_index>=0 ?
-                            pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
-                            alg_kind::eltwise_gelu : 0;
-
-    bool has_eltwise_gelu_erf = elementwise_index>=0 ?
-                                pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
-                                alg_kind::eltwise_gelu_erf : 0;
-
-    unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
+    float *oscale = const_cast<float *>(scales);
     int sum_idx = po.find(primitive_kind::sum);
     float do_sum = sum_idx >= 0 ? po.entry_[sum_idx].sum.scale: 0.0f;
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
@@ -290,28 +244,26 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8 ||
             algo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
         auto_tuner = 1;
-        algo = auto_compute_matmul_int8(zenEnvObj, src_type, dst_type, bias_type, 0,
-                                        strcmp(transA,
-                                               "N"), strcmp(transB, "N"),
-                                        M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                                        geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
-                                        do_sum, is_weights_const);
+        algo = auto_compute_matmul_int8(ctx, zenEnvObj, src_type, dst_type, bias_type,
+                                        Layout, transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                                        M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
+                                        beta, (char *)dst, ldc, oscale, src_zero_point, weights_zero_point,
+                                        dst_zero_point, oscale_size, do_sum, is_weights_const);
     }
     else {
-        matmul_int8_wrapper(zenEnvObj, src_type, dst_type, bias_type, 0, strcmp(transA,
-                            "N"), strcmp(transB, "N"),
-                            M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
-                            geluType, beta, (char *)dst, ldc, output_scales, dst_zero_point, scale_size,
-                            do_sum, is_weights_const);
+        algo = matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type,
+                                   Layout,
+                                   transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                                   M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
+                                   beta, (char *)dst, ldc, oscale, src_zero_point, weights_zero_point,
+                                   dst_zero_point, oscale_size, do_sum, is_weights_const);
     }
     zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=",
                   auto_tuner ? "True": "False",
-                  " Layout=",
-                  1 ? "CblasRowMajor," : "CblasColMajor,",
+                  " Layout=", 1 ? "CblasRowMajor," : "CblasColMajor,",
                   " m=", M, " k=", K, " n=", N, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
-                  " relu=", has_eltwise_relu, " gelu=", geluType,
-                  " algo_type=", algo, " scale sum=", do_sum, " src dt=", src_type, " dst_dt=",
+                  " algo_type=", algo, " scale_sum=", do_sum, " src dt=", src_type, " dst_dt=",
                   dst_type, " weight_caching=", is_weights_const ? "True": "False");
 
 
