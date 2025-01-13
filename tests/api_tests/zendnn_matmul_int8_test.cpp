@@ -107,7 +107,7 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     }
 
     //Set zero_point vals for src and dst
-    int32_t zp_A = 0, zp_C = 2;
+    int32_t zp_A = 9, zp_C = 2;
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -139,6 +139,31 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     write_to_zendnn_memory((void *)&zp_C, zp_C_mem);
     write_to_zendnn_memory(bin_data.data(), bin_mem);
 
+    int src_scale_size = 1, wei_scale_size = N, dst_scale_size = 1;
+    std::vector<float> src_scale(src_scale_size);
+    std::vector<float> wei_scale(wei_scale_size);
+    std::vector<float> dst_scale(dst_scale_size);
+
+    default_random_engine gen;
+    uniform_real_distribution<double> distribution(0.0, 1.0);
+    for (int i = 0; i < src_scale.size(); i++) {
+        src_scale[i] = distribution(gen);
+    }
+    for (int i = 0; i < wei_scale.size(); i++) {
+        wei_scale[i] = distribution(gen);
+    }
+    for (int i = 0; i < dst_scale.size(); i++) {
+        dst_scale[i] = distribution(gen);
+    }
+
+    memory src_scale_mem({{src_scale_size}, memory::data_type::f32, {1}}, eng);
+    memory wei_scale_mem({{wei_scale_size}, memory::data_type::f32, {1}}, eng);
+    memory dst_scale_mem({{dst_scale_size}, memory::data_type::f32, {1}}, eng);
+
+    write_to_zendnn_memory(src_scale.data(), src_scale_mem);
+    write_to_zendnn_memory(wei_scale.data(), wei_scale_mem);
+    write_to_zendnn_memory(dst_scale.data(), dst_scale_mem);
+
     // Create operation descriptor
     auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
     // Create primitive post-ops (ReLU).
@@ -157,12 +182,16 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     //Add scale
-    //matmul_attr.set_output_scales((1<<1), scales);
-    matmul_attr.set_output_scales(0, {scale});
+    // matmul_attr.set_output_scales((1<<1), scales);
+    // matmul_attr.set_output_scales(0, {scale});
     //Add zero_point
     //ZENDNN_RUNTIME_S32_VAL used to create primitive without actual zero_point
     matmul_attr.set_zero_points(ZENDNN_ARG_SRC, 0, {ZENDNN_RUNTIME_S32_VAL});
     matmul_attr.set_zero_points(ZENDNN_ARG_DST, 0, {ZENDNN_RUNTIME_S32_VAL});
+    matmul_attr.set_scales_mask(ZENDNN_ARG_SRC, 0, {}, dt::f32);
+    matmul_attr.set_scales_mask(ZENDNN_ARG_WEIGHTS, 1, {1,1}, dt::f32);
+    matmul_attr.set_scales_mask(ZENDNN_ARG_DST, 0, {}, dt::f32);
+    matmul_attr.set_compute_src_dtype(memory::data_type::u8);
     // Create primitive descriptor.
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, eng);
     // Create the primitive.
@@ -175,6 +204,9 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
         {ZENDNN_ARG_WEIGHTS, weights_mem},
         {ZENDNN_ARG_BIAS, bias_mem},
         {ZENDNN_ARG_DST, dst_mem},
+        {ZENDNN_ARG_ATTR_SCALES | ZENDNN_ARG_SRC, src_scale_mem},
+        {ZENDNN_ARG_ATTR_SCALES | ZENDNN_ARG_WEIGHTS, wei_scale_mem},
+        {ZENDNN_ARG_ATTR_SCALES | ZENDNN_ARG_DST, dst_scale_mem},
         {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem},
         {ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem},
         {t, bin_mem}
@@ -225,7 +257,7 @@ std::vector<int32_t> matmul_example_2D_dst_s32(zendnn::engine eng,
     }
 
     //Set zero_point vals for src and dst
-    int32_t zp_A = 0, zp_C = 5;
+    int32_t zp_A = 5, zp_C = 5;
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};

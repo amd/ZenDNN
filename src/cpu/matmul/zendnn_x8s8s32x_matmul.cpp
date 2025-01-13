@@ -67,10 +67,17 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
     using namespace utils;
     using namespace data_type;
 
-    auto check_attr_oscale = [&]() -> bool {
-        const auto &oscale = attr()->output_scales_;
-        return oscale.mask_ == 0
-        || (oscale.mask_ == (1 << (dst_md()->ndims - 1)));
+    auto check_attr_scales = [&]() -> bool {
+        bool ok = attr_scales_ok();
+        if (!attr()->scales_.get(ZENDNN_ARG_SRC).has_default_values()
+                && !attr()->scales_.get(ZENDNN_ARG_WEIGHTS).has_default_values()
+                && attr()->scales_.get(ZENDNN_ARG_WEIGHTS).mask_ != 0) {
+            // This case requires scratchpad with unknown size
+            if (N() == ZENDNN_RUNTIME_DIM_VAL) {
+                ok = false;
+            }
+        }
+        return ok;
     };
 
     auto check_attr_zero_points
@@ -101,14 +108,13 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
 
     zendnnEnv zenEnvObj = readEnv();
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm ||
-            zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_JIT_INT8) {
+    if (obj.is_brgemm) {
         return status::unimplemented;
     }
 
     bool ok = one_of(src_md()->data_type, s8, u8)
               && weights_md()->data_type == s8 && desc()->accum_data_type == s32
-              && one_of(dst_md()->data_type, f32, s32, s8, bf16)
+              && one_of(dst_md()->data_type, f32, s32, s8, u8, bf16)
               && IMPLICATION(with_bias(),
                              one_of(weights_md(1)->data_type, f32, s32, s8, bf16)
                              && is_bias_1xN())
@@ -122,7 +128,7 @@ status_t zendnn_x8s8s32x_matmul_t::pd_t::init(engine_t *engine) {
               && attr_.post_ops_.check_sum_consistent_dt(dst_md()->data_type)
               // need to set up default formats first, so that latter checks can
               // be perfomed properly
-              && set_default_formats() && check_attr_oscale()
+              && set_default_formats() && check_attr_scales()
               && check_attr_zero_points() && check_attr_post_ops()
               && gemm_based::check_gemm_compatible_formats(*this)
               && attr_.set_default_formats(dst_md(0)) == status::success;
@@ -196,7 +202,17 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const auto &po = this->pd()->attr()->post_ops_;
     const auto post_ops_binary_rhs_arg_vec = prepare_binary_args(po, ctx);
 
+    // Is set using set_output_scales()
     DEFINE_SCALES_BUFFER(scales);
+
+    // Passed as runtime memory
+    DEFINE_STATIC_SCALES_BUFFER(src_scales, src_scale_size, src_scale_type,
+                                ZENDNN_ARG_SRC);
+    DEFINE_STATIC_SCALES_BUFFER(wei_scales, wei_scale_size, wei_scale_type,
+                                ZENDNN_ARG_WEIGHTS);
+    DEFINE_STATIC_SCALES_BUFFER(dst_scales, dst_scale_size, dst_scale_type,
+                                ZENDNN_ARG_DST);
+
     DEFINE_ZERO_POINT_VALUE(src_zero_point, ZENDNN_ARG_SRC);
     DEFINE_ZERO_POINT_VALUE(weights_zero_point, ZENDNN_ARG_WEIGHTS);
     DEFINE_ZERO_POINT_VALUE(dst_zero_point, ZENDNN_ARG_DST);
@@ -208,6 +224,19 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int src_type = src_d.data_type();
     int dst_type = dst_d.data_type();
     int bias_type = pd()->weights_md(1)->data_type;
+    bool default_src_scales = pd()->attr()->static_scales_.get(
+                                  ZENDNN_ARG_SRC).has_default_values();
+    bool default_wei_scales = pd()->attr()->static_scales_.get(
+                                  ZENDNN_ARG_WEIGHTS).has_default_values();
+    bool default_dst_scales = pd()->attr()->static_scales_.get(
+                                  ZENDNN_ARG_DST).has_default_values();
+
+    // Use output_scales only when no other scale is set
+    // Modifying the wei_scales to support output_scales
+    if (default_src_scales && default_wei_scales && default_dst_scales) {
+        wei_scales = scales;
+        wei_scale_size = oscale_size;
+    }
 
     zendnnInfo(ZENDNN_PROFLOG, "zendnn_int8_matmul_t::execute");
 
@@ -233,9 +262,18 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     bool is_weights_const = zenEnvObj.zenWeightCache &&
                             pd()->weights_md()->is_memory_const;
 
-    const float alpha = params.get_gemm_alpha(scales);
+    const float alpha = params.get_gemm_alpha(dst_scales);
     const float beta = params.gemm_beta_;
-    float *oscale = const_cast<float *>(scales);
+
+    if (dst_scale_type == bf16) {
+        float *dst_float_scales = const_cast<float *>(dst_scales);
+        for (int idx = 0; idx < dst_scale_size; idx++) {
+            dst_float_scales[idx] = zendnn::impl::cpu::io::load_float_value((zendnn_bf16),
+                                    (void *)dst_scales, idx);
+        }
+        dst_scales = dst_float_scales;
+    }
+
     int sum_idx = po.find(primitive_kind::sum);
     float do_sum = sum_idx >= 0 ? po.entry_[sum_idx].sum.scale: 0.0f;
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
@@ -247,16 +285,22 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         algo = auto_compute_matmul_int8(ctx, zenEnvObj, src_type, dst_type, bias_type,
                                         Layout, transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                         M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
-                                        beta, (char *)dst, ldc, oscale, src_zero_point, weights_zero_point,
-                                        dst_zero_point, oscale_size, do_sum, is_weights_const);
+                                        beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
+                                        dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
+                                        src_scale_size, const_cast<float *>(wei_scales), wei_scale_size,
+                                        const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,
+                                        src_scale_type);
     }
     else {
         algo = matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type,
                                    Layout,
                                    transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                    M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
-                                   beta, (char *)dst, ldc, oscale, src_zero_point, weights_zero_point,
-                                   dst_zero_point, oscale_size, do_sum, is_weights_const);
+                                   beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
+                                   dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
+                                   src_scale_size, const_cast<float *>(wei_scales), wei_scale_size,
+                                   const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,
+                                   src_scale_type);
     }
     zendnnVerbose(ZENDNN_PROFLOG, "zenMatMul_gemm auto_tuner=",
                   auto_tuner ? "True": "False",

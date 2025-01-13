@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -367,6 +367,11 @@ status_t primitive_attr_t::set_autoTunerEnable(bool autoTunerflag) {
     return success;
 }
 
+status_t primitive_attr_t::set_computeSrcDType(data_type_t data_type) {
+    computeSrcDtype = data_type;
+    return success;
+}
+
 status_t primitive_attr_t::set_plugin_op_name(const std::string plugin_op_name) {
     plugin_op = plugin_op_name;
     return success;
@@ -427,6 +432,7 @@ status_t zendnn_primitive_attr_get_fpmath_mode(
     *mode = attr->fpmath_mode_;
     return success;
 }
+
 status_t zendnn_primitive_attr_set_autoTunerEnable(
     primitive_attr_t *attr, bool flag){
         return attr->set_autoTunerEnable(flag);
@@ -507,6 +513,23 @@ status_t zendnn_primitive_attr_get_scales(primitive_attr_t *attr, int arg,
     if (!ok) return invalid_arguments;
 
     return attr->scales_.get(arg, count, mask, scales);
+}
+
+status_t zendnn_primitive_attr_set_scales_mask(
+        primitive_attr_t *attr, int arg, int mask, int ndims,
+        const dims_t group_dims, data_type_t data_type) {
+    bool ok = attr && mask >= 0 && arg >= 0 && ndims >= 0 &&
+                utils::one_of(data_type, data_type::f32, data_type::bf16) &&
+                checkGroup(ndims, group_dims);
+    if(!ok) return invalid_arguments;
+
+    return attr->static_scales_.set(arg, mask, ndims, group_dims, data_type);
+}
+
+status_t zendnn_primitive_attr_set_compute_src_dtype(
+    primitive_attr_t *attr, data_type_t data_type){
+        auto var = attr->set_computeSrcDType(data_type);
+        return var;
 }
 
 status_t zendnn_primitive_attr_get_zero_points(const primitive_attr_t *attr,

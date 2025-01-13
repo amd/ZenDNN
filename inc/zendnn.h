@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -534,6 +534,41 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_get_scales(
 zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_scales(
         zendnn_primitive_attr_t attr, int arg, zendnn_dim_t count, int mask,
         const float *scales);
+
+/// Sets primitive attributes scaling factors for primitive operations for a
+/// given memory argument. The scaling factors must be passed at execution time
+/// as an argument with index #ZENDNN_ARG_ATTR_SCALES | arg.
+///
+/// @sa zendnn_primitive_attr_set_scales_mask
+///
+///
+/// @param attr Primitive attributes.
+/// @param arg Parameter argument index as passed to the
+///     zendnn_primitive_execute() call.
+/// @param mask Scaling factors correspondence mask that defines the
+///     correspondence between the tensor dimensions and the @p scales array.
+///     The set i-th bit indicates that a dedicated scaling factor is used for
+///     each index along that dimension. Set the mask to 0 to use a common
+///     scaling factor for the whole output tensor.
+/// @param groups Scaling factors correspondence groups that define the
+///     correspondence between the tensor dimensions and the scales array.
+///     The set i-th dimension indicates a number of groups of scaling
+///     factors used for that logical dimension in a memory indicated by @p arg.
+/// @param data_type Scaling factors data_type.
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_scales_mask(
+        zendnn_primitive_attr_t attr, int arg, int mask,  int ndims,
+        const zendnn_dims_t group_dims, zendnn_data_type_t data_type);
+
+/// Sets the compute src data type primitive attributes.
+///
+/// @param attr Primitive attributes.
+/// @param data_type Compute source data_type
+/// @returns #zendnn_success on success and a status describing the error
+///     otherwise.
+zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_compute_src_dtype(
+        zendnn_primitive_attr_t attr, zendnn_data_type_t data_type);
 
 /// Returns @p count, correspondence zero point @p mask, and a pointer to a
 /// constant int32_t array of @p zero_points for given @p attr and memory

@@ -1145,13 +1145,19 @@ extern "C"
         const float beta,
         char *dst,
         const int ldc,
-        float *scale,
         const int32_t zero_point_src,
         const int32_t zero_point_wei,
         const int32_t zero_point_dst,
-        int out_scale_size,
         float do_sum,
-        bool is_weights_const
+        bool is_weights_const,
+        float *src_scale,
+        int src_scale_size,
+        float *wei_scale,
+        int wei_scale_size,
+        float *dst_scales,
+        int dst_scale_size,
+        bool default_dst_scales,
+        int scale_type
     );
 
     int auto_compute_matmul_int8(
@@ -1176,13 +1182,19 @@ extern "C"
         const float beta,
         char *output,
         const int ldc,
-        float *scale,
         const int32_t zero_point_src,
         const int32_t zero_point_wei,
         const int32_t zero_point_dst,
-        int out_scale_size,
         float do_sum,
-        bool is_weights_const
+        bool is_weights_const,
+        float *src_scale,
+        int src_scale_size,
+        float *wei_scale,
+        int wei_scale_size,
+        float *dst_scales,
+        int dst_scale_size,
+        bool default_dst_scales,
+        int scale_type
     );
 
     int matmul_woq_wrapper(

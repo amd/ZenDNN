@@ -56,6 +56,52 @@ void reorderAndCacheWeights(
     ReorderFunc<T> reorder_func
 );
 
+void cacheStaticScales(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    float *&new_scale,
+    float *src_scale,
+    float *wei_scale,
+    float *dst_scale,
+    int src_scale_size,
+    int wei_scale_size,
+    int dst_scale_size,
+    int scale_type
+);
+
+void cacheZeroPointCompensation(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    int M,
+    int N,
+    int K,
+    const char *src,
+    int src_s0,
+    int src_s1,
+    const int8_t *wei,
+    int wei_s0,
+    int wei_s1,
+    int32_t *&acc,
+    int ldc,
+    int32_t src_zero_point,
+    int32_t wei_zero_point
+);
+
+void cacheScaledBias(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    zendnn::stream engine_stream,
+    zendnn::engine eng,
+    zendnn::memory::desc bias_desc,
+    char *&new_bias,
+    char *bias,
+    int n,
+    float *src_scale,
+    float *wei_scale,
+    int src_scale_size,
+    int wei_scale_size
+);
+
 namespace zendnn {
 namespace impl {
 template <typename KEY_T, typename VALUE_T>
