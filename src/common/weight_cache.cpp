@@ -74,6 +74,248 @@ void reorderAndCacheWeights(
     }
 }
 
+void cacheZeroPointCompensation(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    int M,
+    int N,
+    int K,
+    const char *src,
+    int src_s0,
+    int src_s1,
+    const int8_t *wei,
+    int wei_s0,
+    int wei_s1,
+    int32_t *&acc,
+    int ldc,
+    int32_t src_zero_point,
+    int32_t wei_zero_point
+) {
+    // Used to cache compensation when only src_scales exist.
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, int32_t *>
+    matmul_src_zp_wei_comp_cache;
+
+    bool enable_cache = zenEnvObj.zenZpCompCache;
+    if (!wei_zero_point && !src_zero_point) {
+        return;
+    }
+    else if (!wei_zero_point) {
+        auto found_obj = matmul_src_zp_wei_comp_cache.find_key(key_obj);
+        if (!found_obj) {
+            // acc is freed by lru map
+            acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*N);
+            std::vector<int32_t> wei_comp(N,0);
+            if (src_zero_point) {
+                for_(dim_t k = 0; k < K; ++k)
+                for (dim_t n = 0; n < N; ++n) {
+                    if (k == 0) {
+                        wei_comp[n] = int32_t(0);
+                    }
+                    wei_comp[n] += wei[wei_s0 * k + wei_s1 * n];
+                }
+            }
+
+            for (dim_t n = 0; n < N; ++n) {
+                acc[n] = 0 - src_zero_point * wei_comp[n];
+            }
+            if (enable_cache) {
+                zendnnVerbose(ZENDNN_PROFLOG,
+                              "Cache Zero-point(src and wei) as 1D compensation");
+                map_mutex.lock();
+                matmul_src_zp_wei_comp_cache.add(key_obj, acc);
+                map_mutex.unlock();
+            }
+        }
+        else {
+            acc = matmul_src_zp_wei_comp_cache.get(key_obj);
+        }
+    }
+    else if (!src_zero_point) {
+        std::vector<int32_t> src_comp(M,0);
+        // acc is freed in main function for wei_zp != 0
+        acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
+        if (wei_zero_point) {
+            for_(dim_t m = 0; m < M; ++m)
+            for (dim_t k = 0; k < K; ++k) {
+                if (k == 0) {
+                    src_comp[m] = int32_t(0);
+                }
+                src_comp[m] += src[src_s0 * m + src_s1 * k];
+            }
+        }
+
+        for_(dim_t m = 0; m < M; ++m)
+        for (dim_t n = 0; n < N; ++n) {
+            acc[m * ldc + n] = 0 - wei_zero_point * src_comp[m];
+        }
+    }
+    else {
+        std::vector<int32_t> src_comp(M,0);
+        std::vector<int32_t> wei_comp(N,0);
+        // acc is freed in main function for wei_zp != 0
+        acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
+        if (wei_zero_point) {
+            for_(dim_t m = 0; m < M; ++m)
+            for (dim_t k = 0; k < K; ++k) {
+                if (k == 0) {
+                    src_comp[m] = int32_t(0);
+                }
+                src_comp[m] += src[src_s0 * m + src_s1 * k];
+            }
+        }
+
+        if (src_zero_point) {
+            for_(dim_t k = 0; k < K; ++k)
+            for (dim_t n = 0; n < N; ++n) {
+                if (k == 0) {
+                    wei_comp[n] = int32_t(0);
+                }
+                wei_comp[n] += wei[wei_s0 * k + wei_s1 * n];
+            }
+        }
+
+        for_(dim_t m = 0; m < M; ++m)
+        for (dim_t n = 0; n < N; ++n)
+            acc[m * ldc + n] = 0 - src_zero_point * wei_comp[n]
+                               - wei_zero_point * src_comp[m]
+                               + src_zero_point * wei_zero_point * (int)K;
+    }
+}
+
+// Fucntion to cache BIAS/(src_scale*wei_scale)
+// TODO: get proper size of bias
+void cacheScaledBias(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    zendnn::stream engine_stream,
+    zendnn::engine eng,
+    zendnn::memory::desc bias_desc,
+    char *&new_bias,
+    char *bias,
+    int n,
+    float *src_scale,
+    float *wei_scale,
+    int src_scale_size,
+    int wei_scale_size
+) {
+    // Bias caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, char *>
+    matmul_bias_cache;
+    auto found_obj = matmul_bias_cache.find_key(key_obj);
+
+    // enable cache = 1 (cache the product).
+    // enable_cache = 0 (do product always)
+    bool enable_cache = zenEnvObj.zenBiasCache;
+    // Assuming wei scales size is larger or equal to src scale size.
+    if (!found_obj) {
+        std::vector<float> reordered_bias_scales(wei_scale_size);
+        #pragma omp parallel for
+        for (int i = 0; i < wei_scale_size; i++) {
+            reordered_bias_scales[i] = 1 / (wei_scale[i]*src_scale[i%src_scale_size]);
+        }
+
+        auto bias_memory = memory(bias_desc, eng, bias);
+        size_t size_mem = bias_memory.get_desc().get_size();
+        new_bias = (char *)zendnn_aligned_alloc(64, size_mem);
+        auto reordered_bias_memory = memory(bias_desc, eng, new_bias);
+        primitive_attr bias_attr;
+        bias_attr.set_output_scales(wei_scale_size == 1 ? 0 : (1<<1),
+                                    reordered_bias_scales);
+        reorder(bias_memory, reordered_bias_memory, bias_attr).execute(engine_stream,
+                bias_memory, reordered_bias_memory);
+        if (enable_cache) {
+            zendnnVerbose(ZENDNN_PROFLOG,"Cache Scaled Bias");
+            map_mutex.lock();
+            matmul_bias_cache.add(key_obj, new_bias);
+            map_mutex.unlock();
+        }
+    }
+    else {
+        new_bias = matmul_bias_cache.get(key_obj);
+    }
+
+    return;
+}
+
+// Current support is for wei_scale*src_scale*dst_scale
+// TODO: consider all scale sizes to access data.
+void cacheStaticScales(
+    zendnn::zendnnEnv zenEnvObj,
+    const Key_matmul &key_obj,
+    float *&new_scale,
+    float *src_scale,
+    float *wei_scale,
+    float *dst_scale,
+    int src_scale_size,
+    int wei_scale_size,
+    int dst_scale_size,
+    int scale_type
+) {
+    // Static scale caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, float *>
+    matmul_SrcWei_scales_cache;
+    auto found_obj = matmul_SrcWei_scales_cache.find_key(key_obj);
+
+    bool enable_cache = zenEnvObj.zenStaticScaleCache;
+    // Assuming wei scales size is larger or equal to src scale size.
+    // enable cache = 1 (don't do product again if already cached).
+    // enable_cache = 0 (do product always)
+    if (!found_obj || !enable_cache) {
+        new_scale = (float *)zendnn_aligned_alloc(64, sizeof(float)*wei_scale_size);
+        if (scale_type == zendnn_f32) {
+            if (dst_scale != NULL) {
+                #pragma omp parallel for
+                for (int i = 0; i < wei_scale_size; i++) {
+                    new_scale[i] = wei_scale[i] * src_scale[0] * dst_scale[0];
+                }
+            }
+            else {
+                #pragma omp parallel for
+                for (int i = 0; i < wei_scale_size; i++) {
+                    new_scale[i] = wei_scale[i] * src_scale[0];
+                }
+            }
+        }
+        else if (scale_type == zendnn_bf16) {
+            float src_scale_f = zendnn::impl::cpu::io::load_float_value((zendnn_bf16),
+                                (void *)src_scale, 0);
+            if (dst_scale != NULL) {
+                float dst_scale_f = zendnn::impl::cpu::io::load_float_value((zendnn_bf16),
+                                    (void *)dst_scale, 0);
+                #pragma omp parallel for
+                for (int idx = 0; idx < wei_scale_size; idx++) {
+                    new_scale[idx] = zendnn::impl::cpu::io::load_float_value((zendnn_bf16),
+                                     (void *)wei_scale, idx) *
+                                     src_scale_f * dst_scale_f;
+                }
+            }
+            else {
+                #pragma omp parallel for
+                for (int idx = 0; idx < wei_scale_size; idx++) {
+                    new_scale[idx] = zendnn::impl::cpu::io::load_float_value((zendnn_bf16),
+                                     (void *)wei_scale, idx) *
+                                     src_scale_f;
+                }
+            }
+        }
+        else {
+            ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
+                               "Data Type not supported for scales.");
+        }
+        if (enable_cache) {
+            zendnnVerbose(ZENDNN_PROFLOG,"Cache static scales");
+            map_mutex.lock();
+            matmul_SrcWei_scales_cache.add(key_obj, new_scale);
+            map_mutex.unlock();
+        }
+    }
+    else {
+        new_scale = matmul_SrcWei_scales_cache.get(key_obj);
+    }
+
+    return;
+}
+
 // Explicit instantiations for specific data types
 template void reorderAndCacheWeights<int8_t>(
     const Key_matmul &key_obj,

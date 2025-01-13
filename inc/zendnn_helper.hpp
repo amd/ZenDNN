@@ -153,6 +153,9 @@ class zendnnEnv {
     uint    zenEBAlgo;
     bool    zenINT8format;
     bool    zenWeightCache;
+    bool    zenStaticScaleCache;
+    bool    zenBiasCache;
+    bool    zenZpCompCache;
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -205,8 +208,8 @@ class zendnnEnv {
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_JIT_INT8)
 
         zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
-        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 &&
-                zenINT8GEMMalgo!=100) {
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 ||
+                zenINT8GEMMalgo <zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8) {
             zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
@@ -238,6 +241,13 @@ class zendnnEnv {
 
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
         zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
+        //ZENDNN_SCALE_CACHING is to enable/disable scale caching in MatMul
+        zenStaticScaleCache = (bool)zendnn_getenv_int("ZENDNN_SCALE_CACHING", 1);
+        //ZENDNN_BIAS_CACHING is to enable/disable bias caching in MatMul
+        zenBiasCache = (bool)zendnn_getenv_int("ZENDNN_BIAS_CACHING", 1);
+        //ZENDNN_ZP_COMP_CACHING is to enable/disable ZP comp caching in MatMul
+        zenZpCompCache = (bool)zendnn_getenv_int("ZENDNN_ZP_COMP_CACHING", 1);
+
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO", 1 /* GEMM */);

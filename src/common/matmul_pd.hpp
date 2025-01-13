@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -130,6 +130,54 @@ struct matmul_pd_t : public primitive_desc_t {
         }
 
         return dims[n_dims - 1] == N();
+    }
+    int src_qmask_M() const {
+        const int src_ndims = src_md(0)->ndims;
+        assert(src_ndims >= 2);
+        return 1 << (src_ndims - 2);
+    }
+
+    int src_qmask_K() const {
+        const int src_ndims = src_md(0)->ndims;
+        assert(src_ndims >= 2);
+        return 1 << (src_ndims - 1);
+    }
+
+    virtual bool attr_scales_ok(const std::vector<int> &supported_args
+            = {ZENDNN_ARG_SRC, ZENDNN_ARG_WEIGHTS, ZENDNN_ARG_DST}) const {
+        if (attr()->static_scales_.has_default_values()) return true;
+        bool ok = attr()->static_scales_.has_default_values(supported_args);
+        for (int arg : supported_args) {
+            const auto &sc = attr()->static_scales_.get(arg);
+            const auto &mask = sc.mask_;
+            if (sc.has_default_values()) {
+                continue;
+            }
+            if (arg == ZENDNN_ARG_WEIGHTS) {
+                const bool wei_n_group_ok
+                        = IMPLICATION(sc.ndims_ == 2 && sc.group_dims_[1] > 1,
+                                N() % sc.group_dims_[1] == 0);
+
+                // Any group is allowed to be greater than 1 but only one at a
+                // time, not both.
+                ok = ok && utils::one_of(sc.ndims_, 0, 2)
+                        && IMPLICATION(sc.ndims_ == 2,
+                                utils::one_of(
+                                        1, sc.group_dims_[0]) && wei_n_group_ok);
+            } else if (arg == ZENDNN_ARG_SRC) {
+                ok = ok
+                        && utils::one_of(mask, 0, src_qmask_K(),
+                                src_qmask_M() + src_qmask_K());
+                ok = ok && utils::one_of(sc.ndims_, 0, 2);
+                ok = ok && IMPLICATION((mask & src_qmask_K()), sc.ndims_ == 2);
+                ok = ok
+                        && IMPLICATION(sc.ndims_ == 2,
+                                sc.group_dims_[0] == 1);
+            } else {
+                ok = ok && (mask == 0);
+            }
+        }
+        return ok;
     }
 
 protected:

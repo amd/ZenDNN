@@ -250,13 +250,19 @@ int auto_compute_matmul_int8(
     const float beta,
     char *dst,
     const int ldc,
-    float *scale,
     const int32_t zero_point_src,
     const int32_t zero_point_wei,
     const int32_t zero_point_dst,
-    int out_scale_size,
     float do_sum,
-    bool is_weights_const
+    bool is_weights_const,
+    float *src_scale,
+    int src_scale_size,
+    float *wei_scale,
+    int wei_scale_size,
+    float *dst_scales,
+    int dst_scale_size,
+    bool default_dst_scales,
+    int scale_type
 ) {
     //It is used to know if weights address should be enabled or not for map.
     //0: disable, 1: enable.
@@ -306,10 +312,10 @@ int auto_compute_matmul_int8(
             matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
                                 transpose_input, transpose_weights,
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
-                                beta, (char *)dst, ldc, scale, zero_point_src,
-                                zero_point_wei, zero_point_dst, out_scale_size,
-                                do_sum, is_weights_const);
-
+                                beta, (char *)dst, ldc, zero_point_src,
+                                zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
+                                src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                dst_scales, dst_scale_size, default_dst_scales, scale_type);
             //Time end
 #ifdef _WIN32
             auto end_n = std::chrono::high_resolution_clock::now();
@@ -332,9 +338,10 @@ int auto_compute_matmul_int8(
             matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
                                 transpose_input, transpose_weights,
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
-                                beta, (char *)dst, ldc, scale, zero_point_src,
-                                zero_point_wei, zero_point_dst, out_scale_size,
-                                do_sum, is_weights_const);
+                                beta, (char *)dst, ldc, zero_point_src,
+                                zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
+                                src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                dst_scales, dst_scale_size, default_dst_scales, scale_type);
         }
     }
     //Read Value from map.
@@ -344,11 +351,12 @@ int auto_compute_matmul_int8(
         //Get best algo for given layer from MAP
         zenEnvObj.zenINT8GEMMalgo = matmul_kernel_map[key_obj];
         matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
-                            transpose_input, transpose_weights, m, k, n, alpha,
-                            input, lda, weights, ldb, bias, po_ops, beta,
-                            (char *)dst, ldc, scale, zero_point_src,
-                            zero_point_wei, zero_point_dst, out_scale_size,
-                            do_sum, is_weights_const);
+                            transpose_input, transpose_weights,
+                            m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
+                            beta, (char *)dst, ldc, zero_point_src,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
+                            src_scale, src_scale_size, wei_scale, wei_scale_size,
+                            dst_scales, dst_scale_size, default_dst_scales, scale_type);
     }
     //Updates the map values by running different algorithms
     else {
@@ -366,10 +374,11 @@ int auto_compute_matmul_int8(
 #endif
         matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
                             transpose_input, transpose_weights,
-                            m, k, n, alpha, input, lda, weights, ldb, bias,
-                            po_ops, beta, (char *)dst, ldc, scale, zero_point_src,
-                            zero_point_wei, zero_point_dst, out_scale_size, do_sum,
-                            is_weights_const);
+                            m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
+                            beta, (char *)dst, ldc, zero_point_src,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
+                            src_scale, src_scale_size, wei_scale, wei_scale_size,
+                            dst_scales, dst_scale_size, default_dst_scales, scale_type);
         //timer end
 #ifdef _WIN32
         auto end_n = std::chrono::high_resolution_clock::now();

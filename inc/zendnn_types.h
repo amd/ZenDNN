@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -3028,15 +3028,18 @@ typedef const struct zendnn_primitive *const_zendnn_primitive_t;
 /// variable number of destination arguments.
 #define ZENDNN_ARG_MULTIPLE_DST 2048
 
+/// Scaling factor provided at execution time.
+#define ZENDNN_ARG_ATTR_SCALES 4096
+
 /// Zero points provided at execution time.
-#define ZENDNN_ARG_ATTR_ZERO_POINTS 4096
+#define ZENDNN_ARG_ATTR_ZERO_POINTS 8192
 
 /// Arguments for fused depthwise convolution.
 /// See @ref dev_guide_attributes_post_ops_depthwise_fusion
-#define ZENDNN_ARG_ATTR_POST_OP_DW 8192
+#define ZENDNN_ARG_ATTR_POST_OP_DW 16384
 
 /// Starting point for a binary post operation.
-#define ZENDNN_ARG_ATTR_MULTIPLE_POST_OP_BASE 16384
+#define ZENDNN_ARG_ATTR_MULTIPLE_POST_OP_BASE 32768
 
 /// Arguments for a binary post operation. Up to 32 arguments are supported.
 /// See @ref dev_guide_attributes_post_ops_binary_fusion

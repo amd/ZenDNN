@@ -3808,6 +3808,40 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
             "could not set scales primitive attribute");
     }
 
+    /// Sets scaling factors for primitive operations for a given memory
+    /// argument. The scaling factors must be passed at execution time
+    /// as an argument with index #ZENDNN_ARG_ATTR_SCALES | arg.
+    ///
+    /// @sa zendnn_primitive_attr_set_scales_mask
+    ///
+    /// @param arg Parameter argument index as passed to the
+    ///     primitive::execute() call.
+    /// @param mask Scaling factors correspondence mask that defines the
+    ///     correspondence between the tensor dimensions and the @p scales
+    ///     vector. The set i-th bit indicates that a dedicated scaling factor
+    ///     is used for each index along that dimension. Set the mask to 0 to
+    ///     use a common scaling factor for the whole output tensor.
+    /// @param groups Scaling factors correspondence groups that define the
+    ///     correspondence between the tensor dimensions and the scales array.
+    ///     The set i-th dimension indicates a number of groups of scaling
+    ///     factors used for that logical dimension in a memory indicated by @p arg.
+    /// @param data_type Scaling factors data_type.
+    void set_scales_mask(int arg, int mask, const memory::dims &groups,
+        memory::data_type data_type = memory::data_type::f32) {
+        error::wrap_c_api(zendnn_primitive_attr_set_scales_mask(get(),
+                              arg, mask, (int)groups.size(), groups.data(),
+                              memory::convert_to_c(data_type)),
+                          "could not set scales primitive attribute");
+    }
+
+    /// Sets Computation datatype for a given primitve arguments.
+    ///
+    /// @param data_type  Sets Computation Src DType.
+    void set_compute_src_dtype(memory::data_type data_type = memory::data_type::u8) {
+        error::wrap_c_api(zendnn_primitive_attr_set_compute_src_dtype(
+                              get(), memory::convert_to_c(data_type)),
+                          "could not set computation soruce data type primitive attribute");
+    }
     /// Returns zero points correspondence mask and values.
     ///
     /// @param arg Parameter argument index as passed to the

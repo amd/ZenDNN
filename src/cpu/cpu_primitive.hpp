@@ -73,6 +73,36 @@
     } \
     MAYBE_UNUSED(scales);
 
+#define DEFINE_STATIC_SCALES_BUFFER(scales, scale_size, scale_type, mem_arg) \
+    alignas(16) float CONCAT2(scales, _buf16)[16] = {0}; \
+    const float *scales {nullptr}; \
+    int scale_size; \
+    int scale_type; \
+    if (pd()->attr()) { \
+        if ((pd()->attr())->static_scales_.get(mem_arg).has_default_values()) { \
+            utils::array_set(CONCAT2(scales, _buf16), 1.0f, 16); \
+            scales = CONCAT2(scales, _buf16); \
+            scale_size = 1; \
+            scale_type = data_type::f32; \
+        } else { \
+            scales = CTX_IN_MEM(const float *, ZENDNN_ARG_ATTR_SCALES | mem_arg); \
+            if (scales == nullptr) return status::invalid_arguments; \
+            const auto scales_d = ctx.memory_mdw(ZENDNN_ARG_ATTR_SCALES | mem_arg); \
+            bool ok = utils::one_of(scales_d.data_type(), data_type::f32, \
+                                data_type::bf16); \
+            if (!ok) return status::invalid_arguments; \
+            scale_size = (int)(scales_d.dims()[0]); \
+            scale_type = scales_d.data_type(); \
+            if (scales_d.nelems() == 1) { \
+                const float s = zendnn::impl::cpu::io::load_float_value( \
+                            scales_d.data_type(), scales, 0); \
+                utils::array_set(CONCAT2(scales, _buf16), s, 16); \
+                scales = CONCAT2(scales, _buf16); \
+            } \
+        } \
+    } \
+    MAYBE_UNUSED(scales);
+
 #define DEFINE_ZERO_POINTS_BUFFER(zero_points_ptr, mem_arg) \
     const int32_t *zero_points_ptr \
             = pd()->attr()->zero_points_.defined(mem_arg) \

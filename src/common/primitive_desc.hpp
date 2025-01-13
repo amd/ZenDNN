@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -86,6 +86,11 @@ struct primitive_desc_t : public c_compatible {
     enum class arg_usage_t { unused, input, output };
     virtual arg_usage_t arg_usage(int arg) const {
         using types::is_zero_md;
+        if (arg & ZENDNN_ARG_ATTR_SCALES) {
+            int scale_arg = arg & ~ZENDNN_ARG_ATTR_SCALES;
+            if (!attr()->static_scales_.get(scale_arg).has_default_values())
+                return arg_usage_t::input;
+        }
         if (arg == ZENDNN_ARG_ATTR_WOQ_SCALES
                 && !attr()->woqScales_.defined())
             return arg_usage_t::input;

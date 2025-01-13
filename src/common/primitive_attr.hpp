@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -136,6 +136,7 @@ struct rnn_tparams_t : public c_compatible {
   private:
     ZENDNN_DISALLOW_COPY_AND_ASSIGN(rnn_tparams_t);
 };
+
 struct runtime_scales_t : public c_compatible {
     runtime_scales_t() {}
 
@@ -183,6 +184,91 @@ struct runtime_scales_t : public c_compatible {
     int ndims_ = 0;
     dims_t group_dims_ = {};
     data_type_t data_type_ = data_type::f32;
+};
+
+struct static_scales_t : public c_compatible {
+    static_scales_t() = default;
+
+    const runtime_scales_t &get(int arg) const {
+        static const runtime_scales_t default_scales;
+        auto it = scales_.find(arg);
+        if (it == scales_.end()) {
+            return default_scales;
+        }
+        return it->second;
+    }
+
+    bool operator==(const static_scales_t &rhs) const {
+        return scales_ == rhs.scales_;
+    }
+
+    bool has_default_values(const std::vector<int> &skip_args = {}) const {
+        auto predicate = [](const runtime_scales_t &s) {
+            return s.has_default_values();
+        };
+        return has_default_property(skip_args, predicate);
+    }
+
+    bool has_default_data_type(const std::vector<int> &skip_args = {}) const {
+        auto predicate = [](const runtime_scales_t &s) {
+            return s.has_default_data_type();
+        };
+        return has_default_property(skip_args, predicate);
+    }
+
+    bool has_default_groups(const std::vector<int> &skip_args = {}) const {
+        auto predicate = [](const runtime_scales_t &s) {
+            return s.has_default_groups();
+        };
+        return has_default_property(skip_args, predicate);
+    }
+
+    status_t set(int arg, int mask, int ndims, const dims_t group_dims,
+            data_type_t data_type) {
+        if (!check_arg(arg)) return status::invalid_arguments;
+        return scales_[arg].set(ndims, mask, group_dims, data_type);
+    }
+
+    status_t get(int arg, int *mask, bool *is_set, int *ndims = nullptr,
+            dims_t group_dims = nullptr,
+            data_type_t *data_type = nullptr) const {
+        if (!check_arg(arg)) return status::invalid_arguments;
+        const auto &s = get(arg);
+        if (mask) *mask = s.mask_;
+        if (is_set) *is_set = s.is_set_;
+        if (ndims) *ndims = s.ndims_;
+        if (group_dims && s.ndims_ > 0)
+            utils::array_copy(group_dims, s.group_dims_, s.ndims_);
+        if (data_type) *data_type = s.data_type_;
+        return status::success;
+    }
+
+    std::map<int, runtime_scales_t> scales_;
+
+private:
+    bool check_arg(int arg) const {
+        for (const auto &sa : {ZENDNN_ARG_SRC, ZENDNN_ARG_WEIGHTS, ZENDNN_ARG_DST}) {
+            if (arg == sa) return true;
+        }
+        return false;
+    }
+
+    bool has_default_property(const std::vector<int> &skip_args,
+            bool (*predicate)(const runtime_scales_t &)) const {
+        for (const auto &s : scales_) {
+            if (!predicate(s.second)) {
+                bool skip = false;
+                for (const auto &skip_a : skip_args)
+                    if (s.first == skip_a) {
+                        skip = true;
+                        break;
+                    }
+                if (skip) continue;
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 struct scales_t : public c_compatible {
@@ -773,7 +859,9 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                   other.rnn_weights_projection_qparams_));
         CHECK(rnn_tparams_.copy_from(other.rnn_tparams_));
         autoTunerEnable = other.autoTunerEnable;
+        computeSrcDtype = other.computeSrcDtype;
         woqScales_ = other.woqScales_;
+        static_scales_ = other.static_scales_;
         plugin_op = other.plugin_op;
         return zendnn::impl::status::success;
     }
@@ -819,12 +907,15 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                    == rhs.rnn_weights_projection_qparams_
                    && rnn_tparams_ == rhs.rnn_tparams_
                    && autoTunerEnable == rhs.autoTunerEnable
+                   && computeSrcDtype == rhs.computeSrcDtype
                    && plugin_op == rhs.plugin_op
-                   && woqScales_ == rhs.woqScales_;
+                   && woqScales_ == rhs.woqScales_
+                   && static_scales_ == rhs.static_scales_;
         return ret;
     }
 
     zendnn::impl::status_t set_autoTunerEnable(bool autoTunerFlag);
+    zendnn::impl::status_t set_computeSrcDType(zendnn::impl::data_type_t data_type);
     zendnn::impl::status_t set_plugin_op_name(const std::string plugin_op_name);
     zendnn::impl::status_t set_fpmath_mode(zendnn::impl::fpmath_mode_t fpmath_mode);
     zendnn::impl::status_t set_scratchpad_mode(
@@ -868,8 +959,10 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn::impl::scales_t rnn_weights_projection_qparams_;
     zendnn::impl::rnn_tparams_t rnn_tparams_;
     bool autoTunerEnable;
+    zendnn::impl::data_type_t computeSrcDtype;
     std::string plugin_op;
     zendnn::impl::runtime_scales_t woqScales_;
+    zendnn::impl::static_scales_t static_scales_;
 
     zendnn_primitive_attr &operator=(const zendnn_primitive_attr &other) = delete;
 };
