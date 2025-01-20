@@ -381,10 +381,12 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
                 -Itests/api_tests tests/api_tests/zendnn_grp_embedding_bag_test.cpp -L_out/lib -lamdZenDNN \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
+ifeq "$(FBGEMM_ENABLE)" "1"
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_bag_test_int4 $(INCDIRS) \
                 -Itests/api_tests tests/api_tests/zendnn_grp_embedding_bag_test_int4.cpp -L_out/lib -lamdZenDNN \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
                 $(CK_LINK_FLAGS)
+endif
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/grp_embedding_mlp_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_grp_embedding_mlp_test.cpp -L_out/lib -lamdZenDNN \
                 -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
