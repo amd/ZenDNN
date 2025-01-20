@@ -104,7 +104,7 @@ void fbgemm_embedding_bag_kernel(
     unsigned int op_num_threads, const char *plugin_op,
     const bool &scale_bias_last) {
 
-    double start_ms = impl::get_msec();
+    //double start_ms = impl::get_msec();
     auto emd_table_dims = z_input.get_desc().dims();
     auto dim_embedding  = z_dst.get_desc().dims()[1];
     auto num_rows       = emd_table_dims[0];
@@ -218,8 +218,12 @@ void fbgemm_embedding_bag_kernel(
                 is_bf16_out,
                 is_bf16_in);
     }
-
-    if (op_num_threads == 1 || batch_size <= 100) {
+    
+    // TODO: Generate more heuristics based on batch size, pooling size and number of threads.
+    // Current decision logic is based on the batch size and number of threads.
+    if (op_num_threads == 1 || batch_size <= 100 ||
+            (z_input.get_desc().data_type()==impl::data_type::s4 && batch_size <=1024) ||
+            (z_input.get_desc().data_type()==impl::data_type::s4 && op_num_threads <= 2)) {
         kernel(
             batch_size,
             indices_size,
@@ -252,11 +256,11 @@ void fbgemm_embedding_bag_kernel(
     if (include_last_offset==0) {
         delete[] fbgemm_offsets;
     }
-    double duration_ms = impl::get_msec() - start_ms;
+    /*double duration_ms = impl::get_msec() - start_ms;
     zendnnVerbose(ZENDNN_PROFLOG, "zendnn_primitive_execute,cpu",",","plugin_op:",
                   plugin_op,",","fbgemm",",",in_dtype,",",out_dtype,",",
                   "BS:",batch_size,",ED:",dim_embedding,",alg:sum",",",duration_ms,
-                  ",ms");
+                  ",ms");*/
 }
 #endif
 

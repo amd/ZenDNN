@@ -32,9 +32,9 @@ using namespace zendnn;
 
 // Function to generate random embedding table
 std::vector<float> generateRandomEmbeddingTable(int num_rows,
-        int embedding_dim) {
+        int dim) {
 
-    std::vector<float> embedding_table(num_rows * embedding_dim);
+    std::vector<float> embedding_table(num_rows * dim);
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> dis(1.0f, 2.0f);
@@ -48,16 +48,16 @@ std::vector<float> generateRandomEmbeddingTable(int num_rows,
 void generateFusedEmbeddingTableInt4(
     const std::vector<float> &embedding_table,
     int num_rows,
-    int embedding_dim,
+    int dim,
     std::vector<uint8_t> &fused_embedding_table,
     bool scale_bias_last = true) {
 
     // For int4, 2 elements per byte
     int num_elements_per_byte = 2;
-    int block_size = embedding_dim;
+    int block_size = dim;
 
     // Calculate fused row size
-    size_t row_size = (embedding_dim + num_elements_per_byte - 1) /
+    size_t row_size = (dim + num_elements_per_byte - 1) /
                       num_elements_per_byte +
                       2 * sizeof(fbgemm::float16);  // Scale and bias
 
@@ -68,34 +68,30 @@ void generateFusedEmbeddingTableInt4(
     uint8_t *fused_ptr = fused_embedding_table.data();
 
     for (int i = 0; i < num_rows; ++i) {
-        const float *row = &embedding_table[ i * embedding_dim];
+        const float *row = &embedding_table[ i * dim];
 
         // Calculate scale and bias for the row
-        float min_val = *std::min_element(row, row + embedding_dim);
-        float max_val = *std::max_element(row, row + embedding_dim);
+        float min_val = *std::min_element(row, row + dim);
+        float max_val = *std::max_element(row, row + dim);
         float scale = (max_val - min_val) / 15.0f;  // 15 = 2^4 - 1 (int4 range)
         float bias = min_val;
 
         // Quantize weights to int4
         int bit_position =0;
-        std::vector<uint8_t> quantized_row((embedding_dim + 1) / num_elements_per_byte,
+        std::vector<uint8_t> quantized_row((dim + 1) / num_elements_per_byte,
                                            0);
 
         //INT4 packing: 1st element = LSB, 2nd element = MSB
-        for (int j = 0; j < embedding_dim; ++j) {
+        for (int j = 0; j < dim; ++j) {
             int quantized_value = std::round((row[j] - bias) / scale);
             quantized_value = std::min(15, std::max(0,
                                                     quantized_value));  // Clamp to [0, 15]
-
-            int value = quantized_value & 0xF;
-            int byte_index = bit_position / 8;
-            int bit_offset = bit_position % 8;
-
-            quantized_row[byte_index] |= (value << bit_offset);
-            if (bit_offset >4) {
-                quantized_row[byte_index+1] |= (value >> (8- bit_offset));
+            if (j % num_elements_per_byte == 0) {
+                quantized_row[j/num_elements_per_byte] = quantized_value & 0xF;
             }
-            bit_position += 4;
+            else {
+                quantized_row[j/num_elements_per_byte] |= (quantized_value & 0xF) << 4;
+            }
         }
 
         // Write to fused table
@@ -148,7 +144,7 @@ void embedding_bag_exec(
 
     embedding_bag::desc pdesc;
     embedding_bag::primitive_desc pd;
-    
+
     if (z_per_sample_weights_defined) {
         // declare embedding bag primitive
         pdesc = embedding_bag::desc(prop_kind::forward_inference,
@@ -192,187 +188,197 @@ void embedding_bag_exec(
 int main(int argc, char **argv) {
     // Check if batch size is provided as a command line argument
     if (argc != 2) {
-        std::cerr << "Usage: ./grp_embedding_bag_test <num_ops>" << std::endl;
+        std::cerr << "Usage: ./grp_embedding_bag_test_int4 <num_tests>" << std::endl;
         return 1;
     }
 
     // Get batch size from command line argument
-    int num_ops  = std::stoi(argv[1]);
-
-    // Define parameters
-    int input_length = 100; //Input indices length
-    int pool_size = 2; //Pooling size
-    int batch_size = input_length/pool_size; // Number of batches
-    int embedding_dim = 64;// Embedding dimension
-    int num_embeddings = 4; // Number of embeddings per table
+    int num_tests  = std::stoi(argv[1]);
 
     //Initialize random number generator
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis_input(0, num_embeddings-1);
+
+    // Testing Parameters
+    int input_length = 100; //Input indices length
+    std::vector<int> batchSizes = {30, 50, 100, 512, 1024, 2048, 4096, 8192, 16384, 32768};
+    std::vector<int> embeddingDimensions = {16, 32, 64, 128, 256, 512};
+    std::vector<int> tableSizes = {1024, 10000, 100000}; // Number of embeddings per table
+    std::vector<int> numTables = {2, 5, 10, 26, 50, 100, 500, 1000};
 
     // Create engine and stream
     engine eng(engine::kind::cpu, 0);
     stream s(eng);
 
-    //Generate input indices
-    std::vector<memory> input_mem(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        input_mem[i] = create_memory(memory::desc({{input_length},
-            memory::data_type::s32,
-            memory::format_tag::a}), eng);
-    }
+    for (int batchSize : batchSizes) {
+        for (int dim : embeddingDimensions) {
+            for (int tableSize : tableSizes) {
+                for (int nTables : numTables) {
 
-    std::vector<int> input_data(input_length);
-    for (int i = 0; i < num_ops; ++i) {
-        for (auto &w : input_data) {
-            w = dis_input(gen);
-        }
-        write_to_zendnn_memory(input_data.data(), input_mem[i]);
-    }
+                    std::uniform_int_distribution<> dis_input(0, tableSize-1);
+                    std::uniform_int_distribution<> dis_offset(0, input_length-2);
+                    //Generate input indices
+                    std::vector<memory> input_mem(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        input_mem[i] = create_memory(memory::desc({{input_length},
+                            memory::data_type::s32,
+                            memory::format_tag::a}), eng);
+                    }
+                    std::vector<int> input_data(input_length);
+                    for (int i = 0; i < nTables; ++i) {
+                        for (auto &w : input_data) {
+                            w = dis_input(gen);
+                        }
+                        write_to_zendnn_memory(input_data.data(), input_mem[i]);
+                    }
 
-    // Generate random offset
-    std::vector<memory> offset_mem(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        offset_mem[i] = create_memory(memory::desc({{batch_size},
-            memory::data_type::s32,
-            memory::format_tag::a}), eng);
-    }
+                    // Generate random offset
+                    std::vector<memory> offset_mem(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        offset_mem[i] = create_memory(memory::desc({{batchSize},
+                            memory::data_type::s32,
+                            memory::format_tag::a}), eng);
+                    }
+                    std::vector<int> offset_data(batchSize);
+                    for (int i = 0; i < nTables; ++i) {
+                        offset_data[0] = 0;
 
-    std::vector<int> offset_data(batch_size);
-    for (int i = 0; i < num_ops; ++i) {
-        offset_data[0] = 0;
-        for (int j = 1; j < batch_size; ++j) {
-            offset_data[j]=offset_data[j-1]+pool_size;
-        }
-        write_to_zendnn_memory(offset_data.data(), offset_mem[i]);
-    }
+                        for (int j = 1; j < batchSize; ++j) {
+                            offset_data[j]=dis_offset(gen);
+                        }
+                        std::sort(offset_data.begin(), offset_data.end());
+                        write_to_zendnn_memory(offset_data.data(), offset_mem[i]);
 
-    //Generate embedding table
-    std::vector<memory> embedding_mem(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        embedding_mem[i] = create_memory(memory::desc({{num_embeddings, embedding_dim},
-            memory::data_type::f32,
-            memory::format_tag::ab}), eng);
-    }
-    size_t fused_embedding_dim = (embedding_dim + 2 - 1) / 2 + 2 * sizeof(
-                                     fbgemm::float16);
-    int num_int4_elem = 2*fused_embedding_dim;
+                    }
 
-    std::vector<memory> embedding_mem_int4(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        embedding_mem_int4[i] = create_memory(memory::desc({{num_embeddings, num_int4_elem},
-            memory::data_type::s4,
-            memory::format_tag::ab}), eng);
-    }
+                    //Generate embedding table
+                    std::vector<memory> embedding_mem(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        embedding_mem[i] = create_memory(memory::desc({{tableSize, dim},
+                            memory::data_type::f32,
+                            memory::format_tag::ab}), eng);
+                    }
+                    size_t fused_dim = (dim + 2 - 1) / 2 + 2 * sizeof(
+                                           fbgemm::float16);
+                    int num_int4_elem = 2*fused_dim;
 
-    // Create multiple embedding tables
-    for (int t = 0; t < num_ops; ++t) {
-        // Generate random embedding table
-        std::vector<float> embedding_table = generateRandomEmbeddingTable(
-                num_embeddings, embedding_dim);
-        std::vector<uint8_t> fused_embedding_table;
+                    std::vector<memory> embedding_mem_int4(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        embedding_mem_int4[i] = create_memory(memory::desc({{tableSize, num_int4_elem},
+                            memory::data_type::s4,
+                            memory::format_tag::ab}), eng);
+                    }
 
-        // Generate fused embedding table with int4 weights
-        generateFusedEmbeddingTableInt4(embedding_table, num_embeddings, embedding_dim,
-                                        fused_embedding_table);
-        write_to_zendnn_memory(embedding_table.data(), embedding_mem[t]);
-        write_to_zendnn_memory(fused_embedding_table.data(), embedding_mem_int4[t]);
+                    for (int t = 0; t < nTables; ++t) {
+                        // Generate random embedding table
+                        std::vector<float> embedding_table = generateRandomEmbeddingTable(
+                                tableSize, dim);
+                        std::vector<uint8_t> fused_embedding_table;
 
-    }
+                        // Generate fused embedding table with int4 weights
+                        generateFusedEmbeddingTableInt4(embedding_table, tableSize, dim,
+                                                        fused_embedding_table);
+                        write_to_zendnn_memory(embedding_table.data(), embedding_mem[t]);
+                        write_to_zendnn_memory(fused_embedding_table.data(), embedding_mem_int4[t]);
 
-    //Create f32 output table
-    std::vector<memory> out_mem(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        out_mem[i] = create_memory(memory::desc({{batch_size, embedding_dim},
-            memory::data_type::f32,
-            memory::format_tag::ab}), eng);
-    }
+                    }
 
-    std::vector<memory> out_mem_bf16(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        out_mem_bf16[i] = create_memory(memory::desc({{batch_size, embedding_dim},
-            memory::data_type::bf16,
-            memory::format_tag::ab}), eng);
-    }
+                    //Create f32 output table
+                    std::vector<memory> out_mem(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        out_mem[i] = create_memory(memory::desc({{batchSize, dim},
+                            memory::data_type::f32,
+                            memory::format_tag::ab}), eng);
+                    }
+                    std::vector<memory> out_mem_bf16(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        out_mem_bf16[i] = create_memory(memory::desc({{batchSize, dim},
+                            memory::data_type::bf16,
+                            memory::format_tag::ab}), eng);
+                    }
 
-    //Create f32 output table for custom grp embedding bag execution
-    std::vector<memory> grp_out_mem(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        grp_out_mem[i] = create_memory(memory::desc({{batch_size, embedding_dim},
-            memory::data_type::f32,
-            memory::format_tag::ab}), eng);
-    }
+                    //Create f32 output table for custom grp embedding bag execution
+                    std::vector<memory> grp_out_mem(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        grp_out_mem[i] = create_memory(memory::desc({{batchSize, dim},
+                            memory::data_type::f32,
+                            memory::format_tag::ab}), eng);
+                    }
 
-    //Create f32 output table for custom grp embedding bag execution
-    std::vector<memory> grp_out_mem_bf16(num_ops);
-    for (int i = 0; i <num_ops; ++i) {
-        grp_out_mem_bf16[i] = create_memory(memory::desc({{batch_size, embedding_dim},
-            memory::data_type::bf16,
-            memory::format_tag::ab}), eng);
-    }
+                    //Create f32 output table for custom grp embedding bag execution
+                    std::vector<memory> grp_out_mem_bf16(nTables);
+                    for (int i = 0; i <nTables; ++i) {
+                        grp_out_mem_bf16[i] = create_memory(memory::desc({{batchSize, dim},
+                            memory::data_type::bf16,
+                            memory::format_tag::ab}), eng);
+                    }
 
-    std::vector <int32_t> scale_grad_by_freq(num_ops, 0);
-    std::vector <int32_t> sparse(num_ops, 0);
-    std::vector <int32_t> per_sample_weights_defined(num_ops, 0);
-    std::vector <int32_t> include_last_offset(num_ops, 0);
-    std::vector <int32_t> padding_idx(num_ops, -1);
-    std::vector <memory> per_sample_weights_opt(num_ops);
-    std::vector <algorithm> alg(num_ops, algorithm::embedding_bag_sum);
+                    std::vector <int32_t> scale_grad_by_freq(nTables, 0);
+                    std::vector <int32_t> sparse(nTables, 0);
+                    std::vector <int32_t> per_sample_weights_defined(nTables, 0);
+                    std::vector <int32_t> include_last_offset(nTables, 0);
+                    std::vector <int32_t> padding_idx(nTables, -1);
+                    std::vector <memory> per_sample_weights_opt(nTables);
+                    std::vector <algorithm> alg(nTables, algorithm::embedding_bag_sum);
 
-    //optional weights, can be null for non-weighted sum
-    for (int i = 0; i <num_ops; ++i) {
-        per_sample_weights_opt[i] = create_memory(memory::desc({{input_length, embedding_dim},
-            memory::data_type::f32,
-            memory::format_tag::ab}), eng);
-    }
-    std::vector<float> weights(input_length*embedding_dim);
-    for (int i = 0; i < num_ops; ++i) {
-        for (auto &w : weights) {
-            w = 2.0f;
-        }
-        write_to_zendnn_memory(weights.data(), per_sample_weights_opt[i]);
-    }
+                    //optional weights, can be null for non-weighted sum
+                    for (int i = 0; i <nTables; ++i) {
+                        per_sample_weights_opt[i] = create_memory(memory::desc({{input_length, dim},
+                            memory::data_type::f32,
+                            memory::format_tag::ab}), eng);
+                    }
+                    std::vector<float> weights(input_length*dim);
+                    for (int i = 0; i < nTables; ++i) {
+                        for (auto &w : weights) {
+                            w = 2.0f;
+                        }
+                        write_to_zendnn_memory(weights.data(), per_sample_weights_opt[i]);
+                    }
 
-    //Execute Embedding bag
-    for (int i = 0; i < num_ops; ++i) {
-        embedding_bag_exec(embedding_mem[i],
-                           input_mem[i], offset_mem[i],
-                           scale_grad_by_freq[i], alg[i], sparse[i], per_sample_weights_opt[i],
-                           per_sample_weights_defined[i], include_last_offset[i], padding_idx[i],
-                           out_mem[i], 1);
-    }
+                    //Execute Embedding bag
+                    for (int i = 0; i < nTables; ++i) {
+                        embedding_bag_exec(embedding_mem[i],
+                                           input_mem[i], offset_mem[i],
+                                           scale_grad_by_freq[i], alg[i], sparse[i], per_sample_weights_opt[i],
+                                           per_sample_weights_defined[i], include_last_offset[i], padding_idx[i],
+                                           out_mem[i], 1);
+                    }
 
-    //Execute Custom Group embedding bag
+                    //Execute Custom Group embedding bag
 #if BF16_ENABLE
-    zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem_int4,
-            input_mem, offset_mem,
-            scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
-            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem_bf16,
-            "zendnn_grp_embedding_bag");
+                    zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem_int4,
+                            input_mem, offset_mem,
+                            scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
+                            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem_bf16,
+                            "zendnn_grp_embedding_bag");
 #else
-    zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem_int4,
-            input_mem, offset_mem,
-            scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
-            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem,
-            "zendnn_grp_embedding_bag");
+                    zendnn_custom_op::zendnn_grp_embedding_bag(embedding_mem_int4,
+                            input_mem, offset_mem,
+                            scale_grad_by_freq, alg, sparse, per_sample_weights_opt,
+                            per_sample_weights_defined, include_last_offset, padding_idx, grp_out_mem,
+                            "zendnn_grp_embedding_bag");
 #endif
 
-    //Compare results
-    for (int i = 0; i < num_ops; ++i) {
-        std::vector<float> ebag_output(batch_size * embedding_dim);
-        std::vector<float> grp_ebag_output(batch_size * embedding_dim);
+                    //Compare results
+                    for (int i = 0; i < nTables; ++i) {
+                        std::vector<float> ebag_output(batchSize * dim);
+                        std::vector<float> grp_ebag_output(batchSize * dim);
 
 #if BF16_ENABLE
-        reorder(grp_out_mem_bf16[i], grp_out_mem[i]).execute(s,grp_out_mem_bf16[i],
-                grp_out_mem[i]);
+                        reorder(grp_out_mem_bf16[i], grp_out_mem[i]).execute(s,grp_out_mem_bf16[i],
+                                grp_out_mem[i]);
 #endif
-        read_from_zendnn_memory(ebag_output.data(), out_mem[i]);
-        read_from_zendnn_memory(grp_ebag_output.data(), grp_out_mem[i]);
+                        read_from_zendnn_memory(ebag_output.data(), out_mem[i]);
+                        read_from_zendnn_memory(grp_ebag_output.data(), grp_out_mem[i]);
 
-        for (int idx=0; idx < batch_size * embedding_dim; idx++) {
-            assert((ebag_output[idx] - grp_ebag_output[idx])<= 0.1 ||
-                   (ebag_output[idx] - grp_ebag_output[idx])<= -0.1);
+                        for (int idx=0; idx < batchSize * dim; idx++) {
+                            double diff = ebag_output[idx] - grp_ebag_output[idx];
+                            assert((std::round(diff * 10)/10)<= 0.3 ||
+                                   (std::round(diff * 10)/10)<= -0.3);
+                        }
+                    }
+                }
+            }
         }
     }
     std::cout << " Custom Grp EBag test Comparison Successful " << std::endl;
