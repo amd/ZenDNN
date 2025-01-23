@@ -60,9 +60,9 @@
 #include "common/zendnn_private.hpp"
 #include "zendnn.hpp"
 
-#define NUM_BF16_ALGO 3
-#define MATMUL_SKIP_ITER_BF16 3
-#define MATMUL_EVALUATE_ITER_BF16 3
+#define NUM_BF16_ALGO 2
+#define MATMUL_SKIP_ITER_BF16 2
+#define MATMUL_EVALUATE_ITER_BF16 2
 
 using namespace zendnn;
 using namespace zendnn::impl::cpu;

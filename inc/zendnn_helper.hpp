@@ -173,6 +173,8 @@ class zendnnEnv {
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_JIT_FP32)
         // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_FP32)
         zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
+        //TODO: Need to implement Decision tree for FP32:0
+        zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ? zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 && zenGEMMalgo!=100) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }

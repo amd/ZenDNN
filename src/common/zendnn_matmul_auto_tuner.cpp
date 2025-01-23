@@ -30,8 +30,8 @@
 using namespace zendnn;
 
 //Total num of algo available
-#define NUM_OF_ALGO 5
-#define NUM_OF_ALGO_INT8 3
+#define NUM_OF_ALGO 2
+#define NUM_OF_ALGO_INT8 2
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
 //CPU information size
@@ -39,12 +39,12 @@ using namespace zendnn;
 
 //Skip Iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_SKIP_ITER
-#define MATMUL_SKIP_ITER_INT8 3
-#define MATMUL_SKIP_ITER_FP32 5
+#define MATMUL_SKIP_ITER_INT8 2
+#define MATMUL_SKIP_ITER_FP32 2
 //Evaluate iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_EVALUATE_ITER
-#define MATMUL_EVALUATE_ITER_INT8 3
-#define MATMUL_EVALUATE_ITER_FP32 5
+#define MATMUL_EVALUATE_ITER_INT8 2
+#define MATMUL_EVALUATE_ITER_FP32 2
 
 //This tracks the no. of times graph executed
 // from the framework.
