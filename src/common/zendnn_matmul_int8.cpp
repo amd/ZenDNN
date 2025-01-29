@@ -142,8 +142,7 @@ void zenMatMulPrimitiveINT8V3_for_mul_add(zendnn::zendnnEnv zenEnvObj,
                       NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
 
 
-    std::vector<float> scale_vector;
-    scale_vector.insert(scale_vector.end(), n_scale, n_scale + wei_scale_size);
+    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
 
     // TODO: update the name of variable
     matmul_attr.set_autoTunerEnable(true);
@@ -317,8 +316,7 @@ void zenMatMulPrimitiveINT8V1(zendnn::zendnnEnv zenEnvObj,
                       dst_scale, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
 
 
-    std::vector<float> scale_vector;
-    scale_vector.insert(scale_vector.end(), n_scale, n_scale + wei_scale_size);
+    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
 
     matmul_attr.set_autoTunerEnable(true);
     matmul_attr.set_output_scales(wei_scale_size == 1? 0: (1<<1), scale_vector);
@@ -558,8 +556,7 @@ void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
     cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
                       NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
 
-    std::vector<float> scale_vector;
-    scale_vector.insert(scale_vector.end(), n_scale, n_scale + wei_scale_size);
+    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
 
     // TODO: update the name of variable
     matmul_attr.set_autoTunerEnable(true);
@@ -777,8 +774,7 @@ void zenMatMulPrimitiveINT8V3(zendnn::zendnnEnv zenEnvObj,
                       NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
 
 
-    std::vector<float> scale_vector;
-    scale_vector.insert(scale_vector.end(), n_scale, n_scale + wei_scale_size);
+    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
 
     // TODO: update the name of variable
     matmul_attr.set_autoTunerEnable(true);
