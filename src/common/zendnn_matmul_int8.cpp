@@ -1786,6 +1786,16 @@ int matmul_int8_wrapper(
 ) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     int thread_qty = zenEnvObj.omp_num_threads;
+    // DT for INT8
+    if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
+        if ((M <= 256) || (N < K)) {
+            zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
+        }
+        else {
+            zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
+        }
+    }
+    // AOCL Support Check
     if ((zenEnvObj.zenINT8GEMMalgo ==
             zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8 ||
             zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_AOCL_INT8) &&

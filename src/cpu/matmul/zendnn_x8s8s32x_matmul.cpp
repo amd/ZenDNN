@@ -279,8 +279,7 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
 
     //TODO: Seperate Implementation of Decision Tree for INT8 (MATMUL_DT_INT8)
-    if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8 ||
-            algo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
+    if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {
         auto_tuner = 1;
         algo = auto_compute_matmul_int8(ctx, zenEnvObj, src_type, dst_type, bias_type,
                                         Layout, transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
