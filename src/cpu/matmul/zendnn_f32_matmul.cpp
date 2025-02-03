@@ -59,15 +59,15 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
     };
 
     auto check_group = [&]() -> bool {
-	if(attr()->woqScales_.ndims_ == 0){
-	    return true;
-	}
+        if (attr()->woqScales_.ndims_ == 0) {
+            return true;
+        }
         return !(weights_md()->dims[0] % attr()->woqScales_.group_dims_[0]);
     };
 
     bool ok = src_md()->data_type == src_type
               && utils::one_of(weights_md()->data_type, f32, s8, s4)
-	       && check_group()
+              && check_group()
               && desc()->accum_data_type == acc_type
               && dst_md()->data_type == dst_type && check_bias()
               && attr()->has_default_values(
@@ -154,8 +154,18 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
         case 0:
             return true;
         case 1:
+            if (p.contain(eltwise, 0) &&
+                    !utils::one_of(p.entry_[0].eltwise.alg, alg_kind::eltwise_relu,
+                                   alg_kind::eltwise_gelu_erf, alg_kind::eltwise_gelu)) {
+                return false;
+            }
             return check_sum(0) || p.contain(eltwise, 0);
         case 2:
+            if (!utils::one_of(p.entry_[1].eltwise.alg, alg_kind::eltwise_relu,
+                               alg_kind::eltwise_gelu_erf, alg_kind::eltwise_gelu)) {
+                return false;
+            }
+
             return check_sum(0) && p.contain(eltwise, 1);
         default:
             return false;
@@ -388,7 +398,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         const auto group_dims = pd()->attr()->woqScales_.group_dims_;
         int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
         data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
-        matmul_woq_wrapper(ctx, zendnn_f32, weights_type, zendnn_f32, zendnn_f32, Layout,
+        matmul_woq_wrapper(ctx, zendnn_f32, weights_type, zendnn_f32, zendnn_f32,
+                           Layout,
                            strcmp(transA, "N"),
                            strcmp(transB, "N"),
                            M, K, N, alpha, (char *)src, lda, (char *)weights, ldb,
