@@ -542,10 +542,8 @@ void zenMatMul_gemm_wrapper(
                   " weight_caching=", is_weights_const ? "True": "False",
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (algo_type == 4 || algo_type == 3) {
-        obj.is_log = false;
-        obj.is_brgemm = false;
-    }
+    obj.is_log = true;
+    obj.is_brgemm = false;
 }
 
 void zenMatMul(
@@ -1279,10 +1277,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   mul_node, batch_size, bias, relu, gelu);
         }
     }
-    if (obj.is_brgemm) {
-        obj.is_brgemm = false;
-        obj.is_log = false;
-    }
+    obj.is_log = true;
+    obj.is_brgemm = false;
 
 #endif
     // Code for time profiling of this kernel
