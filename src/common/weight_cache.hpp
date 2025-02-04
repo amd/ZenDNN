@@ -56,6 +56,16 @@ void reorderAndCacheWeights(
     ReorderFunc<T> reorder_func
 );
 
+void reorderAndCacheWeightsBrgemm(
+    const Key_matmul &key_obj_reorder,
+    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    zendnn::memory &user_weights_memory,
+    zendnn::memory &reordered_weights_memory,
+    zendnn::engine &eng,
+    zendnn::stream &engine_stream,
+    bool is_weights_const
+);
+
 void cacheStaticScales(
     zendnn::zendnnEnv zenEnvObj,
     const Key_matmul &key_obj,

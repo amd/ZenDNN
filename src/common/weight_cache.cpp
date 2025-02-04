@@ -74,6 +74,36 @@ void reorderAndCacheWeights(
     }
 }
 
+void reorderAndCacheWeightsBrgemm(
+    const Key_matmul &key_obj_reorder,
+    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    zendnn::memory &user_weights_memory,
+    zendnn::memory &reordered_weights_memory,
+    zendnn::engine &eng,
+    zendnn::stream &engine_stream,
+    bool is_weights_const
+) {
+    //weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
+    auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
+
+    if (!is_weights_const || !found_obj_reorder) {
+        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                user_weights_memory, reordered_weights_memory);
+        if (is_weights_const) {
+            //Save in map
+            map_mutex.lock();
+            matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
+            map_mutex.unlock();
+        }
+    }
+    else {
+        reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
+    }
+}
+
 void cacheZeroPointCompensation(
     zendnn::zendnnEnv zenEnvObj,
     const Key_matmul &key_obj,
