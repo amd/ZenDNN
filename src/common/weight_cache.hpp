@@ -47,6 +47,7 @@ void reorderAndCacheWeights(
     const int n,
     const int ldb,
     const bool is_weights_const,
+    bool inplace_reorder_wei,
     const char order,
     const char trans,
     const char reorder_param0,
@@ -63,7 +64,8 @@ void reorderAndCacheWeightsBrgemm(
     zendnn::memory &reordered_weights_memory,
     zendnn::engine &eng,
     zendnn::stream &engine_stream,
-    bool is_weights_const
+    bool is_weights_const,
+    bool inplace_reorder = false
 );
 
 void cacheStaticScales(

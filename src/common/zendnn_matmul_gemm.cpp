@@ -89,7 +89,7 @@ void zenMatMul_gemm_blocked(
             const char trans = 'n';
 
             reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
-                                          ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                          ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0, reorder_param1,
                                           reorder_param2,
                                           aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
                                          );

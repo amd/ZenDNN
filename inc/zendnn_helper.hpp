@@ -156,6 +156,7 @@ class zendnnEnv {
     bool    zenStaticScaleCache;
     bool    zenBiasCache;
     bool    zenZpCompCache;
+    bool    zenCacheInplace;
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -241,6 +242,8 @@ class zendnnEnv {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
         }
 
+        //ZENDNN_WEIGHT_CACHING_INPLACE is to enable/disable weight caching in MatMul
+        zenCacheInplace = (bool)zendnn_getenv_int("ZENDNN_INPLACE_CACHING", 0);
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
         zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
         //ZENDNN_SCALE_CACHING is to enable/disable scale caching in MatMul

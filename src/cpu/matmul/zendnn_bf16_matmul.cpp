@@ -375,7 +375,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
         }
 
         reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                        ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                        ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
                                         reorder_param2,
                                         aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                        );
@@ -479,7 +479,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                    ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                    ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
                                     reorder_param2,
                                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                    );
@@ -597,7 +597,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         }
 
         reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                        ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                        ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
                                         reorder_param2,
                                         aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                        );
@@ -701,7 +701,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     int16_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                    ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                    ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
                                     reorder_param2,
                                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                    );
