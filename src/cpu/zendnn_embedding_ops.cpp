@@ -25,6 +25,10 @@
 #include "common/verbose.hpp"
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
+
+/*Both scale and Bias are in Float16,
+so number of s4 elements are 8*/
+#define SCALE_BIAS_SIZE 8
 #if FBGEMM_ENABLE
     #include "fbgemm/FbgemmEmbedding.h"
 #endif
@@ -102,15 +106,20 @@ void fbgemm_embedding_bag_kernel(
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
     unsigned int op_num_threads, const char *plugin_op,
-    const bool &scale_bias_last) {
+    const bool &scale_bias_last, const int &cat_dim, const int &mlp_pos,
+    const int &output_stride, const int idx,
+    const int num_tables) {
 
     //double start_ms = impl::get_msec();
     auto emd_table_dims = z_input.get_desc().dims();
-    auto dim_embedding  = z_dst.get_desc().dims()[1];
+    auto dim_embedding  = (z_input.get_desc().data_type()==impl::data_type::s4)?
+                          z_input.get_desc().dims()[1]-SCALE_BIAS_SIZE : z_input.get_desc().dims()[1];
     auto num_rows       = emd_table_dims[0];
     int indices_size    = z_indices.get_desc().dims()[0];
-    int batch_size      = z_dst.get_desc().dims()[0];
+    int batch_size      = (include_last_offset==0)?z_offsets.get_desc().dims()[0] :
+                          z_offsets.get_desc().dims()[0]-1;
     int bit_rate;
+    int stride_offset;
     bool is_bf16_out;
     bool is_bf16_in;
     bool use_weight=z_per_sample_weights_defined;
@@ -123,6 +132,7 @@ void fbgemm_embedding_bag_kernel(
     IN_TYPE *table_ptr=NULL;
     float *weights=nullptr;
     OUT_TYPE *output=NULL;
+    OUT_TYPE *cat_output=NULL;
     int32_t *fbgemm_offsets=nullptr;
     int32_t *indices = static_cast<int32_t *>(z_indices.get_data_handle());
     int32_t *offsets = static_cast<int32_t *>(z_offsets.get_data_handle());
@@ -182,6 +192,25 @@ void fbgemm_embedding_bag_kernel(
         weights   = static_cast<float *>(z_per_sample_weights.get_data_handle());
     }
 
+    if (cat_dim==1) {
+        stride_offset = output_stride;
+        int mlp_offset = output_stride - num_tables*dim_embedding;
+        cat_output = (mlp_pos==0) ? output + (idx*dim_embedding) + mlp_offset:
+                     output + (idx*dim_embedding);
+    }
+    else if (cat_dim==0) {
+        stride_offset = dim_embedding;
+        int mlp_offset = (z_dst.get_desc().dims()[0]-batch_size*num_tables)
+                         *dim_embedding;
+        cat_output = (mlp_pos==0) ? output + mlp_offset + (idx*batch_size*dim_embedding)
+                     :
+                     output + (idx * batch_size * dim_embedding);
+    }
+    else {
+        stride_offset = dim_embedding;
+        cat_output=output;
+    }
+
     using KernelType = typename std::conditional<
                        std::is_same<IN_TYPE, uint8_t>::value,
                        typename fbgemm::EmbeddingSpMDMKernelSignature<uint8_t, int, std::int32_t, OUT_TYPE>::Type,
@@ -201,24 +230,28 @@ void fbgemm_embedding_bag_kernel(
                 prefetch?16:0,
                 is_wt_positional,
                 use_offsets,
-                -1, /*output_stride*/
+                output_stride,
                 -1, /*input_stride=*/
                 scale_bias_last,
                 is_bf16_out);
     }
     else {
         kernel =
-            fbgemm::GenerateEmbeddingSpMDM<IN_TYPE, int32_t, int32_t, OUT_TYPE>(
+            fbgemm::GenerateEmbeddingSpMDMWithStrides<IN_TYPE, int32_t, int32_t, OUT_TYPE>(
                 dim_embedding,
                 use_weight,
                 normalize_by_lengths,
                 prefetch?16:0,
                 is_wt_positional,
                 use_offsets,
+                output_stride,
+                -1, /*input_stride=*/
+                true, /* scale_bias_last*/
+                false, /*no bags*/
                 is_bf16_out,
                 is_bf16_in);
     }
-    
+
     // TODO: Generate more heuristics based on batch size, pooling size and number of threads.
     // Current decision logic is based on the batch size and number of threads.
     if (op_num_threads == 1 || batch_size <= 100 ||
@@ -232,7 +265,7 @@ void fbgemm_embedding_bag_kernel(
             indices,
             (const int *)fbgemm_offsets,
             weights,
-            output);
+            cat_output);
     }
     else {
         #pragma omp parallel for num_threads(op_num_threads)
@@ -249,7 +282,7 @@ void fbgemm_embedding_bag_kernel(
                 &indices[start_idx],
                 (const int *)&fbgemm_offsets[i],
                 weights,
-                &output[i * dim_embedding]);
+                &cat_output[i * stride_offset]);
         }
     }
 
@@ -273,7 +306,9 @@ void zendnn_embedding_bag_exec(
     const int32_t &z_per_sample_weights_defined,
     const int32_t &include_last_offset, const int32_t &padding_idx, memory &z_dst,
     const char *plugin_op, unsigned int op_num_threads,
-    const bool &scale_bias_last) {
+    const bool &scale_bias_last, const int &cat_dim=-1, const int &mlp_pos=-1,
+    const int &output_stride=-1, const int idx=0,
+    const int num_tables=1) {
 
     zendnnEnv EnvObj = readEnv();
     int batch_size      = z_dst.get_desc().dims()[0];
@@ -290,7 +325,8 @@ void zendnn_embedding_bag_exec(
                            "Mean & Max algo not Supported for INT4 Data Type");
     }
     if ((EnvObj.zenEBAlgo==zenEBAlgoType::EB_OP_FBGEMM || op_num_threads==1 ||
-            batch_size<=100 || z_input.get_desc().data_type()==impl::data_type::s4) &&
+            batch_size<=100 || cat_dim!=-1 ||
+            z_input.get_desc().data_type()==impl::data_type::s4) &&
             (z_algorithm==algorithm::embedding_bag_sum)) {
 
         fbgemm_embedding_bag_kernel<IN_TYPE, OUT_TYPE>(
@@ -298,7 +334,9 @@ void zendnn_embedding_bag_exec(
             z_algorithm, sparse, z_per_sample_weights,
             z_per_sample_weights_defined,
             include_last_offset,
-            padding_idx, z_dst, op_num_threads, plugin_op, scale_bias_last);
+            padding_idx, z_dst, op_num_threads, plugin_op, scale_bias_last, cat_dim,
+            mlp_pos, output_stride, idx,
+            num_tables);
     }
     else {
         zendnn_embedding_bag_kernel(
@@ -330,7 +368,8 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                                    std::vector <int32_t> &z_include_last_offset,
                                    std::vector <int32_t> &z_padding_idx,
                                    std::vector <memory> &z_destination, const char *plugin_op, int thread_qty,
-                                   const bool &scale_bias_last) {
+                                   const bool &scale_bias_last, const int &cat_dim=-1, const int &mlp_pos=-1,
+                                   const int &output_stride=-1) {
 
     zendnnEnv zenEnvObj = readEnv();
     unsigned int eb_thread_qty = zenEnvObj.omp_num_threads;
@@ -338,6 +377,7 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
     std::string thread_type;
     int batch_size      = z_destination[0].get_desc().dims()[0];
     int embedding_dim   = z_input[0].get_desc().dims()[1];
+    bool cat_output     = (z_destination.size()==1);
 
     double start_ms = impl::get_msec();
     if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::CCD_THREADED) {
@@ -371,8 +411,10 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op,
-                    inner_threads, scale_bias_last);
+                    z_padding_idx[threadOffset],
+                    (cat_output)? z_destination[0]:z_destination[threadOffset], plugin_op,
+                    inner_threads, scale_bias_last, cat_dim, mlp_pos, output_stride, threadOffset,
+                    num_tables);
             }
 
         }
@@ -395,8 +437,10 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                 z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                 z_per_sample_weights_defined[threadOffset],
                 z_include_last_offset[threadOffset],
-                z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op,
-                inner_threads, scale_bias_last);
+                z_padding_idx[threadOffset],
+                (cat_output)? z_destination[0]:z_destination[threadOffset], plugin_op,
+                inner_threads, scale_bias_last, cat_dim, mlp_pos, output_stride, threadOffset,
+                num_tables);
         }
     }
 
@@ -417,8 +461,9 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                     z_sparse[threadOffset], z_per_sample_weights_opt[threadOffset],
                     z_per_sample_weights_defined[threadOffset],
                     z_include_last_offset[threadOffset],
-                    z_padding_idx[threadOffset], z_destination[threadOffset], plugin_op, 1,
-                    scale_bias_last);
+                    z_padding_idx[threadOffset],
+                    (cat_output)? z_destination[0]:z_destination[threadOffset], plugin_op, 1,
+                    scale_bias_last, cat_dim, mlp_pos, output_stride, threadOffset, num_tables);
             }
         }
 
@@ -427,12 +472,15 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
     else {
         thread_type="batch_threaded";
         for (int i = 0; i < num_tables; i++) {
+
             zendnn_embedding_bag_exec<IN_TYPE, OUT_TYPE>(
                 z_input[i], z_indices[i], z_offsets[i],
                 z_scale_grad_by_freq[i], z_modes[i],
                 z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
                 z_include_last_offset[i],
-                z_padding_idx[i], z_destination[i], plugin_op, eb_thread_qty, scale_bias_last);
+                z_padding_idx[i], (cat_output)? z_destination[0]:z_destination[i], plugin_op,
+                eb_thread_qty, scale_bias_last,
+                cat_dim, mlp_pos, output_stride, i, num_tables);
         }
 
     }
@@ -533,7 +581,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
         std::vector <int32_t> &z_per_sample_weights_defined,
         std::vector <int32_t> &z_include_last_offset,
         std::vector <int32_t> &z_padding_idx,
-        std::vector <memory> &z_destination, const char *plugin_op, int thread_qty,
+        std::vector <memory> &z_destination, const char *plugin_op, const int &cat_dim,
+        const int &mlp_pos, const int &output_stride, int thread_qty,
         const bool &scale_bias_last) {
 
     if ((z_input[0].get_desc().data_type()==impl::data_type::f32) &&
@@ -543,7 +592,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last, cat_dim,
+                mlp_pos, output_stride);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
@@ -552,7 +602,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last, cat_dim,
+                mlp_pos, output_stride);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::bf16) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
@@ -561,7 +612,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last, cat_dim,
+                mlp_pos, output_stride);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::bf16)) {
@@ -570,7 +622,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last, cat_dim,
+                mlp_pos, output_stride);
     }
     else if ((z_input[0].get_desc().data_type()==impl::data_type::s4) &&
              (z_destination[0].get_desc().data_type()==impl::data_type::f32)) {
@@ -579,7 +632,8 @@ void zendnn_custom_op::zendnn_grp_embedding_bag(std::vector <memory> &z_input,
                 z_scale_grad_by_freq, z_modes,
                 z_sparse, z_per_sample_weights_opt, z_per_sample_weights_defined,
                 z_include_last_offset,
-                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last);
+                z_padding_idx, z_destination, plugin_op, thread_qty, scale_bias_last, cat_dim,
+                mlp_pos, output_stride);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments, "Data Type not Supported");

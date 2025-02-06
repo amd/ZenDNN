@@ -760,8 +760,9 @@ class zendnn_custom_op {
                                          std::vector <int32_t> &z_per_sample_weights_defined,
                                          std::vector <int32_t> &z_include_last_offset,
                                          std::vector <int32_t> &z_padding_idx,
-                                         std::vector <memory> &z_destination, const char *plugin_op="", int thread_qty=1,
-                                         const bool &scale_bias_last=true);
+                                         std::vector <memory> &z_destination, const char *plugin_op="",
+                                         const int &cat_dim=-1, const int &mlp_pos=-1, const int &output_stride=-1,
+                                         int thread_qty=1, const bool &scale_bias_last=true);
 
 //Embedding op API
     static void zendnn_embedding(const memory &z_input, const memory &z_indices,
@@ -828,10 +829,10 @@ class zendnn_custom_op {
                                          const std::vector<memory> &z_mm_result);
     //SDPA OP API
     static void zendnn_sdpa_attention(
-                const memory& input_Q_mem, const memory& input_K_mem,
-                const memory& input_V_mem,
-                memory& input_mask_mem,
-                memory& output_mem);
+        const memory &input_Q_mem, const memory &input_K_mem,
+        const memory &input_V_mem,
+        memory &input_mask_mem,
+        memory &output_mem);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.
@@ -3833,10 +3834,10 @@ struct primitive_attr : public handle<zendnn_primitive_attr_t> {
     ///     factors used for that logical dimension in a memory indicated by @p arg.
     /// @param data_type Scaling factors data_type.
     void set_scales_mask(int arg, int mask, const memory::dims &groups,
-        memory::data_type data_type = memory::data_type::f32) {
+                         memory::data_type data_type = memory::data_type::f32) {
         error::wrap_c_api(zendnn_primitive_attr_set_scales_mask(get(),
-                              arg, mask, (int)groups.size(), groups.data(),
-                              memory::convert_to_c(data_type)),
+                          arg, mask, (int)groups.size(), groups.data(),
+                          memory::convert_to_c(data_type)),
                           "could not set scales primitive attribute");
     }
 
