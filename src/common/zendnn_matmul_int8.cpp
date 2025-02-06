@@ -49,35 +49,44 @@ using tag = memory::format_tag;
 using dt = memory::data_type;
 extern std::mutex map_mutex;
 
+template <typename T>
 void mul_add_quantize_matrix(float *dst_data, char *C_Array, float dst_scale,
                              int M,
-                             int N, const int32_t zero_point_dst, int dst_type, float *mul_buf,
-                             float *add_buf) {
+                             int N, const int32_t zero_point_dst, int dst_type, T *mul_buf,
+                             T *add_buf, int buffer_type) {
     float result = 0.0f;
     #pragma omp parallel for
     for (int idx = 0; idx < M * N; idx++) {
-        result = (((dst_data[idx]*mul_buf[idx]) + add_buf[idx])* dst_scale) +
+        result = (((dst_data[idx] * zendnn::impl::cpu::io::load_float_value((
+                        zendnn::impl::data_type_t)buffer_type, (void *)mul_buf,
+                    idx)) + zendnn::impl::cpu::io::load_float_value((zendnn::impl::data_type_t)
+                            buffer_type, (void *)add_buf, idx))* dst_scale) +
                  zero_point_dst;
         zendnn::impl::cpu::io::store_float_value((zendnn::impl::data_type_t)dst_type,
                 result, C_Array, idx);
     }
 }
 
-void zenMatMulPrimitiveINT8V3_for_mul_add(zendnn::zendnnEnv zenEnvObj,
-        const impl::exec_ctx_t &ctx, int thread_qty,
-        int src_type, int dst_type,
-        int bias_type, const bool Layout, const bool TransA, const bool TransB,
-        const int M, const int N, const int K, const char *A_Array,
-        const int8_t *B_Array, const char *bias, char *C_Array,
-        const float alpha, const float beta, const int lda, const int ldb,
-        const int ldc, const impl::post_ops_t &po_ops, bool blocked_format,
-        const int32_t zero_point_src,
-        const int32_t zero_point_wei, const int32_t zero_point_dst,
-        float do_sum, bool is_weights_const,
-        float *src_scale, int src_scale_size,
-        float *wei_scale, int wei_scale_size,
-        float *dst_scale, int dst_scale_size, bool default_dst_scales,
-        int scale_type) {
+void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
+                            const impl::exec_ctx_t &ctx, int thread_qty,
+                            int src_type, int dst_type,
+                            int bias_type, const bool Layout, const bool TransA, const bool TransB,
+                            const int M, const int N, const int K, const char *A_Array,
+                            const int8_t *B_Array, const char *bias, char *C_Array,
+                            const float alpha, const float beta, const int lda, const int ldb,
+                            const int ldc, const impl::post_ops_t &po_ops, bool blocked_format,
+                            const int32_t zero_point_src,
+                            const int32_t zero_point_wei, const int32_t zero_point_dst,
+                            float do_sum, bool is_weights_const,
+                            float *src_scale, int src_scale_size,
+                            float *wei_scale, int wei_scale_size,
+                            float *dst_scale, int dst_scale_size, bool default_dst_scales,
+                            int scale_type) {
+    // TODO: This version control is for internal use only
+    unsigned int zen_matmul_version =
+        zendnn::zendnn_getenv_int("ZENDNN_INT8_MATMUL_VER",
+                                  ZENDNN_MATMUL_VERSION);
+
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -112,330 +121,19 @@ void zenMatMulPrimitiveINT8V3_for_mul_add(zendnn::zendnnEnv zenEnvObj,
             tag::any);
 
     memory::desc bias_md;
-    if (bias_type) {
-        bias_md = memory::desc({bias_dims}, (zendnn::memory::data_type)bias_type,
-                               tag::ab);
-    }
-
-    primitive_attr matmul_attr;
-    int postop_index = 0;
-    float *mul_buff = NULL, *add_buff = NULL;
-    for (auto idx = 0; idx < po_ops.len(); ++idx) {
-        const auto &e = po_ops.entry_[idx];
-        if (e.binary.alg == impl::alg_kind::binary_add) {
-            add_buff = const_cast<float *>(CTX_IN_MEM(const float *,
-                                           (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-        }
-        else if (e.binary.alg == impl::alg_kind::binary_mul) {
-            mul_buff = const_cast<float *>(CTX_IN_MEM(const float *,
-                                           (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-        }
-        postop_index++;
-    }
-
-    memory::desc dst_md;
-    dst_md = memory::desc({dst_dims}, dt::f32, {ldc, 1});
-
-    //new memory for cached scales
-    float *n_scale = NULL;
-    cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
-                      NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
-
-
-    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
-
-    // TODO: update the name of variable
-    matmul_attr.set_autoTunerEnable(true);
-    matmul_attr.set_output_scales(wei_scale_size == 1? 0: (1<<1), scale_vector);
-    if (zero_point_src != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_SRC, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    if (zero_point_wei != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_WEIGHTS, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    //MatMul desc
-    auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
-                       blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                               blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
-                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                                               matmul_weights_md, dst_md);
-
-    //MatMul primitive desc
-    auto matmul_prim_disc =
-        zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
-
-    //Memory creation
-    zendnn::memory user_weights_memory, src_memory, dst_memory;
-    zendnn::memory bias_memory, reordered_bias_memory;
-    src_memory = memory(src_md, eng, in_arr);
-    user_weights_memory = memory(matmul_weights_md, eng, filt_arr);
-
-    char *new_bias = NULL;
-    if (bias_type) {
-        // Reordered Bias values to Quantize the Bias
-        auto bias_desc = matmul_prim_disc.bias_desc();
-        cacheScaledBias(zenEnvObj, key_obj_scales, engine_stream, eng,
-                        bias_desc, new_bias, bias_arr, N, src_scale, wei_scale, src_scale_size,
-                        wei_scale_size);
-        reordered_bias_memory = memory(bias_md, eng, new_bias);
-    }
-    //Create a temp dst to stoer output in f32.
-    float *new_dst = (float *)zendnn_aligned_alloc(64, sizeof(float)*M*N);
-    dst_memory = memory(dst_md, eng, new_dst);
-
-    //Weight reordering
-    zendnn::memory reordered_weights_memory;
-
-    if (blocked_format) {
-        reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
-            reordered_weights_memory, eng, engine_stream, is_weights_const);
-    }
-
-    zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
-    net_args.insert({ZENDNN_ARG_SRC, src_memory});
-    net_args.insert({ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory});
-    if (bias_type) net_args.insert({ZENDNN_ARG_BIAS, reordered_bias_memory});
-    net_args.insert({ZENDNN_ARG_DST,dst_memory});
-    if (zero_point_src != 0) {
-        int32_t *zero_point_src_nc = const_cast<int32_t *>(&zero_point_src);
-        memory zp_A_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_src_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem});
-    }
-    if (zero_point_wei != 0) {
-        int32_t *zero_point_wei_nc = const_cast<int32_t *>(&zero_point_wei);
-        memory zp_B_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_wei_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_WEIGHTS, zp_B_mem});
-    }
-    matmul_prim.execute(engine_stream, net_args);
-
-    mul_add_quantize_matrix(new_dst, C_Array, dst_scale[0], M, N, zero_point_dst,
-                            dst_type, mul_buff, add_buff);
-    free(new_dst);
-    if (!zenEnvObj.zenStaticScaleCache && n_scale != NULL) {
-        free(n_scale);
-    }
-    if (!zenEnvObj.zenBiasCache && new_bias != NULL) {
-        free(new_bias);
-    }
-}
-void zenMatMulPrimitiveINT8V1(zendnn::zendnnEnv zenEnvObj,
-                              const impl::exec_ctx_t &ctx, int thread_qty,
-                              int src_type, int dst_type,
-                              int bias_type, const bool Layout, const bool TransA, const bool TransB,
-                              const int M, const int N, const int K, const char *A_Array,
-                              const int8_t *B_Array, const char *bias, char *C_Array,
-                              const float alpha, const float beta, const int lda, const int ldb,
-                              const int ldc, const impl::post_ops_t &po_ops, bool blocked_format,
-                              const int32_t zero_point_src,
-                              const int32_t zero_point_wei, const int32_t zero_point_dst,
-                              float do_sum, bool is_weights_const,
-                              float *src_scale, int src_scale_size,
-                              float *wei_scale, int wei_scale_size,
-                              float *dst_scale, int dst_scale_size, bool default_dst_scales,
-                              int scale_type) {
-    zendnn::engine eng(engine::kind::cpu, 0);
-    zendnn::stream engine_stream(eng);
-
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               thread_qty, false);
-    Key_matmul key_obj_scales(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                              thread_qty, true);
-
-    std::vector<primitive> net;
-    std::unordered_map<int, memory> net_args;
-
-    //Prepare Data
-    char *in_arr = const_cast<char *>(A_Array);
-    int8_t *filt_arr = const_cast<int8_t *>(B_Array);
-    char *bias_arr = const_cast<char *>(bias);
-
-    memory::dims src_dims = {M, K};
-    memory::dims weight_dims = {K, N};
-    memory::dims bias_dims = {1, N};
-    memory::dims dst_dims = {M, N};
-
-    memory::dims a_strides = TransA ? memory::dims {1, lda} :
-                             memory::dims {lda, 1};
-    memory::dims b_strides = TransB ? memory::dims {1, ldb} :
-                             memory::dims {ldb, 1};
-
-    memory::desc src_md = memory::desc({src_dims}, src_type == zendnn_s8? dt::s8 :
-                                       dt::u8, a_strides);
-    memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-                                     b_strides);
-    memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-            tag::any);
-
-    memory::desc bias_md;
-    if (bias_type) {
-        bias_md = memory::desc({bias_dims}, (zendnn::memory::data_type)bias_type,
-                               tag::ab);
-    }
-
-    primitive_attr matmul_attr;
     zendnn::post_ops post_ops;
-    bool post_attr = false;
-    const float scale_po = 1.0f;
-    int postop_index = 0;
-    for (auto idx = 0; idx < po_ops.len(); ++idx) {
-        const auto &e = po_ops.entry_[idx];
-        if (e.eltwise.alg == impl::alg_kind::eltwise_relu) {
-            // Relu
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_relu, 0.f, 0.f);
-        }
-    }
-
-    if (post_attr) {
-        matmul_attr.set_post_ops(post_ops);
-    }
-
-    memory::desc dst_md;
-    dst_md = memory::desc({dst_dims}, (zendnn::memory::data_type)dst_type, {ldc, 1});
-
-    //new memory for cached scales
-    float *n_scale = NULL;
-    cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
-                      dst_scale, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
-
-
-    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
-
-    matmul_attr.set_autoTunerEnable(true);
-    matmul_attr.set_output_scales(wei_scale_size == 1? 0: (1<<1), scale_vector);
-    if (zero_point_src != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_SRC, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    if (zero_point_wei != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_WEIGHTS, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    if (zero_point_dst != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_DST, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    //MatMul desc
-    auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
-                       blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                               blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
-                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                                               matmul_weights_md, dst_md);
-
-    //MatMul primitive desc
-    auto matmul_prim_disc =
-        zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
-
-    //Memory creation
-    zendnn::memory user_weights_memory, src_memory, dst_memory;
-    zendnn::memory bias_memory, reordered_bias_memory;
-    src_memory = memory(src_md, eng, in_arr);
-    user_weights_memory = memory(matmul_weights_md, eng, filt_arr);
-    char *new_bias = NULL;
-    if (bias_type) {
-        // Reordered Bias values to Quantize the Bias
-        auto bias_desc = matmul_prim_disc.bias_desc();
-        cacheScaledBias(zenEnvObj, key_obj_scales, engine_stream, eng,
-                        bias_desc, new_bias, bias_arr, N, src_scale, wei_scale, src_scale_size,
-                        wei_scale_size);
-        reordered_bias_memory = memory(bias_md, eng, new_bias);
-    }
-    dst_memory = memory(dst_md, eng, C_Array);
-
-    //Weight reordering
-    zendnn::memory reordered_weights_memory;
-
-    if (blocked_format) {
-        reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
-            reordered_weights_memory, eng, engine_stream, is_weights_const);
-    }
-
-    zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
-    net_args.insert({ZENDNN_ARG_SRC, src_memory});
-    net_args.insert({ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory});
-    if (bias_type) net_args.insert({ZENDNN_ARG_BIAS, reordered_bias_memory});
-    net_args.insert({ZENDNN_ARG_DST,dst_memory});
-    if (zero_point_src != 0) {
-        int32_t *zero_point_src_nc = const_cast<int32_t *>(&zero_point_src);
-        memory zp_A_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_src_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem});
-    }
-    if (zero_point_wei != 0) {
-        int32_t *zero_point_wei_nc = const_cast<int32_t *>(&zero_point_wei);
-        memory zp_B_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_wei_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_WEIGHTS, zp_B_mem});
-    }
-    if (zero_point_dst != 0) {
-        int32_t *zero_point_dst_nc = const_cast<int32_t *>(&zero_point_dst);
-        memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_dst_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem});
-    }
-    matmul_prim.execute(engine_stream, net_args);
-    if (!zenEnvObj.zenStaticScaleCache && n_scale != NULL) {
-        free(n_scale);
-    }
-    if (!zenEnvObj.zenBiasCache && new_bias != NULL) {
-        free(new_bias);
-    }
-}
-
-void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
-                              const impl::exec_ctx_t &ctx, int thread_qty,
-                              int src_type, int dst_type,
-                              int bias_type, const bool Layout, const bool TransA, const bool TransB,
-                              const int M, const int N, const int K, const char *A_Array,
-                              const int8_t *B_Array, const char *bias, char *C_Array,
-                              const float alpha, const float beta, const int lda, const int ldb,
-                              const int ldc, const impl::post_ops_t &po_ops, bool blocked_format,
-                              const int32_t zero_point_src,
-                              const int32_t zero_point_wei, const int32_t zero_point_dst,
-                              float do_sum, bool is_weights_const,
-                              float *src_scale, int src_scale_size,
-                              float *wei_scale, int wei_scale_size,
-                              float *dst_scale, int dst_scale_size, bool default_dst_scales,
-                              int scale_type) {
-    zendnn::engine eng(engine::kind::cpu, 0);
-    zendnn::stream engine_stream(eng);
-
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               thread_qty, false);
-    Key_matmul key_obj_scales(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                              thread_qty, true);
-
-    std::vector<primitive> net;
-    std::unordered_map<int, memory> net_args;
-
-    //Prepare Data
-    char *in_arr = const_cast<char *>(A_Array);
-    int8_t *filt_arr = const_cast<int8_t *>(B_Array);
-    char *bias_arr = const_cast<char *>(bias);
-
-    memory::dims src_dims = {M, K};
-    memory::dims weight_dims = {K, N};
-    memory::dims bias_dims = {1, N};
-    memory::dims dst_dims = {M, N};
-
-    memory::dims a_strides = TransA ? memory::dims {1, lda} :
-                             memory::dims {lda, 1};
-    memory::dims b_strides = TransB ? memory::dims {1, ldb} :
-                             memory::dims {ldb, 1};
-
-    memory::desc src_md = memory::desc({src_dims}, src_type == zendnn_s8? dt::s8 :
-                                       dt::u8, a_strides);
-    memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-                                     b_strides);
-    memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-            tag::any);
-
-    memory::desc bias_md;
     zendnn::memory bias_memory;
-    zendnn::post_ops post_ops;
     int postop_index = 0;
     bool post_attr = false;
 
     if (bias_type) {
-        post_attr = true;
         bias_md = memory::desc({bias_dims}, (zendnn::memory::data_type)bias_type,
                                tag::ab);
+    }
+
+    // Bias is executed as postop add for Ver 3
+    if (bias_type && zen_matmul_version == 3) {
+        post_attr = true;
         bias_memory = memory(bias_md, eng, bias_arr);
         auto bias_t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
         postop_index++;
@@ -443,8 +141,22 @@ void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
         net_args.insert({bias_t, bias_memory});
     }
 
+    bool relu_po = (po_ops.len() == 1 &&
+                    po_ops.entry_[0].eltwise.alg == impl::alg_kind::eltwise_relu);
+
+    // Mul and Add buffers are of same datatype (Either BF16 or F32)
+    // TODO: Add support for different datatypes for Mul and Add (u8, s8, etc.,) and mixed datatypes
+    bool mul_add_ver2 = po_ops.len() == 2 &&
+                        po_ops.entry_[0].binary.alg == impl::alg_kind::binary_mul &&
+                        po_ops.entry_[1].binary.alg == impl::alg_kind::binary_add &&
+                        (po_ops.entry_[0].binary.src1_desc.data_type == zendnn_f32 ||
+                         po_ops.entry_[0].binary.src1_desc.data_type == zendnn_bf16) &&
+                        zen_matmul_version == 2;
+
     primitive_attr matmul_attr;
     const float scale_po = 1.0f;
+    void *mul_buff = NULL, *add_buff = NULL;
+    int buffer_type;
     for (auto idx = 0; idx < po_ops.len(); ++idx) {
         const auto &e = po_ops.entry_[idx];
         if (e.eltwise.alg == impl::alg_kind::eltwise_relu) {
@@ -477,39 +189,70 @@ void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
             post_ops.append_sum(e.sum.scale);
         }
         else if (e.binary.alg == impl::alg_kind::binary_add) {
-            post_attr = true;
-            const auto &src1_desc = e.binary.src1_desc;
-            post_ops.append_binary(algorithm::binary_add, src1_desc);
-            auto add_raw = const_cast<void *>(CTX_IN_MEM(const void *,
-                                              (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-            auto po_mem = memory(src1_desc,eng,add_raw);
-            int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
-            net_args.insert({t,po_mem});
+            if (mul_add_ver2) {
+                buffer_type = e.binary.src1_desc.data_type;
+                if (buffer_type == zendnn_f32) {
+                    add_buff = const_cast<float *>(CTX_IN_MEM(const float *,
+                                                   (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+                }
+                else {
+                    add_buff = const_cast<int16_t *>(CTX_IN_MEM(const int16_t *,
+                                                     (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+
+                }
+            }
+            else {
+                post_attr = true;
+                const auto &src1_desc = e.binary.src1_desc;
+                post_ops.append_binary(algorithm::binary_add, src1_desc);
+                auto add_raw = const_cast<void *>(CTX_IN_MEM(const void *,
+                                                  (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+                auto po_mem = memory(src1_desc,eng,add_raw);
+                int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
+                net_args.insert({t,po_mem});
+            }
         }
         else if (e.binary.alg == impl::alg_kind::binary_mul) {
-            post_attr = true;
-            const auto &src1_desc = e.binary.src1_desc;
-            post_ops.append_binary(algorithm::binary_mul, src1_desc);
-            auto mul_raw = const_cast<void *>(CTX_IN_MEM(const void *,
-                                              (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-            auto po_mem = memory(src1_desc,eng,mul_raw);
-            int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
-            net_args.insert({t,po_mem});
+            if (mul_add_ver2) {
+                buffer_type = e.binary.src1_desc.data_type;
+                if (buffer_type == zendnn_f32) {
+                    mul_buff = const_cast<float *>(CTX_IN_MEM(const float *,
+                                                   (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+                }
+                else {
+                    mul_buff = const_cast<int16_t *>(CTX_IN_MEM(const int16_t *,
+                                                     (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+                }
+            }
+            else {
+                post_attr = true;
+                const auto &src1_desc = e.binary.src1_desc;
+                post_ops.append_binary(algorithm::binary_mul, src1_desc);
+                auto mul_raw = const_cast<void *>(CTX_IN_MEM(const void *,
+                                                  (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
+                auto po_mem = memory(src1_desc,eng,mul_raw);
+                int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
+                net_args.insert({t,po_mem});
+            }
         }
         postop_index++;
     }
 
-    if (!default_dst_scales) {
-        post_attr = true;
-        // Dst scale
-        zendnn::memory dst_scale_memory;
-        auto dst_scale_md = memory::desc({1}, dt::f32, tag::a);
-        dst_scale_memory = memory(dst_scale_md, eng, dst_scale);
+    // Dest scales are applied
+    if (!((mul_add_ver2) || (zen_matmul_version != 3 &&
+                             (po_ops.len() == 0 || relu_po)))) {
+        if (!default_dst_scales) {
+            post_attr = true;
+            // Dst scale
+            zendnn::memory dst_scale_memory;
+            auto dst_scale_md = memory::desc({1}, dt::f32, tag::a);
+            dst_scale_memory = memory(dst_scale_md, eng, dst_scale);
 
-        auto dst_scale_t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) |
-                           ZENDNN_ARG_SRC_1;
-        post_ops.append_binary(algorithm::binary_mul, dst_scale_md);
-        net_args.insert({dst_scale_t, dst_scale_memory});
+            auto dst_scale_t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) |
+                               ZENDNN_ARG_SRC_1;
+            post_ops.append_binary(algorithm::binary_mul, dst_scale_md);
+            net_args.insert({dst_scale_t, dst_scale_memory});
+        }
     }
 
     if (post_attr) {
@@ -517,12 +260,26 @@ void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
     }
 
     memory::desc dst_md;
-    dst_md = memory::desc({dst_dims}, (zendnn::memory::data_type)dst_type, {ldc, 1});
+    if (mul_add_ver2) {
+        dst_md = memory::desc({dst_dims}, dt::f32, {ldc, 1});
+    }
+    else {
+        dst_md = memory::desc({dst_dims}, (zendnn::memory::data_type)dst_type, {ldc, 1});
+    }
 
     //new memory for cached scales
     float *n_scale = NULL;
-    cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
-                      NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
+    // Ver 1 --> Relu/no-post ops (scales = src*wei*sst), Other (scales = src * wei)
+    // Ver 2 --> Relu/no-post ops (scales = src*wei*dst), Other (scales = src * wei)
+    // Ver 3 --> scales = src * wei
+    if (zen_matmul_version != 3 && (po_ops.len() == 0 || relu_po)) {
+        cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
+                          dst_scale, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
+    }
+    else {
+        cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
+                          NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
+    }
 
     std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
 
@@ -535,230 +292,41 @@ void zenMatMulPrimitiveINT8V2(zendnn::zendnnEnv zenEnvObj,
     if (zero_point_wei != 0) {
         matmul_attr.set_zero_points(ZENDNN_ARG_WEIGHTS, 0, {ZENDNN_RUNTIME_S32_VAL});
     }
-    if (zero_point_dst != 0) {
+    if (!mul_add_ver2 && (zero_point_dst != 0)) {
         matmul_attr.set_zero_points(ZENDNN_ARG_DST, 0, {ZENDNN_RUNTIME_S32_VAL});
     }
+
+    zendnn::matmul::primitive_desc matmul_prim_disc;
     //MatMul desc
-    auto matmul_disc = blocked_format ? zendnn::matmul::desc(src_md,
-                       blocked_matmul_weights_md, dst_md) :
-                       zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
-    //MatMul primitive desc
-    auto matmul_prim_disc =
-        zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
+    if (zen_matmul_version == 3) {
+        // Bias computation takes place as a post-op
+        auto matmul_disc = blocked_format ? zendnn::matmul::desc(src_md,
+                           blocked_matmul_weights_md, dst_md) :
+                           zendnn::matmul::desc(src_md, matmul_weights_md, dst_md);
+        matmul_prim_disc = zendnn::matmul::primitive_desc(matmul_disc, matmul_attr,
+                           eng);
+    }
+    else {
+        auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
+                           blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                                   blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
+                                           matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
+                                                   matmul_weights_md, dst_md);
+        matmul_prim_disc = zendnn::matmul::primitive_desc(matmul_disc, matmul_attr,
+                           eng);
+    }
 
     //Memory creation
     zendnn::memory user_weights_memory, src_memory, dst_memory;
-
-    src_memory = memory(src_md, eng, in_arr);
-    user_weights_memory = memory(matmul_weights_md, eng, filt_arr);
-    dst_memory = memory(dst_md, eng, C_Array);
-
-    //Weight reordering
-    zendnn::memory reordered_weights_memory;
-
-    if (blocked_format) {
-        reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
-            reordered_weights_memory, eng, engine_stream, is_weights_const);
-    }
-
-    zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
-    net_args.insert({ZENDNN_ARG_SRC, src_memory});
-    net_args.insert({ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory});
-    net_args.insert({ZENDNN_ARG_DST,dst_memory});
-    if (zero_point_src != 0) {
-        int32_t *zero_point_src_nc = const_cast<int32_t *>(&zero_point_src);
-        memory zp_A_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_src_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_SRC, zp_A_mem});
-    }
-    if (zero_point_wei != 0) {
-        int32_t *zero_point_wei_nc = const_cast<int32_t *>(&zero_point_wei);
-        memory zp_B_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_wei_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_WEIGHTS, zp_B_mem});
-    }
-    if (zero_point_dst != 0) {
-        int32_t *zero_point_dst_nc = const_cast<int32_t *>(&zero_point_dst);
-        memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_dst_nc);
-        net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem});
-    }
-    matmul_prim.execute(engine_stream, net_args);
-    if (!zenEnvObj.zenStaticScaleCache && n_scale != NULL) {
-        free(n_scale);
-    }
-}
-
-void zenMatMulPrimitiveINT8V3(zendnn::zendnnEnv zenEnvObj,
-                              const impl::exec_ctx_t &ctx, int thread_qty,
-                              int src_type, int dst_type,
-                              int bias_type, const bool Layout, const bool TransA, const bool TransB,
-                              const int M, const int N, const int K, const char *A_Array,
-                              const int8_t *B_Array, const char *bias, char *C_Array,
-                              const float alpha, const float beta, const int lda, const int ldb,
-                              const int ldc, const impl::post_ops_t &po_ops, bool blocked_format,
-                              const int32_t zero_point_src,
-                              const int32_t zero_point_wei, const int32_t zero_point_dst,
-                              float do_sum, bool is_weights_const,
-                              float *src_scale, int src_scale_size,
-                              float *wei_scale, int wei_scale_size,
-                              float *dst_scale, int dst_scale_size, bool default_dst_scales,
-                              int scale_type) {
-    zendnn::engine eng(engine::kind::cpu, 0);
-    zendnn::stream engine_stream(eng);
-
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               thread_qty, false);
-    Key_matmul key_obj_scales(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                              thread_qty, true);
-
-    std::vector<primitive> net;
-    std::unordered_map<int, memory> net_args;
-
-    //Prepare Data
-    char *in_arr = const_cast<char *>(A_Array);
-    int8_t *filt_arr = const_cast<int8_t *>(B_Array);
-    char *bias_arr = const_cast<char *>(bias);
-
-    memory::dims src_dims = {M, K};
-    memory::dims weight_dims = {K, N};
-    memory::dims bias_dims = {1, N};
-    memory::dims dst_dims = {M, N};
-
-    memory::dims a_strides = TransA ? memory::dims {1, lda} :
-                             memory::dims {lda, 1};
-    memory::dims b_strides = TransB ? memory::dims {1, ldb} :
-                             memory::dims {ldb, 1};
-
-    memory::desc src_md = memory::desc({src_dims}, src_type == zendnn_s8? dt::s8 :
-                                       dt::u8, a_strides);
-    memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-                                     b_strides);
-    memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-            tag::any);
-
-    memory::desc bias_md;
-    if (bias_type) {
-        bias_md = memory::desc({bias_dims}, (zendnn::memory::data_type)bias_type,
-                               tag::ab);
-    }
-
-    primitive_attr matmul_attr;
-    zendnn::post_ops post_ops;
-    bool post_attr = false;
-    const float scale_po = 1.0f;
-    int postop_index = 0;
-    for (auto idx = 0; idx < po_ops.len(); ++idx) {
-        const auto &e = po_ops.entry_[idx];
-        if (e.eltwise.alg == impl::alg_kind::eltwise_relu) {
-            // Relu
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_relu, 0.f, 0.f);
-        }
-        else if (e.eltwise.alg == impl::alg_kind::eltwise_swish) {
-            // SiLU
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_swish, 1.f, 0.f);
-        }
-        else if (e.eltwise.alg == impl::alg_kind::eltwise_gelu) {
-            // Gelu tanH
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_gelu, 1.f, 0.f);
-        }
-        else if (e.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
-            // Gelu ERF
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_gelu_erf, 1.f, 0.f);
-        }
-        else if (e.eltwise.alg == impl::alg_kind::eltwise_logistic) {
-            // Sigmoid
-            post_attr = true;
-            post_ops.append_eltwise(scale_po, algorithm::eltwise_logistic, 0.f, 0.f);
-        }
-        else if (e.kind == impl::primitive_kind::sum) {
-            post_attr = true;
-            post_ops.append_sum(e.sum.scale);
-        }
-        else if (e.binary.alg == impl::alg_kind::binary_add) {
-            post_attr = true;
-            const auto &src1_desc = e.binary.src1_desc;
-            post_ops.append_binary(algorithm::binary_add, src1_desc);
-            auto add_raw = const_cast<void *>(CTX_IN_MEM(const void *,
-                                              (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-            auto po_mem = memory(src1_desc,eng,add_raw);
-            int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
-            net_args.insert({t,po_mem});
-        }
-        else if (e.binary.alg == impl::alg_kind::binary_mul) {
-            post_attr = true;
-            const auto &src1_desc = e.binary.src1_desc;
-            post_ops.append_binary(algorithm::binary_mul, src1_desc);
-            auto mul_raw = const_cast<void *>(CTX_IN_MEM(const void *,
-                                              (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1)));
-            auto po_mem = memory(src1_desc,eng,mul_raw);
-            int t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) | ZENDNN_ARG_SRC_1;
-            net_args.insert({t,po_mem});
-        }
-        postop_index++;
-    }
-
-    if (!default_dst_scales) {
-        post_attr = true;
-        // Dst scale
-        zendnn::memory dst_scale_memory;
-        auto dst_scale_md = memory::desc({1}, dt::f32, tag::a);
-        dst_scale_memory = memory(dst_scale_md, eng, dst_scale);
-
-        auto dst_scale_t = ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(postop_index) |
-                           ZENDNN_ARG_SRC_1;
-        post_ops.append_binary(algorithm::binary_mul, dst_scale_md);
-        net_args.insert({dst_scale_t, dst_scale_memory});
-    }
-
-    if (post_attr) {
-        matmul_attr.set_post_ops(post_ops);
-    }
-
-    memory::desc dst_md;
-    dst_md = memory::desc({dst_dims}, (zendnn::memory::data_type)dst_type, {ldc, 1});
-
-    //new memory for cached scales
-    float *n_scale = NULL;
-    cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
-                      NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
-
-
-    std::vector<float> scale_vector(n_scale, n_scale + wei_scale_size);
-
-    // TODO: update the name of variable
-    matmul_attr.set_autoTunerEnable(true);
-    matmul_attr.set_output_scales(wei_scale_size == 1? 0: (1<<1), scale_vector);
-    if (zero_point_src != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_SRC, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    if (zero_point_wei != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_WEIGHTS, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    if (zero_point_dst != 0) {
-        matmul_attr.set_zero_points(ZENDNN_ARG_DST, 0, {ZENDNN_RUNTIME_S32_VAL});
-    }
-    //MatMul desc
-    auto matmul_disc = blocked_format ? bias_type? zendnn::matmul::desc(src_md,
-                       blocked_matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                               blocked_matmul_weights_md, dst_md) : bias_type? zendnn::matmul::desc(src_md,
-                                       matmul_weights_md, bias_md, dst_md): zendnn::matmul::desc(src_md,
-                                               matmul_weights_md, dst_md);
-
-    //MatMul primitive desc
-    auto matmul_prim_disc =
-        zendnn::matmul::primitive_desc(matmul_disc, matmul_attr, eng);
-
-    //Memory creation
-    zendnn::memory user_weights_memory, src_memory, dst_memory;
-    zendnn::memory bias_memory, reordered_bias_memory;
+    zendnn::memory reordered_bias_memory;
     src_memory = memory(src_md, eng, in_arr);
     user_weights_memory = memory(matmul_weights_md, eng, filt_arr);
 
     char *new_bias = NULL;
-    if (bias_type) {
+    // Ver 1 --> Reordered Bias (Bias / Src scale * Wei scale)
+    // Ver 2 --> Reordered Bias (Bias / Src scale * Wei scale)
+    // Ver 3 --> Bias (Applies as a postop)
+    if (bias_type && zen_matmul_version != 3) {
         // Reordered Bias values to Quantize the Bias
         auto bias_desc = matmul_prim_disc.bias_desc();
         cacheScaledBias(zenEnvObj, key_obj_scales, engine_stream, eng,
@@ -766,7 +334,16 @@ void zenMatMulPrimitiveINT8V3(zendnn::zendnnEnv zenEnvObj,
                         wei_scale_size);
         reordered_bias_memory = memory(bias_md, eng, new_bias);
     }
-    dst_memory = memory(dst_md, eng, C_Array);
+
+    float *new_dst = NULL;
+    if (mul_add_ver2) {
+        // New Memory is created to handle Explicit Mul+Add computation.
+        new_dst = (float *)zendnn_aligned_alloc(64, sizeof(float)*M*N);
+        dst_memory = memory(dst_md, eng, new_dst);
+    }
+    else {
+        dst_memory = memory(dst_md, eng, C_Array);
+    }
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
@@ -780,7 +357,9 @@ void zenMatMulPrimitiveINT8V3(zendnn::zendnnEnv zenEnvObj,
     zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
     net_args.insert({ZENDNN_ARG_SRC, src_memory});
     net_args.insert({ZENDNN_ARG_WEIGHTS, blocked_format?reordered_weights_memory:user_weights_memory});
-    if (bias_type) net_args.insert({ZENDNN_ARG_BIAS, reordered_bias_memory});
+    if (zen_matmul_version != 3) {
+        if (bias_type) net_args.insert({ZENDNN_ARG_BIAS, reordered_bias_memory});
+    }
     net_args.insert({ZENDNN_ARG_DST,dst_memory});
     if (zero_point_src != 0) {
         int32_t *zero_point_src_nc = const_cast<int32_t *>(&zero_point_src);
@@ -792,12 +371,27 @@ void zenMatMulPrimitiveINT8V3(zendnn::zendnnEnv zenEnvObj,
         memory zp_B_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_wei_nc);
         net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_WEIGHTS, zp_B_mem});
     }
-    if (zero_point_dst != 0) {
+    if (!mul_add_ver2 && (zero_point_dst != 0)) {
         int32_t *zero_point_dst_nc = const_cast<int32_t *>(&zero_point_dst);
         memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng, zero_point_dst_nc);
         net_args.insert({ZENDNN_ARG_ATTR_ZERO_POINTS | ZENDNN_ARG_DST, zp_C_mem});
     }
     matmul_prim.execute(engine_stream, net_args);
+
+    if (mul_add_ver2) {
+        if (buffer_type == zendnn_f32) {
+            mul_add_quantize_matrix<float>(new_dst, C_Array, dst_scale[0], M, N,
+                                           zero_point_dst,
+                                           dst_type, (float *)mul_buff, (float *)add_buff, buffer_type);
+        }
+        else {
+            mul_add_quantize_matrix<int16_t>(new_dst, C_Array, dst_scale[0], M, N,
+                                             zero_point_dst,
+                                             dst_type, (int16_t *)mul_buff, (int16_t *)add_buff, buffer_type);
+        }
+
+        free(new_dst);
+    }
 
     if (!zenEnvObj.zenStaticScaleCache && n_scale != NULL) {
         free(n_scale);
@@ -1767,15 +1361,15 @@ int matmul_int8_wrapper(
                 //dst src:s8 and dst:u8
                 //CALL BRGEMM Primitive
                 obj.is_brgemm = true;
-                zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, true, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
+                zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                                       bias_type,
+                                       Layout,
+                                       transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                                       lda, ldb, ldc, po_ops, true, zero_point_src,
+                                       zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                       src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                       dst_scales, dst_scale_size, default_dst_scales,
+                                       scale_type);
                 obj.is_brgemm = false;
             }
         }
@@ -1805,15 +1399,15 @@ int matmul_int8_wrapper(
                 //dst u8
                 //CALL BRGEMM Primitive
                 obj.is_brgemm = true;
-                zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, true, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
+                zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                                       bias_type,
+                                       Layout,
+                                       transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                                       lda, ldb, ldc, po_ops, true, zero_point_src,
+                                       zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                       src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                       dst_scales, dst_scale_size, default_dst_scales,
+                                       scale_type);
                 obj.is_brgemm = false;
             }
         }
@@ -1849,15 +1443,15 @@ int matmul_int8_wrapper(
                 //dst u8
                 //CALL BRGEMM Primitive
                 obj.is_brgemm = true;
-                zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, false, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
+                zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                                       bias_type,
+                                       Layout,
+                                       transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                                       lda, ldb, ldc, po_ops, false, zero_point_src,
+                                       zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                       src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                       dst_scales, dst_scale_size, default_dst_scales,
+                                       scale_type);
                 obj.is_brgemm = false;
             }
         }
@@ -1887,15 +1481,15 @@ int matmul_int8_wrapper(
                 //dst u8
                 //CALL BRGEMM Primitive
                 obj.is_brgemm = true;
-                zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, false, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
+                zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                                       bias_type,
+                                       Layout,
+                                       transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                                       lda, ldb, ldc, po_ops, false, zero_point_src,
+                                       zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                       src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                       dst_scales, dst_scale_size, default_dst_scales,
+                                       scale_type);
                 obj.is_brgemm = false;
             }
         }
@@ -1904,66 +1498,16 @@ int matmul_int8_wrapper(
              zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8) {
         //CALL blocked BRGEMM Primitive
         obj.is_brgemm = true;
-        // TODO: This version control is for internal use only
-        unsigned int zen_matmul_version =
-            zendnn::zendnn_getenv_int("ZENDNN_INT8_MATMUL_VER",
-                                      ZENDNN_MATMUL_VERSION);
-        bool relu_po = (po_ops.len() == 1 &&
-                        po_ops.entry_[0].eltwise.alg == impl::alg_kind::eltwise_relu);
 
-        // TODO: Add mix of activation and binary ops.
-        bool mul_add = po_ops.len() == 2 &&
-                       po_ops.entry_[0].binary.alg == impl::alg_kind::binary_mul &&
-                       po_ops.entry_[1].binary.alg == impl::alg_kind::binary_add;
-        if ((po_ops.len() == 0 || relu_po) && zen_matmul_version == 1) {
-            zenMatMulPrimitiveINT8V1(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                     bias_type,
-                                     Layout,
-                                     transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                     lda, ldb, ldc, po_ops, true, zero_point_src,
-                                     zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                     src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                     dst_scales, dst_scale_size, default_dst_scales,
-                                     scale_type);
-        }
-        else {
-            if (zen_matmul_version == 0 && mul_add) {
-                // should be enabled only with MUL and ADD.
-                zenMatMulPrimitiveINT8V3_for_mul_add(zenEnvObj, ctx, thread_qty, src_type,
-                                                     dst_type,
-                                                     bias_type,
-                                                     Layout,
-                                                     transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                                     lda, ldb, ldc, po_ops, true, zero_point_src,
-                                                     zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                                     src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                                     dst_scales, dst_scale_size, default_dst_scales,
-                                                     scale_type);
-            }
-            else if (zen_matmul_version == 2) {
-                zenMatMulPrimitiveINT8V2(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, true, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
-            }
-            else {
-                zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                         bias_type,
-                                         Layout,
-                                         transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                         lda, ldb, ldc, po_ops, true, zero_point_src,
-                                         zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                         src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                         dst_scales, dst_scale_size, default_dst_scales,
-                                         scale_type);
-            }
-        }
-
+        zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                               bias_type,
+                               Layout,
+                               transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                               lda, ldb, ldc, po_ops, true, zero_point_src,
+                               zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                               src_scale, src_scale_size, wei_scale, wei_scale_size,
+                               dst_scales, dst_scale_size, default_dst_scales,
+                               scale_type);
         obj.is_brgemm = false;
     }
     else {
@@ -1973,15 +1517,15 @@ int matmul_int8_wrapper(
         zenEnvObj.zenBiasCache = 0;
         zenEnvObj.zenStaticScaleCache = 0;
 
-        zenMatMulPrimitiveINT8V3(zenEnvObj, ctx, thread_qty, src_type, dst_type,
-                                 bias_type,
-                                 Layout,
-                                 transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
-                                 lda, ldb, ldc, po_ops, false, zero_point_src,
-                                 zero_point_wei, zero_point_dst, do_sum, is_weights_const,
-                                 src_scale, src_scale_size, wei_scale, wei_scale_size,
-                                 dst_scales, dst_scale_size, default_dst_scales,
-                                 scale_type);
+        zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
+                               bias_type,
+                               Layout,
+                               transA, transB, M, N, K, src, weights, bias, dst, alpha, beta,
+                               lda, ldb, ldc, po_ops, false, zero_point_src,
+                               zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                               src_scale, src_scale_size, wei_scale, wei_scale_size,
+                               dst_scales, dst_scale_size, default_dst_scales,
+                               scale_type);
         obj.is_brgemm = false;
     }
     obj.is_log = true;
