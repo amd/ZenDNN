@@ -1044,7 +1044,7 @@ int matmul_woq_wrapper(
                 }
                 else if (M >= 128 && N >= 1024 && K >= 1024) {
                     // AOCL BF16 Kernel with Zen Weights Conversion
-                    zenEnvObj.zenBF16GEMMalgo = 3;
+                    zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_BF16;
                 }
                 else if (M == 32) {
                     if (N <= K) {
@@ -1059,7 +1059,7 @@ int matmul_woq_wrapper(
                 else {
                     if (N <= K) {
                         // AOCL BF16 Kernel with Zen Weights Conversion
-                        zenEnvObj.zenBF16GEMMalgo = 3;
+                        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_AOCL_BF16;
                     }
                     else {
                         // Blocked BRGEMM BF16 with Zen Weights Conversion
@@ -1073,11 +1073,13 @@ int matmul_woq_wrapper(
         //then run blocked brgemm
         if ((zenEnvObj.zenBF16GEMMalgo ==
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
-                || zenEnvObj.zenBF16GEMMalgo == 3) && (use_jit || !can_run_aocl)) {
+                || zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) &&
+                (use_jit || !can_run_aocl)) {
             zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
         }
 
-        if (zenEnvObj.zenBF16GEMMalgo == 1 && weights_type == zendnn_s4) {
+        if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
+                && weights_type == zendnn_s4) {
             aocl_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                           transA, transB,
                           M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
@@ -1085,7 +1087,7 @@ int matmul_woq_wrapper(
                           wei_scale, 0, scale_size, do_sum,
                           is_weights_const, group_size, scale_dt);
         }
-        else if (zenEnvObj.zenBF16GEMMalgo == 3) {
+        else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) {
             ref_woq_bf16(ctx, po_ops, src_type, weights_type, dst_type, bias_type, Layout,
                          transA, transB,
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
@@ -1094,6 +1096,7 @@ int matmul_woq_wrapper(
                          is_weights_const, group_size, scale_dt);
         }
         else {
+            //TODO: Add non-blocked BRGEMM support
             obj.is_brgemm = true;
             obj.is_log = false;
             zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,

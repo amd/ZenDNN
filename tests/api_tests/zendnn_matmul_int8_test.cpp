@@ -191,7 +191,6 @@ std::vector<int8_t> matmul_example_2D_dst_s8(zendnn::engine eng,
     matmul_attr.set_scales_mask(ZENDNN_ARG_SRC, 0, {}, dt::f32);
     matmul_attr.set_scales_mask(ZENDNN_ARG_WEIGHTS, 1, {1,1}, dt::f32);
     matmul_attr.set_scales_mask(ZENDNN_ARG_DST, 0, {}, dt::f32);
-    matmul_attr.set_compute_src_dtype(memory::data_type::u8);
     // Create primitive descriptor.
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, eng);
     // Create the primitive.

@@ -367,11 +367,6 @@ status_t primitive_attr_t::set_autoTunerEnable(bool autoTunerflag) {
     return success;
 }
 
-status_t primitive_attr_t::set_computeSrcDType(data_type_t data_type) {
-    computeSrcDtype = data_type;
-    return success;
-}
-
 status_t primitive_attr_t::set_plugin_op_name(const std::string plugin_op_name) {
     plugin_op = plugin_op_name;
     return success;
@@ -524,12 +519,6 @@ status_t zendnn_primitive_attr_set_scales_mask(
     if(!ok) return invalid_arguments;
 
     return attr->static_scales_.set(arg, mask, ndims, group_dims, data_type);
-}
-
-status_t zendnn_primitive_attr_set_compute_src_dtype(
-    primitive_attr_t *attr, data_type_t data_type){
-        auto var = attr->set_computeSrcDType(data_type);
-        return var;
 }
 
 status_t zendnn_primitive_attr_get_zero_points(const primitive_attr_t *attr,
