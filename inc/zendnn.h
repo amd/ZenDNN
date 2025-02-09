@@ -561,15 +561,6 @@ zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_scales_mask(
         zendnn_primitive_attr_t attr, int arg, int mask,  int ndims,
         const zendnn_dims_t group_dims, zendnn_data_type_t data_type);
 
-/// Sets the compute src data type primitive attributes.
-///
-/// @param attr Primitive attributes.
-/// @param data_type Compute source data_type
-/// @returns #zendnn_success on success and a status describing the error
-///     otherwise.
-zendnn_status_t ZENDNN_API zendnn_primitive_attr_set_compute_src_dtype(
-        zendnn_primitive_attr_t attr, zendnn_data_type_t data_type);
-
 /// Returns @p count, correspondence zero point @p mask, and a pointer to a
 /// constant int32_t array of @p zero_points for given @p attr and memory
 /// argument (index), previously set by zendnn_primitive_attr_set_zero_points.

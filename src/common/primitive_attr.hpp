@@ -859,7 +859,6 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                   other.rnn_weights_projection_qparams_));
         CHECK(rnn_tparams_.copy_from(other.rnn_tparams_));
         autoTunerEnable = other.autoTunerEnable;
-        computeSrcDtype = other.computeSrcDtype;
         woqScales_ = other.woqScales_;
         static_scales_ = other.static_scales_;
         plugin_op = other.plugin_op;
@@ -907,7 +906,6 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
                    == rhs.rnn_weights_projection_qparams_
                    && rnn_tparams_ == rhs.rnn_tparams_
                    && autoTunerEnable == rhs.autoTunerEnable
-                   && computeSrcDtype == rhs.computeSrcDtype
                    && plugin_op == rhs.plugin_op
                    && woqScales_ == rhs.woqScales_
                    && static_scales_ == rhs.static_scales_;
@@ -915,7 +913,6 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     }
 
     zendnn::impl::status_t set_autoTunerEnable(bool autoTunerFlag);
-    zendnn::impl::status_t set_computeSrcDType(zendnn::impl::data_type_t data_type);
     zendnn::impl::status_t set_plugin_op_name(const std::string plugin_op_name);
     zendnn::impl::status_t set_fpmath_mode(zendnn::impl::fpmath_mode_t fpmath_mode);
     zendnn::impl::status_t set_scratchpad_mode(
@@ -959,7 +956,6 @@ struct zendnn_primitive_attr : public zendnn::impl::c_compatible {
     zendnn::impl::scales_t rnn_weights_projection_qparams_;
     zendnn::impl::rnn_tparams_t rnn_tparams_;
     bool autoTunerEnable;
-    zendnn::impl::data_type_t computeSrcDtype;
     std::string plugin_op;
     zendnn::impl::runtime_scales_t woqScales_;
     zendnn::impl::static_scales_t static_scales_;
