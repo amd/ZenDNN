@@ -38,9 +38,9 @@
 #include "common/primitive.hpp"
 #include "zendnn_logging.hpp"
 #include "zendnn_private.hpp"
-#include "common/weight_cache.hpp"
 #include "zendnn_helper.hpp"
 #include "zendnn.hpp"
+#include "zendnn_reorder_cache.hpp"
 
 #define ZENDNN_MATMUL_VERSION 1
 

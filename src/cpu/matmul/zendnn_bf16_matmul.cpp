@@ -45,7 +45,6 @@
 #include "common/type_helpers.hpp"
 #include "zendnn_helper.hpp"
 #include "common/utils.hpp"
-#include "common/weight_cache.hpp"
 #include "cpu/cpu_primitive.hpp"
 #include "cpu/platform.hpp"
 #include "cpu/ref_io_helper.hpp"
@@ -59,6 +58,7 @@
 #include "zendnn_logging.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn.hpp"
+#include "zendnn_reorder_cache.hpp"
 
 #define NUM_BF16_ALGO 2
 #define MATMUL_SKIP_ITER_BF16 2

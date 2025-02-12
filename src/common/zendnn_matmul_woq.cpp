@@ -31,8 +31,8 @@
 #include "cpu/matmul/matmul_utils.hpp"
 #include "common/zendnn_private.hpp"
 #include "zendnn_helper.hpp"
-#include "common/weight_cache.hpp"
 #include "zendnn.hpp"
+#include "zendnn_reorder_cache.hpp"
 
 using namespace zendnn;
 using tag = memory::format_tag;
@@ -334,38 +334,13 @@ int ref_woq_bf16(
 
     int16_t *reorder_filter = NULL;
 
-    //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int16_t *>
-    matmul_weight_cache;
-    auto found_obj = matmul_weight_cache.find_key(key_obj);
+    woqReorderAndCacheWeightsAocl<int16_t>(key_obj, weights, reorder_filter, K, N,
+                                           ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                           reorder_param2,
+                                           aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
+                                           weights_type, wei_scale, scale_size, group_size, scale_dt
+                                          );
 
-    if (!is_weights_const || !found_obj) {
-        int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
-
-        if (weights_type == zendnn_s4) { //Convert S4 to BF16
-            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
-                             scale_dt);
-        }
-        else { //Convert S8 to BF16
-            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
-                             scale_dt);
-        }
-        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(
-                                          'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int16_t *) zendnn_aligned_alloc(64,
-                         b_reorder_buf_siz_req);
-        aocl_reorder_bf16bf16f32of32('r', trans, 'B', wei_bf16, reorder_filter, K,
-                                     N, ldb);
-        free(wei_bf16);
-        if (is_weights_const) {
-            map_mutex.lock();
-            matmul_weight_cache.add(key_obj, reorder_filter);
-            map_mutex.unlock();
-        }
-    }
-    else {
-        reorder_filter = matmul_weight_cache.get(key_obj);
-    }
     aocl_post_op *post_ops = NULL;
     float dummy_scale = (float)1.0;
     if (dst_type == zendnn_bf16) {
@@ -491,38 +466,13 @@ int ref_woq_f32(
 
     float *reorder_filter = NULL;
 
-    //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, float *>
-    matmul_weight_cache;
-    auto found_obj = matmul_weight_cache.find_key(key_obj);
+    woqReorderAndCacheWeightsAocl<float>(key_obj, weights, reorder_filter, K, N,
+                                         ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
+                                         reorder_param2,
+                                         aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                                         weights_type, wei_scale, scale_size, group_size, scale_dt
+                                        );
 
-    if (!is_weights_const || !found_obj) {
-        float *wei_f32 = (float *)zendnn_aligned_alloc(64, sizeof(float)*K*N);
-
-        if (weights_type == zendnn_s4) { //Convert S4 to FP32
-            cvt_int4_to_f32(weights, wei_f32, K, N, wei_scale, scale_size, group_size,
-                            scale_dt);
-        }
-        else { //Convert S8 to FP32
-            cvt_int8_to_f32(weights, wei_f32, K, N, wei_scale, scale_size, group_size,
-                            scale_dt);
-        }
-        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_f32f32f32of32(
-                                          'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (float *) zendnn_aligned_alloc(64,
-                         b_reorder_buf_siz_req);
-        aocl_reorder_f32f32f32of32('r', trans, 'B', wei_f32, reorder_filter, K,
-                                   N, ldb);
-        free(wei_f32);
-        if (is_weights_const) {
-            map_mutex.lock();
-            matmul_weight_cache.add(key_obj, reorder_filter);
-            map_mutex.unlock();
-        }
-    }
-    else {
-        reorder_filter = matmul_weight_cache.get(key_obj);
-    }
     aocl_post_op *post_ops = NULL;
     int postop_count = 0;
     float dummy_scale = (float)1.0;
@@ -726,13 +676,16 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     //Weight reordering
     zendnn::memory reordered_weights_memory;
 
-    //Weight reordering
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
-    matmul_weight_cache;
-    auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
-
-    if (!is_weights_const || !found_obj_reorder) {
-        int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
+    int16_t *wei_bf16 = NULL;
+    if (blocked_format) {
+        woqReorderAndCacheWeightsBrgemm(
+            key_obj_reorder, matmul_prim_disc, user_weights_memory,
+            reordered_weights_memory, eng, engine_stream, matmul_weights_md,
+            is_weights_const, weights, weights_type, K, N, wei_scale, scale_size,
+            group_size, scale_dt);
+    }
+    else {
+        wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
 
         if (weights_type == zendnn_s4) { //Convert S4 to BF16
             cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
@@ -743,22 +696,7 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
                              scale_dt);
         }
         user_weights_memory = memory(matmul_weights_md, eng, wei_bf16);
-
-        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
-        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
-                user_weights_memory, reordered_weights_memory);
-        if (is_weights_const) {
-            //Save in map
-            map_mutex.lock();
-            matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
-            map_mutex.unlock();
-        }
-        free(wei_bf16);
     }
-    else {
-        reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
-    }
-
 
     //net.push_back(zendnn::matmul(matmul_prim_disc));
     zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
@@ -767,6 +705,10 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     if (bias_type) net_args.insert({ZENDNN_ARG_BIAS,bias_memory});
     net_args.insert({ZENDNN_ARG_DST,dst_memory});
     matmul_prim.execute(engine_stream, net_args);
+
+    if (!blocked_format) {
+        free(wei_bf16);
+    }
 }
 
 int aocl_woq_bf16(
@@ -826,27 +768,11 @@ int aocl_woq_bf16(
 
     int8_t *reorder_filter = NULL;
 
-    //Weight caching
-    static zendnn::impl::lru_weight_cache_t<Key_matmul, int8_t *>
-    matmul_weight_cache;
-    auto found_obj = matmul_weight_cache.find_key(key_obj);
-
-    if (!is_weights_const || !found_obj) {
-        siz_t b_reorder_buf_siz_req = aocl_get_reorder_buf_size_bf16s4f32of32(
-                                          'r', trans, reorder_param0, reorder_param1, reorder_param2);
-        reorder_filter = (int8_t *) zendnn_aligned_alloc(64,
-                         b_reorder_buf_siz_req);
-        aocl_reorder_bf16s4f32of32('r', trans, 'B', weights, reorder_filter, K,
-                                   N, ldb);
-        if (is_weights_const) {
-            map_mutex.lock();
-            matmul_weight_cache.add(key_obj, reorder_filter);
-            map_mutex.unlock();
-        }
-    }
-    else {
-        reorder_filter = matmul_weight_cache.get(key_obj);
-    }
+    reorderAndCacheWeights<int8_t>(key_obj, weights, reorder_filter, K, N,
+                                   ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
+                                   reorder_param2,
+                                   aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
+                                  );
 
     aocl_post_op *post_ops = NULL;
 
@@ -1095,8 +1021,19 @@ int matmul_woq_wrapper(
                          wei_scale, 0, scale_size, do_sum,
                          is_weights_const, group_size, scale_dt);
         }
+        else if (zenEnvObj.zenBF16GEMMalgo =
+                     zenBF16MatMulAlgoType::MATMUL_JIT_BF16) {
+            obj.is_brgemm = true;
+            obj.is_log = false;
+            zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,
+                                             bias_type, Layout, transA, transB, M, N, K,
+                                             (int16_t *)src, (int8_t *)weights, bias, dst, alpha, beta, lda, ldb, ldc,
+                                             po_ops, false, wei_scale, 0, scale_size, is_weights_const, group_size,
+                                             scale_dt);
+            obj.is_brgemm = false;
+            obj.is_log = true;
+        }
         else {
-            //TODO: Add non-blocked BRGEMM support
             obj.is_brgemm = true;
             obj.is_log = false;
             zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,

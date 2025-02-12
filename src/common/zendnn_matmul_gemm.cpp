@@ -16,7 +16,6 @@
 *******************************************************************************/
 
 #include "common/zendnn_private.hpp"
-#include "common/weight_cache.hpp"
 #include <omp.h>
 #ifndef ZENDNN_USE_AOCL_BLIS_API
     #include <cblas.h>
@@ -31,6 +30,7 @@
 #include "zendnn_private.hpp"
 #include "zendnn_helper.hpp"
 #include "zendnn.hpp"
+#include "zendnn_reorder_cache.hpp"
 
 std::mutex map_mutex;
 using namespace zendnn;
@@ -89,7 +89,8 @@ void zenMatMul_gemm_blocked(
             const char trans = 'n';
 
             reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
-                                          ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0, reorder_param1,
+                                          ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0,
+                                          reorder_param1,
                                           reorder_param2,
                                           aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
                                          );

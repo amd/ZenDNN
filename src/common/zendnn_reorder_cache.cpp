@@ -19,12 +19,7 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include <zendnn.hpp>
-#include <unordered_map>
-#include <list>
-#include <memory>
-#include <atomic>
-#include "weight_cache.hpp"
+#include "zendnn_reorder_cache.hpp"
 #include <mutex>
 
 extern std::mutex map_mutex;
@@ -60,6 +55,7 @@ void reorderAndCacheWeights(
     T *c_wei = const_cast<T *>(weights);
     if (inplace_reorder_wei) {
         if (!is_weights_const) {
+            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
             siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                           reorder_param1, reorder_param2);
             // TODO: Implement scratchpad memory or memory pool
@@ -111,6 +107,7 @@ void reorderAndCacheWeightsBrgemm(
 
     if (inplace_reorder) {
         if (!is_weights_const) {
+            zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
@@ -127,6 +124,7 @@ void reorderAndCacheWeightsBrgemm(
         reordered_weights_memory = user_weights_memory;
     }
     else if (!is_weights_const || !found_obj_reorder) {
+        zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
         reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                 user_weights_memory, reordered_weights_memory);
@@ -136,6 +134,124 @@ void reorderAndCacheWeightsBrgemm(
             matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
             map_mutex.unlock();
         }
+    }
+    else {
+        reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
+    }
+}
+
+template <typename T>
+void woqReorderAndCacheWeightsAocl(
+    const Key_matmul &key_obj,
+    const int8_t *filter,
+    T *&reorder_filter,
+    const int k,
+    const int n,
+    const int ldb,
+    const bool is_weights_const,
+    const char order,
+    const char trans,
+    const char reorder_param0,
+    const dim_t reorder_param1,
+    const dim_t reorder_param2,
+    GetReorderBufSizeFunc get_reorder_buf_size,
+    ReorderFunc<T> reorder_func,
+    int weights_type,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+) {
+    // Weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, T *> matmul_weight_cache;
+    auto found_obj = matmul_weight_cache.find_key(key_obj);
+
+    if (!is_weights_const || !found_obj) {
+        zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
+        T *wei_type = (T *)zendnn_aligned_alloc(64, sizeof(T)*k*n);
+        if constexpr(std::is_same<T, int16_t>::value) {
+            if (weights_type == zendnn_s4) { //Convert S4 to BF16
+                cvt_int4_to_bf16(filter, wei_type, k, n, wei_scale, scale_size, group_size,
+                                 scale_dt);
+            }
+            else { //Convert S8 to BF16
+                cvt_int8_to_bf16(filter, wei_type, k, n, wei_scale, scale_size, group_size,
+                                 scale_dt);
+            }
+        }
+        else if constexpr(std::is_same<T, float>::value) {
+            if (weights_type == zendnn_s4) { //Convert S4 to FP32
+                cvt_int4_to_f32(filter, wei_type, k, n, wei_scale, scale_size, group_size,
+                                scale_dt);
+            }
+            else { //Convert S8 to BF16
+                cvt_int8_to_f32(filter, wei_type, k, n, wei_scale, scale_size, group_size,
+                                scale_dt);
+            }
+        }
+        siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
+                                      reorder_param1, reorder_param2);
+        reorder_filter = (T *)zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
+        reorder_func(order, trans, 'B', wei_type, reorder_filter, k, n, ldb);
+        free(wei_type);
+        if (is_weights_const) {
+            // Create new entry
+            map_mutex.lock();
+            matmul_weight_cache.add(key_obj, reorder_filter);
+            map_mutex.unlock();
+        }
+    }
+    else {
+        reorder_filter = matmul_weight_cache.get(key_obj);
+    }
+}
+
+void woqReorderAndCacheWeightsBrgemm(
+    const Key_matmul &key_obj_reorder,
+    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    zendnn::memory &user_weights_memory,
+    zendnn::memory &reordered_weights_memory,
+    zendnn::engine &eng,
+    zendnn::stream &engine_stream,
+    zendnn::memory::desc &matmul_weights_md,
+    bool is_weights_const,
+    int8_t *weights,
+    int weights_type,
+    const int K,
+    const int N,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+) {
+    //weight caching
+    static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
+    matmul_weight_cache;
+    auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
+
+    if (!is_weights_const || !found_obj_reorder) {
+        zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
+        int16_t *wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
+
+        if (weights_type == zendnn_s4) { //Convert S4 to BF16
+            cvt_int4_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
+        }
+        else { //Convert S8 to BF16
+            cvt_int8_to_bf16(weights, wei_bf16, K, N, wei_scale, scale_size, group_size,
+                             scale_dt);
+        }
+        user_weights_memory = memory(matmul_weights_md, eng, wei_bf16);
+        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+        reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
+                user_weights_memory, reordered_weights_memory);
+        if (is_weights_const) {
+            //Save in map
+            map_mutex.lock();
+            matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
+            map_mutex.unlock();
+        }
+        free(wei_bf16);
     }
     else {
         reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
@@ -439,133 +555,47 @@ template void reorderAndCacheWeights<int16_t>(
     ReorderFunc<int16_t> reorder_func
 );
 
-namespace zendnn {
-namespace impl {
+// Explicit instantiations for specific data types
+template void woqReorderAndCacheWeightsAocl<int16_t>(
+    const Key_matmul &key_obj,
+    const int8_t *filter,
+    int16_t *&reorder_filter,
+    const int k,
+    const int n,
+    const int ldb,
+    const bool is_weights_const,
+    const char order,
+    const char trans,
+    const char reorder_param0,
+    const dim_t reorder_param1,
+    const dim_t reorder_param2,
+    GetReorderBufSizeFunc get_reorder_buf_size,
+    ReorderFunc<int16_t> reorder_func,
+    int weights_type,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+);
 
-template <typename KEY_T, typename VALUE_T>
-lru_weight_cache_t<KEY_T, VALUE_T>::lru_weight_cache_t(int capacity) :
-    capacity_(capacity) {
-    cache_mapper_ = std::make_unique<
-                    std::unordered_map<w_key_t, timed_entry_t>>();
-}
-
-template <typename KEY_T, typename VALUE_T>
-lru_weight_cache_t<KEY_T, VALUE_T>::~lru_weight_cache_t() {
-    evict();
-    return;
-}
-
-
-template <typename KEY_T, typename VALUE_T>
-void lru_weight_cache_t<KEY_T, VALUE_T>::set_capacity(int capacity) {
-    if (capacity < 0) {
-        throw std::invalid_argument("Capacity cannot be negative");
-    }
-    capacity_ = capacity;
-    if (capacity_ < cache_mapper_->size()) {
-        evict(cache_mapper_->size() - capacity_);
-    }
-}
-
-template <typename KEY_T, typename VALUE_T>
-int lru_weight_cache_t<KEY_T, VALUE_T>::get_capacity() const {
-    return static_cast<int>(capacity_);
-}
-
-template <typename KEY_T, typename VALUE_T>
-typename lru_weight_cache_t<KEY_T, VALUE_T>::value_t
-lru_weight_cache_t<KEY_T, VALUE_T>::get_or_add(
-    const w_key_t &key,
-    const value_t &value) {
-    if (cache_mapper_->find(key) == cache_mapper_->end()) {
-        add(key, value);
-    }
-    return get(key);
-}
-
-template <typename KEY_T, typename VALUE_T>
-bool lru_weight_cache_t<KEY_T, VALUE_T>::find_key(const w_key_t &key) const {
-    return (cache_mapper_->find(key) != cache_mapper_->end());
-}
-
-template <typename KEY_T, typename VALUE_T>
-void lru_weight_cache_t<KEY_T, VALUE_T>::remove_if_invalidated(
-    const w_key_t &key) {
-    auto it = cache_mapper_->find(key);
-    if (it != cache_mapper_->end()) {
-        cache_mapper_->erase(it);
-    }
-}
-
-template <typename KEY_T, typename VALUE_T>
-int lru_weight_cache_t<KEY_T, VALUE_T>::get_size() const {
-    return static_cast<int>(cache_mapper_->size());
-}
-
-template <typename KEY_T, typename VALUE_T>
-lru_weight_cache_t<KEY_T, VALUE_T>::timed_entry_t::timed_entry_t(
-    const value_t &value,
-    size_t timestamp)
-    : value_(value), timestamp_(timestamp) {}
-
-template <typename KEY_T, typename VALUE_T>
-void lru_weight_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
-    while (capacity_ < std::numeric_limits<int>::max() &&
-            cache_mapper_->size() > capacity_ - n) {
-        auto oldest = std::min_element(
-                          cache_mapper_->begin(), cache_mapper_->end(),
-        [](const auto &a, const auto &b) {
-            return a.second.timestamp_ < b.second.timestamp_;
-        });
-        if constexpr(std::is_pointer<VALUE_T>::value) {
-            if (oldest->second.value_ != NULL) {
-                std::free(oldest->second.value_);
-            }
-        }
-        cache_mapper_->erase(oldest);
-    }
-}
-
-template <typename KEY_T, typename VALUE_T>
-void lru_weight_cache_t<KEY_T, VALUE_T>::evict() {
-    // Free memory for all entries in the cache
-    for (auto &entry : *cache_mapper_) {
-        // Assuming VALUE_T is a pointer type
-        if constexpr(std::is_pointer<VALUE_T>::value) {
-            if (entry.second.value_ != NULL) {
-                std::free(entry.second.value_);
-            }
-        }
-    }
-    // Clear the cache
-    cache_mapper_->clear();
-}
-
-template <typename KEY_T, typename VALUE_T>
-void lru_weight_cache_t<KEY_T, VALUE_T>::add(const w_key_t &key,
-        const value_t &value) {
-    evict(1);
-    size_t timestamp = current_timestamp_++;
-    cache_mapper_->emplace(std::piecewise_construct,
-                           std::forward_as_tuple(key),
-                           std::forward_as_tuple(value, timestamp));
-}
-
-template <typename KEY_T, typename VALUE_T>
-typename lru_weight_cache_t<KEY_T, VALUE_T>::value_t
-lru_weight_cache_t<KEY_T, VALUE_T>::get(
-    const w_key_t &key) {
-    auto it = cache_mapper_->find(key);
-    if (it != cache_mapper_->end()) {
-        it->second.timestamp_ = current_timestamp_++;
-        return it->second.value_;
-    }
-    throw std::runtime_error("Key not found in cache.");
-}
-
-template struct lru_weight_cache_t <Key_matmul, memory>;
-template struct lru_weight_cache_t <Key_matmul, int16_t *>;
-template struct lru_weight_cache_t <Key_matmul, int8_t *>;
-template struct lru_weight_cache_t <Key_matmul, float *>;
-}
-}
+template void woqReorderAndCacheWeightsAocl<float>(
+    const Key_matmul &key_obj,
+    const int8_t *filter,
+    float *&reorder_filter,
+    const int k,
+    const int n,
+    const int ldb,
+    const bool is_weights_const,
+    const char order,
+    const char trans,
+    const char reorder_param0,
+    const dim_t reorder_param1,
+    const dim_t reorder_param2,
+    GetReorderBufSizeFunc get_reorder_buf_size,
+    ReorderFunc<float> reorder_func,
+    int weights_type,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+);

@@ -19,15 +19,10 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef COMMON_WEIGHT_CACHE_HPP
-#define COMMON_WEIGHT_CACHE_HPP
+#ifndef ZENDNN_REORDER_CACHE_HPP 
+#define ZENDNN_REORDER_CACHE_HPP
 
-#include "common/zendnn_private.hpp"
-#include <zendnn.hpp>
-#include <unordered_map>
-#include <memory>
-#include <atomic>
-#include <stdexcept>
+#include "common/zendnn_lru_cache.hpp"
 
 // Define a function pointer type for getting the reorder buffer size.
 using GetReorderBufSizeFunc = siz_t (*)(const char, const char, const char,
@@ -66,6 +61,48 @@ void reorderAndCacheWeightsBrgemm(
     zendnn::stream &engine_stream,
     bool is_weights_const,
     bool inplace_reorder = false
+);
+
+template <typename T>
+void woqReorderAndCacheWeightsAocl(
+    const Key_matmul &key_obj,
+    const int8_t *filter,
+    T *&reorder_filter,
+    const int k,
+    const int n,
+    const int ldb,
+    const bool is_weights_const,
+    const char order,
+    const char trans,
+    const char reorder_param0,
+    const dim_t reorder_param1,
+    const dim_t reorder_param2,
+    GetReorderBufSizeFunc get_reorder_buf_size,
+    ReorderFunc<T> reorder_func,
+    int weights_type,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+);
+
+void woqReorderAndCacheWeightsBrgemm(
+    const Key_matmul &key_obj_reorder,
+    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    zendnn::memory &user_weights_memory,
+    zendnn::memory &reordered_weights_memory,
+    zendnn::engine &eng,
+    zendnn::stream &engine_stream,
+    zendnn::memory::desc &matmul_weights_md,
+    bool is_weights_const,
+    int8_t *weights,
+    int weights_type,
+    const int K,
+    const int N,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
 );
 
 void cacheStaticScales(
@@ -114,48 +151,4 @@ void cacheScaledBias(
     int wei_scale_size
 );
 
-namespace zendnn {
-namespace impl {
-template <typename KEY_T, typename VALUE_T>
-struct lru_weight_cache_t {
-    using w_key_t = KEY_T;
-    using value_t = VALUE_T;
-
-    //Constructor
-    lru_weight_cache_t(int capacity=
-                           zendnn::impl::getenv_int("ZENDNN_WEIGHT_CACHE_CAPACITY",
-                                   std::numeric_limits<int>::max()));
-    // Destructor
-    ~lru_weight_cache_t();
-
-    // Public methods
-    void set_capacity(int capacity);
-    int get_capacity() const;
-    value_t get_or_add(const w_key_t &key, const value_t &value);
-    void remove_if_invalidated(const w_key_t &key);
-    int get_size() const;
-    void add(const w_key_t &key, const value_t &value);
-    value_t get(const w_key_t &key);
-    bool find_key(const w_key_t &key) const;
-
-  private:
-    // Private struct to hold the cache value and its timestamp
-    struct timed_entry_t {
-        value_t value_;
-        std::atomic<size_t> timestamp_;
-        // Constructor
-        timed_entry_t(const value_t &value, size_t timestamp);
-    };
-
-    // Private methods
-    void evict();
-    void evict(size_t n);
-
-    // Private members
-    size_t capacity_;
-    std::atomic<size_t> current_timestamp_;
-    std::unique_ptr<std::unordered_map<w_key_t, timed_entry_t>> cache_mapper_;
-};
-}
-}
-#endif // COMMON_WEIGHT_CACHE_HPP
+#endif // ZENDNN_REORDER_CACHE_HPP
