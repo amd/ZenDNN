@@ -2,7 +2,7 @@
 
 Zen Deep Neural Network Library (ZenDNN)
 ========================================
-ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems. ZenDNN leverages oneDNN/DNNL v2.6.3's basic infrastructure and APIs. ZenDNN optimizes several APIs and adds new APIs, which are currently integrated into TensorFlow, ONNXRT, and PyTorch.
+ZenDNN (Zen Deep Neural Network) Library accelerates deep learning inference applications on AMD CPUs. This library, which includes APIs for basic neural network building blocks optimized for AMD CPUs, targets deep learning application and framework developers with the goal of improving inference performance on AMD CPUs across a variety of workloads, including computer vision, natural language processing (NLP), and recommender systems. ZenDNN leverages oneDNN/DNNL v2.6.3's basic infrastructure and APIs. ZenDNN optimizes several APIs and adds new APIs, which are currently integrated into TensorFlow, and PyTorch.
 
 ZenDNN depends on:
 - AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS).
@@ -43,10 +43,9 @@ The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® plat
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.17 (Plugin), ONNXRT v1.19.2, and PyTorch v2.4 (Plugin).
-* Python v3.9-v3.12 has been used to generate the TensorFlow v2.17 (Plugin) wheel files (*.whl).
-* Python v3.8-v3.11 has been used to generate the ONNXRT v1.19.2 wheel files (*.whl).
-* Python v3.8-v3.11 has been used to generate the PyTorch v2.4 (Plugin) wheel files (*.whl).
+* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.5 (Plugin).
+* Python v3.9-v3.12 has been used to generate the TensorFlow v2.18 (Plugin) wheel files (*.whl).
+* Python v3.9-v3.12 has been used to generate the PyTorch v2.5 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -62,7 +61,7 @@ Binaires will be supported on
 * SLES15 SP6, SP3
 * RockyLinux 9.4
 * CentOS 8.4
->Note: PyTorch v2.4 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
+>Note: PyTorch v2.5 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
 
 Build from source will be supported on
 * Ubuntu® 22.04, 24.04
@@ -80,7 +79,7 @@ For C++ interface binaries, any Linux based OS with GLIBC version later than 2.2
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* AOCL-BLAS v5.0 must be installed.
+* AOCL-BLAS v5.0.1 must be installed.
 
 
 # AOCL-BLAS Library Installation
@@ -97,11 +96,20 @@ The following points must be considered while installing AOCL-BLAS:
 ## AOCL-BLAS Library Setup
 Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
-2. Download aocl-blis-linux-gcc-5.0.0.tar.gz.
+2. Download BLIS
+   wget https://github.com/amd/blis/archive/refs/tags/AOCL-LPGEMM-012925.tar.gz
 3. Execute the following commands:
     ```bash
-    tar -xvf aocl-blis-linux-gcc-5.0.0.tar.gz
-    cd amd-blis
+    tar -xvf AOCL-LPGEMM-012925.tar.gz
+    cd blis-AOCL-LPGEMM-012925
+    make clean; make distclean; CC=gcc ./configure -a aocl_gemm --prefix=../amd-blis --enable-threading=openmp --enable-cblas amdzen; make -j install
+    cd ../amd-blis/include
+    mkdir LP64
+    cp blis/* LP64/
+    cd ../lib/
+    mkdir LP64
+    cp libblis-mt.* LP64/
+    cd ../
 	```
 This will set up the environment for AOCL-BLAS path:
 ```bash
@@ -173,9 +181,8 @@ ZenDNN has the following runtime dependencies:
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python v3.9-v3.12 for TensorFlow v2.17 (Plugin)
-* Python v3.8-v3.11 for PyTorch v2.4 (Plugin)
-* Python v3.8-v3.11 for ONNXRT v1.19.2
+* Python v3.9-v3.12 for TensorFlow v2.18(Plugin)
+* Python v3.9-v3.12 for PyTorch v2.5 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
@@ -221,7 +228,7 @@ The different ACTORS are as follows:
 | API     | Logs all the ZenDNN API calls
 | TEST    | Logs used in API tests, functionality tests and regression tests
 | PROF    | Logs the performance of operations in millisecond
-| FWK     | Logs all the framework (TensorFlow, ONNXRT, and PyTorch) specific calls
+| FWK     | Logs all the framework (TensorFlow, and PyTorch) specific calls
 
 For example:
 * To turn on info logging, use **ZENDNN_LOG_OPTS=ALL:2**

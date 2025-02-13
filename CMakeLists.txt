@@ -1,5 +1,5 @@
 #*******************************************************************************
-# Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+# Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 # Notified per clause 4(b) of the license.
 #******************************************************************************/
 
@@ -77,7 +77,7 @@ endif()
 
 set(PROJECT_NAME "ZenDNN")
 set(PROJECT_FULL_NAME "Zen Deep Neural Network Library (ZenDNN)")
-set(PROJECT_VERSION "5.0.0")
+set(PROJECT_VERSION "5.0.1")
 
 if (CMAKE_VERSION VERSION_LESS 3.0)
     project(${PROJECT_NAME} C CXX)
