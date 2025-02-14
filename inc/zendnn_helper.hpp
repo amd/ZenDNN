@@ -160,6 +160,16 @@ enum class zendnnPostOp {
     ADD = 6,
 };
 
+//enum for weight cache strategy
+enum zendnnWeightCacheType {
+    WEIGHT_CACHE_DISABLE = 0,
+    WEIGHT_CACHE_OUT_OF_PLACE = 1,
+    WEIGHT_CACHE_INPLACE = 2,
+    WEIGHT_CACHE_AOT_INPLACE = 3,
+    WEIGHT_CACHE_AOT_RESIZED_INPLACE = 4,
+    WEIGHT_CACHE_AOT_REORDER = 5,
+};
+
 //class to read environment variables for zendnnn
 //In future this will be used with operator memory desc
 class zendnnEnv {
@@ -175,12 +185,11 @@ class zendnnEnv {
     uint    zenEnableTFOpts;
     uint    zenEBThreadAlgo;
     uint    zenEBAlgo;
+    uint    zenWeightCache;
     bool    zenINT8format;
-    bool    zenWeightCache;
     bool    zenStaticScaleCache;
     bool    zenBiasCache;
     bool    zenZpCompCache;
-    bool    zenCacheInplace;
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -201,7 +210,8 @@ class zendnnEnv {
         //TODO: Need to implement Decision tree for FP32:0
         zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ?
                       zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 && zenGEMMalgo!=100) {
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 &&
+                zenGEMMalgo!=zenMatMulAlgoType::MATMUL_AUTO_FP32) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
 
@@ -221,7 +231,7 @@ class zendnnEnv {
 
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
         if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16 &&
-                zenBF16GEMMalgo!=100) {
+                zenBF16GEMMalgo!=zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
             zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
         }
 
@@ -236,7 +246,8 @@ class zendnnEnv {
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenINT8GEMMalgo=zenInt8MatMulAlgoType::MATMUL_JIT_INT8)
 
         zenINT8GEMMalgo = zendnnGetMatMulAlgo("INT8");
-        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8) {
+        if (zenINT8GEMMalgo>zenINT8MatMulAlgoType::MATMUL_JIT_INT8 &&
+                zenINT8GEMMalgo!=zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {
             zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
         }
         //TODO: change ZENDNN_ENABLE_MEMPOOL to ZENDNN_ENABLE_TF_MEMPOOL
@@ -264,11 +275,12 @@ class zendnnEnv {
         if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN) {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
         }
-
-        //ZENDNN_WEIGHT_CACHING_INPLACE is to enable/disable weight caching in MatMul
-        zenCacheInplace = (bool)zendnn_getenv_int("ZENDNN_INPLACE_CACHING", 0);
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
-        zenWeightCache = (bool)zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
+        zenWeightCache = zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
+        if (zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {
+            zenWeightCache = zendnnWeightCacheType::WEIGHT_CACHE_DISABLE;
+        }
+
         //ZENDNN_SCALE_CACHING is to enable/disable scale caching in MatMul
         zenStaticScaleCache = (bool)zendnn_getenv_int("ZENDNN_SCALE_CACHING", 1);
         //ZENDNN_BIAS_CACHING is to enable/disable bias caching in MatMul

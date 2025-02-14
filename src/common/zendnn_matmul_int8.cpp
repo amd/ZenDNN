@@ -100,8 +100,7 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
                                   ZENDNN_INT8_MATMUL_VERSION1);
 
     // In-place will use fixed tag.
-    bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
-
+    unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
@@ -131,20 +130,35 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
     memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::s8,
                                      b_strides);
     memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::s8,
-            inplace_reorder_wei ? tag::BA16a64b4a : tag::any);
+            weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE ?
+            tag::BA16a64b4a : tag::any);
 
     bool is_algo2 = zenEnvObj.zenINT8GEMMalgo ==
                     zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
     bool default_src_zp = zero_point_src == 0;
     bool default_wei_zp = zero_point_wei == 0;
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_INPLACE ||
+            weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE) {
+        memory::desc want_B_md = blocked_matmul_weights_md;
+        if (src_type == zendnn_s8) {
+            want_B_md.data.extra.flags |= zendnn_memory_extra_flag_compensation_conv_s8s8;
+            want_B_md.data.extra.compensation_mask = (1 << 1);
+        }
+        if (!default_src_zp) {
+            want_B_md.data.extra.flags
+            |= zendnn_memory_extra_flag_compensation_conv_asymmetric_src;
+            want_B_md.data.extra.asymm_compensation_mask = (1 << 1);
+        }
+        blocked_matmul_weights_md = want_B_md;
+    }
     // If size doesn't match with reordered_memory don't do blocking
-    if (inplace_reorder_wei &&
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
             (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size())) {
         blocked_format = false;
     }
 
-    if (inplace_reorder_wei && is_algo2 &&
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
+            is_algo2 &&
             (!default_src_zp || !default_wei_zp) && blocked_format) {
         zen_matmul_version = ZENDNN_INT8_MATMUL_VERSION3;
     }
@@ -194,7 +208,7 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
                                    src_1,
                                    filt_arr, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
                                    blocked_format, is_weights_const,
-                                   zenEnvObj.zenINT8GEMMalgo, inplace_reorder_wei, eng, engine_stream);
+                                   zenEnvObj.zenINT8GEMMalgo, weight_cache_type, eng, engine_stream);
 
         // Compensation matrix as add postop
         if (acc != NULL) {
@@ -425,10 +439,10 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
-            inplace_reorder_wei ?key_obj : key_obj_reorder,
+            key_obj_reorder,
             matmul_prim_disc.weights_desc(), user_weights_memory,
             reordered_weights_memory, eng, engine_stream, is_weights_const,
-            inplace_reorder_wei);
+            weight_cache_type);
     }
     zendnn::matmul matmul_prim = zendnn::matmul(matmul_prim_disc);
     net_args.insert({ZENDNN_ARG_SRC, src_memory});
@@ -860,7 +874,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     float *dst_scale,
     int dst_scale_size
 ) {
-    bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, thread_qty, false);
 
@@ -870,6 +884,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     int32_t *acc = NULL;
     // Reordered weights
     int8_t *reorder_filter = NULL;
+    bool reorder_status = false;
 
     int src_0 = transpose_input ? 1 : lda;
     int src_1 = transpose_input ? lda : 1;
@@ -879,7 +894,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
                                blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               inplace_reorder_wei);
+                               weight_cache_type);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -898,11 +913,17 @@ void zenMatMul_gemm_u8s8s32ofloat(
         const char reorder_param0 = 'B';
         const dim_t reorder_param1 = k;
         const dim_t reorder_param2 = n;
-        reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter, k, n,
-                                       ldb, is_weights_const, inplace_reorder_wei, order, transB, reorder_param0,
-                                       reorder_param1, reorder_param2,
-                                       aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32
-                                      );
+        reorder_status = reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter,
+                         k, n,
+                         ldb, is_weights_const, order, transB, reorder_param0,
+                         reorder_param1, reorder_param2,
+                         aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
+                         weight_cache_type
+                                                       );
+        if (!reorder_status) {
+            mem_format_b = 'n';
+            blocked_format = false;
+        }
     }
     else {
         mem_format_b = 'n';
@@ -946,7 +967,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                !inplace_reorder_wei;
+                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
     free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
                        reorder_filter, free_reorder_weights);
 }
@@ -985,7 +1006,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     float *dst_scale,
     int dst_scale_size
 ) {
-    bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, thread_qty, false);
 
@@ -995,6 +1016,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     int32_t *acc = NULL;
     // Reordered weights
     int8_t *reorder_filter = NULL;
+    bool reorder_status = false;
 
     int src_0 = transpose_input ? 1 : lda;
     int src_1 = transpose_input ? lda : 1;
@@ -1004,7 +1026,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
                                blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               inplace_reorder_wei);
+                               weight_cache_type);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1023,11 +1045,16 @@ void zenMatMul_gemm_s8s8s32ofloat(
         const char reorder_param0 = 'B';
         const dim_t reorder_param1 = k;
         const dim_t reorder_param2 = n;
-        reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter, k, n,
-                                       ldb, is_weights_const, inplace_reorder_wei, order, transB, reorder_param0,
-                                       reorder_param1, reorder_param2,
-                                       aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32
-                                      );
+        reorder_status = reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter,
+                         k, n,
+                         ldb, is_weights_const, order, transB, reorder_param0,
+                         reorder_param1, reorder_param2,
+                         aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
+                         weight_cache_type);
+        if (!reorder_status) {
+            mem_format_b = 'n';
+            blocked_format = false;
+        }
     }
     else {
         mem_format_b = 'n';
@@ -1071,7 +1098,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                !inplace_reorder_wei;
+                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
     free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
                        reorder_filter, free_reorder_weights);
 }
@@ -1110,7 +1137,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     float *dst_scale,
     int dst_scale_size
 ) {
-    bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, thread_qty, false);
 
@@ -1120,6 +1147,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     int32_t *acc = NULL;
     // Reordered weights
     int8_t *reorder_filter = NULL;
+    bool reorder_status = false;
 
     int src_0 = transpose_input ? 1 : lda;
     int src_1 = transpose_input ? lda : 1;
@@ -1129,7 +1157,7 @@ void zenMatMul_gemm_s8s8s32oInt(
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
                                blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               inplace_reorder_wei);
+                               weight_cache_type);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1148,11 +1176,16 @@ void zenMatMul_gemm_s8s8s32oInt(
         const char reorder_param0 = 'B';
         const dim_t reorder_param1 = k;
         const dim_t reorder_param2 = n;
-        reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter, k, n,
-                                       ldb, is_weights_const, inplace_reorder_wei, order, transB, reorder_param0,
-                                       reorder_param1, reorder_param2,
-                                       aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32
-                                      );
+        reorder_status = reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter,
+                         k, n,
+                         ldb, is_weights_const, order, transB, reorder_param0,
+                         reorder_param1, reorder_param2,
+                         aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
+                         weight_cache_type);
+        if (!reorder_status) {
+            mem_format_b = 'n';
+            blocked_format = false;
+        }
     }
     else {
         mem_format_b = 'n';
@@ -1215,7 +1248,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                !inplace_reorder_wei;
+                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
     free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
                        reorder_filter, free_reorder_weights);
 }
@@ -1255,7 +1288,8 @@ void zenMatMul_gemm_u8s8s32oInt(
     float *dst_scale,
     int dst_scale_size
 ) {
-    bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
+
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, thread_qty, false);
 
@@ -1265,6 +1299,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     int32_t *acc = NULL;
     // Reordered weights
     int8_t *reorder_filter = NULL;
+    bool reorder_status = false;
 
     int src_0 = transpose_input ? 1 : lda;
     int src_1 = transpose_input ? lda : 1;
@@ -1274,7 +1309,7 @@ void zenMatMul_gemm_u8s8s32oInt(
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
                                blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               inplace_reorder_wei);
+                               weight_cache_type);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1294,11 +1329,16 @@ void zenMatMul_gemm_u8s8s32oInt(
         const dim_t reorder_param1 = k;
         const dim_t reorder_param2 = n;
 
-        reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter, k, n,
-                                       ldb, is_weights_const, inplace_reorder_wei, order, transB, reorder_param0,
-                                       reorder_param1, reorder_param2,
-                                       aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32
-                                      );
+        reorder_status = reorderAndCacheWeights<int8_t>(key_obj, filter, reorder_filter,
+                         k, n,
+                         ldb, is_weights_const, order, transB, reorder_param0,
+                         reorder_param1, reorder_param2,
+                         aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
+                         weight_cache_type);
+        if (!reorder_status) {
+            mem_format_b = 'n';
+            blocked_format = false;
+        }
     }
     else {
         mem_format_b = 'n';
@@ -1351,7 +1391,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                !inplace_reorder_wei;
+                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
     free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
                        reorder_filter, free_reorder_weights);
 }
@@ -1410,10 +1450,7 @@ int matmul_int8_wrapper(
     // DT for INT8
     if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
         // If in-place then use JIT non-blocked.
-        if (zenEnvObj.zenCacheInplace) {
-            zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
-        }
-        else if ((M <= 256) || (N < K)) {
+        if ((M <= 256) || (N < K)) {
             zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
         }
         else {
@@ -1427,9 +1464,12 @@ int matmul_int8_wrapper(
             !check_dt_po_int8(do_sum)) {
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
     }
+    // TODO: Remove this condition once AOT_RESIZED_INPLACE enabled.
     size_t aocl_reorder_size = aocl_get_reorder_buf_size_u8s8s32os32('r',
                                transB ? 't': 'n', 'B', K, N);
-    if (zenEnvObj.zenCacheInplace &&
+    if (zenEnvObj.zenWeightCache ==
+            zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
+            src_type == zendnn_u8 &&
             (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8 &&
              (K*N != aocl_reorder_size))) {
         zendnnVerbose(ZENDNN_PROFLOG,"Not running AOCL BLOCKED format");
@@ -1623,7 +1663,6 @@ int matmul_int8_wrapper(
         map_mutex.lock();
         obj.is_brgemm = true;
         map_mutex.unlock();
-
         zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                bias_type,
                                Layout,

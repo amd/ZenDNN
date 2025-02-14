@@ -729,12 +729,12 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
 
     int16_t *wei_bf16 = NULL;
     auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-        zenEnvObj.omp_num_threads, false, block_info);
+    Key_matmul key_obj(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                       zenEnvObj.omp_num_threads, false, block_info);
 
     if (blocked_format) {
         woqReorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
+            key_obj, matmul_prim_disc, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, matmul_weights_md,
             is_weights_const, weights, weights_type, K, N, wei_scale, scale_size,
             group_size, scale_dt);
@@ -824,7 +824,7 @@ int aocl_woq_bf16(
     int8_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int8_t>(key_obj, weights, reorder_filter, K, N,
-                                   ldb, is_weights_const, 0, order, trans, reorder_param0, reorder_param1,
+                                   ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
                                    reorder_param2,
                                    aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
                                   );
@@ -1004,9 +1004,6 @@ int matmul_woq_wrapper(
     zendnnEnv zenEnvObj = readEnv();
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
 
-    //Check data_types of dst, post-ops
-    bool can_run_aocl = impl::cpu::matmul::check_dt_(po_ops, dst_type);
-
     //Due to limitation of current aocl kernels
     //using jit call for cases where BIAS, alpha and beta
     //all are available
@@ -1061,7 +1058,7 @@ int matmul_woq_wrapper(
         if ((zenEnvObj.zenBF16GEMMalgo ==
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16
                 || zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) &&
-                (use_jit || !can_run_aocl)) {
+                use_jit) {
             zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
         }
 
@@ -1083,7 +1080,7 @@ int matmul_woq_wrapper(
                          is_weights_const, group_size, scale_dt);
         }
         else if (zenEnvObj.zenBF16GEMMalgo ==
-                     zenBF16MatMulAlgoType::MATMUL_JIT_BF16) {
+                 zenBF16MatMulAlgoType::MATMUL_JIT_BF16) {
             map_mutex.lock();
             obj.is_brgemm = true;
             obj.is_log = false;
