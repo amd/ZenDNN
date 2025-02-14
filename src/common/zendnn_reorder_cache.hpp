@@ -36,7 +36,7 @@ void aocl_unreorder(const int8_t *wei, int8_t *plain_buff, int k, int n,
                     int ldb);
 
 template <typename T>
-void reorderAndCacheWeights(
+bool reorderAndCacheWeights(
     const Key_matmul &key_obj,
     const T *filter,
     T *&reorder_filter,
@@ -44,17 +44,17 @@ void reorderAndCacheWeights(
     const int n,
     const int ldb,
     const bool is_weights_const,
-    bool inplace_reorder_wei,
     const char order,
     const char trans,
     const char reorder_param0,
     const dim_t reorder_param1,
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
-    ReorderFunc<T> reorder_func
+    ReorderFunc<T> reorder_func,
+    int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
 );
 
-void reorderAndCacheWeightsBrgemm(
+bool reorderAndCacheWeightsBrgemm(
     const Key_matmul &key_obj_reorder,
     const zendnn::memory::desc &weight_disc,
     zendnn::memory &user_weights_memory,
@@ -62,7 +62,7 @@ void reorderAndCacheWeightsBrgemm(
     zendnn::engine &eng,
     zendnn::stream &engine_stream,
     bool is_weights_const,
-    bool inplace_reorder = false
+    int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
 );
 
 template <typename T>
@@ -139,7 +139,7 @@ void cacheZeroPointCompensation(
     bool blocked_format,
     bool is_weights_const,
     int algo,
-    bool inplace_reorder = false,
+    int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE,
     zendnn::engine eng = engine(),
     zendnn::stream engine_stream = stream()
 );

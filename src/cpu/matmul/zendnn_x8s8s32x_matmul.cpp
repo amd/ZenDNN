@@ -278,6 +278,14 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     float do_sum = sum_idx >= 0 ? po.entry_[sum_idx].sum.scale: 0.0f;
     int algo = zenEnvObj.zenINT8GEMMalgo, auto_tuner = 0 ;
 
+    // Fallback to ALGO 2(blocked brgem) if weight cache
+    // type 2/3/4 for AUTO and DT
+    if (zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
+            && (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8 ||
+                zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_DT_INT8)) {
+        zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
+    }
+
     //TODO: Seperate Implementation of Decision Tree for INT8 (MATMUL_DT_INT8)
     if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {
         auto_tuner = 1;
@@ -309,7 +317,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                   " m=", M, " k=", K, " n=", N, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                   " algo_type=", algo, " scale_sum=", do_sum, " src dt=", src_type, " dst_dt=",
-                  dst_type, " weight_caching=", is_weights_const ? "True": "False", " weight_address=",(void *)weights);
+                  dst_type, " weight_caching=", is_weights_const ? "True": "False",
+                  " weight_address=",(void *)weights);
 
 
     return status::success;

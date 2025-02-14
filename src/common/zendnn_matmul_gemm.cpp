@@ -69,6 +69,7 @@ void zenMatMul_gemm_blocked(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, zenEnvObj.omp_num_threads, false);
 
@@ -86,12 +87,16 @@ void zenMatMul_gemm_blocked(
         const dim_t reorder_param2 = n;
         const char order = 'r';
         const char trans = transpose_filter ? 't':'n';
-        reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k, n,
-                                      ldb, is_weights_const, 0/*false for inplace*/, order, trans, reorder_param0,
-                                      reorder_param1,
-                                      reorder_param2,
-                                      aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32
-                                     );
+        bool status = reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k,
+                      n,
+                      ldb, is_weights_const, order, trans, reorder_param0,
+                      reorder_param1, reorder_param2,
+                      aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                      weight_cache_type);
+        if (status == false) {
+            mem_format_b = 'n';
+            blocked_format = false;
+        }
     }
     else {
         mem_format_b = 'n';
@@ -225,7 +230,8 @@ void zenMatMul_gemm_blocked(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const && blocked_format) {
+    if (!is_weights_const && blocked_format &&
+            weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
         free(reorder_filter);
     }
 }
@@ -241,6 +247,7 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
 
@@ -265,11 +272,17 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     memory::desc matmul_weights_md = memory::desc({weight_dims}, dt::f32,
                                      b_strides);
     memory::desc blocked_matmul_weights_md = memory::desc({weight_dims}, dt::f32,
-            tag::any);
+            weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE ?
+            tag::BA16a64b : tag::any);
     memory::desc bias_md = memory::desc({bias_dims}, dt::f32, tag::ab);
 
     memory::desc dst_md = memory::desc({dst_dims}, dt::f32, {ldc, 1});
 
+    // If size doesn't match with reordered_memory don't do blocking
+    if (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size() &&
+            weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {
+        blocked_format = false;
+    }
     primitive_attr matmul_attr;
     zendnn::post_ops post_ops;
     bool post_attr=false;
@@ -323,13 +336,15 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     //Weight reordering
     zendnn::memory reordered_weights_memory;
     auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               zenEnvObj.omp_num_threads, false, block_info);
+    Key_matmul key_obj(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                       zenEnvObj.omp_num_threads, false, block_info);
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc.weights_desc(), user_weights_memory,
-            reordered_weights_memory, eng, engine_stream, is_weights_const);
+            key_obj,
+            matmul_prim_disc.weights_desc(), user_weights_memory,
+            reordered_weights_memory, eng, engine_stream, is_weights_const,
+            weight_cache_type);
     }
 
     net.push_back(zendnn::matmul(matmul_prim_disc));
@@ -479,8 +494,9 @@ void zenMatMul_gemm_wrapper(
 
     //Experimental version for auto tuner
     //TODO: Seperate Implementation of Decision Tree for FP32 (MATMUL_DT_FP32)
-    if (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO_FP32 ||
-            zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_DT_FP32) {
+    if (zenEnvObj.zenWeightCache <= zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
+            && (zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_AUTO_FP32 ||
+                zenEnvObj.zenGEMMalgo==zenMatMulAlgoType::MATMUL_DT_FP32)) {
         auto_tuner=true;
 
         if (false == Layout) { //CblasColMajor
@@ -525,7 +541,8 @@ void zenMatMul_gemm_wrapper(
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                   " relu=", relu, " gelu=", gelu, " algo_type=", algo_type,
                   " weight_caching=", is_weights_const ? "True": "False",
-                  " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count, " weight_address=",(void *)filter);
+                  " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count, " weight_address=",
+                  (void *)filter);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     map_mutex.lock();
     obj.is_log = true;

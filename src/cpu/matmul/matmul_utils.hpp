@@ -31,24 +31,6 @@ namespace cpu {
 
 namespace matmul {
 
-//Checks datatype for post-ops, bias, and dst
-inline bool check_dt_(post_ops_t po_ops, int dst_type){
-    //Check buffer based post-ops data type
-    for (auto idx = 0; idx < po_ops.len(); ++idx) {
-        const auto &e = po_ops.entry_[idx];
-        switch (e.kind) {
-            case primitive_kind::binary:
-                if((e.binary.src1_desc.data_type != dst_type )){
-                    return false;
-                }
-                break;
-            default:
-                break;
-        }
-    }
-    return true;
-}
-
 //Checks for supported post-ops in aocl and blocked brgemm
 inline status_t check_post_ops_(post_ops_t po_ops){
     for (auto idx = 0; idx < po_ops.len(); ++idx) {
