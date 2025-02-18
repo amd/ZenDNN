@@ -53,9 +53,9 @@ void reorderAndCacheWeights(
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     T *c_wei = const_cast<T *>(weights);
-    if (inplace_reorder_wei && !found_obj) {
-        if (!is_weights_const) {
-            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
+    if (inplace_reorder_wei) {
+        if (!is_weights_const && !found_obj) {
+            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights In-place");
             siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                           reorder_param1, reorder_param2);
             // TODO: Implement scratchpad memory or memory pool
@@ -66,14 +66,18 @@ void reorderAndCacheWeights(
             for (int idx = 0; idx < b_reorder_buf_siz_req; idx++) {
                 c_wei[idx] = reorder_weights[idx];
             }
-            matmul_weight_cache.add(key_obj, c_wei);
+            T *dummy_val = NULL;
+            matmul_weight_cache.add(key_obj, dummy_val);
             //Free the allocated memory
             free(reorder_weights);
             map_mutex.unlock();
         }
+        else {
+            zendnnVerbose(ZENDNN_PROFLOG,"Read BLIS reorder weights In-place");
+        }
         reorder_weights = c_wei;
     }
-    else if (!inplace_reorder_wei && (!is_weights_const || !found_obj)) {
+    else if (!is_weights_const || !found_obj) {
         zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
         siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                       reorder_param1, reorder_param2);
@@ -93,7 +97,7 @@ void reorderAndCacheWeights(
 
 void reorderAndCacheWeightsBrgemm(
     const Key_matmul &key_obj_reorder,
-    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    const zendnn::memory::desc &weight_disc,
     zendnn::memory &user_weights_memory,
     zendnn::memory &reordered_weights_memory,
     zendnn::engine &eng,
@@ -106,28 +110,32 @@ void reorderAndCacheWeightsBrgemm(
     matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
-    if (inplace_reorder && !found_obj_reorder) {
-        if (!is_weights_const) {
-            zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
-            reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+    if (inplace_reorder) {
+        if (!is_weights_const && !found_obj_reorder) {
+            zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights In-place");
+            reordered_weights_memory = memory(weight_disc, eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
             //Save in map
             map_mutex.lock();
             int8_t *reorder_ptr = (int8_t *)reordered_weights_memory.get_data_handle();
             int8_t *user_ptr = (int8_t *)user_weights_memory.get_data_handle();
-            matmul_weight_cache.add(key_obj_reorder, user_weights_memory);
+            zendnn::memory dummy_val;
+            matmul_weight_cache.add(key_obj_reorder, dummy_val);
             #pragma omp parallel for
-            for (int idx = 0; idx < matmul_prim_disc.weights_desc().get_size(); idx++) {
+            for (int idx = 0; idx < weight_disc.get_size(); idx++) {
                 user_ptr[idx] = reorder_ptr[idx];
             }
             map_mutex.unlock();
         }
+        else {
+            zendnnVerbose(ZENDNN_PROFLOG,"Read BRGEMM reorder weights In-place");
+        }
         reordered_weights_memory = user_weights_memory;
     }
-    else if (!inplace_reorder && (!is_weights_const || !found_obj_reorder)) {
+    else if (!is_weights_const || !found_obj_reorder) {
         zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
-        reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
+        reordered_weights_memory = memory(weight_disc, eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                 user_weights_memory, reordered_weights_memory);
         if (is_weights_const) {
@@ -275,12 +283,18 @@ void cacheZeroPointCompensation(
     int32_t *&acc,
     int ldc,
     int32_t src_zero_point,
-    int32_t wei_zero_point
+    int32_t wei_zero_point,
+    bool is_weights_const,
+    bool inplace_reorder_wei
 ) {
     // Used to cache compensation when only src_scales exist.
     static zendnn::impl::lru_weight_cache_t<Key_matmul, int32_t *>
     matmul_src_zp_wei_comp_cache;
 
+    bool is_unreorder_wei_req = false;
+    if (is_weights_const && inplace_reorder_wei) {
+        is_unreorder_wei_req = true;
+    }
     bool enable_cache = zenEnvObj.zenZpCompCache;
     if (!wei_zero_point && !src_zero_point) {
         return;
@@ -291,6 +305,10 @@ void cacheZeroPointCompensation(
             // acc is freed by lru map
             acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*N);
             std::vector<int32_t> wei_comp(N,0);
+
+            // TODO:Update temp_wei if plain format reordering required.
+            //if (is_unreorder_wei_req) {}
+            //
             if (src_zero_point) {
                 for_(dim_t k = 0; k < K; ++k)
                 for (dim_t n = 0; n < N; ++n) {
@@ -350,6 +368,9 @@ void cacheZeroPointCompensation(
             }
         }
 
+        // TODO:Update temp_wei if plain format reordering required.
+        //if (is_unreorder_wei_req) {}
+        //
         if (src_zero_point) {
             for_(dim_t k = 0; k < K; ++k)
             for (dim_t n = 0; n < N; ++n) {

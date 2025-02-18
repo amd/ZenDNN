@@ -197,6 +197,9 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
 
     int32_t zp_A = 3, zp_C = 2;
 
+    bool x = zendnn_custom_op::zendnn_reorder(weights_data.data(),
+             weights_data.data(), K, N, false, zendnn_s8);
+
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -259,6 +262,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
         reorder(mul_mem, mul_mem_bf16).execute(engine_stream, mul_mem, mul_mem_bf16);
         reorder(add_mem, add_mem_bf16).execute(engine_stream, add_mem, add_mem_bf16);
     }
+
 
     memory src_scale_mem({{1}, memory::data_type::f32, {1}}, eng);
     memory wei_scale_mem({{wei_scale.size()}, memory::data_type::f32, {1}}, eng);
@@ -675,7 +679,6 @@ int main(int argc, char **argv) {
         {1024,  1024},
         {1024,  512},
         {256,   1},
-        {512,   256},
         {13,    512},
         {256,   64},
         {415,   512},

@@ -19,7 +19,7 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef ZENDNN_REORDER_CACHE_HPP 
+#ifndef ZENDNN_REORDER_CACHE_HPP
 #define ZENDNN_REORDER_CACHE_HPP
 
 #include "common/zendnn_lru_cache.hpp"
@@ -54,7 +54,7 @@ void reorderAndCacheWeights(
 
 void reorderAndCacheWeightsBrgemm(
     const Key_matmul &key_obj_reorder,
-    const zendnn::matmul::primitive_desc &matmul_prim_disc,
+    const zendnn::memory::desc &weight_disc,
     zendnn::memory &user_weights_memory,
     zendnn::memory &reordered_weights_memory,
     zendnn::engine &eng,
@@ -133,7 +133,9 @@ void cacheZeroPointCompensation(
     int32_t *&acc,
     int ldc,
     int32_t src_zero_point,
-    int32_t wei_zero_point
+    int32_t wei_zero_point,
+    bool is_weights_const,
+    bool inplace_reorder = false
 );
 
 void cacheScaledBias(

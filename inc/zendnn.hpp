@@ -833,6 +833,9 @@ class zendnn_custom_op {
         const memory &input_V_mem,
         memory &input_mask_mem,
         memory &output_mem);
+
+    // ZenDNN Reorder API
+    static bool zendnn_reorder(void *src, void *dst, uint k, uint n, bool trans, zendnn_data_type_t dt);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.

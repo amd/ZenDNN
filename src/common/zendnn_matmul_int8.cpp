@@ -97,14 +97,15 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
         zendnn::zendnn_getenv_int("ZENDNN_INT8_MATMUL_VER",
                                   ZENDNN_MATMUL_VERSION);
 
+    // In-place will use fixed tag.
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
     Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
                                thread_qty, false);
-    Key_matmul key_obj_scales(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                              thread_qty, true);
+    Key_matmul key_obj(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                       thread_qty, true);
 
     std::vector<primitive> net;
     std::unordered_map<int, memory> net_args;
@@ -289,11 +290,11 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
     // Ver 2 --> Relu/no-post ops (scales = src*wei*dst), Other (scales = src * wei)
     // Ver 3 --> scales = src * wei
     if (zen_matmul_version != 3 && (po_ops.len() == 0 || relu_po)) {
-        cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
+        cacheStaticScales(zenEnvObj, key_obj, n_scale, src_scale, wei_scale,
                           dst_scale, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
     }
     else {
-        cacheStaticScales(zenEnvObj, key_obj_scales, n_scale, src_scale, wei_scale,
+        cacheStaticScales(zenEnvObj, key_obj, n_scale, src_scale, wei_scale,
                           NULL, src_scale_size, wei_scale_size, dst_scale_size, scale_type);
     }
 
@@ -345,7 +346,7 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
     if (bias_type && zen_matmul_version != 3) {
         // Reordered Bias values to Quantize the Bias
         auto bias_desc = matmul_prim_disc.bias_desc();
-        cacheScaledBias(zenEnvObj, key_obj_scales, engine_stream, eng,
+        cacheScaledBias(zenEnvObj, key_obj, engine_stream, eng,
                         bias_desc, new_bias, bias_arr, N, src_scale, wei_scale, src_scale_size,
                         wei_scale_size);
         reordered_bias_memory = memory(bias_md, eng, new_bias);
@@ -366,7 +367,8 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
+            inplace_reorder_wei ?key_obj : key_obj_reorder,
+            matmul_prim_disc.weights_desc(), user_weights_memory,
             reordered_weights_memory, eng, engine_stream, is_weights_const,
             inplace_reorder_wei);
     }
@@ -813,7 +815,8 @@ void zenMatMul_gemm_u8s8s32ofloat(
     int wei_1 = transpose_filter ? ldb : 1;
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei);
+                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                               is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -936,7 +939,8 @@ void zenMatMul_gemm_s8s8s32ofloat(
     int wei_1 = transpose_filter ? ldb : 1;
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei);
+                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                               is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1059,7 +1063,8 @@ void zenMatMul_gemm_s8s8s32oInt(
     int wei_1 = transpose_filter ? ldb : 1;
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei);
+                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                               is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1185,11 +1190,6 @@ void zenMatMul_gemm_u8s8s32oInt(
     float *dst_scale,
     int dst_scale_size
 ) {
-    //TEST Different class
-    //zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    //bool check_const = obj.is_ref_gemm_bf16;
-    // TEST END
-
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
                        filter, thread_qty, true);
@@ -1207,7 +1207,8 @@ void zenMatMul_gemm_u8s8s32oInt(
     int wei_1 = transpose_filter ? ldb : 1;
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei);
+                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                               is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1345,7 +1346,11 @@ int matmul_int8_wrapper(
     int thread_qty = zenEnvObj.omp_num_threads;
     // DT for INT8
     if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_DT_INT8) {
-        if ((M <= 256) || (N < K)) {
+        // If in-place then use JIT non-blocked.
+        if (zenEnvObj.zenCacheInplace) {
+            zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
+        }
+        else if ((M <= 256) || (N < K)) {
             zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
         }
         else {

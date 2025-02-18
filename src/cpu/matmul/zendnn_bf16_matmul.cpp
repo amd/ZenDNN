@@ -993,7 +993,7 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
-            key_obj_reorder, matmul_prim_disc, user_weights_memory,
+            key_obj_reorder, matmul_prim_disc.weights_desc(), user_weights_memory,
             reordered_weights_memory, eng, engine_stream, is_weights_const);
     }
 

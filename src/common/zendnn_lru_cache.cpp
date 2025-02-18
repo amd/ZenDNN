@@ -98,43 +98,35 @@ lru_weight_cache_t<KEY_T, VALUE_T>::timed_entry_t::timed_entry_t(
 
 template <typename KEY_T, typename VALUE_T>
 void lru_weight_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
-    zendnnEnv zenEnvObj = readEnv();
-    bool inplace_cache = zenEnvObj.zenCacheInplace;
-    if (!inplace_cache) {
-        while (capacity_ < std::numeric_limits<int>::max() &&
-                cache_mapper_->size() > capacity_ - n) {
-            auto oldest = std::min_element(
-                            cache_mapper_->begin(), cache_mapper_->end(),
-            [](const auto &a, const auto &b) {
-                return a.second.timestamp_ < b.second.timestamp_;
-            });
-            if constexpr(std::is_pointer<VALUE_T>::value) {
-                if (oldest->second.value_ != NULL) {
-                    std::free(oldest->second.value_);
-                }
+    while (capacity_ < std::numeric_limits<int>::max() &&
+            cache_mapper_->size() > capacity_ - n) {
+        auto oldest = std::min_element(
+                          cache_mapper_->begin(), cache_mapper_->end(),
+        [](const auto &a, const auto &b) {
+            return a.second.timestamp_ < b.second.timestamp_;
+        });
+        if constexpr(std::is_pointer<VALUE_T>::value) {
+            if (oldest->second.value_ != NULL) {
+                std::free(oldest->second.value_);
             }
-            cache_mapper_->erase(oldest);
         }
+        cache_mapper_->erase(oldest);
     }
 }
 
 template <typename KEY_T, typename VALUE_T>
 void lru_weight_cache_t<KEY_T, VALUE_T>::evict() {
-    zendnnEnv zenEnvObj = readEnv();
-    bool inplace_cache = zenEnvObj.zenCacheInplace;
-    if (!inplace_cache) {
-        // Free memory for all entries in the cache
-        for (auto &entry : *cache_mapper_) {
-            // Assuming VALUE_T is a pointer type
-            if constexpr(std::is_pointer<VALUE_T>::value) {
-                if (entry.second.value_ != NULL) {
-                    std::free(entry.second.value_);
-                }
+    // Free memory for all entries in the cache
+    for (auto &entry : *cache_mapper_) {
+        // Assuming VALUE_T is a pointer type
+        if constexpr(std::is_pointer<VALUE_T>::value) {
+            if (entry.second.value_ != NULL) {
+                std::free(entry.second.value_);
             }
         }
-        // Clear the cache
-        cache_mapper_->clear();
     }
+    // Clear the cache
+    cache_mapper_->clear();
 }
 
 template <typename KEY_T, typename VALUE_T>
