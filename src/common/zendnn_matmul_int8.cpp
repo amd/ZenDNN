@@ -1351,8 +1351,9 @@ int matmul_int8_wrapper(
     }
     size_t aocl_reorder_size = aocl_get_reorder_buf_size_u8s8s32os32('r',
                                transB ? 't': 'n', 'B', K, N);
-    if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8
-            && (K*N != aocl_reorder_size)) {
+    if (zenEnvObj.zenCacheInplace &&
+            (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8 &&
+             (K*N != aocl_reorder_size))) {
         zendnnVerbose(ZENDNN_PROFLOG,"Not running AOCL BLOCKED format");
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
     }

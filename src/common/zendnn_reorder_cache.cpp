@@ -53,7 +53,7 @@ void reorderAndCacheWeights(
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
     T *c_wei = const_cast<T *>(weights);
-    if (inplace_reorder_wei) {
+    if (inplace_reorder_wei && !found_obj) {
         if (!is_weights_const) {
             zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
             siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
@@ -66,13 +66,14 @@ void reorderAndCacheWeights(
             for (int idx = 0; idx < b_reorder_buf_siz_req; idx++) {
                 c_wei[idx] = reorder_weights[idx];
             }
+            matmul_weight_cache.add(key_obj, c_wei);
             //Free the allocated memory
             free(reorder_weights);
             map_mutex.unlock();
         }
         reorder_weights = c_wei;
     }
-    else if (!is_weights_const || !found_obj) {
+    else if (!inplace_reorder_wei && (!is_weights_const || !found_obj)) {
         zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights");
         siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                       reorder_param1, reorder_param2);
@@ -105,7 +106,7 @@ void reorderAndCacheWeightsBrgemm(
     matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
 
-    if (inplace_reorder) {
+    if (inplace_reorder && !found_obj_reorder) {
         if (!is_weights_const) {
             zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
             reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
@@ -115,6 +116,7 @@ void reorderAndCacheWeightsBrgemm(
             map_mutex.lock();
             int8_t *reorder_ptr = (int8_t *)reordered_weights_memory.get_data_handle();
             int8_t *user_ptr = (int8_t *)user_weights_memory.get_data_handle();
+            matmul_weight_cache.add(key_obj_reorder, user_weights_memory);
             #pragma omp parallel for
             for (int idx = 0; idx < matmul_prim_disc.weights_desc().get_size(); idx++) {
                 user_ptr[idx] = reorder_ptr[idx];
@@ -123,7 +125,7 @@ void reorderAndCacheWeightsBrgemm(
         }
         reordered_weights_memory = user_weights_memory;
     }
-    else if (!is_weights_const || !found_obj_reorder) {
+    else if (!inplace_reorder && (!is_weights_const || !found_obj_reorder)) {
         zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights");
         reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
