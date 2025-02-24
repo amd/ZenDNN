@@ -286,7 +286,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                         M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
                                         beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
                                         dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
-                                        src_scale_size, const_cast<float *>(wei_scales), wei_scale_size,
+                                        src_scale_size, default_src_scales, const_cast<float *>(wei_scales),
+                                        wei_scale_size, default_wei_scales,
                                         const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,
                                         src_scale_type);
     }
@@ -297,7 +298,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                    M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
                                    beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
                                    dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
-                                   src_scale_size, const_cast<float *>(wei_scales), wei_scale_size,
+                                   src_scale_size, default_src_scales, const_cast<float *>(wei_scales),
+                                   wei_scale_size, default_wei_scales,
                                    const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,
                                    src_scale_type);
     }

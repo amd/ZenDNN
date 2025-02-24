@@ -23,6 +23,8 @@
 #include <mutex>
 
 extern std::mutex map_mutex;
+using tag = memory::format_tag;
+using dt = memory::data_type;
 
 // This function reorders and caches weights for matrix multiplication operations. It uses a cache to store
 // reordered weights to optimize performance for repeated operations with the same parameters. The function
@@ -130,7 +132,7 @@ void reorderAndCacheWeightsBrgemm(
             map_mutex.unlock();
         }
         else {
-            zendnnVerbose(ZENDNN_PROFLOG,"Read BRGEMM reorder weights In-place");
+            zendnnVerbose(ZENDNN_PROFLOG,"Read cached BRGEMM weights In-place");
         }
         reordered_weights_memory = user_weights_memory;
     }
@@ -147,6 +149,7 @@ void reorderAndCacheWeightsBrgemm(
         }
     }
     else {
+        zendnnVerbose(ZENDNN_PROFLOG,"Read cached BRGEMM weights");
         reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
     }
 }
@@ -213,6 +216,7 @@ void woqReorderAndCacheWeightsAocl(
         }
     }
     else {
+        zendnnVerbose(ZENDNN_PROFLOG,"Read BLIS cached weights");
         reorder_filter = matmul_weight_cache.get(key_obj);
     }
 }
@@ -294,7 +298,10 @@ void cacheZeroPointCompensation(
     int32_t wei_zero_point,
     bool blocked_format,
     bool is_weights_const,
-    bool inplace_reorder_wei
+    int algo,
+    bool inplace_reorder_wei,
+    zendnn::engine eng,
+    zendnn::stream engine_stream
 ) {
     // Used to cache compensation when only src_scales exist.
     static zendnn::impl::lru_weight_cache_t<Key_matmul, int32_t *>
@@ -304,7 +311,21 @@ void cacheZeroPointCompensation(
     if (is_weights_const && inplace_reorder_wei && blocked_format) {
         is_unreorder_wei_req = true;
     }
+
+    zendnn::memory reordered_weight_memory, un_reordered_weight_memory;
+    zendnn::memory::desc matmul_weights_md, blocked_matmul_weights_md;
+    memory::dims b_strides;
+
     bool enable_cache = zenEnvObj.zenZpCompCache;
+    bool aocl_enable = (algo == 1 || algo == 3);
+    bool brgemm_enable = (algo == 2 || algo == 4);
+
+    if (brgemm_enable) {
+        b_strides = memory::dims {wei_s0, wei_s1};
+        matmul_weights_md = memory::desc({{K, N}}, dt::s8, b_strides);
+        blocked_matmul_weights_md = memory::desc({{K, N}}, dt::s8, tag::BA16a64b4a);
+    }
+
     if (!wei_zero_point && !src_zero_point) {
         return;
     }
@@ -315,25 +336,34 @@ void cacheZeroPointCompensation(
             acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*N);
             std::vector<int32_t> wei_comp(N,0);
 
-            int8_t *t_wei = const_cast<int8_t *>(wei);
+            int8_t *filt_array = const_cast<int8_t *>(wei);
             if (is_unreorder_wei_req) {
-                t_wei = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
-                aocl_unreorder((const int8_t *)wei, t_wei, K, N,
-                               wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+                if (aocl_enable) {
+                    filt_array = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
+                    aocl_unreorder((const int8_t *)wei, filt_array, K, N,
+                                   wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+                }
+                else {
+                    reordered_weight_memory = memory(blocked_matmul_weights_md, eng, filt_array);
+                    un_reordered_weight_memory = memory(matmul_weights_md, eng);
+                    reorder(reordered_weight_memory,
+                            un_reordered_weight_memory).execute(engine_stream,
+                                    reordered_weight_memory, un_reordered_weight_memory);
+                    filt_array = (int8_t *)un_reordered_weight_memory.get_data_handle();
+                }
             }
 
-            #pragma omp parallel for
             for (dim_t k = 0; k < K; ++k) {
                 for (dim_t n = 0; n < N; ++n) {
                     if (k == 0) {
                         wei_comp[n] = int32_t(0);
                     }
-                    wei_comp[n] += t_wei[wei_s0 * k + wei_s1 * n];
+                    wei_comp[n] += filt_array[wei_s0 * k + wei_s1 * n];
                 }
             }
 
-            if (is_unreorder_wei_req) {
-                free(t_wei);
+            if (is_unreorder_wei_req && aocl_enable) {
+                free(filt_array);
             }
             for (dim_t n = 0; n < N; ++n) {
                 acc[n] = 0 - src_zero_point * wei_comp[n];
@@ -347,6 +377,8 @@ void cacheZeroPointCompensation(
             }
         }
         else {
+            zendnnVerbose(ZENDNN_PROFLOG,
+                          "Read cached Zero-point(src and wei) as 1D compensation");
             acc = matmul_src_zp_wei_comp_cache.get(key_obj);
         }
     }
@@ -354,7 +386,7 @@ void cacheZeroPointCompensation(
         std::vector<int32_t> src_comp(M,0);
         // acc is freed in main function for wei_zp != 0
         acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
-        #pragma omp parallel for
+
         for (dim_t m = 0; m < M; ++m) {
             for (dim_t k = 0; k < K; ++k) {
                 if (k == 0) {
@@ -376,7 +408,6 @@ void cacheZeroPointCompensation(
         // acc is freed in main function for wei_zp != 0
         acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
         //Src comp
-        #pragma omp parallel for
         for (dim_t m = 0; m < M; ++m) {
             for (dim_t k = 0; k < K; ++k) {
                 if (k == 0) {
@@ -387,29 +418,40 @@ void cacheZeroPointCompensation(
         }
 
         //Wei comp
-        int8_t *t_wei = const_cast<int8_t *>(wei);
+        int8_t *filt_array = const_cast<int8_t *>(wei);
         if (is_unreorder_wei_req) {
-            t_wei = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
-            aocl_unreorder(wei, t_wei, K, N, wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+            if (aocl_enable) {
+                filt_array = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
+                aocl_unreorder(wei, filt_array, K, N, wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+            }
+            else {
+                reordered_weight_memory = memory(blocked_matmul_weights_md, eng, filt_array);
+                un_reordered_weight_memory = memory(matmul_weights_md, eng);
+                reorder(reordered_weight_memory,
+                        un_reordered_weight_memory).execute(engine_stream,
+                                reordered_weight_memory, un_reordered_weight_memory);
+                filt_array = (int8_t *)un_reordered_weight_memory.get_data_handle();
+            }
         }
-        #pragma omp parallel for
+
         for (dim_t k = 0; k < K; ++k) {
             for (dim_t n = 0; n < N; ++n) {
                 if (k == 0) {
                     wei_comp[n] = int32_t(0);
                 }
-                wei_comp[n] += t_wei[wei_s0 * k + wei_s1 * n];
+                wei_comp[n] += filt_array[wei_s0 * k + wei_s1 * n];
             }
         }
-        if (is_unreorder_wei_req) {
-            free(t_wei);
+        if (is_unreorder_wei_req && aocl_enable) {
+            free(filt_array);
         }
 
         for (dim_t m = 0; m < M; ++m) {
-            for (dim_t n = 0; n < N; ++n)
+            for (dim_t n = 0; n < N; ++n) {
                 acc[m * ldc + n] = 0 - src_zero_point * wei_comp[n]
                                    - wei_zero_point * src_comp[m]
                                    + src_zero_point * wei_zero_point * (int)K;
+            }
         }
     }
 }
@@ -463,6 +505,7 @@ void cacheScaledBias(
         }
     }
     else {
+        zendnnVerbose(ZENDNN_PROFLOG,"Read cached Scaled Bias");
         new_bias = matmul_bias_cache.get(key_obj);
     }
 
@@ -542,6 +585,7 @@ void cacheStaticScales(
         }
     }
     else {
+        zendnnVerbose(ZENDNN_PROFLOG,"Read cached static scales");
         new_scale = matmul_SrcWei_scales_cache.get(key_obj);
     }
 

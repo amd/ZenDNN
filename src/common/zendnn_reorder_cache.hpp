@@ -33,7 +33,7 @@ template <typename T>
 using ReorderFunc = void (*)(const char, const char, const char, const T *, T *,
                              const dim_t, const dim_t, const dim_t);
 void aocl_unreorder(const int8_t *wei, int8_t *plain_buff, int k, int n,
-                       int ldb);
+                    int ldb);
 
 template <typename T>
 void reorderAndCacheWeights(
@@ -138,7 +138,10 @@ void cacheZeroPointCompensation(
     int32_t wei_zero_point,
     bool blocked_format,
     bool is_weights_const,
-    bool inplace_reorder = false
+    int algo,
+    bool inplace_reorder = false,
+    zendnn::engine eng = engine(),
+    zendnn::stream engine_stream = stream()
 );
 
 void cacheScaledBias(

@@ -257,8 +257,10 @@ int auto_compute_matmul_int8(
     bool is_weights_const,
     float *src_scale,
     int src_scale_size,
+    bool default_src_scales,
     float *wei_scale,
     int wei_scale_size,
+    bool default_wei_scales,
     float *dst_scales,
     int dst_scale_size,
     bool default_dst_scales,
@@ -313,8 +315,9 @@ int auto_compute_matmul_int8(
                                 transpose_input, transpose_weights,
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                                 beta, (char *)dst, ldc, zero_point_src,
-                                zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
-                                src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
+                                default_wei_scales,
                                 dst_scales, dst_scale_size, default_dst_scales, scale_type);
             //Time end
 #ifdef _WIN32
@@ -339,8 +342,9 @@ int auto_compute_matmul_int8(
                                 transpose_input, transpose_weights,
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                                 beta, (char *)dst, ldc, zero_point_src,
-                                zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
-                                src_scale, src_scale_size, wei_scale, wei_scale_size,
+                                zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
+                                default_wei_scales,
                                 dst_scales, dst_scale_size, default_dst_scales, scale_type);
         }
     }
@@ -354,8 +358,9 @@ int auto_compute_matmul_int8(
                             transpose_input, transpose_weights,
                             m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                             beta, (char *)dst, ldc, zero_point_src,
-                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
-                            src_scale, src_scale_size, wei_scale, wei_scale_size,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                            src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
+                            default_wei_scales,
                             dst_scales, dst_scale_size, default_dst_scales, scale_type);
     }
     //Updates the map values by running different algorithms
@@ -376,8 +381,9 @@ int auto_compute_matmul_int8(
                             transpose_input, transpose_weights,
                             m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                             beta, (char *)dst, ldc, zero_point_src,
-                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, 
-                            src_scale, src_scale_size, wei_scale, wei_scale_size,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                            src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
+                            default_wei_scales,
                             dst_scales, dst_scale_size, default_dst_scales, scale_type);
         //timer end
 #ifdef _WIN32
