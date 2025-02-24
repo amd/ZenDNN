@@ -1400,7 +1400,9 @@ int matmul_int8_wrapper(
             else {
                 //dst src:s8 and dst:u8
                 //CALL BRGEMM Primitive
+                map_mutex.lock();
                 obj.is_brgemm = true;
+                map_mutex.unlock();
                 zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                        bias_type,
                                        Layout,
@@ -1410,7 +1412,9 @@ int matmul_int8_wrapper(
                                        src_scale, src_scale_size, wei_scale, wei_scale_size,
                                        dst_scales, dst_scale_size, default_dst_scales,
                                        scale_type);
+                map_mutex.lock();
                 obj.is_brgemm = false;
+                map_mutex.unlock();
             }
         }
         else {
@@ -1438,7 +1442,9 @@ int matmul_int8_wrapper(
             else {
                 //dst u8
                 //CALL BRGEMM Primitive
+                map_mutex.lock();
                 obj.is_brgemm = true;
+                map_mutex.unlock();
                 zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                        bias_type,
                                        Layout,
@@ -1448,7 +1454,9 @@ int matmul_int8_wrapper(
                                        src_scale, src_scale_size, wei_scale, wei_scale_size,
                                        dst_scales, dst_scale_size, default_dst_scales,
                                        scale_type);
+                map_mutex.lock();
                 obj.is_brgemm = false;
+                map_mutex.unlock();
             }
         }
     }
@@ -1482,7 +1490,9 @@ int matmul_int8_wrapper(
             else {
                 //dst u8
                 //CALL BRGEMM Primitive
+                map_mutex.lock();
                 obj.is_brgemm = true;
+                map_mutex.unlock();
                 zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                        bias_type,
                                        Layout,
@@ -1492,7 +1502,9 @@ int matmul_int8_wrapper(
                                        src_scale, src_scale_size, wei_scale, wei_scale_size,
                                        dst_scales, dst_scale_size, default_dst_scales,
                                        scale_type);
+                map_mutex.lock();
                 obj.is_brgemm = false;
+                map_mutex.unlock();
             }
         }
         else { // make function for src:u8
@@ -1520,7 +1532,9 @@ int matmul_int8_wrapper(
             else {
                 //dst u8
                 //CALL BRGEMM Primitive
+                map_mutex.lock();
                 obj.is_brgemm = true;
+                map_mutex.unlock();
                 zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                        bias_type,
                                        Layout,
@@ -1530,14 +1544,18 @@ int matmul_int8_wrapper(
                                        src_scale, src_scale_size, wei_scale, wei_scale_size,
                                        dst_scales, dst_scale_size, default_dst_scales,
                                        scale_type);
+                map_mutex.lock();
                 obj.is_brgemm = false;
+                map_mutex.unlock();
             }
         }
     }
     else if (zenEnvObj.zenINT8GEMMalgo ==
              zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8) {
         //CALL blocked BRGEMM Primitive
+        map_mutex.lock();
         obj.is_brgemm = true;
+        map_mutex.unlock();
 
         zenMatMulPrimitiveINT8(zenEnvObj, ctx, thread_qty, src_type, dst_type,
                                bias_type,
@@ -1548,11 +1566,15 @@ int matmul_int8_wrapper(
                                src_scale, src_scale_size, wei_scale, wei_scale_size,
                                dst_scales, dst_scale_size, default_dst_scales,
                                scale_type);
+        map_mutex.lock();
         obj.is_brgemm = false;
+        map_mutex.unlock();
     }
     else {
         //CALL BRGEMM Primitive
+        map_mutex.lock();
         obj.is_brgemm = true;
+        map_mutex.unlock();
         // Disable all caching for non-blocked BRGEMM
         zenEnvObj.zenBiasCache = 0;
         zenEnvObj.zenStaticScaleCache = 0;
@@ -1566,8 +1588,12 @@ int matmul_int8_wrapper(
                                src_scale, src_scale_size, wei_scale, wei_scale_size,
                                dst_scales, dst_scale_size, default_dst_scales,
                                scale_type);
+        map_mutex.lock();
         obj.is_brgemm = false;
+        map_mutex.unlock();
     }
+    map_mutex.lock();
     obj.is_log = true;
+    map_mutex.unlock();
     return zenEnvObj.zenINT8GEMMalgo ;
 }

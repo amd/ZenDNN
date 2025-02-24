@@ -1046,7 +1046,10 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
         zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
     }
 
+
+    map_mutex.lock();
     obj.is_log = true;
+    map_mutex.unlock();
     if ((zenEnvObj.zenBF16GEMMalgo ==
             zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
             zenEnvObj.zenBF16GEMMalgo ==
@@ -1125,8 +1128,10 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
              || zenEnvObj.zenBF16GEMMalgo ==
              zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
         //CALL blocked BRGEMM Primitive
+        map_mutex.lock();
         obj.is_brgemm = true;
         obj.is_log = false;
+        map_mutex.unlock();
         if (has_binary_index<0 && zenEnvObj.zenBF16GEMMalgo ==
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -1174,13 +1179,17 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                    po_ops, true, is_weights_const);
         }
+        map_mutex.lock();
         obj.is_log = true;
         obj.is_brgemm = false;
+        map_mutex.unlock();
     }
     else {
         //CALL BRGEMM Primitive
-        obj.is_log = false;
+        map_mutex.lock();
         obj.is_brgemm = true;
+        obj.is_log = false;
+        map_mutex.unlock();
         if (has_binary_index<0 &&
                 zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -1228,8 +1237,10 @@ int matmul_bf16_wrapper(const exec_ctx_t &ctx,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                    po_ops, false, is_weights_const);
         }
+        map_mutex.lock();
         obj.is_log = true;
         obj.is_brgemm = false;
+        map_mutex.unlock();
     }
     return zenEnvObj.zenBF16GEMMalgo;
 }

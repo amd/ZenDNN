@@ -1093,26 +1093,34 @@ int matmul_woq_wrapper(
         }
         else if (zenEnvObj.zenBF16GEMMalgo =
                      zenBF16MatMulAlgoType::MATMUL_JIT_BF16) {
+            map_mutex.lock();
             obj.is_brgemm = true;
             obj.is_log = false;
+            map_mutex.unlock();
             zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,
                                              bias_type, Layout, transA, transB, M, N, K,
                                              (int16_t *)src, (int8_t *)weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                              po_ops, false, wei_scale, 0, scale_size, is_weights_const, group_size,
                                              scale_dt);
+            map_mutex.lock();
             obj.is_brgemm = false;
             obj.is_log = true;
+            map_mutex.unlock();
         }
         else {
+            map_mutex.lock();
             obj.is_brgemm = true;
             obj.is_log = false;
+            map_mutex.unlock();
             zenMatMulPrimitiveIntComputeBF16(ctx, zenEnvObj, weights_type, dst_type,
                                              bias_type, Layout, transA, transB, M, N, K,
                                              (int16_t *)src, (int8_t *)weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                              po_ops, true, wei_scale, 0, scale_size, is_weights_const, group_size,
                                              scale_dt);
+            map_mutex.lock();
             obj.is_brgemm = false;
             obj.is_log = true;
+            map_mutex.unlock();
         }
     }
     else if (src_type == zendnn_f32) {

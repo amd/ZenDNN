@@ -382,7 +382,9 @@ void zenMatMul_gemm(
     //MatMul with pipelining
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    map_mutex.lock();
     obj.is_log = true;
+    map_mutex.unlock();
 
     //We don't have support for MATMUL_BLIS_GEMM1.
     if (0) {
@@ -400,7 +402,9 @@ void zenMatMul_gemm(
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
         //Blocked JIT kernel
+        map_mutex.lock();
         obj.is_brgemm = true;
+        map_mutex.unlock();
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, true,
@@ -416,7 +420,9 @@ void zenMatMul_gemm(
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32) {
         //JIT kernel call
+        map_mutex.lock();
         obj.is_brgemm = true;
+        map_mutex.unlock();
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, false,
@@ -521,8 +527,10 @@ void zenMatMul_gemm_wrapper(
                   " weight_caching=", is_weights_const ? "True": "False",
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    map_mutex.lock();
     obj.is_log = true;
     obj.is_brgemm = false;
+    map_mutex.unlock();
 }
 
 void zenMatMul(
@@ -1187,8 +1195,10 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                     int batch_size, const float **bias, const bool relu,
                     const int gelu) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    map_mutex.lock();
     obj.is_brgemm = true;
     obj.is_log = true;
+    map_mutex.unlock();
 
     zendnnEnv zenEnvObj = readEnv();
 
@@ -1256,8 +1266,10 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
                                   mul_node, batch_size, bias, relu, gelu);
         }
     }
+    map_mutex.lock();
     obj.is_log = true;
     obj.is_brgemm = false;
+    map_mutex.unlock();
 
 #endif
     // Code for time profiling of this kernel
