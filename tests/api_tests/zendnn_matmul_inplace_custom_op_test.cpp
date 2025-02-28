@@ -198,7 +198,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     int32_t zp_A = 3, zp_C = 2;
 
     bool x = zendnn_custom_op::zendnn_reorder(weights_data.data(),
-             weights_data.data(), K, N, false, zendnn_s8);
+             weights_data.data(), K, N, true, zendnn_s8);
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -209,7 +209,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     // Create memory descriptors and memory objects for src, weights, bias, and
     // dst.
     auto src_md = memory::desc(src_dims, dt::u8, tag::ab);
-    auto weights_md = memory::desc(weights_dims, dt::s8, tag::ab, true);
+    auto weights_md = memory::desc(weights_dims, dt::s8, tag::ba, true);
     auto bias_md = memory::desc(bias_dims, dt::f32, tag::ab);
     memory::desc dst_md;
     if (enable_bf16) {
@@ -236,7 +236,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     }
 
     auto src_mem = memory(src_md, eng);
-    auto weights_mem = memory(weights_md, eng);
+    auto weights_mem = memory(weights_md, eng, weights_data.data());
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
     auto add_mem = memory(add_md, eng);
@@ -252,7 +252,6 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng);
 
     write_to_zendnn_memory(src_data.data(), src_mem);
-    write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
     write_to_zendnn_memory((void *)&zp_A, zp_A_mem);
     write_to_zendnn_memory((void *)&zp_C, zp_C_mem);
@@ -438,7 +437,7 @@ std::vector<T> matmul_example_2D_dst_ref(zendnn::engine eng,
     // Create memory descriptors and memory objects for src, weights, bias, and
     // dst.
     auto src_md = memory::desc(src_dims, dt::u8, tag::ab);
-    auto weights_md = memory::desc(weights_dims, dt::s8, tag::ab, true);
+    auto weights_md = memory::desc(weights_dims, dt::s8, tag::ba, true);
     auto bias_md = memory::desc(bias_dims, dt::f32, tag::ab);
     memory::desc dst_md;
     if (enable_bf16) {

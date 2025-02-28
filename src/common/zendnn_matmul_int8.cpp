@@ -442,7 +442,7 @@ aocl_post_op *create_aocl_post_ops_int8(
     aocl_post_op *post_ops = NULL;
     // By default, scale postop is always enabled.
     // Check if Bias and zero_point_dst postops are required.
-    bool apply_dst_scale_or_dst_zp = zero_point_dst != 0 || (dst_scale != NULL &&
+    bool apply_dst_scale_or_dst_zp = *zero_point_dst != 0 || (dst_scale != NULL &&
                                      !(dst_scale[0] == 1.0 && dst_scale_size == 1));
     int postop_count = 1;
     int bias_cnt = 0;
@@ -816,7 +816,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               is_weights_const, inplace_reorder_wei);
+                               blocked_format, is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -940,7 +940,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               is_weights_const, inplace_reorder_wei);
+                               blocked_format, is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1064,7 +1064,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               is_weights_const, inplace_reorder_wei);
+                               blocked_format, is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1208,7 +1208,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
                                src_1,
                                filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               is_weights_const, inplace_reorder_wei);
+                               blocked_format, is_weights_const, inplace_reorder_wei);
 
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
@@ -1292,15 +1292,10 @@ void zenMatMul_gemm_u8s8s32oInt(
 
 //Temporary checks for post-ops and data type for AOCL
 bool check_dt_po_int8(
-    int src_type,
     float do_sum
 ) {
     //Check sum post-op scale
     if (do_sum != 0.0 && do_sum != 1.0) {
-        return false;
-    }
-    //TODO: Currently AOCL is supporting u8 inputs.
-    if (src_type == zendnn_s8) {
         return false;
     }
 
@@ -1361,7 +1356,7 @@ int matmul_int8_wrapper(
     if ((zenEnvObj.zenINT8GEMMalgo ==
             zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8 ||
             zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_AOCL_INT8) &&
-            !check_dt_po_int8(src_type, do_sum)) {
+            !check_dt_po_int8(do_sum)) {
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
     }
     size_t aocl_reorder_size = aocl_get_reorder_buf_size_u8s8s32os32('r',

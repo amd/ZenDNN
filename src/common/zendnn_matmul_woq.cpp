@@ -1091,7 +1091,7 @@ int matmul_woq_wrapper(
                          wei_scale, 0, scale_size, do_sum,
                          is_weights_const, group_size, scale_dt);
         }
-        else if (zenEnvObj.zenBF16GEMMalgo =
+        else if (zenEnvObj.zenBF16GEMMalgo ==
                      zenBF16MatMulAlgoType::MATMUL_JIT_BF16) {
             map_mutex.lock();
             obj.is_brgemm = true;

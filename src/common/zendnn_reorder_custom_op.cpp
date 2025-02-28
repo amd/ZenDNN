@@ -36,7 +36,8 @@ bool reorder_brgemm_inplace(void *src, void *dst, uint k, uint n,
                             bool trans_mem,
                             zendnn_data_type_t dt) {
     // TODO:Remove key dependency
-    Key_matmul key_obj(false, trans_mem, 1, k, n, k, n, n, NULL, 1, true);
+    Key_matmul key_obj(false, trans_mem, 1, k, n, k, trans_mem ? k : n, n, src, 1,
+                       true);
 
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
@@ -95,7 +96,8 @@ bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
     }
 
     // TODO:Remove key dependency
-    Key_matmul key_obj(false, trans_mem, 1, k, n, k, n, n, NULL, 1, true);
+    Key_matmul key_obj(false, trans_mem, 1, k, n, k, trans_mem ? k : n, n, src, 1,
+                       true);
     if (dt == zendnn_f32) {
         int siz_req = aocl_get_reorder_buf_size_f32f32f32of32(order, trans,
                       reorder_param0, reorder_param1, reorder_param2);

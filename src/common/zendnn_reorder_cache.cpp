@@ -61,6 +61,7 @@ void reorderAndCacheWeights(
             // TODO: Implement scratchpad memory or memory pool
             reorder_weights = (T *)zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
             reorder_func(order, trans, 'B', weights, reorder_weights, k, n, ldb);
+
             map_mutex.lock();
             #pragma omp parallel for
             for (int idx = 0; idx < b_reorder_buf_siz_req; idx++) {
@@ -268,6 +269,13 @@ void woqReorderAndCacheWeightsBrgemm(
     }
 }
 
+void aocl_unreorder(const int8_t *wei, int8_t *plain_buff, int k, int n,
+                    int ldb) {
+    // TODO: Support 1st arg in better way
+    aocl_unreorder_s8s8s32os32_reference(ldb == k ? 'c' : 'r', 'B', wei, plain_buff,
+                                         k, n, ldb);
+}
+
 void cacheZeroPointCompensation(
     zendnn::zendnnEnv zenEnvObj,
     const Key_matmul &key_obj,
@@ -284,6 +292,7 @@ void cacheZeroPointCompensation(
     int ldc,
     int32_t src_zero_point,
     int32_t wei_zero_point,
+    bool blocked_format,
     bool is_weights_const,
     bool inplace_reorder_wei
 ) {
@@ -292,7 +301,7 @@ void cacheZeroPointCompensation(
     matmul_src_zp_wei_comp_cache;
 
     bool is_unreorder_wei_req = false;
-    if (is_weights_const && inplace_reorder_wei) {
+    if (is_weights_const && inplace_reorder_wei && blocked_format) {
         is_unreorder_wei_req = true;
     }
     bool enable_cache = zenEnvObj.zenZpCompCache;
@@ -306,19 +315,26 @@ void cacheZeroPointCompensation(
             acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*N);
             std::vector<int32_t> wei_comp(N,0);
 
-            // TODO:Update temp_wei if plain format reordering required.
-            //if (is_unreorder_wei_req) {}
-            //
-            if (src_zero_point) {
-                for_(dim_t k = 0; k < K; ++k)
+            int8_t *t_wei = const_cast<int8_t *>(wei);
+            if (is_unreorder_wei_req) {
+                t_wei = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
+                aocl_unreorder((const int8_t *)wei, t_wei, K, N,
+                               wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+            }
+
+            #pragma omp parallel for
+            for (dim_t k = 0; k < K; ++k) {
                 for (dim_t n = 0; n < N; ++n) {
                     if (k == 0) {
                         wei_comp[n] = int32_t(0);
                     }
-                    wei_comp[n] += wei[wei_s0 * k + wei_s1 * n];
+                    wei_comp[n] += t_wei[wei_s0 * k + wei_s1 * n];
                 }
             }
 
+            if (is_unreorder_wei_req) {
+                free(t_wei);
+            }
             for (dim_t n = 0; n < N; ++n) {
                 acc[n] = 0 - src_zero_point * wei_comp[n];
             }
@@ -338,8 +354,8 @@ void cacheZeroPointCompensation(
         std::vector<int32_t> src_comp(M,0);
         // acc is freed in main function for wei_zp != 0
         acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
-        if (wei_zero_point) {
-            for_(dim_t m = 0; m < M; ++m)
+        #pragma omp parallel for
+        for (dim_t m = 0; m < M; ++m) {
             for (dim_t k = 0; k < K; ++k) {
                 if (k == 0) {
                     src_comp[m] = int32_t(0);
@@ -348,9 +364,10 @@ void cacheZeroPointCompensation(
             }
         }
 
-        for_(dim_t m = 0; m < M; ++m)
-        for (dim_t n = 0; n < N; ++n) {
-            acc[m * ldc + n] = 0 - wei_zero_point * src_comp[m];
+        for (dim_t m = 0; m < M; ++m) {
+            for (dim_t n = 0; n < N; ++n) {
+                acc[m * ldc + n] = 0 - wei_zero_point * src_comp[m];
+            }
         }
     }
     else {
@@ -358,8 +375,9 @@ void cacheZeroPointCompensation(
         std::vector<int32_t> wei_comp(N,0);
         // acc is freed in main function for wei_zp != 0
         acc = (int32_t *)zendnn_aligned_alloc(64, sizeof(int32_t)*M*N);
-        if (wei_zero_point) {
-            for_(dim_t m = 0; m < M; ++m)
+        //Src comp
+        #pragma omp parallel for
+        for (dim_t m = 0; m < M; ++m) {
             for (dim_t k = 0; k < K; ++k) {
                 if (k == 0) {
                     src_comp[m] = int32_t(0);
@@ -368,24 +386,31 @@ void cacheZeroPointCompensation(
             }
         }
 
-        // TODO:Update temp_wei if plain format reordering required.
-        //if (is_unreorder_wei_req) {}
-        //
-        if (src_zero_point) {
-            for_(dim_t k = 0; k < K; ++k)
+        //Wei comp
+        int8_t *t_wei = const_cast<int8_t *>(wei);
+        if (is_unreorder_wei_req) {
+            t_wei = (int8_t *)zendnn_aligned_alloc(64, sizeof(int8_t)*K*N);
+            aocl_unreorder(wei, t_wei, K, N, wei_s0 > wei_s1 ? wei_s0 : wei_s1);
+        }
+        #pragma omp parallel for
+        for (dim_t k = 0; k < K; ++k) {
             for (dim_t n = 0; n < N; ++n) {
                 if (k == 0) {
                     wei_comp[n] = int32_t(0);
                 }
-                wei_comp[n] += wei[wei_s0 * k + wei_s1 * n];
+                wei_comp[n] += t_wei[wei_s0 * k + wei_s1 * n];
             }
         }
+        if (is_unreorder_wei_req) {
+            free(t_wei);
+        }
 
-        for_(dim_t m = 0; m < M; ++m)
-        for (dim_t n = 0; n < N; ++n)
-            acc[m * ldc + n] = 0 - src_zero_point * wei_comp[n]
-                               - wei_zero_point * src_comp[m]
-                               + src_zero_point * wei_zero_point * (int)K;
+        for (dim_t m = 0; m < M; ++m) {
+            for (dim_t n = 0; n < N; ++n)
+                acc[m * ldc + n] = 0 - src_zero_point * wei_comp[n]
+                                   - wei_zero_point * src_comp[m]
+                                   + src_zero_point * wei_zero_point * (int)K;
+        }
     }
 }
 
