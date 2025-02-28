@@ -38,7 +38,7 @@ AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel and
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC<sup>TM</sup> CPUs on the Linux® platform. ZenDNN v5.0.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.0.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
@@ -57,18 +57,11 @@ This release of ZenDNN supports the following Operating Systems (OS) and compile
 Binaires will be supported on
 * Ubuntu® 20.04, 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
-* Anolis 8.8, 8.9
-* SLES15 SP6, SP3
-* RockyLinux 9.4
-* CentOS 8.4
 >Note: PyTorch v2.5 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
 
 Build from source will be supported on
 * Ubuntu® 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
-* Anolis 8.8,8.9
-* SLES15 SP6, SP3
-* RockyLinux 9.4
 
 ## Compilers
 * GCC 12.2
@@ -137,7 +130,7 @@ Composable Kernel (CK) for CPU is currently only on the `cpu_avx2` branch of the
 ### Prerequisites
 CK is suitable for these compilers:
 1) hipclang: this is mainly used for compiling GPU hip kernels(require rocm environment), but also can be used for CPU. For a first trial use below compiler.
-2) gcc: at least gcc-9 is needed, you may need manually install a gcc-9 if ubuntu default is not gcc-9.
+2) gcc: at least gcc-9 is needed, you may need to manually install a gcc-9 if default is lower than gcc-9.
 
 ### Download code
 ```
