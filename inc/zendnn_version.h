@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -31,7 +31,7 @@
 #define ZENDNN_VERSION_MINOR 0
 
 /// Patch version
-#define ZENDNN_VERSION_PATCH 1
+#define ZENDNN_VERSION_PATCH 2
 
 /// Git commit hash
 #define ZENDNN_VERSION_HASH  "N/A"

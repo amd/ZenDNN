@@ -38,14 +38,14 @@ AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel and
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.0.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.0.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.5 (Plugin).
+* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.6 (Plugin).
 * Python v3.9-v3.12 has been used to generate the TensorFlow v2.18 (Plugin) wheel files (*.whl).
-* Python v3.9-v3.12 has been used to generate the PyTorch v2.5 (Plugin) wheel files (*.whl).
+* Python v3.9-v3.13 has been used to generate the PyTorch v2.6 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -57,7 +57,7 @@ This release of ZenDNN supports the following Operating Systems (OS) and compile
 Binaires will be supported on
 * Ubuntu® 20.04, 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
->Note: PyTorch v2.5 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
+>Note: PyTorch v2.6 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
 
 Build from source will be supported on
 * Ubuntu® 22.04, 24.04
@@ -175,7 +175,7 @@ ZenDNN has the following runtime dependencies:
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
 * Python v3.9-v3.12 for TensorFlow v2.18(Plugin)
-* Python v3.9-v3.12 for PyTorch v2.5 (Plugin)
+* Python v3.9-v3.13 for PyTorch v2.6 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
