@@ -146,6 +146,81 @@ bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
     return true;
 }
 
+// returns size required by AOCL blocked format weights
+size_t get_aocl_size(uint k, uint n, bool trans_mem, zendnn_data_type_t src_dt,
+                     int src_zp, zendnn_data_type_t dt) {
+
+    size_t req_buff_size = 0;
+    const char reorder_param0 = 'B';
+    const dim_t reorder_param1 = k;
+    const dim_t reorder_param2 = n;
+    const char order = 'r';
+    char trans = 'n';
+    if (trans_mem) {
+        trans = 't';
+    }
+    if (dt == zendnn_f32) {
+        req_buff_size = aocl_get_reorder_buf_size_f32f32f32of32(order, trans,
+                        reorder_param0, reorder_param1, reorder_param2);
+        req_buff_size *= sizeof(float);
+    }
+    else if (dt == zendnn_bf16) {
+        req_buff_size = aocl_get_reorder_buf_size_bf16bf16f32of32(order, trans,
+                        reorder_param0, reorder_param1, reorder_param2);
+        req_buff_size *= sizeof(int16_t);
+    }
+    // Current support is for activation U8, Weights S8 only.
+    else if (dt == zendnn_s8) {
+        if (src_dt == zendnn_u8) {
+            req_buff_size = aocl_get_reorder_buf_size_u8s8s32os32(order, trans,
+                            reorder_param0, reorder_param1, reorder_param2);
+        }
+        else if (src_dt == zendnn_s8) {
+            req_buff_size = aocl_get_reorder_buf_size_s8s8s32os32(order, trans,
+                            reorder_param0, reorder_param1, reorder_param2);
+        }
+        if (src_zp) {
+            req_buff_size += n*sizeof(int32_t);
+        }
+    }
+
+    return req_buff_size;
+}
+
+// returns size required by BRGEMM blocked format weights
+size_t get_brgemm_size(uint k, uint n, bool trans, zendnn_data_type_t src_dt,
+                       int src_zp, zendnn_data_type_t dt) {
+    zendnn::engine eng(engine::kind::cpu, 0);
+    zendnn::stream engine_stream(eng);
+    memory::desc blocked_matmul_weights_md;
+    if (dt == zendnn_f32) {
+        blocked_matmul_weights_md = memory::desc({k,n}, (
+                                        memory::data_type)dt, TAG_F32);
+    }
+    else if (dt == zendnn_bf16) {
+        blocked_matmul_weights_md = memory::desc({k,n}, (
+                                        memory::data_type)dt, TAG_BF16);
+    }
+    // Current support is for activation U8, Weights S8 only.
+    else if (dt == zendnn_s8) {
+        blocked_matmul_weights_md = memory::desc({k,n}, (
+                                        memory::data_type)dt, TAG_INT8);
+    }
+    memory::desc want_B_md = blocked_matmul_weights_md;
+    if (src_dt == zendnn_s8) {
+        want_B_md.data.extra.flags |= zendnn_memory_extra_flag_compensation_conv_s8s8;
+        want_B_md.data.extra.compensation_mask = (1 << 1);
+    }
+    if (src_zp) {
+        want_B_md.data.extra.flags
+        |= zendnn_memory_extra_flag_compensation_conv_asymmetric_src;
+        want_B_md.data.extra.asymm_compensation_mask = (1 << 1);
+    }
+    blocked_matmul_weights_md = want_B_md;
+    return blocked_matmul_weights_md.get_size();
+}
+
+
 // Returns backend/ALGO for given data type
 unsigned int fetch_backend(zendnn_data_type_t dt) {
     zendnnEnv zenEnvObj = readEnv();
@@ -190,5 +265,32 @@ bool zendnn_custom_op::zendnn_reorder(void *src, void *dst, uint k, uint n,
                            "Unsupported backend argument passed for zendnn_reorder");
     }
     return status;
+}
+//Returns size for reorder
+size_t zendnn_custom_op::zendnn_reorder_size(uint k, uint n, bool trans,
+        zendnn_data_type_t src_dt, int src_zp, zendnn_data_type_t weight_dt) {
+
+    size_t req_bytes = 0;
+    unsigned int backend = fetch_backend(weight_dt);
+    if (backend == 1/*aocl*/) {
+        req_bytes = get_aocl_size(k, n, trans, src_dt, src_zp, weight_dt);
+    }
+    else if (backend == 2/*brgemm*/) {
+        req_bytes = get_brgemm_size(k, n, trans, src_dt, src_zp, weight_dt);
+    }
+    else if (backend == 3 || backend == 4 || backend == 0/*non-blocked*/) {
+        req_bytes = k*n;
+        if (weight_dt == zendnn_f32) {
+            req_bytes *= sizeof(float);
+        }
+        else if (weight_dt == zendnn_bf16) {
+            req_bytes *= sizeof(int16_t);
+        }
+    }
+    else {
+        ZENDNN_THROW_ERROR(zendnn_invalid_arguments,
+                           "Unsupported backend argument passed for zendnn_reorder_size");
+    }
+    return req_bytes;
 }
 }

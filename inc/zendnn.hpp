@@ -835,7 +835,13 @@ class zendnn_custom_op {
         memory &output_mem);
 
     // ZenDNN Reorder API
-    static bool zendnn_reorder(void *src, void *dst, uint k, uint n, bool trans, zendnn_data_type_t dt);
+    static bool zendnn_reorder(void *src, void *dst, uint k, uint n, bool trans,
+                               zendnn_data_type_t dt);
+
+    // ZenDNN Reorder Size API
+    static size_t zendnn_reorder_size(uint k, uint n, bool trans,
+                                      zendnn_data_type_t src_dt,
+                                      int src_zp, zendnn_data_type_t wei_dt);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.
@@ -9349,13 +9355,13 @@ struct vanilla_rnn_forward : public primitive {
              float beta = 0.0f) {
             error::wrap_c_api(
                 zendnn_vanilla_rnn_forward_desc_init(&data,
-                    zendnn::convert_to_c(aprop_kind),
-                    zendnn::convert_to_c(activation),
-                    zendnn::convert_to_c(direction), &src_layer_desc.data,
-                    &src_iter_desc.data, &weights_layer_desc.data,
-                    &weights_iter_desc.data, &bias_desc.data,
-                    &dst_layer_desc.data, &dst_iter_desc.data,
-                    zendnn::convert_to_c(flags), alpha, beta),
+                        zendnn::convert_to_c(aprop_kind),
+                        zendnn::convert_to_c(activation),
+                        zendnn::convert_to_c(direction), &src_layer_desc.data,
+                        &src_iter_desc.data, &weights_layer_desc.data,
+                        &weights_iter_desc.data, &bias_desc.data,
+                        &dst_layer_desc.data, &dst_iter_desc.data,
+                        zendnn::convert_to_c(flags), alpha, beta),
                 "could not create a descriptor for a vanilla RNN forward "
                 "propagation primitive");
         }
@@ -9544,17 +9550,17 @@ struct vanilla_rnn_backward : public primitive {
              float beta = 0.0f) {
             error::wrap_c_api(
                 zendnn_vanilla_rnn_backward_desc_init(&data,
-                    zendnn::convert_to_c(aprop_kind),
-                    zendnn::convert_to_c(activation),
-                    zendnn::convert_to_c(direction), &src_layer_desc.data,
-                    &src_iter_desc.data, &weights_layer_desc.data,
-                    &weights_iter_desc.data, &bias_desc.data,
-                    &dst_layer_desc.data, &dst_iter_desc.data,
-                    &diff_src_layer_desc.data, &diff_src_iter_desc.data,
-                    &diff_weights_layer_desc.data,
-                    &diff_weights_iter_desc.data, &diff_bias_desc.data,
-                    &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
-                    zendnn::convert_to_c(flags), alpha, beta),
+                        zendnn::convert_to_c(aprop_kind),
+                        zendnn::convert_to_c(activation),
+                        zendnn::convert_to_c(direction), &src_layer_desc.data,
+                        &src_iter_desc.data, &weights_layer_desc.data,
+                        &weights_iter_desc.data, &bias_desc.data,
+                        &dst_layer_desc.data, &dst_iter_desc.data,
+                        &diff_src_layer_desc.data, &diff_src_iter_desc.data,
+                        &diff_weights_layer_desc.data,
+                        &diff_weights_iter_desc.data, &diff_bias_desc.data,
+                        &diff_dst_layer_desc.data, &diff_dst_iter_desc.data,
+                        zendnn::convert_to_c(flags), alpha, beta),
                 "could not create a descriptor for a vanilla RNN backward "
                 "propagation primitive");
         }
