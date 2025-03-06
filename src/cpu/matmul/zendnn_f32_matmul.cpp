@@ -77,8 +77,17 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
               && gemm_based::check_gemm_compatible_formats(*this);
 
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
-            weights_md()->data_type == f32) {
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    // Based on heuristics for Smaller Dimensions M(<=128), N and K (i.e <= 512)
+    // control is redirected to BRGEMM.
+    // TODO: Generate more heuristics for M,N,K for smaller dimensions to make
+    // the check generalized
+    if ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
+            weights_md()->data_type == f32) ||
+            (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 &&
+             thread_qty == 1 &&
+             src_md()->dims[0] <= 128 && weights_md()->dims[0] <= 512 &&
+             weights_md()->dims[1] <= 512)) {
         return status::unimplemented;
     }
 
