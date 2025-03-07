@@ -140,16 +140,15 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
     bool default_src_zp = zero_point_src == 0;
     bool default_wei_zp = zero_point_wei == 0;
 
+    // If size doesn't match with reordered_memory don't do blocking
+    if (inplace_reorder_wei &&
+            (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size())) {
+        blocked_format = false;
+    }
+
     if (inplace_reorder_wei && is_algo2 &&
-            (!default_src_zp || !default_wei_zp)) {
-        // If size doesn't match with reordered_memory don't do blocking
-        if (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
-            // Default Version is set to 1
-            blocked_format = false;
-        }
-        else {
-            zen_matmul_version = ZENDNN_INT8_MATMUL_VERSION3;
-        }
+            (!default_src_zp || !default_wei_zp) && blocked_format) {
+        zen_matmul_version = ZENDNN_INT8_MATMUL_VERSION3;
     }
 
     memory::desc bias_md;
