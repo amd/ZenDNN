@@ -28,8 +28,8 @@
     #define LOG_LEVEL_DEFAULT LOG_LEVEL_ERROR
 #endif
 
-using std::string;
-using std::stringstream;
+using ::std::string;
+using ::std::stringstream;
 
 enum LogLevel {
     LOG_LEVEL_DISABLED  = -1,
