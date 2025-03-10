@@ -271,7 +271,7 @@ int auto_compute_matmul_int8(
     unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
 
     Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
-                       weights, zenEnvObj.omp_num_threads, false);
+                       weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
@@ -604,7 +604,7 @@ int auto_compute_matmul(
     unsigned int algo_type;
 
     Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
-                       weights, zenEnvObj.omp_num_threads, false);
+                       weights, zenEnvObj.omp_num_threads, true);
 
     //Persistent Map
     //{ 0: disable, 1: write, 2:read }

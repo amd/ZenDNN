@@ -105,10 +105,8 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               thread_qty, false);
     Key_matmul key_obj(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                       thread_qty, true);
+                       thread_qty, false);
 
     std::vector<primitive> net;
     std::unordered_map<int, memory> net_args;
@@ -421,6 +419,9 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
+    auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                               thread_qty, false, block_info);
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
@@ -861,7 +862,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
 ) {
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // New scale for src*wei
     float *new_scale = NULL;
@@ -986,7 +987,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
 ) {
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // New scale for src*wei
     float *new_scale = NULL;
@@ -1111,7 +1112,7 @@ void zenMatMul_gemm_s8s8s32oInt(
 ) {
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // New scale for src*wei
     float *new_scale = NULL;
@@ -1256,7 +1257,7 @@ void zenMatMul_gemm_u8s8s32oInt(
 ) {
     bool inplace_reorder_wei = zenEnvObj.zenCacheInplace;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // New scale for src*wei
     float *new_scale = NULL;

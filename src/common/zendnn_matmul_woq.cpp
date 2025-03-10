@@ -380,7 +380,7 @@ int ref_woq_bf16(
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
-                       true);
+                       false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -512,7 +512,7 @@ int ref_woq_f32(
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
-                       true);
+                       false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -604,19 +604,6 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
     zendnnVerbose(ZENDNN_PROFLOG,"JIT kernel woq");
-    //TODO: Create cleaner key for weight caching map
-    //Putting hardcoded values for now
-    Key_matmul key_obj_reorder;
-    key_obj_reorder.transpose_input = TransA;
-    key_obj_reorder.transpose_weights = TransB;
-    key_obj_reorder.m = M;
-    key_obj_reorder.k = K;
-    key_obj_reorder.n = N;
-    key_obj_reorder.lda = lda;
-    key_obj_reorder.ldb = ldb;
-    key_obj_reorder.ldc = 0;
-    key_obj_reorder.weights = B_Array;
-    key_obj_reorder.thread_count = 0;
 
     std::unordered_map<int, memory> net_args;
 
@@ -741,6 +728,10 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     zendnn::memory reordered_weights_memory;
 
     int16_t *wei_bf16 = NULL;
+    auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+        zenEnvObj.omp_num_threads, false, block_info);
+
     if (blocked_format) {
         woqReorderAndCacheWeightsBrgemm(
             key_obj_reorder, matmul_prim_disc, user_weights_memory,
@@ -812,7 +803,7 @@ int aocl_woq_bf16(
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
-                       true);
+                       false);
 
     zendnnVerbose(ZENDNN_PROFLOG,"aocl_bf16s4 kernel");
 

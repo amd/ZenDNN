@@ -70,7 +70,7 @@ void zenMatMul_gemm_blocked(
     zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, zenEnvObj.omp_num_threads, true);
+                       filter, zenEnvObj.omp_num_threads, false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -241,9 +241,6 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               zenEnvObj.omp_num_threads, false);
-
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
 
@@ -325,6 +322,9 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
 
     //Weight reordering
     zendnn::memory reordered_weights_memory;
+    auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+                               zenEnvObj.omp_num_threads, false, block_info);
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(

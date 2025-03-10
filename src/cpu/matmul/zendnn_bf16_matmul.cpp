@@ -418,7 +418,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -525,7 +525,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -644,7 +644,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -752,7 +752,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
                               zenEnvObj.omp_num_threads;
     //TODO: Create cleaner key for weight caching map
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
-                       filter, thread_qty, true);
+                       filter, thread_qty, false);
 
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
@@ -862,10 +862,6 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     zendnn::stream engine_stream(eng);
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    //TODO: Create cleaner key for weight caching map
-    //Putting hardcoded values for now
-    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
-                               thread_qty, false);
 
     std::unordered_map<int, memory> net_args;
 
@@ -990,6 +986,9 @@ void zenMatMulPrimitiveBF16(const exec_ctx_t &ctx, zendnnEnv zenEnvObj,
     dst_memory = memory(dst_md, eng, C_Array);
     //Weight reordering
     zendnn::memory reordered_weights_memory;
+    auto block_info = matmul_prim_disc.weights_desc().data.format_desc.blocking;
+    Key_matmul key_obj_reorder(TransA, TransB, M, K, N, lda, ldb, ldc, B_Array,
+        thread_qty, false, block_info);
 
     if (blocked_format) {
         reorderAndCacheWeightsBrgemm(
@@ -1287,7 +1286,7 @@ int auto_compute_matmul_bf16(
 ) {
 
     Key_matmul key_obj_auto(transpose_input, transpose_filter, M, K, N, lda, ldb,
-                            ldc, weights, zenEnvObj.omp_num_threads, false);
+                            ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
