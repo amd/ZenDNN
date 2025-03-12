@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2021-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -29,8 +29,10 @@
 #include <algorithm>
 #include <string>
 #include "zendnn.hpp"
+#include <cfloat>
 #include "test_utils.hpp"
 #include "zendnn_logging.hpp"
+#include "zendnn_helper.hpp"
 
 
 using namespace zendnn;
@@ -48,11 +50,16 @@ void init_vector(std::vector<float> &v) {
 int compare_vectors(const std::vector<float> &v1, const std::vector<float> &v2,
                     int64_t K, const char *message) {
     double v1_l2 = 0, diff_l2 = 0;
+    float max_diff=FLT_MIN, min_diff=FLT_MAX;
     for (size_t n = 0; n < v1.size(); ++n) {
-        float diff = v1[n] - v2[n];
+        float diff = (float)(v1[n] - v2[n]);
+        max_diff = std::max(max_diff, diff);
+        min_diff = std::min(min_diff, diff);
         v1_l2 += v1[n] * v1[n];
         diff_l2 += diff * diff;
     }
+    std::cout<<"max_diff: "<<max_diff<<std::endl;
+    std::cout<<"min_diff: "<<min_diff<<std::endl;
     v1_l2 = std::sqrt(v1_l2);
     diff_l2 = std::sqrt(diff_l2);
     // Finding the reasonable (tight and accurate) threshold is quite difficult
@@ -386,12 +393,8 @@ void matmul_example_3D(zendnn::engine eng, zendnn::stream engine_stream) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_3D ends");
 }
 
-void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream) {
+std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream, memory::dim M, memory::dim N, memory::dim K, std::vector<float> &weights_data) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
-
-    // Tensor dimensions.
-    const memory::dim MB = 3, // batch size
-                      M = 128, K = 256, N = 512;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -399,22 +402,22 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream) {
     memory::dims dst_dims = {M, N};
     // Allocate buffers.
     std::vector<float> src_data(M * K);
-    std::vector<float> weights_data(K * N);
+    weights_data.resize(K * N);
+    std::cout<<"address:"<<(void*)weights_data.data()<<std::endl;
     std::vector<float> bias_data(1 * N);
     std::vector<float> dst_data(M * N);
-    // Initialize src, weights, bias.
-    std::generate(src_data.begin(), src_data.end(), []() {
-        static int i = 0;
-        return std::cos(i++ / 10.f);
-    });
-    std::generate(weights_data.begin(), weights_data.end(), []() {
-        static int i = 0;
-        return std::sin(i++ * 2.f);
-    });
-    std::generate(bias_data.begin(), bias_data.end(), []() {
-        static int i = 0;
-        return std::tanh(i++);
-    });
+    // Initialize src, weights, bias, add_mem
+    for (int i=0; i<src_data.size(); i++) {
+        src_data[i] = std::cos(i / 10.f);
+    }
+
+    for (int i=0; i<weights_data.size(); i++) {
+        weights_data[i] = std::sin(i * 2.f);
+    }
+
+    for (int i=0; i<bias_data.size(); i++) {
+        bias_data[i] = std::tanh(i);
+    }
     // Create memory descriptors and memory objects for src, weights, bias, and
     // dst.
     auto src_md = memory::desc(src_dims, dt::f32, tag::ab);
@@ -422,12 +425,11 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream) {
     auto bias_md = memory::desc(bias_dims, dt::f32, tag::ab);
     auto dst_md = memory::desc(dst_dims, dt::f32, tag::ab);
     auto src_mem = memory(src_md, eng);
-    auto weights_mem = memory(weights_md, eng);
+    auto weights_mem = memory(weights_md, eng, weights_data.data());
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
     // Write data to memory object's handles.
     write_to_zendnn_memory(src_data.data(), src_mem);
-    write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
     // Create operation descriptor
     auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
@@ -456,6 +458,7 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream) {
     // Read data from memory object's handle.
     read_from_zendnn_memory(dst_data.data(), dst_mem);
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D ends");
+    return dst_data;
 }
 
 int main(int argc, char **argv) {
@@ -465,9 +468,65 @@ int main(int argc, char **argv) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
+//Setting Primitive Cache capacity to 0.
+#ifdef _WIN32
+_putenv_s("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0");
+#else
+setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
+#endif
     matmul_example_3D(eng, engine_stream);
 
-    matmul_example_2D(eng, engine_stream);
+    std::vector<float> gemm_jit, zen;
+
+    // Define list of M values
+    std::vector<memory::dim> M_list = {4,8,16,64,128}; // Add more M values as needed
+
+    // Define list of (K, N) pairs
+    std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
+        {3456,  1024},
+        {3456,512},
+        {512, 3456},
+        {512,256},
+        {13,    512},
+        {256,   128},
+        {1024,  1024},
+        {1024,  512},
+        {256,   1},
+        {512,   256},
+        {13,    512},
+        {256,   64},
+        {415,   512},
+        {512,   512},
+        {256,   1}
+        // Add more (K, N) pairs as needed
+    };
+
+    std::vector<float> weights_data;
+
+    for (const auto &M : M_list) {
+        for (const auto &KN : KN_list) {
+            memory::dim K = KN.first;
+            memory::dim N = KN.second;
+
+            std::cout<<"\nM="<<M<<", N="<<N<<", K="<<K<<std::endl;
+
+            zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+            obj.is_ref_gemm_bf16 = false;
+            obj.is_brgemm = false;
+            
+            //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
+            zen = matmul_example_2D(eng, engine_stream, M, K, N, weights_data);
+
+            
+            //Gemm-JIT Path
+            obj.is_ref_gemm_bf16 = true;
+            obj.is_brgemm = true;
+            gemm_jit = matmul_example_2D(eng, engine_stream, M, K, N, weights_data);
+            //Compare the ZENDNN_PATHS with GEMM_JIT Kernels
+            auto rc = compare_vectors(
+                        gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
+        }
+    }
 
     sgemm_and_matmul_with_params('N', 'T', 10, 20, 30, 1.1f, fixed_beta, eng,
                                  engine_stream);

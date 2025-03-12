@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
+#include <cfloat>
 #include <string>
 #include "zendnn.hpp"
 #include "test_utils.hpp"
@@ -48,11 +49,16 @@ void init_vector(std::vector<float> &v) {
 int compare_vectors(const std::vector<float> &v1, const std::vector<float> &v2,
                     int64_t K, const char *message) {
     double v1_l2 = 0, diff_l2 = 0;
+    float max_diff=FLT_MIN, min_diff=FLT_MAX;
     for (size_t n = 0; n < v1.size(); ++n) {
-        float diff = v1[n] - v2[n];
+        float diff = (float)(v1[n] - v2[n]);
+        max_diff = std::max(max_diff, diff);
+        min_diff = std::min(min_diff, diff);
         v1_l2 += v1[n] * v1[n];
         diff_l2 += diff * diff;
     }
+    std::cout<<"max_diff: "<<max_diff<<std::endl;
+    std::cout<<"min_diff: "<<min_diff<<std::endl;
     v1_l2 = std::sqrt(v1_l2);
     diff_l2 = std::sqrt(diff_l2);
     // Finding the reasonable (tight and accurate) threshold is quite difficult
@@ -175,15 +181,12 @@ void matmul_example_3D(unsigned int post_op) {
 }
 
 std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op,
-                                     std::string binary_postop) {
+                                     std::string binary_postop, memory::dim M, memory::dim N, memory::dim K, std::vector<int16_t> &weights_data_bf16) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
 
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
-    // Tensor dimensions.
-    const memory::dim M = 128, K = 256, N = 512;
-    //const memory::dim M = 2, K = 2, N = 2;
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
     memory::dims weights_dims = {K, N};
@@ -192,6 +195,8 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op,
     // Allocate buffers.
     std::vector<float> src_data(M * K);
     std::vector<float> weights_data(K * N);
+    weights_data_bf16.resize(K * N);
+    std::cout<<"address:"<<(void*)weights_data.data()<<std::endl;
     std::vector<float> bias_data(1 * N);
     std::vector<float> dst_data(M * N);
 
@@ -239,8 +244,8 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op,
 
     // Write data to memory object's handles.
     write_to_zendnn_memory(src_data.data(), src_mem);
-    write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
+    write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bin_add_data1.data(), bin_mem1);
     write_to_zendnn_memory(bin_add_data2.data(), bin_mem2);
     write_to_zendnn_memory(bin_mul_data3.data(), bin_mem3);
@@ -258,7 +263,8 @@ std::vector<float> matmul_example_2D(bool dst_f32, unsigned int post_op,
 
     //Create bf16 memory
     auto src_bf_mem = memory(src_md, eng);
-    auto weights_bf_mem = memory(weights_md, eng);
+    auto weights_bf_mem = memory(weights_md, eng, weights_data_bf16.data());
+    std::cout<<"bf16 address:"<<weights_bf_mem.get_data_handle()<<std::endl;
     auto bias_bf_mem = memory(bias_md, eng);
     auto bin_bf_mem1 = memory(bin_md1, eng);
     auto bin_bf_mem2 = memory(bin_md2, eng);
@@ -383,16 +389,53 @@ int main(int argc, char **argv) {
 
     std::vector<float> gemm_jit, zen;
     matmul_example_3D(post_op);
-    //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
-    zen = matmul_example_2D(f32_flag, post_op, binary_postop);
 
-    //Gemm-JIT Path
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    obj.is_ref_gemm_bf16 = true;
-    gemm_jit = matmul_example_2D(f32_flag, post_op, binary_postop);
-    //Compare the ZENDNN_PATHS with GEMM_JIT Kernels
-    auto rc = compare_vectors(
-                  gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
+    // Define list of M values
+    std::vector<memory::dim> M_list = {4,8,16,64,128}; // Add more M values as needed
+
+    // Define list of (K, N) pairs
+    std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
+        {3456,  1024},
+        {3456,512},
+        {512, 3456},
+        {512,256},
+        {13,    512},
+        {256,   128},
+        {1024,  1024},
+        {1024,  512},
+        {256,   1},
+        {512,   256},
+        {13,    512},
+        {256,   64},
+        {415,   512},
+        {512,   512},
+        {256,   1}
+        // Add more (K, N) pairs as needed
+    };
+
+    std::vector<int16_t> weights_data;
+
+    for (const auto &M : M_list) {
+        for (const auto &KN : KN_list) {
+            memory::dim K = KN.first;
+            memory::dim N = KN.second;
+
+            std::cout<<"\nM="<<M<<", N="<<N<<", K="<<K<<std::endl;
+
+            zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+            obj.is_ref_gemm_bf16 = false;
+            
+            //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
+            zen = matmul_example_2D(f32_flag, post_op, binary_postop, M, K, N, weights_data);
+
+            //Gemm-JIT Path
+            obj.is_ref_gemm_bf16 = true;
+            gemm_jit = matmul_example_2D(f32_flag, post_op, binary_postop, M, K, N, weights_data);
+            //Compare the ZENDNN_PATHS with GEMM_JIT Kernels
+            auto rc = compare_vectors(
+                        gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
+        }
+    }
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_bf16 test ends");
     return 0;
 }

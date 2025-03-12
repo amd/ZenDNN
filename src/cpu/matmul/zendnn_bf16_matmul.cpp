@@ -1300,12 +1300,12 @@ int auto_compute_matmul_bf16(
 
     //Number of iterations to run without creating map for each unique layer.
     unsigned int skip_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER_BF16",
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
                                   MATMUL_SKIP_ITER_BF16);
 
     //Number of iterations to run for creating map for each layer.
     unsigned int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER_BF16",
+        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
                                   MATMUL_EVALUATE_ITER_BF16);
 
     //finds object in map

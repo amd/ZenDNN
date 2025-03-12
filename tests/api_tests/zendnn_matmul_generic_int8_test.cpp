@@ -166,12 +166,13 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
         bool enable_relu, bool enable_mul_add, bool enable_sigmoid,
         bool enable_dst_scales,
         bool enable_src_wei_scales, bool enable_src_zp, bool enable_dst_zp,
-        bool enable_bf16_mul_add, bool enable_dst_s8) {
+        bool enable_bf16_mul_add, bool enable_dst_s8, vector<int8_t> &weights_data) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
 
     // Initialize data vectors for source, weights, bias, add, and multiply operations
     std::vector<uint8_t> src_data(M * K);
-    std::vector<int8_t> weights_data(K * N);
+    weights_data.resize(K * N);
+    std::cout<<"address:"<<(void*)weights_data.data()<<std::endl;
     std::vector<float> bias_data(1 * N);
     std::vector<float> add_data(M * N);
     std::vector<float> mul_data(M * N);
@@ -233,7 +234,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     }
 
     auto src_mem = memory(src_md, eng);
-    auto weights_mem = memory(weights_md, eng);
+    auto weights_mem = memory(weights_md, eng, weights_data.data());
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
     auto add_mem = memory(add_md, eng);
@@ -249,7 +250,6 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     memory zp_C_mem({{1}, memory::data_type::s32, {1}}, eng);
 
     write_to_zendnn_memory(src_data.data(), src_mem);
-    write_to_zendnn_memory(weights_data.data(), weights_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
     write_to_zendnn_memory((void *)&zp_A, zp_A_mem);
     write_to_zendnn_memory((void *)&zp_C, zp_C_mem);
@@ -662,16 +662,16 @@ int main(int argc, char **argv) {
 #endif
 
     // Define list of M values
-    std::vector<memory::dim> M_list = {1024}; // Add more M values as needed
+    std::vector<memory::dim> M_list = {4,8,16,64,128}; // Add more M values as needed
 
     // Define list of (K, N) pairs
     std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
+        {3456,  1024},
         {3456,512},
         {512, 3456},
         {512,256},
         {13,    512},
         {256,   128},
-        {3456,  1024},
         {1024,  1024},
         {1024,  512},
         {256,   1},
@@ -684,6 +684,8 @@ int main(int argc, char **argv) {
         // Add more (K, N) pairs as needed
     };
 
+    std::vector<int8_t> weights_data;
+
     for (const auto &M : M_list) {
         for (const auto &KN : KN_list) {
             memory::dim K = KN.first;
@@ -692,7 +694,7 @@ int main(int argc, char **argv) {
             std::cout<<"\nM="<<M<<", N="<<N<<", K="<<K;
 
             // Create a seed based on M, K, and N
-            size_t seed = std::hash<memory::dim>()(M) ^ std::hash<memory::dim>()(
+            size_t seed = std::hash<memory::dim>()(
                               K) ^ std::hash<memory::dim>()(N);
             std::default_random_engine gen(seed);
             std::uniform_real_distribution<double> distribution(0.0, 1.0);
@@ -727,7 +729,7 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, weights_data);
             }
             else if (ENABLE_DST_S8) {
                 aocl_sint8 = matmul_example_2D_dst_actual<int8_t>(eng,
@@ -735,7 +737,7 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, weights_data);
             }
             else {
                 aocl_float = matmul_example_2D_dst_actual<float>(eng,
@@ -743,7 +745,7 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, weights_data);
             }
             //Set JIT kernel
             obj.is_brgemm = true;

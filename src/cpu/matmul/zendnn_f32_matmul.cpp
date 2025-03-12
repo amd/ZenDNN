@@ -83,7 +83,7 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_brgemm) {
+    if (obj.is_brgemm || obj.is_ref_gemm_bf16) {
         return status::unimplemented;
     }
 
