@@ -32,24 +32,30 @@
 using tag = memory::format_tag;
 namespace zendnn {
 // Currently supporting inplace only BRGEMM
-bool reorder_brgemm_inplace(void *src, void *dst, uint k, uint n,
-                            bool trans_mem, zendnn_data_type_t dt, zendnnEnv zenEnvObj) {
+
+bool reorder_brgemm_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
+                            uint n,
+                            bool trans_mem, zendnn_data_type_t weight_dt, zendnn_data_type_t src_dt,
+                            int src_zp, bool is_resized) {
     // TODO:Remove key dependency
     Key_matmul key_obj(false, trans_mem, 1, k, n, k, trans_mem ? k : n, n, src,
                        zenEnvObj.omp_num_threads,
                        false);
-
+    unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
     zendnn::memory user_weights_memory, reordered_weights_memory;
 
-    memory::desc matmul_weights_md = memory::desc({k,n}, (memory::data_type)dt,
+    memory::desc matmul_weights_md = memory::desc({k,n}, (memory::data_type)
+                                     weight_dt,
                                      trans_mem ? tag::ba : tag::ab);
     user_weights_memory = memory(matmul_weights_md, eng, src);
-    if (dt == zendnn_f32) {
+    if (weight_dt == zendnn_f32) {
         memory::desc blocked_matmul_weights_md = memory::desc({k,n}, (
-                    memory::data_type)dt, TAG_F32);
-        if (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
+                    memory::data_type)weight_dt, TAG_F32);
+        if ((!is_resized ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) &&
+                matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
             return false;
         }
 
@@ -58,10 +64,12 @@ bool reorder_brgemm_inplace(void *src, void *dst, uint k, uint n,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
             zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
-    else if (dt == zendnn_bf16) {
+    else if (weight_dt == zendnn_bf16) {
         memory::desc blocked_matmul_weights_md = memory::desc({k,n}, (
-                    memory::data_type)dt, TAG_BF16);
-        if (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
+                    memory::data_type)weight_dt, TAG_BF16);
+        if ((!is_resized ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) &&
+                matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
             return false;
         }
         reorderAndCacheWeightsBrgemm(
@@ -69,12 +77,34 @@ bool reorder_brgemm_inplace(void *src, void *dst, uint k, uint n,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
             zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
-    else if (dt == zendnn_s8) {
+    else if (weight_dt == zendnn_s8) {
         memory::desc blocked_matmul_weights_md = memory::desc({k,n}, (
-                    memory::data_type)dt, TAG_INT8);
-        if (matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
+                    memory::data_type)weight_dt, TAG_INT8);
+        if ((!is_resized ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) &&
+                matmul_weights_md.get_size() != blocked_matmul_weights_md.get_size()) {
             return false;
         }
+        if (weight_cache_type ==
+                zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE) {
+            memory::desc want_B_md = blocked_matmul_weights_md;
+            if (src_dt == zendnn_s8) {
+                want_B_md.data.extra.flags |= zendnn_memory_extra_flag_compensation_conv_s8s8;
+                want_B_md.data.extra.compensation_mask = (1 << 1);
+            }
+            if (src_zp) {
+                want_B_md.data.extra.flags
+                |= zendnn_memory_extra_flag_compensation_conv_asymmetric_src;
+                want_B_md.data.extra.asymm_compensation_mask = (1 << 1);
+            }
+            blocked_matmul_weights_md = want_B_md;
+        }
+        auto block_info = blocked_matmul_weights_md.data.format_desc.blocking;
+
+        // Key with block info
+        Key_matmul key_obj_s8(false, trans_mem, 1, k, n, k, trans_mem ? k : n, n, src,
+                              1,
+                              false, block_info);
         reorderAndCacheWeightsBrgemm(
             key_obj, blocked_matmul_weights_md, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
@@ -84,8 +114,12 @@ bool reorder_brgemm_inplace(void *src, void *dst, uint k, uint n,
     return true;
 }
 // Currently supporting inplace only
-bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
-                          zendnn_data_type_t dt, zendnnEnv zenEnvObj) {
+bool reorder_aocl_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
+                          uint n, bool trans_mem,
+                          zendnn_data_type_t weight_dt, zendnn_data_type_t src_dt, int src_zp,
+                          bool is_resized) {
+    unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
+
     const char reorder_param0 = 'B';
     const dim_t reorder_param1 = k;
     const dim_t reorder_param2 = n;
@@ -99,11 +133,13 @@ bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
     Key_matmul key_obj(false, trans_mem, 1, k, n, k, trans_mem ? k : n, n, src,
                        zenEnvObj.omp_num_threads,
                        false);
-    if (dt == zendnn_f32) {
+    if (weight_dt == zendnn_f32) {
         int siz_req = aocl_get_reorder_buf_size_f32f32f32of32(order, trans,
                       reorder_param0, reorder_param1, reorder_param2);
         // TODO: get size of data type using some function
-        if (siz_req != 4*k*n) {
+        if ((!is_resized ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE)  &&
+                siz_req != 4*k*n) {
             return false;
         }
         float *temp = NULL;
@@ -113,11 +149,13 @@ bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
                                       aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
                                       zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
-    else if (dt == zendnn_bf16) {
+    else if (weight_dt == zendnn_bf16) {
         int siz_req = aocl_get_reorder_buf_size_bf16bf16f32of32(order, trans,
                       reorder_param0, reorder_param1, reorder_param2);
         // TODO: get size of data type using some function
-        if (siz_req != 2*k*n) {
+        if ((!is_resized ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE)  &&
+                siz_req != 2*k*n) {
             return false;
         }
         int16_t *temp = NULL;
@@ -128,18 +166,43 @@ bool reorder_aocl_inplace(void *src, void *dst, uint k, uint n, bool trans_mem,
                                         zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
     // Current support is for activation U8, Weights S8 only.
-    else if (dt == zendnn_s8) {
-        int siz_req = aocl_get_reorder_buf_size_u8s8s32os32(order, trans,
+    // TODO: Unify src_dt using function pointer for aocl functions.
+    else if (weight_dt == zendnn_s8) {
+        int siz_req = 0;
+        if (src_dt == zendnn_u8) {
+            siz_req = aocl_get_reorder_buf_size_u8s8s32os32(order, trans,
                       reorder_param0, reorder_param1, reorder_param2);
-        if (siz_req != k*n) {
-            return false;
+            if ((!is_resized ||
+                    weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE)  &&
+                    siz_req != k*n) {
+                return false;
+            }
+            int8_t *temp = NULL;
+            reorderAndCacheWeights<int8_t>(key_obj, (int8_t *)src, temp, k, n,
+                                           trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
+                                           reorder_param1, reorder_param2,
+                                           aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
+                                           zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER,
+                                           weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE ? 0 :
+                                           src_zp);
         }
-        int8_t *temp = NULL;
-        reorderAndCacheWeights<int8_t>(key_obj, (int8_t *)src, temp, k, n,
-                                       trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
-                                       reorder_param1, reorder_param2,
-                                       aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
-                                       zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
+        else {
+            siz_req = aocl_get_reorder_buf_size_s8s8s32os32(order, trans,
+                      reorder_param0, reorder_param1, reorder_param2);
+            if ((!is_resized ||
+                    weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE)  &&
+                    siz_req != k*n) {
+                return false;
+            }
+            int8_t *temp = NULL;
+            reorderAndCacheWeights<int8_t>(key_obj, (int8_t *)src, temp, k, n,
+                                           trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
+                                           reorder_param1, reorder_param2,
+                                           aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
+                                           zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER,
+                                           weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE ? 0 :
+                                           src_zp);
+        }
     }
     return true;
 }
@@ -216,7 +279,6 @@ size_t get_brgemm_size(uint k, uint n, bool trans, zendnn_data_type_t src_dt,
     return blocked_matmul_weights_md.get_size();
 }
 
-
 // Returns backend/ALGO for given data type
 unsigned int fetch_backend(zendnn_data_type_t dt, zendnnEnv zenEnvObj) {
     // Return 0 if AUTO is set
@@ -240,28 +302,30 @@ unsigned int fetch_backend(zendnn_data_type_t dt, zendnnEnv zenEnvObj) {
 
 // ZenDNN reorder API for AOCL and BRGEMM
 bool zendnn_custom_op::zendnn_reorder(void *src, void *dst, uint k, uint n,
-                                      bool trans, zendnn_data_type_t dt) {
+                                      bool trans, zendnn_data_type_t weight_dt, zendnn_data_type_t src_dt, int src_zp,
+                                      bool is_resized) {
     bool status = false;
     zendnnEnv zenEnvObj = readEnv();
-    unsigned int backend = fetch_backend(dt, zenEnvObj);
+
+    unsigned int backend = fetch_backend(weight_dt, zenEnvObj);
     unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
-    // TODO: Support AOT_RESIZED_INPLACE
-    if (weight_cache_type != zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {
-        return false;
+    // No reorder if weight_cache_type is 1/2/4
+    if (backend == 3 || backend == 4/*non-blocked*/ ||
+            !(weight_cache_type == 3 || weight_cache_type == 4)) {
+        status = true;
+        zendnnVerbose(ZENDNN_PROFLOG,"No Blocking reorder custom op,", " status ",
+                      status ? "True" : "False");
     }
-    if (backend == 1/*aocl*/) {
-        status = reorder_aocl_inplace(src, dst, k, n, trans, dt, zenEnvObj);
+    else if (backend == 1/*aocl*/) {
+        status = reorder_aocl_inplace(zenEnvObj, src, dst, k, n, trans, weight_dt,
+                                      src_dt, src_zp, is_resized);
         zendnnVerbose(ZENDNN_PROFLOG,"AOCL reorder custom op,", " status ",
                       status ? "True" : "False");
     }
     else if (backend == 2/*brgemm*/ || backend == 0) {
-        status = reorder_brgemm_inplace(src, dst, k, n, trans, dt, zenEnvObj);
+        status = reorder_brgemm_inplace(zenEnvObj, src, dst, k, n, trans, weight_dt,
+                                        src_dt, src_zp, is_resized);
         zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder custom op,", " status ",
-                      status ? "True" : "False");
-    }
-    else if (backend == 3 || backend == 4/*non-blocked*/) {
-        status = true;
-        zendnnVerbose(ZENDNN_PROFLOG,"No Blocking reorder custom op,", " status ",
                       status ? "True" : "False");
     }
     else {
@@ -277,14 +341,11 @@ size_t zendnn_custom_op::zendnn_reorder_size(uint k, uint n, bool trans,
     size_t req_bytes = 0;
     zendnnEnv zenEnvObj = readEnv();
     unsigned int backend = fetch_backend(weight_dt, zenEnvObj);
-    // Check Backend
-    if (backend == 1/*aocl*/) {
-        req_bytes = get_aocl_size(k, n, trans, src_dt, src_zp, weight_dt);
-    }
-    else if (backend == 2/*brgemm*/ || backend == 0) {
-        req_bytes = get_brgemm_size(k, n, trans, src_dt, src_zp, weight_dt);
-    }
-    else if (backend == 3 || backend == 4/*non-blocked*/) {
+
+    unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
+    // Return size as k*n if weight_cache_type is 1/2/4
+    if (backend == 3 || backend == 4/*non-blocked*/ ||
+            weight_cache_type != zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE) {
         req_bytes = k*n;
         if (weight_dt == zendnn_f32) {
             req_bytes *= sizeof(float);
@@ -292,6 +353,12 @@ size_t zendnn_custom_op::zendnn_reorder_size(uint k, uint n, bool trans,
         else if (weight_dt == zendnn_bf16) {
             req_bytes *= sizeof(int16_t);
         }
+    }
+    else if (backend == 1/*aocl*/) {
+        req_bytes = get_aocl_size(k, n, trans, src_dt, src_zp, weight_dt);
+    }
+    else if (backend == 2/*brgemm*/ || backend == 0) {
+        req_bytes = get_brgemm_size(k, n, trans, src_dt, src_zp, weight_dt);
     }
     else {
         ZENDNN_THROW_ERROR(zendnn_invalid_arguments,

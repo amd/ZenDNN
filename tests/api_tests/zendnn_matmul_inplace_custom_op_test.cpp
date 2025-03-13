@@ -166,12 +166,13 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
         bool enable_relu, bool enable_mul_add, bool enable_sigmoid,
         bool enable_dst_scales,
         bool enable_src_wei_scales, bool enable_src_zp, bool enable_dst_zp,
-        bool enable_bf16_mul_add, bool enable_dst_s8) {
+        bool enable_bf16_mul_add, bool enable_dst_s8, std::vector<int8_t> &wei_add,
+        bool do_reorder) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
 
     // Initialize data vectors for source, weights, bias, add, and multiply operations
     std::vector<uint8_t> src_data(M * K);
-    std::vector<int8_t> weights_data(K * N);
+    //std::vector<int8_t> weights_data(K * N);
     std::vector<float> bias_data(1 * N);
     std::vector<float> add_data(M * N);
     std::vector<float> mul_data(M * N);
@@ -179,9 +180,6 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     // Fill the data vectors with some values
     for (int i=0; i<src_data.size(); i++) {
         src_data[i] = i* 13 % 21;
-    }
-    for (int i=0; i<weights_data.size(); i++) {
-        weights_data[i] = i* 13 % 21 - 10;
     }
     for (int i=0; i<bias_data.size(); i++) {
         bias_data[i] = 1.5*(i %21);
@@ -197,8 +195,13 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
 
     int32_t zp_A = 3, zp_C = 2;
 
-    bool x = zendnn_custom_op::zendnn_reorder(weights_data.data(),
-             weights_data.data(), K, N, true, zendnn_s8);
+    if (do_reorder) {
+        size_t req_buff = zendnn_custom_op::zendnn_reorder_size(K, N, true,
+                          zendnn_u8, enable_src_zp? zp_A: 0, zendnn_s8);
+        wei_add.resize(req_buff);
+        bool x = zendnn_custom_op::zendnn_reorder(wei_add.data(),
+                 wei_add.data(), K, N, true, zendnn_s8, zendnn_u8, enable_src_zp? zp_A: 0, true);
+    }
 
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -236,7 +239,7 @@ std::vector<T> matmul_example_2D_dst_actual(zendnn::engine eng,
     }
 
     auto src_mem = memory(src_md, eng);
-    auto weights_mem = memory(weights_md, eng, weights_data.data());
+    auto weights_mem = memory(weights_md, eng, wei_add.data());
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
     auto add_mem = memory(add_md, eng);
@@ -665,7 +668,7 @@ int main(int argc, char **argv) {
 #endif
 
     // Define list of M values
-    std::vector<memory::dim> M_list = {1024}; // Add more M values as needed
+    std::vector<memory::dim> M_list = {4,64,1024}; // Add more M values as needed
 
     // Define list of (K, N) pairs
     std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
@@ -686,7 +689,18 @@ int main(int argc, char **argv) {
         // Add more (K, N) pairs as needed
     };
 
+    std::vector<std::vector<int8_t>> wei_add(KN_list.size());
+    for (int i=0; i<wei_add.size(); i++) {
+        memory::dim K = KN_list[i].first;
+        memory::dim N = KN_list[i].second;
+        wei_add[i].resize(K*N);
+        for (int j=0; j<K*N; j++) {
+            wei_add[i][j] = j* 13 % 21 - 10;
+        }
+    }
+    int x = 0;
     for (const auto &M : M_list) {
+        int idx = 0;
         for (const auto &KN : KN_list) {
             memory::dim K = KN.first;
             memory::dim N = KN.second;
@@ -694,7 +708,7 @@ int main(int argc, char **argv) {
             std::cout<<"\nM="<<M<<", N="<<N<<", K="<<K;
 
             // Create a seed based on M, K, and N
-            size_t seed = std::hash<memory::dim>()(M) ^ std::hash<memory::dim>()(
+            size_t seed = std::hash<memory::dim>()(
                               K) ^ std::hash<memory::dim>()(N);
             std::default_random_engine gen(seed);
             std::uniform_real_distribution<double> distribution(0.0, 1.0);
@@ -729,7 +743,7 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, wei_add[idx], x == 0 ? true: false);
             }
             else if (ENABLE_DST_S8) {
                 aocl_sint8 = matmul_example_2D_dst_actual<int8_t>(eng,
@@ -737,7 +751,7 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, wei_add[idx], x==0 ? true: false);
             }
             else {
                 aocl_float = matmul_example_2D_dst_actual<float>(eng,
@@ -745,8 +759,9 @@ int main(int argc, char **argv) {
                              ENABLE_DST_U8, ENABLE_BF16, ENABLE_FP32,
                              ENABLE_RELU, ENABLE_MUL_ADD, ENABLE_SIGMOID, ENABLE_DST_SCALES,
                              ENABLE_SRC_WEI_SCALES, ENABLE_SRC_ZP, ENABLE_DST_ZP, ENABLE_BF16_MUL_ADD,
-                             ENABLE_DST_S8);
+                             ENABLE_DST_S8, wei_add[idx], x==0 ? true: false);
             }
+            idx++;
             //Set JIT kernel
             obj.is_brgemm = true;
             obj.is_ref_gemm_bf16 = true;
@@ -792,6 +807,7 @@ int main(int argc, char **argv) {
                               "Compare INT8 os8 JIT MatMul vs ZenDNN Paths", args);
             }
         }
+        x = 1;
     }
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test test ends");
     return 0;

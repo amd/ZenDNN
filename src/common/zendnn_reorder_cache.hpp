@@ -51,7 +51,8 @@ bool reorderAndCacheWeights(
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
     ReorderFunc<T> reorder_func,
-    int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
+    int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE,
+    int src_zp = 0
 );
 
 bool reorderAndCacheWeightsBrgemm(

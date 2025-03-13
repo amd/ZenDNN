@@ -890,12 +890,20 @@ void zenMatMul_gemm_u8s8s32ofloat(
     int src_1 = transpose_input ? lda : 1;
     int wei_0 = transpose_filter ? 1 : ldb;
     int wei_1 = transpose_filter ? ldb : 1;
-    cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
-                               src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               weight_cache_type);
 
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE
+            && zero_point_src) {
+        size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
+                          zendnn_u8, 0, zendnn_s8);
+        acc = (int32_t *)(filter + wei_size);
+    }
+    else {
+        cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
+                                   src_1,
+                                   filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                                   blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
+                                   weight_cache_type);
+    }
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
                       src_scale_size, wei_scale_size, 0, zendnn_f32);
@@ -1022,12 +1030,19 @@ void zenMatMul_gemm_s8s8s32ofloat(
     int src_1 = transpose_input ? lda : 1;
     int wei_0 = transpose_filter ? 1 : ldb;
     int wei_1 = transpose_filter ? ldb : 1;
-    cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
-                               src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               weight_cache_type);
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE
+            && zero_point_src) {
+        size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
+                          zendnn_s8, 0, zendnn_s8);
+        acc = (int32_t *)(filter + wei_size);
+    }
+    else {
+        cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
+                                   src_1,
+                                   filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                                   blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
+                                   weight_cache_type);
+    }
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
                       src_scale_size, wei_scale_size, 0, zendnn_f32);
@@ -1153,12 +1168,19 @@ void zenMatMul_gemm_s8s8s32oInt(
     int src_1 = transpose_input ? lda : 1;
     int wei_0 = transpose_filter ? 1 : ldb;
     int wei_1 = transpose_filter ? ldb : 1;
-    cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
-                               src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               weight_cache_type);
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE
+            && zero_point_src) {
+        size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
+                          zendnn_s8, 0, zendnn_s8);
+        acc = (int32_t *)(filter + wei_size);
+    }
+    else {
+        cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
+                                   src_1,
+                                   filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                                   blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
+                                   weight_cache_type);
+    }
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
                       src_scale_size, wei_scale_size, 0, zendnn_f32);
@@ -1305,12 +1327,19 @@ void zenMatMul_gemm_u8s8s32oInt(
     int src_1 = transpose_input ? lda : 1;
     int wei_0 = transpose_filter ? 1 : ldb;
     int wei_1 = transpose_filter ? ldb : 1;
-    cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
-                               src_1,
-                               filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
-                               blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
-                               weight_cache_type);
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE
+            && zero_point_src) {
+        size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
+                          zendnn_u8, 0, zendnn_s8);
+        acc = (int32_t *)(filter + wei_size);
+    }
+    else {
+        cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
+                                   src_1,
+                                   filter, wei_0, wei_1, acc, ldc, zero_point_src, zero_point_wei,
+                                   blocked_format, is_weights_const, zenEnvObj.zenINT8GEMMalgo,
+                                   weight_cache_type);
+    }
     // Passing dst scale as NULL (Applied as aocl post-op).
     cacheStaticScales(zenEnvObj, key_obj, new_scale, src_scale, wei_scale, NULL,
                       src_scale_size, wei_scale_size, 0, zendnn_f32);
@@ -1475,6 +1504,7 @@ int matmul_int8_wrapper(
         zendnnVerbose(ZENDNN_PROFLOG,"Not running AOCL BLOCKED format");
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
     }
+
     if (zenEnvObj.zenINT8GEMMalgo ==
             zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8) {
         int8_t zero_point_dst_8 = (int8_t)zero_point_dst;

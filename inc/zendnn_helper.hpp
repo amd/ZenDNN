@@ -285,7 +285,7 @@ class zendnnEnv {
         auto_evaluate_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 0);
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
         zenWeightCache = zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
-        if (zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {
+        if (zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE) {
             zenWeightCache = zendnnWeightCacheType::WEIGHT_CACHE_DISABLE;
         }
 

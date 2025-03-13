@@ -48,7 +48,8 @@ bool reorderAndCacheWeights(
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
     ReorderFunc<T> reorder_func,
-    int weight_cache_type
+    int weight_cache_type,
+    int src_zp
 ) {
     // Weight caching
     static zendnn::impl::lru_weight_cache_t<Key_matmul, T *> matmul_weight_cache;
@@ -89,6 +90,7 @@ bool reorderAndCacheWeights(
         if (!found_obj) {
             siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                           reorder_param1, reorder_param2);
+
             // TODO: Implement scratchpad memory or memory pool
             reorder_weights = (T *)zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
             reorder_func(order, trans, 'B', weights, reorder_weights, k, n, ldb);
@@ -148,6 +150,32 @@ bool reorderAndCacheWeights(
             zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights WEIGHT_CACHE_AOT_REORDER");
             siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, reorder_param0,
                                           reorder_param1, reorder_param2);
+            // only applicable for INT8
+            if (src_zp) {
+                int wei_s0, wei_s1;
+                if (trans == 't') {
+                    wei_s0 = 1;
+                    wei_s1 = k;
+                }
+                else {
+                    wei_s0 = n;
+                    wei_s1 = 1;
+                }
+                int8_t *s8_wei = (int8_t *)weights;
+                int32_t *wei_comp = (int32_t *)(s8_wei + b_reorder_buf_siz_req);
+                for (dim_t k_ = 0; k_ < k; ++k_) {
+                    for (dim_t n_ = 0; n_ < n; ++n_) {
+                        if (k_ == 0) {
+                            wei_comp[n_] = int32_t(0);
+                        }
+                        wei_comp[n_] += s8_wei[wei_s0 * k_ + wei_s1 * n_];
+                    }
+                }
+
+                for (dim_t n_ = 0; n_ < n; ++n_) {
+                    wei_comp[n_] = 0 - src_zp * wei_comp[n_];
+                }
+            }
             // TODO: Implement scratchpad memory or memory pool
             reorder_weights = (T *)zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
             reorder_func(order, trans, 'B', weights, reorder_weights, k, n, ldb);
@@ -447,7 +475,7 @@ void cacheZeroPointCompensation(
 
     bool is_unreorder_wei_req = false;
     if (is_weights_const &&
-            weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE &&
+            weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
             blocked_format) {
         is_unreorder_wei_req = true;
     }
@@ -748,7 +776,8 @@ template bool reorderAndCacheWeights<int8_t>(
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
     ReorderFunc<int8_t> reorder_func,
-    int weight_cache_type
+    int weight_cache_type,
+    int src_zp
 );
 
 template bool reorderAndCacheWeights<float>(
@@ -766,7 +795,8 @@ template bool reorderAndCacheWeights<float>(
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
     ReorderFunc<float> reorder_func,
-    int weight_cache_type
+    int weight_cache_type,
+    int src_zp
 );
 
 template bool reorderAndCacheWeights<int16_t>(
@@ -784,7 +814,8 @@ template bool reorderAndCacheWeights<int16_t>(
     const dim_t reorder_param2,
     GetReorderBufSizeFunc get_reorder_buf_size,
     ReorderFunc<int16_t> reorder_func,
-    int weight_cache_type
+    int weight_cache_type,
+    int src_zp
 );
 
 // Explicit instantiations for specific data types

@@ -836,7 +836,9 @@ class zendnn_custom_op {
 
     // ZenDNN Reorder API
     static bool zendnn_reorder(void *src, void *dst, uint k, uint n, bool trans,
-                               zendnn_data_type_t dt);
+                               zendnn_data_type_t weight_dt,
+                               zendnn_data_type_t src_dt = zendnn_u8, int src_zp = 0,
+                               bool is_resized = false);
 
     // ZenDNN Reorder Size API
     static size_t zendnn_reorder_size(uint k, uint n, bool trans,
