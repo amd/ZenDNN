@@ -94,13 +94,11 @@ struct Key_matmul {
     Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,
                unsigned int N,
                unsigned int lda, unsigned int ldb, unsigned int ldc, const void *B_Array,
-               unsigned int omp_num_threads, bool src_dims_, zendnn_blocking_desc_t blk_)
+               unsigned int omp_num_threads, bool src_dims_, zendnn_blocking_desc_t& blk_)
         : transpose_input(false), transpose_weights(TransB), m(1), k(K), n(N),
           lda(1), ldb(ldb), ldc(1), thread_count(omp_num_threads),
-          weights(B_Array), enable_src_dims(src_dims_) {
+          weights(B_Array), enable_src_dims(src_dims_), blk_size(blk_) {
 
-        // BLK size
-        blk_size = blk_;
         // Update specific variables if src_dims_ is true
         if (src_dims_) {
             transpose_input = false;
@@ -121,7 +119,7 @@ struct Key_matmul {
             }
         }
         // Since dealing with 2D MatMul Key
-        for (size_t i = 0; i < 2; ++i) {
+        for (int i = 0; i < 2; ++i) {
             if (other.blk_size.strides[i] != blk_size.strides[i]) {
                 return false;
             }
@@ -163,7 +161,7 @@ struct hash<Key_matmul> {
             seed = zendnn::impl::hash_combine(seed, (k.blk_size.inner_blks[idx]));
         }
         // Since dealing with 2D MatMul Key
-        for (size_t i = 0; i < 2; ++i) {
+        for (int i = 0; i < 2; ++i) {
             seed = zendnn::impl::hash_combine(seed, (k.blk_size.strides[i]));
         }
         return seed;
