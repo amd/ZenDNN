@@ -1,10 +1,4 @@
-#*******************************************************************************
-# Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
-# Notified per clause 4(b) of the license.
-#*******************************************************************************
-
-#===============================================================================
-# Copyright 2016-2022 Intel Corporation
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,97 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#===============================================================================
 
-if (NOT ZENDNN_BUILD_TESTS)
-    return()
+find_package(OpenMP REQUIRED)
+
+execute_process(
+    COMMAND bash -c "rm -rf _out/tests && mkdir -p _out/tests"
+    WORKING_DIRECTORY ${ZENDNN_DIR}
+    RESULT_VARIABLE TEST_DIR_RESULT)
+
+if(NOT TEST_DIR_RESULT EQUAL 0)
+    message(FATAL_ERROR "ZENDNN Tests, _out/tests failed")
 endif()
 
-if(POLICY CMP0065)
-    cmake_policy(SET CMP0065 NEW)
-endif()
+set(test_target_list zendnn_conv_test zendnn_avx_conv zendnn_avx_conv_param zendnn_avx_conv_maxpool zendnn_inference_f32 zendnn_avx_conv_param_fusion zendnn_avx_conv_param_direct ref_avx_conv_param zendnn_avx_conv_primitive_cache_test zendnn_matmul_int zendnn_matmul_generic_int8 zendnn_matmul_int4 zendnn_matmul_test zendnn_grp_matmul_test zendnn_matmulFusions_test zendnn_matmul_gelu_test zendnn_matmul_weight_cache_test zendnn_matmul_bf16_test zendnn_avx_maxpool_blocked embedding_bag_test grp_embedding_bag_test grp_embedding_mlp_test zendnn_block_size zendnn_matmul_inplace embedding_bag_benchmark zendnn_attention_multihead_bf16 zendnn_attention_multihead_f32 zendnn_sdpa_test)
 
-# propagate TEST specific flags
-append(CMAKE_C_FLAGS "${CMAKE_TEST_CCXX_FLAGS}")
-append(CMAKE_CXX_FLAGS "${CMAKE_TEST_CCXX_FLAGS}")
-
-set(CMAKE_TEST_CCXX_NOWARN_FLAGS)
-
-# propagate no warning flags
-append(CMAKE_TEST_CCXX_NOWARN_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
-
-# propagate sanitizer flags
-append(CMAKE_C_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
-append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
-
-# allow tests to include internal header files with, e.g.
-# include "src/common/zendnn_thread.hpp" ...
-include_directories_with_host_compiler(${PROJECT_SOURCE_DIR})
-# ... and allow the included files transitively include other headers files
-# e.g. include "common/zendnn_thread_parallel_nd.hpp" from "zendnn_thread.hpp"
-include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/src)
-
-if(WIN32 AND NOT MINGW)
-    if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")
-        # 2415: unused variable
-        append(CMAKE_TEST_CCXX_NOWARN_FLAGS "/Qdiag-disable:2415")
-    elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-        # c4244: conversion with possible loss of data
-        # c4996: unsafe / deprecated functions
-        append(CMAKE_TEST_CCXX_NOWARN_FLAGS "/wd4996 /wd4244")
-        if ("${ZENDNN_CPU_THREADING_RUNTIME}" STREQUAL "THREADPOOL" AND Eigen3_FOUND)
-            # c4267: conversion with possible loss of data
-            append(CMAKE_TEST_CCXX_NOWARN_FLAGS "/wd4267")
-        endif()
+foreach(test_target IN LISTS test_target_list)
+    if(${test_target} STREQUAL "zendnn_matmul_int")
+        set(src_test_file zendnn_matmul_int8_test)
+    elseif(${test_target} STREQUAL "zendnn_matmul_int4")
+        set(src_test_file zendnn_matmul_int4_test)
+    elseif(${test_target} STREQUAL "zendnn_matmul_generic_int8")
+        set(src_test_file zendnn_matmul_generic_int8_test)
+    elseif(${test_target} STREQUAL "embedding_bag_test")
+        set(src_test_file zendnn_embedding_bag_test)
+    elseif(${test_target} STREQUAL "grp_embedding_bag_test")
+        set(src_test_file zendnn_grp_embedding_bag_test)
+    elseif(${test_target} STREQUAL "grp_embedding_mlp_test")
+        set(src_test_file zendnn_grp_embedding_mlp_test)
+    elseif(${test_target} STREQUAL "zendnn_matmul_inplace")
+        set(src_test_file zendnn_matmul_inplace_custom_op_test)
+    elseif(${test_target} STREQUAL "embedding_bag_benchmark")
+        set(src_test_file zendnn_embedding_bag_benchmark)
+    elseif(${test_target} STREQUAL "zendnn_attention_multihead_bf16")
+        set(src_test_file zendnn_multihead_attention_bf16)
+    elseif(${test_target} STREQUAL "zendnn_attention_multihead_f32")
+        set(src_test_file zendnn_multihead_attention_f32)
+    else()
+        set(src_test_file ${test_target})
     endif()
-endif()
 
-append(CMAKE_C_FLAGS "${CMAKE_TEST_CCXX_NOWARN_FLAGS}")
-append(CMAKE_CXX_FLAGS "${CMAKE_TEST_CCXX_NOWARN_FLAGS}")
+    add_executable(${test_target} api_tests/${src_test_file}.cpp)
+    target_compile_options(${test_target} PRIVATE -fopenmp)
+    target_compile_options(${test_target} PRIVATE -Wno-narrowing)
 
-append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
-
-#if(NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND (UNIX OR MINGW))
-#    get_directory_property(include_dirs INCLUDE_DIRECTORIES)
-#    set(test_c_symbols "${CMAKE_CURRENT_BINARY_DIR}/test_c_symbols.c")
-#    add_custom_command(
-#        OUTPUT ${test_c_symbols}
-#        #COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/generate_c_symbols_refs.sh
-#        ${CMAKE_CURRENT_SOURCE_DIR}/.. ${test_c_symbols} ${include_dirs}
-#    )
-#    register_exe(test_c_symbols-c ${test_c_symbols} "test")
-# elseif(WIN32)
-# No Windows support for: test_c_symbols.c
-#endif()
-
-add_definitions_with_host_compiler(-DNOMINMAX) # to allow std::max on Windows with parentheses
-
-if(NOT ZENDNN_ENABLE_PRIMITIVE_CACHE)
-    add_definitions_with_host_compiler(-DZENDNN_DISABLE_PRIMITIVE_CACHE)
-endif()
-
-if ("${ZENDNN_CPU_THREADING_RUNTIME}" STREQUAL "THREADPOOL")
-    # Only enable this for threadpool runtime to avoid complaints about empty
-    # object files.
-    set(TEST_THREAD ${CMAKE_CURRENT_SOURCE_DIR}/test_thread.cpp)
-endif()
-
-# Switch on threading layer for GPU only configurations to speed up testing.
-# For non-dppcp compilers OpenMP threading will be used which is handled in
-# OpenMP.cmake.
-if(ZENDNN_WITH_SYCL AND ZENDNN_CPU_RUNTIME STREQUAL "NONE")
-    list(INSERT CMAKE_MODULE_PATH 0 ${PROJECT_SOURCE_DIR}/cmake)
-    find_package_tbb(REQUIRED)
-    list(REMOVE_AT CMAKE_MODULE_PATH 0)
-    handle_tbb_target()
-endif()
-
-add_subdirectory(api_tests)
-#add_subdirectory(gtests)
-#add_subdirectory(benchdnn)
-
-#if(NOT ZENDNN_WITH_SYCL AND NOT ZENDNN_ENABLE_STACK_CHECKER)
-#    if(UNIX OR MINGW)
-#        add_subdirectory(noexcept)
-#    endif()
-#endif()
+    target_link_libraries(${test_target} PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(${test_target} PRIVATE amdZenDNN)
+endforeach()

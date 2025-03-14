@@ -1,3 +1,7 @@
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 # Ignore below file
 system_hw_os_kernel_bios_info.txt
 _out
+zendnn-build
+third_party

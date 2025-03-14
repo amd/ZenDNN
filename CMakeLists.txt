@@ -1,10 +1,4 @@
-#*******************************************************************************
-# Modifications Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
-# Notified per clause 4(b) of the license.
-#******************************************************************************/
-
-#===============================================================================
-# Copyright 2016-2019 Intel Corporation
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,168 +11,428 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#===============================================================================
 
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.25)
 
-if(POLICY CMP0022)
-    cmake_policy(SET CMP0022 NEW)
+# Project name
+project(amdZenDNN)
+
+include(CMakePrintHelpers)
+
+find_package(Git REQUIRED)
+
+# Set C++ standard
+#set(CMAKE_CXX_STANDARD 17)
+#set(CMAKE_CXX_STANDARD_REQUIRED ON)
+#set(CMAKE_CXX_COMPILER "g++")
+
+set(ZENDNN_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${ZENDNN_DIR}/cmake2025")
+
+option(BUILD_SHARED_LIBS "Build SHARED/STATIC" ON)
+
+if(NOT DEFINED AOCC)
+  set(AOCC 0)
 endif()
 
-# Foo::Bar always refers to an IMPORTED target
-if(POLICY CMP0028)
-    cmake_policy(SET CMP0028 NEW)
+if(NOT DEFINED BLIS_API)
+  set(BLIS_API 0)
 endif()
 
-if(POLICY CMP0054)
-    cmake_policy(SET CMP0054 NEW)
+if(BLIS_API EQUAL 1)
+  set(AMDBLIS_ENABLE_CBLAS OFF)
+elseif(BLIS_API EQUAL 0)
+  set(AMDBLIS_ENABLE_CBLAS ON)
+else()
+   message(FATAL_ERROR, "Error, possible values for BLIS_API 0/1, received ${BLIS_API}")
 endif()
 
-# Enable RPATH on MacOS/OSX
-if(POLICY CMP0042)
-    cmake_policy(SET CMP0042 NEW)
-endif()
-
-# Do not export symbols from executables
-if(POLICY CMP0065)
-    cmake_policy(SET CMP0065 NEW)
-endif()
-
-# Pass linker flags to try_compile
-if(POLICY CMP0056)
-    cmake_policy(SET CMP0056 NEW)
-endif()
-
-# Always link with full path
-if(POLICY CMP0060)
-    cmake_policy(SET CMP0060 NEW)
-endif()
-
-# Pass compiler flags to try_compile
-if(POLICY CMP0066)
-    cmake_policy(SET CMP0066 NEW)
-endif()
-
-# Use <PackageName>_ROOT env. variable as a prefix
-if(POLICY CMP0074)
-    cmake_policy(SET CMP0074 NEW)
-endif()
-
-# Install rules order
-if(POLICY CMP0082)
-    cmake_policy(SET CMP0082 NEW)
+if(NOT DEFINED _GLIBCXX_USE_CXX11_ABI)
+  set(_GLIBCXX_USE_CXX11_ABI 0)
 endif()
 
 if("${CMAKE_BUILD_TYPE}" STREQUAL "")
-    message(STATUS "CMAKE_BUILD_TYPE is unset, defaulting to Release")
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING
-        "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel RelWithAssert RelWithMDd...")
+    set(CMAKE_BUILD_TYPE "Release")
 endif()
 
-set(PROJECT_NAME "ZenDNN")
-set(PROJECT_FULL_NAME "Zen Deep Neural Network Library (ZenDNN)")
-set(PROJECT_VERSION "5.0.1")
+#FBGEMM options and default values
+if(NOT DEFINED FBGEMM_TAG)
+  set(FBGEMM_TAG v0.6.0)
+endif()
 
-if (CMAKE_VERSION VERSION_LESS 3.0)
-    project(${PROJECT_NAME} C CXX)
+set(FBGEMM_BUILD_TESTS 0)
+
+set(FBGEMM_CMAKE_C_FLAGS   "-Wno-error=maybe-uninitialized -Wno-error=uninitialized")
+set(FBGEMM_CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI} -Wno-error=maybe-uninitialized -Wno-error=uninitialized")
+
+#AMD-BLIS options and default values
+if(NOT DEFINED AMDBLIS_TAG)
+  set(AMDBLIS_TAG AOCL-LPGEMM-012925)
+endif()
+
+option(AMDBLIS_ENABLE_BLAS "AMD-BLIS, ENABLE_BLAS" ON)
+
+if(NOT DEFINED AMDBLIS_ENABLE_ADDON)
+    set(AMDBLIS_ENABLE_ADDON aocl_gemm)
+endif()
+
+if(NOT DEFINED AMDBLIS_BLIS_CONFIG_FAMILY)
+    set(AMDBLIS_BLIS_CONFIG_FAMILY amdzen)
+endif()
+
+if(NOT DEFINED AMDBLIS_ENABLE_THREADING)
+    set(AMDBLIS_ENABLE_THREADING openmp)
+endif()
+
+cmake_host_system_information(RESULT NUM_CORES QUERY NUMBER_OF_PHYSICAL_CORES)
+string(REGEX MATCH "^[0-9]+" GCC_VERSION_MAJOR ${CMAKE_CXX_COMPILER_VERSION})
+
+if(GCC_VERSION_MAJOR GREATER_EQUAL 12)
+    set(CPP_STD 17)
+    set(AVX512_BF16_EN 1)
 else()
-    cmake_policy(SET CMP0048 NEW)
-    project(${PROJECT_NAME} VERSION "${PROJECT_VERSION}" LANGUAGES C CXX)
+    set(CPP_STD 14)
+    set(AVX512_BF16_EN 0)
 endif()
 
-if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "oneDNN supports 64 bit platforms only")
-endif()
+# Set the C++ standard
+set(CMAKE_CXX_STANDARD ${CPP_STD})
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set the target architecture.
-if(NOT ZENDNN_TARGET_ARCH)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*|ARM64.*)")
-        set(ZENDNN_TARGET_ARCH "AARCH64")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc64.*|PPC64.*|powerpc64.*)")
-        set(ZENDNN_TARGET_ARCH "PPC64")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(s390x.*|S390X.*)")
-        set(ZENDNN_TARGET_ARCH "S390X")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(rv.*|RV.*|riscv.*|RISCV.*)")
-        set(ZENDNN_TARGET_ARCH "RV64")
+#if AMDBLIS Package is not found
+#First check if AMDBLIS_LOCAL_SOURCE is defined and use the source code for build/install
+#and AMDBLIS_TAG if defined also, not used
+
+#AMDBLIS_LOCAL_SOURCE is not defined then download frm Github repositiory with the defined tag
+
+find_package(AMDBLIS)
+if(NOT AMDBLIS_FOUND)
+
+    if(AMDBLIS_LOCAL_SOURCE)
+        message(STATUS "AMDBLIS not found, using ${AMDBLIS_LOCAL_SOURCE}")
+        execute_process(
+            COMMAND bash -c "mkdir -p ${ZENDNN_DIR}/third_party && cd ${ZENDNN_DIR}/third_party && rm -rf amdblis-local-src && cp -R ${AMDBLIS_LOCAL_SOURCE} amdblis-local-src"
+            RESULT_VARIABLE EXEC_PROCESS_RESULT)
+        if(NOT EXEC_PROCESS_RESULT EQUAL 0)
+            message(FATAL_ERROR, "Error, cp ${AMDBLIS_LOCAL_SOURCE} failed to ${ZENDNN_DIR}/third_party/amdblis-local-src")
+        else()
+            message(STATUS, "INFO, cp ${AMDBLIS_LOCAL_SOURCE} successful")
+        endif()
+        set(AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR ${ZENDNN_DIR}/third_party/amdblis-local-src)
     else()
-        set(ZENDNN_TARGET_ARCH "X64")
+        message(STATUS "AMDBLIS not found, downloading")
+        include(cmake2025/download_amdblis.cmake)
+        set(AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR ${amdblis_SOURCE_DIR})
     endif()
-endif()
-message(STATUS "ZENDNN_TARGET_ARCH: ${ZENDNN_TARGET_ARCH}")
 
-list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+    set(BLIS_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/amdblis-build")
 
-set(CMAKE_SRC_CCXX_FLAGS)       # SRC specifics
-set(CMAKE_EXAMPLE_CCXX_FLAGS)   # EXAMPLE specifics
-set(CMAKE_TEST_CCXX_FLAGS)      # TESTS specifics
+    execute_process(
+        COMMAND bash -c "rm -rf ${BLIS_BINARY_DIR} && mkdir -p ${BLIS_BINARY_DIR} && export CXXFLAGS=\"-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}\" && cmake -B ${BLIS_BINARY_DIR} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBLIS_CONFIG_FAMILY=${AMDBLIS_BLIS_CONFIG_FAMILY} -DENABLE_ADDON=${AMDBLIS_ENABLE_ADDON} -DENABLE_THREADING=${AMDBLIS_ENABLE_THREADING} -DENABLE_BLAS=${AMDBLIS_ENABLE_BLAS} -DENABLE_CBLAS=${AMDBLIS_ENABLE_CBLAS} -DCMAKE_INSTALL_PREFIX=$ENV{ZENDNN_BLIS_PATH} ."
+        WORKING_DIRECTORY ${AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR}
+        RESULT_VARIABLE BASH_COMMAND_RESULT)
 
-string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
-
-include("cmake/zendnn_compat.cmake") 
-
-include("cmake/utils.cmake")
-include("cmake/options.cmake")
-include("cmake/SYCL.cmake")
-include("cmake/OpenMP.cmake")
-include("cmake/TBB.cmake")
-include("cmake/Threadpool.cmake")
-include("cmake/OpenCL.cmake")
-include("cmake/platform.cmake")
-include("cmake/SDL.cmake")
-include("cmake/ACL.cmake")
-include("cmake/blas.cmake")
-# include("cmake/doc.cmake")
-include("cmake/version.cmake")
-include("cmake/coverage.cmake")
-include("cmake/build_types.cmake")
-include("cmake/testing.cmake")
-include("cmake/host_compiler.cmake")
-include("cmake/configuring_primitive_list.cmake")
-
-if(UNIX OR MINGW)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
-    # Let SYCL to choose the C++ standard it needs.
-    if(NOT ZENDNN_WITH_SYCL)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS BUILD, CONFIG failed")
     endif()
+
+    execute_process(
+        COMMAND bash -c "cmake --build ${BLIS_BINARY_DIR} --parallel=${NUM_CORES}"
+        WORKING_DIRECTORY ${AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR}
+        RESULT_VARIABLE BASH_COMMAND_RESULT)
+
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS BUILD, BUILD failed")
+    endif()
+
+    execute_process(
+        COMMAND bash -c "cmake --install ${BLIS_BINARY_DIR}"
+        WORKING_DIRECTORY ${AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR}
+        RESULT_VARIABLE BASH_COMMAND_RESULT)
+
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS BUILD, INSTALL failed")
+    endif()
+
+    execute_process(
+            COMMAND bash -c "mkdir -p $ENV{ZENDNN_BLIS_PATH}/include/LP64 && cp $ENV{ZENDNN_BLIS_PATH}/include/*.h $ENV{ZENDNN_BLIS_PATH}/include/LP64"
+            WORKING_DIRECTORY ${ZENDNN_DIR}
+            RESULT_VARIABLE BASH_COMMAND_RESULT)
+
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS, POST INSTALL HEADERS-1 failed")
+    endif()
+
+    execute_process(
+            COMMAND bash -c "cp $ENV{ZENDNN_BLIS_PATH}/include/*.hh $ENV{ZENDNN_BLIS_PATH}/include/LP64"
+            WORKING_DIRECTORY ${ZENDNN_DIR}
+            RESULT_VARIABLE BASH_COMMAND_RESULT)
+
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS, POST INSTALL HEADERS-2 failed")
+    endif()
+
+    execute_process(
+            COMMAND bash -c "mkdir -p $ENV{ZENDNN_BLIS_PATH}/lib/LP64 && cp $ENV{ZENDNN_BLIS_PATH}/lib/libblis* $ENV{ZENDNN_BLIS_PATH}/lib/LP64"
+            WORKING_DIRECTORY ${ZENDNN_DIR}
+            RESULT_VARIABLE BASH_COMMAND_RESULT)
+
+    if(NOT BASH_COMMAND_RESULT EQUAL 0)
+        message(FATAL_ERROR "AMDBLIS, POST INSTALL LIB failed")
+    endif()
+
+    find_package(AMDBLIS REQUIRED)
+    message(STATUS "AMDBLIS, found with current build/install")
+else()
+    message(STATUS "AMDBLIS, found with pre-compiled binaries or previous build/install ")
+endif()
+message(STATUS "AMDBLIS, INCLUDES/LIBS,  ${AMDBLIS_INCLUDE_DIR}, ${AMDBLIS_LIB}")
+
+#if FBGEMM_ENABLE is 1, then only check, build
+if(FBGEMM_ENABLE EQUAL 1)
+    find_package(FBGEMM)
+    if(NOT FBGEMM_FOUND)
+        message(STATUS "FBGEMM not found, downloading")
+        include(cmake2025/download_fbgemm.cmake)
+        set(CMAKE_C_FLAGS ${FBGEMM_CMAKE_C_FLAGS})   
+        set(CMAKE_CXX_FLAGS ${FBGEMM_CMAKE_CXX_FLAGS})
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        add_subdirectory(${ZENDNN_DIR}/third_party/fbgemm ${CMAKE_BINARY_DIR}/third_party/fbgemm)
+        message(STATUS "FBGEMM, found with current build")
+    else()
+        message(STATUS "FBGEMM, found with pre-compiled binaries")
+    endif()
+else()
+    message(STATUS "FBGEMM, not included")
+endif()
+message(STATUS "FBGEMM, INCLUDE_DIRS/LIBRARIES, ${FBGEMM_INCLUDE_DIRS}, ${FBGEMM_LIBRARIES}")
+
+# Set Composable Kernel paths
+# Check if DEPEND_ON_CK is set to 1
+if(DEPEND_ON_CK EQUAL 1)
+    set(CK_PATH ${ZENDNN_CK_PATH})
+
+    # Set link flags
+    set(CK_LINK_FLAGS "-L${CK_PATH}/build/lib -lck_cpu_instance -lhost_tensor")
+
+    # Set defines
+    add_definitions(-DCK_NOGPU -DENABLE_CK)
+
+    # Set common flags
+    set(CK_COMMON_FLAGS "-Wno-attributes -Wno-ignored-attributes -Wno-write-strings")
+
+    # Set include directories
+    include_directories(${CK_PATH} ${CK_PATH}/include ${CK_PATH}/library/include)
 endif()
 
-# Handle cases when OpenMP runtime is requested but not found: override CPU
-# runtime to be sequential
-if(ZENDNN_CPU_RUNTIME STREQUAL "OMP" AND
-   ZENDNN_CPU_THREADING_RUNTIME STREQUAL "SEQ")
-    set(ZENDNN_CPU_RUNTIME "SEQ" CACHE STRING "" FORCE)
+# Check if uProf is enabled
+if(ZENDNN_ENABLE_UPROF)
+    set(UPROF_PATH "${UPROF_INSTALL_PATH}")
+    set(UPROF_INCLUDE_PATH "${UPROF_PATH}/include")
+    set(UPROF_LIB_PATH "${UPROF_PATH}/lib/x64")
+    add_definitions(-DUPROF_ENABLE=1)
+    set(UPROF_LINK "AMDProfileController")
+    set(CXX_UPROF_LINK "-Wl,--whole-archive ${UPROF_PATH}/lib/x64/libAMDProfileController.a -Wl,--no-whole-archive")
+else()
+    set(UPROF_PATH "")
+    set(UPROF_INCLUDE_PATH "")
+    set(UPROF_LIB_PATH "")
+    add_definitions(-DUPROF_ENABLE=0)
+    set(CXX_UPROF_LINK "")
 endif()
 
-enable_testing()
+if(ZENDNN_ENABLE_LIBXSMM)
+  set(LIBXSMM_PATH "${ZENDNN_LIBXSMM_PATH}")
+  set(LIBXSMM_INCLUDE_PATH "${LIBXSMM_PATH}/include")
+  set(LIBXSMM_LIB_PATH "${LIBXSMM_PATH}/lib")
+  set(LIBXSMM_LIBS dl xsmm xsmmnoblas xsmmext)
+else()
+  set(LIBXSMM_PATH "")
+  set(LIBXSMM_INCLUDE_PATH "")
+  set(LIBXSMM_LIB_PATH "")
+  set(LIBXSMM_LIBS "")
+endif()
 
-include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/inc)
-
-configure_file(
-    "${PROJECT_SOURCE_DIR}/inc/zendnn_config.h.in"
-    "${PROJECT_BINARY_DIR}/inc/zendnn_config.h"
+#zendnn source files
+file(GLOB SRCS
+    "src/common/*.cpp"
+    "src/cpu/*.cpp"
+    "src/cpu/gemm/*.cpp"
+    "src/cpu/gemm/f32/*.cpp"
+    "src/cpu/gemm/s8x8s32/*.cpp"
+    "src/cpu/matmul/*.cpp"
+    "src/cpu/reorder/*.cpp"
+    "src/cpu/rnn/*.cpp"
+    "src/cpu/x64/*.cpp"
+    "src/cpu/x64/brgemm/*.cpp"
+    "src/cpu/x64/gemm/*.cpp"
+    "src/cpu/x64/gemm/amx/*.cpp"
+    "src/cpu/x64/gemm/bf16/*.cpp"
+    "src/cpu/x64/gemm/f32/*.cpp"
+    "src/cpu/x64/gemm/s8x8s32/*.cpp"
+    "src/cpu/x64/injectors/*.cpp"
+    "src/cpu/x64/lrn/*.cpp"
+    "src/cpu/x64/matmul/*.cpp"
+    "src/cpu/x64/prelu/*.cpp"
+    "src/cpu/x64/rnn/*.cpp"
+    "src/cpu/x64/shuffle/*.cpp"
+    "src/cpu/x64/utils/*.cpp"
 )
-include_directories_with_host_compiler(${PROJECT_BINARY_DIR}/inc)
 
-if(ZENDNN_INSTALL_MODE STREQUAL "BUNDLE" AND NOT DEFINED CMAKE_INSTALL_LIBDIR)
-    # define CMAKE_INSTALL_LIBDIR as "lib" in the case of bundle
-    set(CMAKE_INSTALL_LIBDIR "lib")
+add_library(amdZenDNN ${SRCS})
+
+set_target_properties(amdZenDNN PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(FBGEMM_ENABLE EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC FBGEMM_ENABLE=1)
+else()
+    target_compile_definitions(amdZenDNN PUBLIC FBGEMM_ENABLE=0)
 endif()
 
-include(GNUInstallDirs)
-include(CMakePackageConfigHelpers)
+if(ZENDNN_TF_USE_CUSTOM_BLIS EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC USE_CUSTOM_BLIS=1)
+else()
+    target_compile_definitions(amdZenDNN PUBLIC USE_CUSTOM_BLIS=0)
+endif()
 
-add_subdirectory(src)
-#add_subdirectory(examples)
+if(BLIS_API EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC ZENDNN_USE_AOCL_BLIS_API=1)
+endif()
+
+# set LPGEMM to 0 if it's not already set (default)
+if(NOT DEFINED LPGEMM)
+  set(LPGEMM 0)
+endif()
+
+if(NOT DEFINED LPGEMM_V4_2)
+  set(LPGEMM_V4_2 0)
+endif()
+
+if(LPGEMM_V5_0 EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC ZENDNN_ENABLE_LPGEMM_V5_0=1)
+elseif(LPGEMM_V4_2 EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC ZENDNN_ENABLE_LPGEMM=1)
+    target_compile_definitions(amdZenDNN PUBLIC ZENDNN_ENABLE_LPGEMM_V4_2=1)
+elseif(LPGEMM EQUAL 1)
+    target_compile_definitions(amdZenDNN PUBLIC ZENDNN_ENABLE_LPGEMM=1)
+endif()
+
+target_compile_definitions(amdZenDNN PUBLIC BIAS_ENABLED=1)
+target_compile_definitions(amdZenDNN PUBLIC ZENDNN_ENABLE=1)
+target_compile_definitions(amdZenDNN PUBLIC ZENDNN_X64=1)
+target_compile_definitions(amdZenDNN PUBLIC AVX512_BF16_EN=${AVX512_BF16_EN})
+target_compile_definitions(amdZenDNN PUBLIC _GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
+if("${CMAKE_BUILD_TYPE}" STREQUAL "Release")
+    target_compile_definitions(amdZenDNN PUBLIC NDEBUG)
+endif()
+
+if(AOCC EQUAL 0)
+    if(GCC_VERSION_MAJOR GREATER_EQUAL 12)
+        target_compile_options(amdZenDNN PUBLIC -march=znver2)
+    else()
+        target_compile_options(amdZenDNN PUBLIC -march=znver1)
+    endif()
+else()
+    target_compile_options(amdZenDNN PUBLIC -march=znver2)
+endif()
+if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+    target_compile_options(amdZenDNN PUBLIC -ggdb)
+endif()
+
+target_compile_options(amdZenDNN PUBLIC -fopenmp -fconcepts)
+target_compile_options(amdZenDNN PUBLIC -Wno-format-zero-length -Wno-format-truncation)
+target_compile_options(amdZenDNN PUBLIC -Wno-unused-result -Wno-stringop-overflow)
+target_compile_options(amdZenDNN PUBLIC -Wno-format -Wno-narrowing)
+target_compile_options(amdZenDNN PUBLIC -mssse3)
+
+target_include_directories(amdZenDNN PUBLIC ${AMDBLIS_INCLUDE_DIR})
+target_include_directories(amdZenDNN PUBLIC ${FBGEMM_INCLUDE_DIRS})
+target_include_directories(amdZenDNN PUBLIC ${ZENDNN_DIR})
+target_include_directories(amdZenDNN PUBLIC inc)
+target_include_directories(amdZenDNN PUBLIC src)
+target_include_directories(amdZenDNN PUBLIC src/common)
+target_include_directories(amdZenDNN PUBLIC src/cpu)
+target_include_directories(amdZenDNN PUBLIC src/tpp)
+
+set(dep_target "amdblis::amdblis")
+if(TARGET ${dep_target})
+   message(STATUS "TARGET ${dep_target}, exist")
+   target_link_libraries(amdZenDNN PUBLIC ${dep_target})
+else()
+   message(STATUS "TARGET ${dep_target}, doesn't exist")
+endif()
+
+if(FBGEMM_ENABLE EQUAL 1)
+    set(dep_target_list fbgemm fbgemm::fbgemm fbgemm::asmjit fbgemm::cpuinfo fbgemm::clog)
+    foreach(dep_target IN LISTS dep_target_list)
+        if(TARGET ${dep_target} EQUAL 0)
+            message(STATUS "TARGET ${dep_target}, doesn't exist")
+        else()
+            message(STATUS "TARGET ${dep_target}, exist")
+            target_link_libraries(amdZenDNN PUBLIC ${dep_target})
+        endif()
+    endforeach()
+endif()
+
+#get ZENDNN Version Hash
+execute_process(COMMAND ${GIT_EXECUTABLE} -c log.showSignature=false log --no-abbrev-commit --oneline -1 --format=%H
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    RESULT_VARIABLE RESULT
+    OUTPUT_VARIABLE ZENDNN_LIB_VERSION_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+if(NOT RESULT EQUAL 0)
+    message(FATAL_ERROR "ZENDNN, git log, failed")
+endif()
+set(ZENDNN_LIB_VERSION_HASH "${ZENDNN_LIB_VERSION_HASH}" CACHE STRING "ZENDNN_LIB_VERSION_HASH" FORCE)
+
 add_subdirectory(tests)
 
-if(ZENDNN_INSTALL_MODE STREQUAL "BUNDLE")
-    install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_PREFIX})
-    install(FILES THIRD-PARTY-PROGRAMS DESTINATION ${CMAKE_INSTALL_PREFIX})
-    install(FILES README.md DESTINATION ${CMAKE_INSTALL_PREFIX})
-else()
-    # Cannot use CMAKE_INSTALL_DOCDIR since it uses PROJECT_NAME and not ZENDNN_LIBRARY_NAME
-    install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
-    install(FILES THIRD-PARTY-PROGRAMS DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
-    install(FILES README.md DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/${ZENDNN_LIBRARY_NAME})
-endif()
+cmake_print_variables(CMAKE_CXX_COMPILER_VERSION)
+cmake_print_variables(CMAKE_CXX_FLAGS)
+cmake_print_variables(CMAKE_MODULE_PATH)
+cmake_print_variables(CMAKE_CXX_STANDARD)
+cmake_print_variables(CMAKE_BUILD_TYPE)
+cmake_print_variables(BUILD_SHARED_LIBS)
+
+cmake_print_variables(_GLIBCXX_USE_CXX11_ABI)
+
+cmake_print_variables(NUM_CORES)
+cmake_print_variables(GCC_VERSION_MAJOR)
+cmake_print_variables(AVX512_BF16_EN)
+
+cmake_print_variables(FBGEMM_TAG)
+cmake_print_variables(FBGEMM_CMAKE_C_FLAGS)
+cmake_print_variables(FBGEMM_CMAKE_CXX_FLAGS)
+cmake_print_variables(FBGEMM_ENABLE)
+cmake_print_variables(FBGEMM_FOUND)
+cmake_print_variables(FBGEMM_VERSION_HASH)
+cmake_print_variables(FBGEMM_LIBRARIES)
+cmake_print_variables(FBGEMM_INCLUDE_DIRS)
+
+cmake_print_variables(AMDBLIS_TAG)
+cmake_print_variables(AMDBLIS_ENABLE_BLAS)
+cmake_print_variables(AMDBLIS_ENABLE_CBLAS)
+cmake_print_variables(AMDBLIS_ENABLE_ADDON)
+cmake_print_variables(AMDBLIS_BLIS_CONFIG_FAMILY)
+cmake_print_variables(AMDBLIS_ENABLE_THREADING)
+cmake_print_variables(AMDBLIS_LOCAL_SOURCE)
+cmake_print_variables(AMDBLIS_FOUND)
+cmake_print_variables(AMDBLIS_VERSION_HASH)
+cmake_print_variables(AMDBLIS_LIB)
+cmake_print_variables(AMDBLIS_INCLUDE_DIR)
+
+cmake_print_variables(AOCC)
+cmake_print_variables(BLIS_API)
+cmake_print_variables(LPGEMM)
+cmake_print_variables(LPGEMM_V4_2)
+cmake_print_variables(LPGEMM_V5_0)
+cmake_print_variables(ZENDNN_TF_USE_CUSTOM_BLIS)
+cmake_print_variables(ZENDNN_LIB_VERSION_HASH)
+
+cmake_print_properties(TARGETS amdZenDNN PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
+cmake_print_properties(TARGETS amdblis::amdblis PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
+cmake_print_properties(TARGETS fbgemm::fbgemm PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
+cmake_print_properties(TARGETS fbgemm::asmjit PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
+cmake_print_properties(TARGETS fbgemm::cpuinfo PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
+cmake_print_properties(TARGETS fbgemm::clog amdZenDNN PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
