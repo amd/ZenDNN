@@ -407,7 +407,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         const auto group_dims = pd()->attr()->woqScales_.group_dims_;
         int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
         data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
-        matmul_woq_wrapper(ctx, zendnn_f32, weights_type, zendnn_f32, zendnn_f32,
+        matmul_woq_wrapper(ctx, zenEnvObj, zendnn_f32, weights_type, zendnn_f32,
+                           zendnn_f32,
                            Layout,
                            strcmp(transA, "N"),
                            strcmp(transB, "N"),
@@ -415,7 +416,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            bias == NULL ? NULL :(char *)bias,
                            pd()->attr()->post_ops_, has_eltwise_relu,
                            geluType, beta, (char *)dst, ldc, woq_scales, 0/*zp*/,
-                           woq_scale_size, beta, is_weights_const, group_size,
+                           woq_scale_size, is_weights_const, group_size,
                            woq_scales_type);
     }
     else if ((float *)bias == NULL) {

@@ -186,6 +186,8 @@ class zendnnEnv {
     uint    zenEBThreadAlgo;
     uint    zenEBAlgo;
     uint    zenWeightCache;
+    uint    auto_skip_iteration;
+    uint    auto_evaluate_iteration;
     bool    zenINT8format;
     bool    zenStaticScaleCache;
     bool    zenBiasCache;
@@ -275,6 +277,12 @@ class zendnnEnv {
         if (zenEBAlgo>zenEBAlgoType::EB_OP_ZENDNN) {
             zenEBAlgo = zenEBAlgoType::EB_OP_ZENDNN;
         }
+
+        //Number of iterations to run without creating map for each unique layer.
+        auto_skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER", 0);
+
+        //Number of iterations to run for creating map for each layer.
+        auto_evaluate_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 0);
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
         zenWeightCache = zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
         if (zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {

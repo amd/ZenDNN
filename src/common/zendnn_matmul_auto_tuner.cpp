@@ -28,10 +28,11 @@
 #include "utils.hpp"
 
 using namespace zendnn;
+extern std::mutex map_mutex;
 
 //Total num of algo available
 #define NUM_OF_ALGO 2
-#define NUM_OF_ALGO_INT8 2
+#define NUM_OF_ALGO_WOQ 3
 //Total num of struct members and algo field in MAP.
 #define NUM_MAP_VALUES 10
 //CPU information size
@@ -39,12 +40,12 @@ using namespace zendnn;
 
 //Skip Iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_SKIP_ITER
-#define MATMUL_SKIP_ITER_INT8 2
-#define MATMUL_SKIP_ITER_FP32 2
+#define MATMUL_SKIP_ITER 2
+#define MATMUL_SKIP_ITER_WOQ 3
 //Evaluate iterations for auto tuner
 //Can be set by environment variable ZENDNN_MATMUL_EVALUATE_ITER
-#define MATMUL_EVALUATE_ITER_INT8 2
-#define MATMUL_EVALUATE_ITER_FP32 2
+#define MATMUL_EVALUATE_ITER 2
+#define MATMUL_EVALUATE_ITER_WOQ 3
 
 //This tracks the no. of times graph executed
 // from the framework.
@@ -67,12 +68,6 @@ matmul_kernel_map;
 //Map value is tuple of (iteration count, execution time of algo, Algo Path)
 std::unordered_map<Key_matmul,std::tuple<unsigned int, float, unsigned int>>
         matmul_kernel_map1_helper;
-
-//Map value is tuple of (vector<pair>, execution time of algo, Algo Path)
-//Each element of vector represents pair of
-//iteration count and average time for each algo(iteration count, average time)
-std::unordered_map<Key_matmul,std::tuple<std::vector<std::pair<unsigned int,float>>, float, unsigned int>>
-        matmul_kernel_map2_helper;
 
 //Writing in the file from the map.
 int map_write_to_file() {
@@ -213,6 +208,195 @@ int map_read_from_file() {
     return 0;
 }
 
+/*WOQ AutoTuner
+ *
+ Based on iteration count
+ Makes use of eval_count to decide when to fetch value from map.
+ Uses iteration count of each unique layer.
+ Doesn't need framework to increment the graph_exe_count.
+
+ Map value tuple
+ <
+   iteration_count,
+   time,
+   algo
+ >
+*/
+//Start
+int auto_compute_matmul_woq(
+    const impl::exec_ctx_t &ctx,
+    zendnn::zendnnEnv zenEnvObj,
+    int src_type,
+    int weights_type,
+    int dst_type,
+    int bias_type,
+    const bool Layout,
+    const bool transA,
+    const bool transB,
+    const int m,
+    const int k,
+    const int n,
+    const float alpha,
+    const char *input,
+    const int lda,
+    const char *weights,
+    const int ldb,
+    const char *bias,
+    const impl::post_ops_t &po_ops,
+    const bool has_eltwise_relu,
+    const int geluType,
+    const float beta,
+    char *dst,
+    const int ldc,
+    bool is_weights_const,
+    float *wei_scale,
+    int scale_size,
+    int group_size,
+    zendnn_data_type_t scale_dt
+) {
+    //It is used to know if weights address should be enabled or not for map.
+    //0: disable, 1: enable.
+    unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
+
+    Key_matmul key_obj(transA, transB, m, k, n, lda, ldb, ldc,
+                       weights, zenEnvObj.omp_num_threads, true);
+
+    //This condition makes sure that address
+    //doesn't gets saved while using persistent map.
+    key_obj.weights = mapType == 1 ? weights : NULL;
+
+    float cur_algo_time; //current algorithm's execution time
+    struct timeval start_n, end_n;
+
+
+    zenEnvObj.auto_skip_iteration = zenEnvObj.auto_skip_iteration == 0 ?
+                                    MATMUL_SKIP_ITER_WOQ : zenEnvObj.auto_skip_iteration;
+    zenEnvObj.auto_evaluate_iteration = zenEnvObj.auto_evaluate_iteration == 0 ?
+                                        MATMUL_EVALUATE_ITER_WOQ : zenEnvObj.auto_evaluate_iteration;
+
+    //finds object in map
+    auto found_obj = matmul_kernel_map1_helper.find(key_obj);
+
+    //If current iterations less than Skip iteration then run default algo.
+    //Checks using the (0) element of map value that denotes count of iterations in map
+    if (found_obj == matmul_kernel_map1_helper.end() ||
+            std::get<0>(found_obj->second) < zenEnvObj.auto_skip_iteration) {
+
+        zendnnVerbose(ZENDNN_PROFLOG,"AutoTuner WOQ SKIP Iteration");
+        //Set AOCL GEMM algo for skip iterations.
+        zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
+
+        //If Key not found in map then time the algo and add new element to map
+        if (found_obj == matmul_kernel_map1_helper.end()) {
+
+            //Time start
+#ifdef _WIN32
+            auto start_n = std::chrono::high_resolution_clock::now();
+#else
+            gettimeofday(&start_n, 0);
+#endif
+
+            matmul_woq_wrapper(ctx, zenEnvObj, src_type, weights_type, dst_type, bias_type,
+                               Layout,
+                               transA, transB,
+                               m, k, n, alpha, input, lda, weights, ldb, bias,
+                               po_ops, has_eltwise_relu,
+                               geluType, beta, dst, ldc, wei_scale, 0, scale_size,
+                               is_weights_const, group_size, scale_dt);
+            //Time end
+#ifdef _WIN32
+            auto end_n = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> difference = end_n - start_n;
+            cur_algo_time = difference.count();
+#else
+            gettimeofday(&end_n, 0);
+            cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f
+                            + (end_n.tv_usec - start_n.tv_usec)/1000.0f; //time in milliseconds
+#endif
+
+            //Create new entry
+            map_mutex.lock();
+            //Map value is tuple of (iteration count, execution time of algo, Algo Path)
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16};
+            //Simplified Map having Key as struct and value as Algo.
+            matmul_kernel_map[key_obj] = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
+            map_mutex.unlock();
+        }
+        //If key found then increment the iter_count and run next algo.
+        else {
+            zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_WOQ)+1;
+            std::get<0>(found_obj->second) += 1;
+            matmul_woq_wrapper(ctx, zenEnvObj, src_type, weights_type, dst_type, bias_type,
+                               Layout,
+                               transA, transB,
+                               m, k, n, alpha, input, lda, weights, ldb, bias,
+                               po_ops, has_eltwise_relu,
+                               geluType, beta, dst, ldc, wei_scale, 0, scale_size,
+                               is_weights_const, group_size, scale_dt);
+        }
+    }
+    //Read Value from map.
+    //Runs after skip iterations and evaluation iterations are done.
+    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+             zenEnvObj.auto_skip_iteration) {
+
+        //Get best algo for given layer from MAP
+        zenEnvObj.zenBF16GEMMalgo = matmul_kernel_map[key_obj];
+        matmul_woq_wrapper(ctx, zenEnvObj, src_type, weights_type, dst_type, bias_type,
+                           Layout,
+                           transA, transB,
+                           m, k, n, alpha, input, lda, weights, ldb, bias,
+                           po_ops, has_eltwise_relu,
+                           geluType, beta, dst, ldc, wei_scale, 0, scale_size,
+                           is_weights_const, group_size, scale_dt);
+    }
+    //Updates the map values by running different algorithms
+    else {
+
+        //Get the number of iteration already ran and select Algo to run for current iteration
+        //get<0>(found_obj->second) = count of iteration
+        zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_WOQ) +1;
+        std::get<0>(found_obj->second) += 1;
+        //timer start
+#ifdef _WIN32
+        auto start_n = std::chrono::high_resolution_clock::now();
+#else
+        gettimeofday(&start_n, 0);
+#endif
+        matmul_woq_wrapper(ctx, zenEnvObj, src_type, weights_type, dst_type, bias_type,
+                           Layout,
+                           transA, transB,
+                           m, k, n, alpha, input, lda, weights, ldb, bias,
+                           po_ops, has_eltwise_relu,
+                           geluType, beta, dst, ldc, wei_scale, 0, scale_size,
+                           is_weights_const, group_size, scale_dt);
+        //timer end
+#ifdef _WIN32
+        auto end_n = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> difference = end_n - start_n;
+        cur_algo_time = difference.count();
+#else
+        gettimeofday(&end_n, 0);
+        cur_algo_time = (end_n.tv_sec - start_n.tv_sec) * 1000.0f +
+                        (end_n.tv_usec - start_n.tv_usec)/ 1000.0f; //time in milliseconds
+#endif
+        zendnnVerbose(ZENDNN_PROFLOG,"AutoTuner WOQ Evaluate Iteration algo:",
+                      zenEnvObj.zenBF16GEMMalgo, " time:",cur_algo_time);
+
+        //If current run gives better timing then update
+        if (cur_algo_time < std::get<1>(found_obj->second)) {
+            std::get<1>(found_obj->second) = cur_algo_time; //Minimum time for chosen algo
+            std::get<2>(found_obj->second) =
+                zenEnvObj.zenBF16GEMMalgo; //Algo with minimum time (1-NUM_OF_ALGO_WOQ)
+            matmul_kernel_map[key_obj] = zenEnvObj.zenBF16GEMMalgo;
+        }
+
+    }
+
+    return zenEnvObj.zenBF16GEMMalgo;
+}
+//END
+
 /*INT8 AutoTuner
  *
  Based on iteration count
@@ -280,15 +464,10 @@ int auto_compute_matmul_int8(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                                  MATMUL_SKIP_ITER_INT8);
-
-    //Number of iterations to run for creating map for each layer.
-    unsigned int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
-                                  MATMUL_EVALUATE_ITER_INT8);
+    zenEnvObj.auto_skip_iteration = zenEnvObj.auto_skip_iteration == 0 ?
+                                    MATMUL_SKIP_ITER : zenEnvObj.auto_skip_iteration;
+    zenEnvObj.auto_evaluate_iteration = zenEnvObj.auto_evaluate_iteration == 0 ?
+                                        MATMUL_EVALUATE_ITER : zenEnvObj.auto_evaluate_iteration;
 
     //finds object in map
     auto found_obj = matmul_kernel_map1_helper.find(key_obj);
@@ -296,7 +475,7 @@ int auto_compute_matmul_int8(
     //If current iterations less than Skip iteration then run default algo.
     //Checks using the (0) element of map value that denotes count of iterations in map
     if (found_obj == matmul_kernel_map1_helper.end() ||
-            std::get<0>(found_obj->second) < skip_iteration) {
+            std::get<0>(found_obj->second) < zenEnvObj.auto_skip_iteration) {
 
         //Set AOCL GEMM algo for skip iterations.
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
@@ -331,12 +510,16 @@ int auto_compute_matmul_int8(
 #endif
 
             //Create new entry
-            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8}; // {iter_count, time, algo}
+            map_mutex.lock();
+            //Map value is tuple of (iteration count, execution time of algo, Algo Path)
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8};
+            //Simplified Map having Key as struct and value as Algo.
             matmul_kernel_map[key_obj] = zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8;
+            map_mutex.unlock();
         }
         //If key found then increment the iter_count and run next algo.
         else {
-            zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_INT8)+1;
+            zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO)+1;
             std::get<0>(found_obj->second) += 1;
             matmul_int8_wrapper(ctx, zenEnvObj, src_type, dst_type, bias_type, Layout,
                                 transpose_input, transpose_weights,
@@ -350,7 +533,8 @@ int auto_compute_matmul_int8(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > evaluate_iteration + skip_iteration) {
+    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+             zenEnvObj.auto_skip_iteration) {
 
         //Get best algo for given layer from MAP
         zenEnvObj.zenINT8GEMMalgo = matmul_kernel_map[key_obj];
@@ -368,7 +552,7 @@ int auto_compute_matmul_int8(
 
         //Get the number of iteration already ran and select Algo to run for current iteration
         //get<0>(found_obj->second) = count of iteration
-        zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO_INT8)
+        zenEnvObj.zenINT8GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO)
                                     +1;
         std::get<0>(found_obj->second) += 1;
         //timer start
@@ -450,15 +634,10 @@ int auto_compute_matmul_fp32(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                                  MATMUL_SKIP_ITER_FP32);
-
-    //Number of iterations to run for creating map for each layer.
-    unsigned int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
-                                  MATMUL_EVALUATE_ITER_FP32);
+    zenEnvObj.auto_skip_iteration = zenEnvObj.auto_skip_iteration == 0 ?
+                                    MATMUL_SKIP_ITER : zenEnvObj.auto_skip_iteration;
+    zenEnvObj.auto_evaluate_iteration = zenEnvObj.auto_evaluate_iteration == 0 ?
+                                        MATMUL_EVALUATE_ITER : zenEnvObj.auto_evaluate_iteration;
 
     //finds object in map
     auto found_obj = matmul_kernel_map1_helper.find(key_obj);
@@ -466,7 +645,7 @@ int auto_compute_matmul_fp32(
     //If current iterations less than Skip iteration then run default algo.
     //Checks using the (0) element of map value that denotes count of iterations in map
     if (found_obj == matmul_kernel_map1_helper.end() ||
-            std::get<0>(found_obj->second) < skip_iteration) {
+            std::get<0>(found_obj->second) < zenEnvObj.auto_skip_iteration) {
 
         //Set algo 3 initially
         zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
@@ -497,8 +676,12 @@ int auto_compute_matmul_fp32(
 #endif
 
             //Create new entry
-            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32}; // {iter_count, time, algo}
+            map_mutex.lock();
+            //Map value is tuple of (iteration count, execution time of algo, Algo Path)
+            matmul_kernel_map1_helper[key_obj] = {1, cur_algo_time, zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32};
+            //Simplified Map having Key as struct and value as Algo.
             matmul_kernel_map[key_obj] = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
+            map_mutex.unlock();
         }
         //If key found then increment the iter_count and run next algo.
         else {
@@ -511,7 +694,8 @@ int auto_compute_matmul_fp32(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > evaluate_iteration + skip_iteration) {
+    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+             zenEnvObj.auto_skip_iteration) {
 
         //Get best algo for given layer from MAP
         zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];

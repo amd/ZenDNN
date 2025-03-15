@@ -1208,6 +1208,38 @@ extern "C"
         int scale_type
     );
 
+    int auto_compute_matmul_woq(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        int src_type,
+        int weights_type,
+        int dst_type,
+        int bias_type,
+        const bool Layout,
+        const bool transA,
+        const bool transB,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const char *input,
+        const int lda,
+        const char *weights,
+        const int ldb,
+        const char *bias,
+        const impl::post_ops_t &po_ops,
+        const bool has_eltwise_relu,
+        const int geluType,
+        const float beta,
+        char *dst,
+        const int ldc,
+        bool is_weights_const,
+        float *wei_scale,
+        int scale_size,
+        int group_size,
+        zendnn_data_type_t scale_dt
+    );
+
     int auto_compute_matmul_int8(
         const zendnn::impl::exec_ctx_t &ctx,
         zendnn::zendnnEnv zenEnvObj,
@@ -1249,6 +1281,7 @@ extern "C"
 
     int matmul_woq_wrapper(
         const zendnn::impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
         int src_type,
         int weights_type,
         int dst_type,
@@ -1274,7 +1307,6 @@ extern "C"
         float *wei_scale,
         const int32_t zero_point_weights,
         int scale_size,
-        float do_sum,
         bool is_weights_const,
         int group_size,
         zendnn_data_type_t scale_dt

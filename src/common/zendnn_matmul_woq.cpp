@@ -368,7 +368,6 @@ int ref_woq_bf16(
     float *wei_scale,
     const int32_t zero_point_weights,
     int scale_size,
-    float do_sum,
     bool is_weights_const,
     int group_size,
     zendnn_data_type_t scale_dt
@@ -502,7 +501,6 @@ int ref_woq_f32(
     float *wei_scale,
     const int32_t zero_point_weights,
     int scale_size,
-    float do_sum,
     bool is_weights_const,
     int group_size,
     zendnn_data_type_t scale_dt
@@ -793,7 +791,6 @@ int aocl_woq_bf16(
     float *wei_scale,
     const int32_t zero_point_weights,
     int scale_size,
-    float do_sum,
     bool is_weights_const,
     int group_size,
     zendnn_data_type_t scale_dt
@@ -970,6 +967,7 @@ int aocl_woq_bf16(
 
 int matmul_woq_wrapper(
     const impl::exec_ctx_t &ctx,
+    zendnn::zendnnEnv zenEnvObj,
     int src_type,
     int weights_type,
     int dst_type,
@@ -995,13 +993,11 @@ int matmul_woq_wrapper(
     float *wei_scale,
     const int32_t zero_point_weights,
     int scale_size,
-    float do_sum,
     bool is_weights_const,
     int group_size,
     zendnn_data_type_t scale_dt
 ) {
     //WOQ kernel
-    zendnnEnv zenEnvObj = readEnv();
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
 
     //Due to limitation of current aocl kernels
@@ -1011,8 +1007,7 @@ int matmul_woq_wrapper(
 
     //TODO: Seperate Implementation of Autotuner for WOQ(MATMUL_AUTO_BF16)
     if (src_type == zendnn_bf16) {
-        if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16 ||
-                zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) {
+        if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) {
             // For Higher thread count(i.e >128) AOCL S4 Kernels gives optimal performance
             if (zenEnvObj.omp_num_threads > 128) {
                 zenEnvObj.zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
@@ -1068,7 +1063,7 @@ int matmul_woq_wrapper(
                           transA, transB,
                           M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
                           has_eltwise_relu, geluType, beta, (char *)dst, ldc,
-                          wei_scale, 0, scale_size, do_sum,
+                          wei_scale, 0, scale_size,
                           is_weights_const, group_size, scale_dt);
         }
         else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) {
@@ -1076,7 +1071,7 @@ int matmul_woq_wrapper(
                          transA, transB,
                          M, K, N, alpha, (int16_t *)src, lda, (int8_t *)weights, ldb, bias,
                          has_eltwise_relu, geluType, beta, (char *)dst, ldc,
-                         wei_scale, 0, scale_size, do_sum,
+                         wei_scale, 0, scale_size,
                          is_weights_const, group_size, scale_dt);
         }
         else if (zenEnvObj.zenBF16GEMMalgo ==
@@ -1116,7 +1111,7 @@ int matmul_woq_wrapper(
                     transA, transB,
                     M, K, N, alpha, (float *)src, lda, (int8_t *)weights, ldb, (const float *)bias,
                     has_eltwise_relu, geluType, beta, (float *)dst, ldc,
-                    wei_scale, 0, scale_size, do_sum,
+                    wei_scale, 0, scale_size,
                     is_weights_const, group_size, scale_dt);
     }
     zendnnVerbose(ZENDNN_PROFLOG,"zendnn_woq_matmul auto_tuner=",

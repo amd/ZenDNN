@@ -1313,15 +1313,10 @@ int auto_compute_matmul_bf16(
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
 
-    //Number of iterations to run without creating map for each unique layer.
-    unsigned int skip_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER",
-                                  MATMUL_SKIP_ITER_BF16);
-
-    //Number of iterations to run for creating map for each layer.
-    unsigned int evaluate_iteration =
-        zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER",
-                                  MATMUL_EVALUATE_ITER_BF16);
+    zenEnvObj.auto_skip_iteration = zenEnvObj.auto_skip_iteration == 0 ?
+                                    MATMUL_SKIP_ITER_BF16 : zenEnvObj.auto_skip_iteration;
+    zenEnvObj.auto_evaluate_iteration = zenEnvObj.auto_evaluate_iteration == 0 ?
+                                        MATMUL_EVALUATE_ITER_BF16 : zenEnvObj.auto_evaluate_iteration;
 
     //finds object in map
     auto found_obj = matmul_kernel_map_bf16_helper.find(key_obj_auto);
@@ -1329,7 +1324,7 @@ int auto_compute_matmul_bf16(
     //If current iterations less than Skip iteration then run default algo.
     //Checks using the (0) element of map value that denotes count of iterations in map
     if (found_obj == matmul_kernel_map_bf16_helper.end() ||
-            std::get<0>(found_obj->second) < skip_iteration) {
+            std::get<0>(found_obj->second) < zenEnvObj.auto_skip_iteration) {
 
         zendnnVerbose(ZENDNN_PROFLOG,"AutoTuner BF16 SKIP Iteration");
         //Set aocl gemm initially
@@ -1364,9 +1359,13 @@ int auto_compute_matmul_bf16(
 #endif
 
             //Create new entry
-            matmul_kernel_map_bf16_helper[key_obj_auto] = {1, cur_algo_time, zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16}; // {iter_count, time, algo}
+            map_mutex.lock();
+            //Map value is tuple of (iteration count, execution time of algo, Algo Path)
+            matmul_kernel_map_bf16_helper[key_obj_auto] = {1, cur_algo_time, zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16};
+            //Simplified Map having Key as struct and value as Algo.
             matmul_kernel_map_bf16[key_obj_auto] =
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16;
+            map_mutex.unlock();
         }
         //If key found then increment the iter_count and run next algo.
         else {
@@ -1383,7 +1382,8 @@ int auto_compute_matmul_bf16(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > evaluate_iteration + skip_iteration) {
+    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+             zenEnvObj.auto_skip_iteration) {
         //Get best algo for given layer from MAP
         zenEnvObj.zenBF16GEMMalgo = matmul_kernel_map_bf16[key_obj_auto];
 
@@ -1635,12 +1635,25 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
         const auto group_dims = pd()->attr()->woqScales_.group_dims_;
         int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
         data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
-        matmul_woq_wrapper(ctx, src_type, weights_type, dst_type, bias_dt, Layout,
-                           transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
-                           M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
-                           pd()->attr()->post_ops_, has_eltwise_relu,
-                           geluType, beta, (char *)dst, ldc, woq_scales, 0, woq_scale_size,
-                           beta, is_weights_const, group_size, woq_scales_type);
+        if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
+            auto_tuner = true;
+            auto_compute_matmul_woq(ctx, zenEnvObj, src_type, weights_type, dst_type,
+                                    bias_dt,
+                                    Layout, transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                                    M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
+                                    pd()->attr()->post_ops_, has_eltwise_relu, geluType,
+                                    beta, (char *)dst, ldc, is_weights_const, woq_scales, woq_scale_size,
+                                    group_size, woq_scales_type);
+        }
+        else {
+            matmul_woq_wrapper(ctx, zenEnvObj, src_type, weights_type, dst_type, bias_dt,
+                               Layout,
+                               transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
+                               M, K, N, alpha, (char *)src, lda, (char *)weights, ldb, (char *)bias,
+                               pd()->attr()->post_ops_, has_eltwise_relu,
+                               geluType, beta, (char *)dst, ldc, woq_scales, 0, woq_scale_size,
+                               is_weights_const, group_size, woq_scales_type);
+        }
         return status::success;
     }
     else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
