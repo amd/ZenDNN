@@ -309,7 +309,7 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                   " m=", M, " k=", K, " n=", N, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                   " algo_type=", algo, " scale_sum=", do_sum, " src dt=", src_type, " dst_dt=",
-                  dst_type, " weight_caching=", is_weights_const ? "True": "False");
+                  dst_type, " weight_caching=", is_weights_const ? "True": "False", " weight_address=",weights);
 
 
     return status::success;

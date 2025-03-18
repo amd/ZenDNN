@@ -20,6 +20,7 @@
 #include <iostream>
 #include <zendnn.h>
 #include <cassert>
+#include <algorithm>
 #ifdef _WIN32
     #include <Windows.h>
     #include <chrono>
@@ -321,7 +322,8 @@ class zendnnEnv {
             assert(epos == algoStr.size());
         }
         else {
-            std::string valueStr = algoStr.substr(epos);
+            std::string valueStr = algoStr.substr(epos, 4);
+            std::transform(valueStr.begin(), valueStr.end(), valueStr.begin(), ::toupper);
             if (valueStr == "AUTO") {
                 return 100;
             }
