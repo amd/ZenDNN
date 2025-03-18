@@ -1128,6 +1128,6 @@ int matmul_woq_wrapper(
                   " Layout=", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)", " M=", M, " N=",N,
                   " K=", K, " transA=", transA, " transB=", transB, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta, " algo_type=",
-                  zenEnvObj.zenBF16GEMMalgo);
+                  zenEnvObj.zenBF16GEMMalgo, " weight_address=",weights);
     return 0;
 }

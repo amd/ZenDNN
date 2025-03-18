@@ -525,7 +525,7 @@ void zenMatMul_gemm_wrapper(
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta,
                   " relu=", relu, " gelu=", gelu, " algo_type=", algo_type,
                   " weight_caching=", is_weights_const ? "True": "False",
-                  " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count);
+                  " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count, " weight_address=",filter);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     map_mutex.lock();
     obj.is_log = true;
