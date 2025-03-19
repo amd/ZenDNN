@@ -140,6 +140,11 @@ ifeq ($(AOCC), 0)
 	CXXFLAGSBENCHTEST := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp -DBIAS_ENABLED=1 -DZENDNN_ENABLE=1 $(CK_DEFINES) -ggdb
 	CXXFLAGSONEDNN := -std=$(CPP_STD) -O0 -g -fPIC -fopenmp
 	COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	ifeq ($(LPGEMM), 1)
+		COMMONFLAGS := -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS) -lstdc++ -mssse3 -Wno-deprecated $(LPGEMM_ENABLE) -DAVX512_BF16_EN=$(AVX512_BF16_EN)
+	else
+		COMMONFLAGS := -Wno-error -Wreturn-type -fconcepts -DZENDNN_X64=1 $(CK_COMMON_FLAGS)
+	endif
 	ifeq "$(GCCVERSIONGTEQ12)" "1"
 		COMMONFLAGS += -march=$(ZNVER)
 	else
