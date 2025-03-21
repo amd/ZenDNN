@@ -1671,7 +1671,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                   " K=", K, " transA=", transA, " transB=", transB, " lda=", lda, " ldb=", ldb,
                   " ldc=", ldc, " alpha=", alpha, " beta=", beta, " batch=", batch, " relu=",
                   has_eltwise_relu, " gelu=", geluType, " algo_type=", algo_type,
-                  " weight_caching=", is_weights_const ? "True": "False", " weight_address=",weights);
+                  " weight_caching=", is_weights_const ? "True": "False", " weight_address=",(void *)weights);
 #endif //ZENDNN_ENABLE
     return status::success;
 }
