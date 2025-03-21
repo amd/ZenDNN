@@ -31,8 +31,6 @@
 /*Both scale and Bias are in Float16,
 so number of s4 elements are 8*/
 #define SCALE_BIAS_SIZE 8
-#define ZENDNN_PARALLEL_FOR 1
-#define ZENDNN_PARALLEL_FOR_TT 0
 #if FBGEMM_ENABLE
     #include "fbgemm/FbgemmEmbedding.h"
 #endif
@@ -159,6 +157,7 @@ void fbgemm_embedding_bag_kernel(
     const int num_tables) {
 
     //double start_ms = impl::get_msec();
+    zendnnEnv zenEnvObj = readEnv();
     auto emd_table_dims = z_input.get_desc().dims();
     auto dim_embedding  = (z_input.get_desc().data_type()==impl::data_type::s4)?
                           z_input.get_desc().dims()[1]-SCALE_BIAS_SIZE : z_input.get_desc().dims()[1];
@@ -300,68 +299,71 @@ void fbgemm_embedding_bag_kernel(
                 is_bf16_in);
     }
 
-
-#if ZENDNN_PARALLEL_FOR
-    if (op_num_threads == 1) {
-        kernel(
-            batch_size,
-            indices_size,
-            num_rows,
-            table_ptr,
-            indices,
-            (const int *)fbgemm_offsets,
-            weights,
-            cat_output);
-    }
-    else {
-        zendnn_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
-            bool success = kernel(
-                               /*output_size=*/end_idx - start_idx,
-                               /*index_size=*/indices_size,
-                               /*data_size=*/num_rows,
-                               /*input=*/table_ptr,
-                               /*indices=*/&indices[fbgemm_offsets[start_idx]],
-                               /*offsets_or_lengths=*/(const int *)&fbgemm_offsets [start_idx],
-                               /*weights=*/nullptr,
-                               /*out=*/&cat_output[start_idx * stride_offset]);
-
-        });
-    }
-#else
-    // TODO: Generate more heuristics based on batch size, pooling size and number of threads.
-    // Current decision logic is based on the batch size and number of threads.
-    if (op_num_threads == 1 || batch_size <= 100 ||
-            (z_input.get_desc().data_type()==impl::data_type::s4 && batch_size <=1024) ||
-            (z_input.get_desc().data_type()==impl::data_type::s4 && op_num_threads <= 2)) {
-        kernel(
-            batch_size,
-            indices_size,
-            num_rows,
-            table_ptr,
-            indices,
-            (const int *)fbgemm_offsets,
-            weights,
-            cat_output);
-    }
-    else {
-        #pragma omp parallel for num_threads(op_num_threads)
-        for (int i = 0; i < batch_size; ++i) {
-            int start_idx = fbgemm_offsets[i];
-            int end_idx = fbgemm_offsets[i + 1];
-            int current_batch_size = end_idx - start_idx;
-            // Call the kernel for the current batch
+    if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::BATCH_PARALLEL_FOR) {
+        if (op_num_threads == 1) {
             kernel(
-                current_batch_size,
+                batch_size,
                 indices_size,
                 num_rows,
                 table_ptr,
-                &indices[start_idx],
-                (const int *)&fbgemm_offsets[i],
+                indices,
+                (const int *)fbgemm_offsets,
                 weights,
-                &cat_output[i * stride_offset]);
+                cat_output);
+        }
+        else {
+            zendnn_parallel_for(0, batch_size, 1, [&](int start_idx, int end_idx) {
+                bool success = kernel(
+                                   /*output_size=*/end_idx - start_idx,
+                                   /*index_size=*/indices_size,
+                                   /*data_size=*/num_rows,
+                                   /*input=*/table_ptr,
+                                   /*indices=*/&indices[fbgemm_offsets[start_idx]],
+                                   /*offsets_or_lengths=*/(const int *)&fbgemm_offsets [start_idx],
+                                   /*weights=*/nullptr,
+                                   /*out=*/&cat_output[start_idx * stride_offset]);
+
+            });
         }
     }
-#endif
+
+    else {
+
+        // TODO: Generate more heuristics based on batch size, pooling size and number of threads.
+        // Current decision logic is based on the batch size and number of threads.
+        if (op_num_threads == 1 || batch_size <= 100 ||
+                (z_input.get_desc().data_type()==impl::data_type::s4 && batch_size <=1024) ||
+                (z_input.get_desc().data_type()==impl::data_type::s4 && op_num_threads <= 2)) {
+            kernel(
+                batch_size,
+                indices_size,
+                num_rows,
+                table_ptr,
+                indices,
+                (const int *)fbgemm_offsets,
+                weights,
+                cat_output);
+        }
+        else {
+            #pragma omp parallel for num_threads(op_num_threads)
+            for (int i = 0; i < batch_size; ++i) {
+                int start_idx = fbgemm_offsets[i];
+                int end_idx = fbgemm_offsets[i + 1];
+                int current_batch_size = end_idx - start_idx;
+                // Call the kernel for the current batch
+                kernel(
+                    current_batch_size,
+                    indices_size,
+                    num_rows,
+                    table_ptr,
+                    &indices[start_idx],
+                    (const int *)&fbgemm_offsets[i],
+                    weights,
+                    &cat_output[i * stride_offset]);
+            }
+        }
+    }
+
     if (include_last_offset==0) {
         delete[] fbgemm_offsets;
     }
@@ -524,21 +526,6 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
         thread_type="table_threaded";
         unsigned int loopCount = (num_tables%eb_thread_qty)==0 ?
                                  num_tables/eb_thread_qty : ((num_tables/eb_thread_qty)+1);
-
-#if ZENDNN_PARALLEL_FOR_TT
-        zendnn_parallel_for(0, num_tables, 1, [&](int start_idx, int end_idx) {
-            for (int i = start_idx; i < end_idx; i++) {
-                zendnn_embedding_bag_exec<IN_TYPE, OUT_TYPE>(
-                    z_input[i], z_indices[i], z_offsets[i],
-                    z_scale_grad_by_freq[i], z_modes[i],
-                    z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
-                    z_include_last_offset[i],
-                    z_padding_idx[i], (cat_output)? z_destination[0]:z_destination[i], plugin_op,
-                    1, scale_bias_last,
-                    cat_dim, mlp_pos, output_stride, i, num_tables);
-            }
-        });
-#else
         #pragma omp parallel num_threads(eb_thread_qty)
         {
             for (int i=0; i<loopCount; i++) {
@@ -557,10 +544,26 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                     scale_bias_last, cat_dim, mlp_pos, output_stride, threadOffset, num_tables);
             }
         }
-#endif
     }
 
-    else {
+    else if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::TABLE_PARALLEL_FOR) {
+        thread_type="table_parallel_for";
+
+        zendnn_parallel_for(0, num_tables, 1, [&](int start_idx, int end_idx) {
+            for (int i = start_idx; i < end_idx; i++) {
+                zendnn_embedding_bag_exec<IN_TYPE, OUT_TYPE>(
+                    z_input[i], z_indices[i], z_offsets[i],
+                    z_scale_grad_by_freq[i], z_modes[i],
+                    z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
+                    z_include_last_offset[i],
+                    z_padding_idx[i], (cat_output)? z_destination[0]:z_destination[i], plugin_op,
+                    1, scale_bias_last,
+                    cat_dim, mlp_pos, output_stride, i, num_tables);
+            }
+        });
+    }
+
+    else if (zenEnvObj.zenEBThreadAlgo==zenEBThreadType::BATCH_THREADED) {
         thread_type="batch_threaded";
         for (int i = 0; i < num_tables; i++) {
             zendnn_embedding_bag_exec<IN_TYPE, OUT_TYPE>(
@@ -573,6 +576,19 @@ void zendnn_grp_embedding_bag_impl(std::vector <memory> &z_input,
                 cat_dim, mlp_pos, output_stride, i, num_tables);
         }
 
+    }
+    else {
+        thread_type="batch_parallel_for";
+        for (int i = 0; i < num_tables; i++) {
+            zendnn_embedding_bag_exec<IN_TYPE, OUT_TYPE>(
+                z_input[i], z_indices[i], z_offsets[i],
+                z_scale_grad_by_freq[i], z_modes[i],
+                z_sparse[i], z_per_sample_weights_opt[i],z_per_sample_weights_defined[i],
+                z_include_last_offset[i],
+                z_padding_idx[i], (cat_output)? z_destination[0]:z_destination[i], plugin_op,
+                eb_thread_qty, scale_bias_last,
+                cat_dim, mlp_pos, output_stride, i, num_tables);
+        }
     }
 
     double duration_ms = impl::get_msec() - start_ms;
@@ -914,4 +930,5 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
 
 }
 }//ZenDNN
+
 
