@@ -145,6 +145,8 @@ enum zenEBThreadType {
     TABLE_THREADED = 2,
     HYBRID_THREADED = 3,
     CCD_THREADED = 4,
+    BATCH_PARALLEL_FOR = 5,
+    TABLE_PARALLEL_FOR = 6,
 };
 
 //enum for post-ops
@@ -197,7 +199,8 @@ class zendnnEnv {
         // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_FP32)
         zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
         //TODO: Need to implement Decision tree for FP32:0
-        zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ? zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
+        zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ?
+                      zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 && zenGEMMalgo!=100) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
@@ -252,7 +255,8 @@ class zendnnEnv {
         //Enabling different threading implementation.
         zenEBThreadAlgo = zendnn_getenv_int("ZENDNN_EB_THREAD_TYPE",
                                             zenEBThreadType::TABLE_THREADED);
-        if (zenEBThreadAlgo>zenEBThreadType::CCD_THREADED) {
+        if (zenEBThreadAlgo <= zenEBThreadType::AUTO_ALGO ||
+                zenEBThreadAlgo > zenEBThreadType::TABLE_PARALLEL_FOR) {
             zenEBThreadAlgo = zenEBThreadType::TABLE_THREADED;
         }
         zenEBAlgo = zendnn_getenv_int("ZENDNN_EB_ALGO",
