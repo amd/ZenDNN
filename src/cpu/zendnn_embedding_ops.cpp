@@ -32,7 +32,7 @@
 so number of s4 elements are 8*/
 #define SCALE_BIAS_SIZE 8
 #define ZENDNN_PARALLEL_FOR 1
-#define ZENDNN_PARALLEL_FOR_TT 1
+#define ZENDNN_PARALLEL_FOR_TT 0
 #if FBGEMM_ENABLE
     #include "fbgemm/FbgemmEmbedding.h"
 #endif
