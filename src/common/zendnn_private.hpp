@@ -94,7 +94,7 @@ struct Key_matmul {
     Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,
                unsigned int N,
                unsigned int lda, unsigned int ldb, unsigned int ldc, const void *B_Array,
-               unsigned int omp_num_threads, bool src_dims_, zendnn_blocking_desc_t& blk_)
+               unsigned int omp_num_threads, bool src_dims_, zendnn_blocking_desc_t &blk_)
         : transpose_input(false), transpose_weights(TransB), m(1), k(K), n(N),
           lda(1), ldb(ldb), ldc(1), thread_count(omp_num_threads),
           weights(B_Array), enable_src_dims(src_dims_), blk_size(blk_) {
@@ -1310,6 +1310,63 @@ extern "C"
         bool is_weights_const,
         int group_size,
         zendnn_data_type_t scale_dt
+    );
+
+    int matmul_bf16_wrapper(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        int dst_type,
+        int bias_type,
+        const bool Layout,
+        const bool transA,
+        const bool transB,
+        const int M,
+        const int K,
+        const int N,
+        const float alpha,
+        const zendnn::impl::bfloat16_t *src,
+        const int lda,
+        const zendnn::impl::bfloat16_t *weights,
+        const int ldb,
+        const char *bias,
+        const bool has_eltwise_relu,
+        const impl::post_ops_t &po_ops,
+        int has_binary_index,
+        const int geluType,
+        const float beta,
+        void *dst,
+        const int ldc,
+        const float *output_scales,
+        const int scale_size,
+        bool is_weights_const);
+
+    int auto_compute_matmul_bf16(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        int dst_type,
+        int bias_type,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int M,
+        const int K,
+        const int N,
+        const float alpha,
+        const zendnn::impl::bfloat16_t *src,
+        const int lda,
+        const zendnn::impl::bfloat16_t *weights,
+        const int ldb,
+        const char *bias,
+        const bool has_eltwise_relu,
+        const impl::post_ops_t &po_ops,
+        int has_binary_index,
+        const int geluType,
+        const float beta,
+        void *dst,
+        const int ldc,
+        const float *output_scales,
+        const int scale_size,
+        bool is_weights_const
     );
 }
 
