@@ -64,7 +64,7 @@ Build from source will be supported on
 * Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
 
 ## Compilers
-* GCC 12.2
+* GCC 13.3.1
 
 Theoretically, for wheel files any Linux based OS with GLIBC version later than 2.28 could be supported.
 
@@ -130,7 +130,7 @@ Composable Kernel (CK) for CPU is currently only on the `cpu_avx2` branch of the
 ### Prerequisites
 CK is suitable for these compilers:
 1) hipclang: this is mainly used for compiling GPU hip kernels(require rocm environment), but also can be used for CPU. For a first trial use below compiler.
-2) gcc: at least gcc-9 is needed, you may need to manually install a gcc-9 if default is lower than gcc-9.
+2) gcc: at least gcc-12.2 is needed, you may need to manually install a gcc-12.2 if default is lower than gcc-12.2.
 
 ### Download code
 ```
