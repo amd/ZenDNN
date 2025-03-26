@@ -28,9 +28,6 @@
     #define LOG_LEVEL_DEFAULT LOG_LEVEL_ERROR
 #endif
 
-using ::std::string;
-using ::std::stringstream;
-
 enum LogLevel {
     LOG_LEVEL_DISABLED  = -1,
     LOG_LEVEL_ERROR     =  0,
@@ -43,7 +40,7 @@ enum LogLevel {
 
 #define LOG_LEVEL_VERBOSE(n) (LOG_LEVEL_VERBOSE0 + n)
 
-static inline const string logLevelToStr(int logLevel) {
+static inline const std::string logLevelToStr(int logLevel) {
     if (logLevel == LOG_LEVEL_ERROR) {
         return "E";
     }
@@ -54,7 +51,7 @@ static inline const string logLevelToStr(int logLevel) {
         return "I";
     }
     else if (logLevel >= LOG_LEVEL_VERBOSE0) {
-        stringstream ss;
+        std::stringstream ss;
         ss << "V" << logLevel - LOG_LEVEL_VERBOSE0;
         return ss.str();
     }
@@ -63,7 +60,7 @@ static inline const string logLevelToStr(int logLevel) {
     }
 }
 
-static inline int zendnnGetLogLevel(const string &name) {
+static inline int zendnnGetLogLevel(const std::string &name) {
 #ifdef _WIN32
     size_t sz = 0;
     static char *logCstr;
@@ -74,16 +71,16 @@ static inline int zendnnGetLogLevel(const string &name) {
     if (!logCstr) {
         return LOG_LEVEL_DEFAULT;
     }
-    string logStr(logCstr);
+    std::string logStr(logCstr);
 
-    string namePlusColon(name + ":");
+    std::string namePlusColon(name + ":");
     size_t pos = logStr.find(namePlusColon);
-    if (pos == string::npos) {
+    if (pos == std::string::npos) {
         namePlusColon = "ALL:";
         pos = logStr.find(namePlusColon);
     }
 
-    if (pos == string::npos) {
+    if (pos == std::string::npos) {
         return LOG_LEVEL_DEFAULT;
     }
 
