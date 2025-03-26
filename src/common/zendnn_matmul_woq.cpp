@@ -40,307 +40,6 @@ using dt = memory::data_type;
 
 extern std::mutex map_mutex;
 
-template<typename T>
-aocl_post_op *create_aocl_post_ops_woq(const impl::exec_ctx_t &ctx,
-                                       const zendnn_post_ops &po,
-                                       int n, const float alpha, const char *bias,
-                                       int bias_type, const bool relu, const int gelu,
-                                       T *sum_buff, int &postop_count,
-                                       const float *scale, float *dummy_scale) {
-    aocl_post_op *post_ops = NULL;
-    if (bias != NULL) {
-        ++postop_count;
-    }
-
-    // Create postop for LPGEMM
-    // Order of postops: BIAS -> RELU
-    if (po.len() + postop_count > 0) {
-        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
-        if (post_ops == NULL) {
-            return NULL;
-        }
-        dim_t max_post_ops_seq_length = po.len() + postop_count;
-        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
-                               sizeof(AOCL_POST_OP_TYPE));
-        if (post_ops->seq_vector == NULL) {
-            free(post_ops);
-            return NULL;
-        }
-
-        // Iterate through each postop, check and add it if needed.
-        int post_op_i = 0;
-        //Set all post-ops to NULL
-        post_ops->eltwise = NULL;
-        post_ops->bias = NULL;
-        post_ops->sum = NULL;
-        post_ops->matrix_add = NULL;
-        post_ops->matrix_mul = NULL;
-
-        dim_t eltwise_index = 0;
-        dim_t bias_index = 0;
-        dim_t scale_index = 0;
-        dim_t add_index = 0;
-        dim_t mul_index = 0;
-
-        //Add bias post-op
-        if (bias != NULL) {
-            // Add bias postop
-            post_ops->seq_vector[post_op_i++] = BIAS;
-            post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
-                                 aocl_post_op_bias));
-            if (post_ops->bias == NULL) {
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return NULL;
-            }
-            if (bias_type == zendnn_bf16) {
-                (post_ops->bias + bias_index)->bias = (int16_t *)bias;
-                (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-            }
-            else if (bias_type == zendnn_f32) {
-                (post_ops->bias + bias_index)->bias = (float *)bias;
-                (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-            }
-            else {
-                zendnnError(ZENDNN_ALGOLOG,
-                            "Check Bias data type, only f32 and bf16 are supported");
-            }
-        }
-
-        //Scale post-op
-        if (scale) {
-            post_ops->sum = (aocl_post_op_sum *) malloc(sizeof(
-                                aocl_post_op_sum));
-
-            if (post_ops->sum == NULL) {
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return NULL;
-            }
-            post_ops->seq_vector[post_op_i++] = SCALE;
-            (post_ops->sum + scale_index)->is_power_of_2 = FALSE;
-            (post_ops->sum + scale_index)->scale_factor = NULL;
-            (post_ops->sum + scale_index)->buff = NULL;
-            (post_ops->sum + scale_index)->zero_point = NULL;
-
-            (post_ops->sum + scale_index)->scale_factor = malloc(sizeof(float));
-            (post_ops->sum + scale_index)->zero_point = malloc(sizeof(int16_t));
-
-            //SCALE
-            float *temp_dscale_ptr = (float *)(post_ops->sum + scale_index)->scale_factor;
-            int16_t *temp_dzero_point_ptr = (int16_t *)(post_ops->sum +
-                                            scale_index)->zero_point;
-            temp_dscale_ptr[0] = (float)(scale[0]);
-
-            temp_dzero_point_ptr[0] = (int16_t)0;
-
-            (post_ops->sum + scale_index)->scale_factor_len = 1;
-            (post_ops->sum + scale_index)->zero_point_len = 1;
-            scale_index++;
-        }
-        //Get count of eltwise and binary post-ops
-        int mem_count[3] = {0};
-        for (auto idx = 0; idx < po.len(); ++idx) {
-            const auto po_type = po.entry_[idx];
-            switch (po_type.kind) {
-            case impl::primitive_kind::eltwise:
-                mem_count[0]++;
-                break;
-            case impl::primitive_kind::binary:
-                if (po_type.binary.alg == impl::alg_kind::binary_add) {
-                    mem_count[1]++;
-                }
-                else if (po_type.binary.alg == impl::alg_kind::binary_mul) {
-                    mem_count[2]++;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-
-        if (mem_count[0] > 0) {
-            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                    aocl_post_op_eltwise)*mem_count[0]);
-            if (post_ops->eltwise == NULL) {
-                if (post_ops->sum != NULL) {
-                    free(post_ops->sum);
-                }
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return NULL;
-            }
-        }
-        if (mem_count[1] > 0) {
-            post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
-                                       aocl_post_op_matrix_add)*mem_count[1]);
-            if (post_ops->matrix_add == NULL) {
-                if (post_ops->eltwise != NULL) {
-                    free(post_ops->eltwise);
-                }
-                if (post_ops->sum != NULL) {
-                    free(post_ops->sum);
-                }
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return NULL;
-            }
-        }
-        if (mem_count[2] > 0) {
-            post_ops->matrix_mul = (aocl_post_op_matrix_mul *) malloc(sizeof(
-                                       aocl_post_op_matrix_mul)*mem_count[2]);
-            if (post_ops->matrix_mul == NULL) {
-                if (post_ops->matrix_add != NULL) {
-                    free(post_ops->matrix_add);
-                }
-                if (post_ops->eltwise != NULL) {
-                    free(post_ops->eltwise);
-                }
-                if (post_ops->sum != NULL) {
-                    free(post_ops->sum);
-                }
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return NULL;
-            }
-        }
-
-        //Add eltwise and binary post-ops in given sequence
-        for (auto idx = 0; idx < po.len(); ++idx) {
-
-            const auto po_type = po.entry_[idx];
-            if (po_type.kind == impl::primitive_kind::eltwise &&
-                    post_ops->eltwise != NULL) {
-
-                if (po_type.eltwise.alg == impl::alg_kind::eltwise_relu) {
-                    // Add ReLU postop
-                    post_ops->seq_vector[post_op_i++] = ELTWISE;
-                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.algo_type = RELU;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu) {
-                    // Gelu tanh.
-                    dim_t eltwise_index = 0;
-                    post_ops->seq_vector[post_op_i++] = ELTWISE;
-                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.algo_type = GELU_TANH;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
-                    // Gelu erf.
-                    dim_t eltwise_index = 0;
-                    post_ops->seq_vector[post_op_i++] = ELTWISE;
-                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.algo_type = GELU_ERF;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
-                    // Sigmoid
-                    dim_t eltwise_index = 0;
-                    post_ops->seq_vector[post_op_i++] = ELTWISE;
-                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.alpha = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.algo_type = SIGMOID;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
-                    // Gelu erf.
-                    dim_t eltwise_index = 0;
-                    post_ops->seq_vector[post_op_i++] = ELTWISE;
-                    (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
-                    (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
-                    T alpha_val = (T)po_type.eltwise.alpha;
-                    (post_ops->eltwise + eltwise_index)->algo.alpha = malloc(sizeof(float));
-                    *((float *)(post_ops->eltwise + eltwise_index)->algo.alpha) = (float)1;
-                    (post_ops->eltwise + eltwise_index)->algo.beta = NULL;
-                    (post_ops->eltwise + eltwise_index)->algo.algo_type = SWISH;
-                    eltwise_index++;
-                }
-            }
-            else if (po_type.kind == impl::primitive_kind::binary) {
-                if (po_type.binary.alg == impl::alg_kind::binary_add &&
-                        post_ops->matrix_add != NULL) {
-                    post_ops->seq_vector[post_op_i++] = MATRIX_ADD;
-                    (post_ops->matrix_add + add_index)->ldm = n;
-                    auto binary_po = CTX_IN_MEM(const void *,
-                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    //Currently putting 1.0 as scale
-                    (post_ops->matrix_add + add_index)->scale_factor = (float *)dummy_scale;
-                    (post_ops->matrix_add + add_index)->scale_factor_len = 1;
-                    auto b_dt = po_type.binary.src1_desc.data_type;
-                    if (b_dt == zendnn_bf16) {
-                        (post_ops->matrix_add + add_index)->stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-                        auto addA = reinterpret_cast<int16_t *>(const_cast<void *>(binary_po));
-                        (post_ops->matrix_add + add_index)->matrix = (int16_t *)addA;
-                    }
-                    else if (b_dt == zendnn_f32) {
-                        (post_ops->matrix_add + add_index)->stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-                        auto addA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        (post_ops->matrix_add + add_index)->matrix = (float *)addA;
-                    }
-                    add_index++;
-                }
-                else if (po_type.binary.alg == impl::alg_kind::binary_mul &&
-                         post_ops->matrix_mul != NULL) {
-                    post_ops->seq_vector[post_op_i++] = MATRIX_MUL;
-                    (post_ops->matrix_mul + mul_index)->ldm = n;
-                    auto binary_po = CTX_IN_MEM(const void *,
-                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    //Currently putting 1.0 as scale
-                    (post_ops->matrix_mul + mul_index)->scale_factor = (float *)dummy_scale;
-                    (post_ops->matrix_mul + mul_index)->scale_factor_len = 1;
-                    auto b_dt = po_type.binary.src1_desc.data_type;
-                    if (b_dt == zendnn_bf16) {
-                        (post_ops->matrix_mul + mul_index)->stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-                        auto mulA = reinterpret_cast<int16_t *>(const_cast<void *>(binary_po));
-                        (post_ops->matrix_mul + mul_index)->matrix = (int16_t *)mulA;
-                    }
-                    else if (b_dt == zendnn_f32) {
-                        (post_ops->matrix_mul + mul_index)->stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-                        auto mulA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        (post_ops->matrix_mul + mul_index)->matrix = (float *)mulA;
-                    }
-                    mul_index++;
-                }
-            }
-            // Using sum post-op with GEMM_beta
-            else if (po_type.kind == impl::primitive_kind::sum) {
-                postop_count-=1; //Since sum post-op is applied as GEMM_beta.
-            }
-        }
-        post_ops->seq_length = po.len() + postop_count;
-    }
-    return (post_ops);
-}
-
 int ref_woq_bf16(
     const impl::exec_ctx_t &ctx,
     const impl::post_ops_t &po_ops,
@@ -408,9 +107,9 @@ int ref_woq_bf16(
     float dummy_scale = (float)1.0;
     if (dst_type == zendnn_bf16) {
         int postop_count = bias == NULL ? 0:1;
-        post_ops = create_aocl_post_ops_woq<int16_t>(ctx, po_ops, N,
+        post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type,
-                   has_eltwise_relu, geluType, NULL/*sum with beta*/,
+                   has_eltwise_relu, geluType, alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/,
                    postop_count, postop_count ? &alpha : NULL, &dummy_scale);
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
@@ -420,17 +119,17 @@ int ref_woq_bf16(
                                    src, lda, mem_format_a,
                                    reorder_filter, ldb,
                                    mem_format_b,
-                                   beta,
+                                   alpha == 1.0 ? beta : 0.0,
                                    (int16_t *)output, ldc,
                                    post_ops);
     }
     else {
         int postop_count = bias == NULL ? 0:1;
-        post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N,
-                   alpha, (const char *)bias, bias_type,
-                   has_eltwise_relu, geluType, NULL/*sum with beta*/,
-                   postop_count, postop_count ? &alpha : NULL,
-                   &dummy_scale);
+        post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
+                                               alpha, (const char *)bias, bias_type,
+                                               has_eltwise_relu, geluType, alpha != 1.0 ? (float *)output : NULL/*sum with beta*/,
+                                               postop_count, postop_count ? &alpha : NULL,
+                                               &dummy_scale);
         aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                                   transA ? 't' : 'n',
                                   transB ? 't' : 'n', M, N, K,
@@ -438,7 +137,7 @@ int ref_woq_bf16(
                                   src, lda, mem_format_a,
                                   reorder_filter, ldb,
                                   mem_format_b,
-                                  beta,
+                                  alpha == 1.0 ? beta : 0.0,
                                   (float *)output, ldc,
                                   post_ops);
     }
@@ -538,10 +237,10 @@ int ref_woq_f32(
     aocl_post_op *post_ops = NULL;
     int postop_count = 0;
     float dummy_scale = (float)1.0;
-    post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N,
-               alpha, bias == NULL ? NULL :(const char *)bias, bias_type,
-               has_eltwise_relu, geluType, (float *)output,
-               postop_count, NULL, &dummy_scale);
+    post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
+                                           alpha, bias == NULL ? NULL :(const char *)bias, bias_type,
+                                           has_eltwise_relu, geluType, (float *)output,
+                                           postop_count, NULL, &dummy_scale);
     aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                             transA ? 't' : 'n',
                             transB ? 't' : 'n', M, N, K,
@@ -549,7 +248,7 @@ int ref_woq_f32(
                             src, lda, mem_format_a,
                             reorder_filter, ldb,
                             mem_format_b,
-                            beta,
+                            alpha == 1.0 ? beta : 0.0,
                             (float *)output, ldc,
                             post_ops);
 
@@ -833,9 +532,9 @@ int aocl_woq_bf16(
     int postop_count = 1;
     float val = 1.0;
     if (dst_type == zendnn_bf16) {
-        post_ops = create_aocl_post_ops_woq<int16_t>(ctx, po_ops, N,
+        post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type, has_eltwise_relu, geluType,
-                   NULL/*sum with beta*/, postop_count, bias !=NULL ? &alpha : &val,
+                   alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/, postop_count, bias !=NULL ? &alpha : &val,
                    &dummy_scale);
 
         //Add pre-op for S4 API
@@ -876,15 +575,15 @@ int aocl_woq_bf16(
                                  src, lda, mem_format_a,
                                  reorder_filter, ldb,
                                  mem_format_b,
-                                 beta,
+                                 alpha == 1.0 ? beta : 0.0,
                                  (int16_t *)output, ldc,
                                  post_ops);
     }
     else {
-        post_ops = create_aocl_post_ops_woq<float>(ctx, po_ops, N, alpha,
-                   (const char *)bias, bias_type, has_eltwise_relu, geluType,
-                   NULL/*sum with beta*/, postop_count,
-                   bias !=NULL ? &alpha : &val, &dummy_scale);
+        post_ops = create_aocl_post_ops<float>(ctx, po_ops, N, alpha,
+                                               (const char *)bias, bias_type, has_eltwise_relu, geluType,
+                                               alpha != 1.0 ? (float *)output : NULL/*sum with beta*/, postop_count,
+                                               bias !=NULL ? &alpha : &val, &dummy_scale);
         //Add pre-op for S4 API
         if (post_ops == NULL) {
             return 0;
@@ -922,7 +621,7 @@ int aocl_woq_bf16(
                                 src, lda, mem_format_a,
                                 reorder_filter, ldb,
                                 mem_format_b,
-                                beta,
+                                alpha == 1.0 ? beta : 0.0,
                                 (float *)output, ldc,
                                 post_ops);
     }

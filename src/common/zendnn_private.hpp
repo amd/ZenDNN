@@ -220,6 +220,14 @@ struct hash<Key_conv> {
 };
 }
 
+template<typename T>
+aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
+    const impl::post_ops_t &po,
+    int n, const float alpha, const char *bias,
+    int bias_type, const bool relu, const int gelu,
+    T *sum_buff, int &postop_count,
+    const float *scale, float *dummy_scale);
+
 extern "C"
 {
     float timedifference_msec(struct timeval t0, struct timeval t1);
