@@ -251,7 +251,7 @@ bool reorderAndCacheWeightsBrgemm(
     // Multi-instance read (memory not expanded)
     else if (weight_cache_type ==zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE) {
         // Check if memory equal to required reorder buffer size
-        if (user_weights_memory.get_desc().get_size() == weight_disc.get_size()) {
+        if (user_weights_memory.get_desc().get_size() != weight_disc.get_size()) {
             return false;
         }
         zendnnVerbose(ZENDNN_PROFLOG,
@@ -270,7 +270,7 @@ bool reorderAndCacheWeightsBrgemm(
         // Perform reordering (used by Custom Reorder API)
         // This path can't be enabled by ENV
         if (!found_obj_reorder) {
-            zendnnVerbose(ZENDNN_PROFLOG,"BLIS reorder weights WEIGHT_CACHE_AOT_REORDER");
+            zendnnVerbose(ZENDNN_PROFLOG,"BRGEMM reorder weights WEIGHT_CACHE_AOT_REORDER");
             reordered_weights_memory = memory(weight_disc, eng);
             reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                     user_weights_memory, reordered_weights_memory);
