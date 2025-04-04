@@ -259,8 +259,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     const dim_t ldc = helper.ldc();
 
     zendnnEnv zenEnvObj = readEnv();
-    bool is_weights_const = zenEnvObj.zenWeightCache &&
-                            pd()->weights_md()->is_memory_const;
+    bool is_weights_const = pd()->weights_md()->is_memory_const;
+    bool is_inplace = pd()->weights_md()->is_inplace;
 
     const float alpha = params.get_gemm_alpha(dst_scales);
     const float beta = params.gemm_beta_;
@@ -293,7 +293,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                         Layout, transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                         M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
                                         beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
-                                        dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
+                                        dst_zero_point, do_sum, is_weights_const, is_inplace,
+                                        const_cast<float *>(src_scales),
                                         src_scale_size, default_src_scales, const_cast<float *>(wei_scales),
                                         wei_scale_size, default_wei_scales,
                                         const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,
@@ -305,7 +306,8 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                    transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                    M, K, N, alpha, src, lda, weights, ldb, bias, pd()->attr()->post_ops_,
                                    beta, (char *)dst, ldc, src_zero_point, weights_zero_point,
-                                   dst_zero_point, do_sum, is_weights_const, const_cast<float *>(src_scales),
+                                   dst_zero_point, do_sum, is_weights_const, is_inplace,
+                                   const_cast<float *>(src_scales),
                                    src_scale_size, default_src_scales, const_cast<float *>(wei_scales),
                                    wei_scale_size, default_wei_scales,
                                    const_cast<float *>(dst_scales), dst_scale_size, default_dst_scales,

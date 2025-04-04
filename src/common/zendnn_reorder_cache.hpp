@@ -44,6 +44,7 @@ bool reorderAndCacheWeights(
     const int n,
     const int ldb,
     const bool is_weights_const,
+    const bool is_inplace,
     const char order,
     const char trans,
     const char reorder_param0,
@@ -63,6 +64,7 @@ bool reorderAndCacheWeightsBrgemm(
     zendnn::engine &eng,
     zendnn::stream &engine_stream,
     bool is_weights_const,
+    bool is_inplace,
     int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
 );
 
@@ -139,6 +141,7 @@ void cacheZeroPointCompensation(
     int32_t wei_zero_point,
     bool blocked_format,
     bool is_weights_const,
+    const bool is_inplace,
     int algo,
     int weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE,
     zendnn::engine eng = engine(),

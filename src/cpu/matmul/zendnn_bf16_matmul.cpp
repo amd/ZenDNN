@@ -104,7 +104,11 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
               && gemm_based::check_gemm_compatible_formats(*this);
     //Return unimplemented if BF16 algo set to 4(MATMUL_JIT_BF16)
     zendnnEnv zenEnvObj = readEnv();
-    if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_BF16 &&
+    if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_BF16 ||
+            (zenEnvObj.zenBF16GEMMalgo != zenBF16MatMulAlgoType::MATMUL_AOCL_BF16 &&
+             (weights_md()->is_memory_const == false ||
+              (weights_md()->is_inplace == false &&
+               zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
             weights_md()->data_type == bf16) {
         return status::unimplemented;
     }
@@ -197,8 +201,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     zendnnEnv zenEnvObj = readEnv();
     const gemm_based::params_t &params = pd()->params();
-    bool is_weights_const = zenEnvObj.zenWeightCache &&
-                            pd()->weights_md()->is_memory_const;
+    bool is_weights_const = pd()->weights_md()->is_memory_const;
+    bool is_inplace = pd()->weights_md()->is_inplace;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
@@ -297,7 +301,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                              transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                              M, K, N, alpha, src, lda, weights, ldb, bias, has_eltwise_relu,
                                              pd()->attr()->post_ops_, has_binary_index, geluType, beta,
-                                             dst, ldc, output_scales, scale_size, is_weights_const);
+                                             dst, ldc, output_scales, scale_size, is_weights_const, is_inplace);
     }
     else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) {
         // If M >=64, N and K >=2048 AOCL BLIS kernels gives optimal performance.
@@ -326,7 +330,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                         transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                         M, K, N, alpha, src, lda, weights, ldb, bias,
                                         has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
-                                        geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                                        geluType, beta, dst, ldc, output_scales, scale_size,
+                                        is_weights_const, is_inplace);
 
     }
     else {
@@ -334,7 +339,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                         transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1,
                                         M, K, N, alpha, src, lda, weights, ldb, bias,
                                         has_eltwise_relu, pd()->attr()->post_ops_, has_binary_index,
-                                        geluType, beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                                        geluType, beta, dst, ldc, output_scales, scale_size,
+                                        is_weights_const, is_inplace);
     }
 
     zendnnVerbose(ZENDNN_PROFLOG,"zendnn_bf16_matmul auto_tuner=",

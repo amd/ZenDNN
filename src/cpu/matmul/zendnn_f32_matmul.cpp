@@ -82,10 +82,15 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
     // control is redirected to BRGEMM.
     // TODO: Generate more heuristics for M,N,K for smaller dimensions to make
     // the check generalized
-    if ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
+    if (((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
+            (zenEnvObj.zenBF16GEMMalgo != zenMatMulAlgoType::MATMUL_AOCL_FP32 &&
+             (weights_md()->is_memory_const == false ||
+              (weights_md()->is_inplace == false &&
+               zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
             weights_md()->data_type == f32) ||
             (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 &&
              thread_qty == 1 &&
+             zenEnvObj.zenWeightCache < zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
              src_md()->dims[0] <= 128 && weights_md()->dims[0] <= 512 &&
              weights_md()->dims[1] <= 512)) {
         return status::unimplemented;
@@ -313,8 +318,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     const gemm_based::params_t &params = pd()->params();
     zendnnEnv zenEnvObj = readEnv();
-    bool is_weights_const = zenEnvObj.zenWeightCache &&
-                            pd()->weights_md()->is_memory_const;
+    bool is_weights_const = pd()->weights_md()->is_memory_const;
+    bool is_inplace = pd()->weights_md()->is_inplace;
 
     const auto &dst_bd = dst_d.blocking_desc();
     const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
@@ -424,14 +429,14 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
                   weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
                   (float *)weights, ldb, NULL, has_eltwise_relu, geluType, beta, (float *)dst,
-                  ldc, is_weights_const);
+                  ldc, is_weights_const, is_inplace);
     }
     else if ((float *)bias != NULL && !has_eltwise) {
         //MatMul with Bias
         zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                           batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                           lda, (float *)weights, ldb,
-                          (float *)bias, beta, (float *)dst, ldc, is_weights_const);
+                          (float *)bias, beta, (float *)dst, ldc, is_weights_const, is_inplace);
     }
     else {
         if (has_eltwise_relu) {
@@ -439,7 +444,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, is_weights_const);
+                                  (float *)bias, beta, (float *)dst, ldc, is_weights_const, is_inplace);
         }
         else if (has_eltwise_gelu) {
             //MatMul with BiasGelu
@@ -449,7 +454,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 1, is_weights_const);
+                                  (float *)bias, beta, (float *)dst, ldc, 1, is_weights_const, is_inplace);
 
         }
         else if (has_eltwise_gelu_erf) {
@@ -460,7 +465,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
             zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                                   batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                                   lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 2, is_weights_const);
+                                  (float *)bias, beta, (float *)dst, ldc, 2, is_weights_const, is_inplace);
         }
         else {
             return status::unimplemented;

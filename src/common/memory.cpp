@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -125,7 +125,8 @@ status_t zendnn_memory::reset_memory_storage(
 }
 
 status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
-        const dims_t dims, data_type_t data_type, format_tag_t tag, bool is_memory_const) {
+        const dims_t dims, data_type_t data_type, format_tag_t tag,
+        bool is_memory_const, bool is_inplace) {
     if (any_null(memory_desc)) return invalid_arguments;
     if (ndims == 0 || tag == format_tag::undef) {
         *memory_desc = types::zero_md();
@@ -141,6 +142,7 @@ status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
 
     auto md = memory_desc_t();
     md.is_memory_const = is_memory_const;
+    md.is_inplace = is_inplace;
     md.ndims = ndims;
     array_copy(md.dims, dims, ndims);
     md.data_type = data_type;
@@ -168,7 +170,8 @@ status_t zendnn_memory_desc_init_by_tag(memory_desc_t *memory_desc, int ndims,
 }
 
 status_t zendnn_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndims,
-        const dims_t dims, data_type_t data_type, const dims_t strides, bool is_memory_const) {
+        const dims_t dims, data_type_t data_type, const dims_t strides,
+        bool is_memory_const, bool is_inplace) {
     if (any_null(memory_desc)) return invalid_arguments;
     if (ndims == 0) {
         *memory_desc = types::zero_md();
@@ -183,6 +186,7 @@ status_t zendnn_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndim
 
     auto md = memory_desc_t();
     md.is_memory_const = is_memory_const;
+    md.is_inplace = is_inplace;
     md.ndims = ndims;
     array_copy(md.dims, dims, ndims);
     md.data_type = data_type;

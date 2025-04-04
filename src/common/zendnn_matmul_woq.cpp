@@ -520,8 +520,8 @@ int aocl_woq_bf16(
     int8_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int8_t>(key_obj, weights, reorder_filter, K, N,
-                                   ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
-                                   reorder_param2,
+                                   ldb, is_weights_const, false, order, trans,
+                                   reorder_param0, reorder_param1, reorder_param2,
                                    aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
                                   );
 

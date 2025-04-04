@@ -1883,6 +1883,8 @@ typedef struct {
     zendnn_memory_extra_desc_t extra;
     //To enable weight caching for op if memory is constant (true)
     bool is_memory_const;
+    //To enable inplace weight caching for op if memory is constant (true)
+    bool is_inplace;
 } zendnn_memory_desc_t;
 
 /// @struct zendnn_memory

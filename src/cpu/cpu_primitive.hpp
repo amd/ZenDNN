@@ -44,10 +44,6 @@
         bool ok = utils::one_of(scales_des.data_type(), data_type::f32, \
                             data_type::bf16); \
         if (!ok) return status::invalid_arguments; \
-        if (scales_des.nelems() == 1) { \
-            utils::array_set(CONCAT2(woqscales, _buf16), woqscales[0], 16); \
-            woqscales = CONCAT2(woqscales, _buf16); \
-        } \
     } \
     MAYBE_UNUSED(woqscales);
 

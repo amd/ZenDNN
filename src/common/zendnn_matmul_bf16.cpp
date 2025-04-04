@@ -88,6 +88,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
     float *output,
     const int ldc,
     bool is_weights_const,
+    bool is_inplace,
     int bias_type,
     bool blocked_format
 ) {
@@ -118,8 +119,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
 
         reorder_status = reorderAndCacheWeights<int16_t>(key_obj, filter,
                          reorder_filter, k, n,
-                         ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
-                         reorder_param2,
+                         ldb, is_weights_const, is_inplace, order, trans,
+                         reorder_param0, reorder_param1, reorder_param2,
                          aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                          weight_cache_type);
         if (!reorder_status) {
@@ -201,6 +202,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     float *output,
     const int ldc,
     bool is_weights_const,
+    bool is_inplace,
     int bias_type
 
 ) {
@@ -230,8 +232,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     int16_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                    ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
-                                    reorder_param2,
+                                    ldb, is_weights_const, is_inplace, order, trans,
+                                    reorder_param0, reorder_param1, reorder_param2,
                                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                    );
 
@@ -322,6 +324,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     const float *scale,
     const int out_scale_size,
     bool is_weights_const,
+    bool is_inplace,
     int bias_type,
     bool blocked_format
 ) {
@@ -353,8 +356,8 @@ void zenMatMul_gemm_bf16bf16f32obf16(
 
         reorder_status = reorderAndCacheWeights<int16_t>(key_obj, filter,
                          reorder_filter, k, n,
-                         ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
-                         reorder_param2,
+                         ldb, is_weights_const, is_inplace, order, trans,
+                         reorder_param0, reorder_param1, reorder_param2,
                          aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                          weight_cache_type);
         if (!reorder_status) {
@@ -438,6 +441,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     const float *scale,
     const int out_scale_size,
     bool is_weights_const,
+    bool is_inplace,
     int bias_type
 ) {
     zendnnEnv zenEnvObj = readEnv();
@@ -465,8 +469,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     int16_t *reorder_filter = NULL;
 
     reorderAndCacheWeights<int16_t>(key_obj, filter, reorder_filter, k, n,
-                                    ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
-                                    reorder_param2,
+                                    ldb, is_weights_const, is_inplace, order, trans,
+                                    reorder_param0, reorder_param1, reorder_param2,
                                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32
                                    );
     //Post ops addition
@@ -543,12 +547,15 @@ void zenMatMulPrimitiveBF16(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
                             const char *bias, void *C_Array, const float alpha,
                             const float beta, const int lda, const int ldb,
                             const int ldc, const impl::post_ops_t &po_ops,
-                            bool blocked_format, bool is_weights_const) {
+                            bool blocked_format, bool is_weights_const, bool is_inplace) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned int weight_cache_type = zenEnvObj.zenWeightCache;
+    if (!is_weights_const) {
+        blocked_format = false;
+    }
     std::unordered_map<int, memory> net_args;
 
     zendnn::impl::bfloat16_t *in_arr = const_cast<zendnn::impl::bfloat16_t *>
@@ -688,7 +695,7 @@ void zenMatMulPrimitiveBF16(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
             key_obj,
             matmul_prim_disc.weights_desc(), user_weights_memory,
             reordered_weights_memory, eng, engine_stream, is_weights_const,
-            weight_cache_type);
+            is_inplace, weight_cache_type);
     }
 
     //net.push_back(zendnn::matmul(matmul_prim_disc));
@@ -727,7 +734,8 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                         const int ldc,
                         const float *output_scales,
                         const int scale_size,
-                        bool is_weights_const) {
+                        bool is_weights_const,
+                        bool is_inplace) {
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
 
@@ -747,11 +755,10 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                 zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
                            zenEnvObj.zenBF16GEMMalgo);
                 zenMatMul_gemm_parallel_bf16bf16f32obf16(ctx, Layout, transA, transB, M, K, N,
-                        alpha,
-                        (int16_t *)src, lda, (int16_t *)weights, ldb,
+                        alpha, (int16_t *)src, lda, (int16_t *)weights, ldb,
                         (int16_t *)bias,
                         has_eltwise_relu, po_ops, geluType, beta, (int16_t *)dst, ldc, output_scales,
-                        scale_size, is_weights_const, bias_type);
+                        scale_size, is_weights_const, is_inplace, bias_type);
             }
             else {
                 zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -760,7 +767,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                                 (int16_t *)src, lda, (int16_t *)weights, ldb,
                                                 (int16_t *)bias,
                                                 has_eltwise_relu, po_ops, geluType, beta, (int16_t *)dst,
-                                                ldc, output_scales, scale_size, is_weights_const, bias_type, true);
+                                                ldc, output_scales, scale_size, is_weights_const, is_inplace, bias_type, true);
             }
         }
         else if (dst_type == zendnn_f32) {
@@ -773,7 +780,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                                         alpha,
                                                         (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
                                                         has_eltwise_relu, po_ops, geluType, beta, (float *)dst, ldc,
-                                                        is_weights_const, bias_type);
+                                                        is_weights_const, is_inplace, bias_type);
             }
             else {
                 zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -781,7 +788,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                 zenMatMul_gemm_bf16bf16f32of32(ctx, Layout, transA, transB, M, K, N, alpha,
                                                (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
                                                has_eltwise_relu, po_ops, geluType, beta, (float *)dst, ldc,
-                                               is_weights_const, bias_type, true);
+                                               is_weights_const, is_inplace, bias_type, true);
             }
         }
     }
@@ -796,7 +803,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                             (int16_t *)src, lda, (int16_t *)weights, ldb,
                                             (int16_t *)bias,
                                             has_eltwise_relu, po_ops, geluType, beta, (int16_t *)dst,
-                                            ldc, output_scales, scale_size, is_weights_const, bias_type, false);
+                                            ldc, output_scales, scale_size, is_weights_const, is_inplace, bias_type, false);
         }
         else if (dst_type == zendnn_f32) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -804,7 +811,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             zenMatMul_gemm_bf16bf16f32of32(ctx, Layout, transA, transB, M, K, N, alpha,
                                            (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
                                            has_eltwise_relu, po_ops, geluType, beta, (float *)dst, ldc,
-                                           is_weights_const, bias_type, true);
+                                           is_weights_const, is_inplace, bias_type, true);
         }
     }
     else if (zenEnvObj.zenBF16GEMMalgo ==
@@ -843,14 +850,14 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                            transB,
                                            m_per_threads, N, K,data_col + inputOffset, weights, bias,
                                            (int16_t *)dst + outputOffset, alpha, beta,
-                                           lda, ldb, ldc, po_ops, true, is_weights_const);
+                                           lda, ldb, ldc, po_ops, true, is_weights_const, is_inplace);
                 }
                 else {
                     zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
                                            transB,
                                            m_per_threads, N, K,data_col + inputOffset, weights, bias,
                                            (float *)dst + outputOffset, alpha, beta,
-                                           lda, ldb, ldc, po_ops, true, is_weights_const);
+                                           lda, ldb, ldc, po_ops, true, is_weights_const, is_inplace);
                 }
             }
         }
@@ -858,10 +865,9 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
                        zenEnvObj.zenBF16GEMMalgo);
             zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
-                                   transB,
-                                   M, N, K,
+                                   transB, M, N, K,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
-                                   po_ops, true, is_weights_const);
+                                   po_ops, true, is_weights_const, is_inplace);
         }
         map_mutex.lock();
         obj.is_log = true;
@@ -901,14 +907,14 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                            transB,
                                            m_per_threads, N, K, data_col + inputOffset, weights, bias,
                                            (int16_t *)dst + outputOffset, alpha, beta, lda, ldb, ldc,
-                                           po_ops, false, is_weights_const);
+                                           po_ops, false, is_weights_const, is_inplace);
                 }
                 else {
                     zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
                                            transB,
                                            m_per_threads, N, K, data_col + inputOffset, weights, bias,
                                            (float *)dst + outputOffset, alpha, beta, lda, ldb, ldc,
-                                           po_ops, false, is_weights_const);
+                                           po_ops, false, is_weights_const, is_inplace);
                 }
             }
         }
@@ -916,10 +922,9 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
                        zenEnvObj.zenBF16GEMMalgo);
             zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
-                                   transB,
-                                   M, N, K,
+                                   transB, M, N, K,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
-                                   po_ops, false, is_weights_const);
+                                   po_ops, false, is_weights_const, is_inplace);
         }
         map_mutex.lock();
         obj.is_log = true;

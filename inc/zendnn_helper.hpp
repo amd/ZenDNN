@@ -973,7 +973,8 @@ extern "C" {
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const
+        bool is_weights_const,
+        bool is_inplace
     );
 
     zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
@@ -1000,7 +1001,8 @@ extern "C" {
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const
+        bool is_weights_const,
+        bool is_inplace
     );
 
     int auto_compute_matmul(
@@ -1022,7 +1024,8 @@ extern "C" {
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const
+        bool is_weights_const,
+        bool is_inplace
     );
     int auto_compute_conv(
         int supportedPath,

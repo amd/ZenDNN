@@ -439,6 +439,7 @@ int auto_compute_matmul_int8(
     const int32_t zero_point_dst,
     float do_sum,
     bool is_weights_const,
+    bool is_inplace,
     float *src_scale,
     int src_scale_size,
     bool default_src_scales,
@@ -495,6 +496,7 @@ int auto_compute_matmul_int8(
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                                 beta, (char *)dst, ldc, zero_point_src,
                                 zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                is_inplace,
                                 src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
                                 default_wei_scales,
                                 dst_scales, dst_scale_size, default_dst_scales, scale_type);
@@ -525,7 +527,7 @@ int auto_compute_matmul_int8(
                                 transpose_input, transpose_weights,
                                 m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                                 beta, (char *)dst, ldc, zero_point_src,
-                                zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                                zero_point_wei, zero_point_dst, do_sum, is_weights_const, is_inplace,
                                 src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
                                 default_wei_scales,
                                 dst_scales, dst_scale_size, default_dst_scales, scale_type);
@@ -542,7 +544,7 @@ int auto_compute_matmul_int8(
                             transpose_input, transpose_weights,
                             m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                             beta, (char *)dst, ldc, zero_point_src,
-                            zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, is_inplace,
                             src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
                             default_wei_scales,
                             dst_scales, dst_scale_size, default_dst_scales, scale_type);
@@ -565,7 +567,7 @@ int auto_compute_matmul_int8(
                             transpose_input, transpose_weights,
                             m, k, n, alpha, input, lda, weights, ldb, bias, po_ops,
                             beta, (char *)dst, ldc, zero_point_src,
-                            zero_point_wei, zero_point_dst, do_sum, is_weights_const,
+                            zero_point_wei, zero_point_dst, do_sum, is_weights_const, is_inplace,
                             src_scale, src_scale_size, default_src_scales, wei_scale, wei_scale_size,
                             default_wei_scales,
                             dst_scales, dst_scale_size, default_dst_scales, scale_type);
@@ -633,7 +635,8 @@ int auto_compute_matmul_bf16(
     const int ldc,
     const float *output_scales,
     const int scale_size,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
 
     Key_matmul key_obj_auto(transpose_input, transpose_filter, M, K, N, lda, ldb,
@@ -677,11 +680,10 @@ int auto_compute_matmul_bf16(
 #endif
 
             matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_type, Layout,
-                                transpose_input,
-                                transpose_filter,
+                                transpose_input, transpose_filter,
                                 M, K, N, alpha, src, lda, weights, ldb, bias,
                                 has_eltwise_relu, po_ops, has_binary_index, geluType,
-                                beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                                beta, dst, ldc, output_scales, scale_size, is_weights_const, is_inplace);
 
             //Time end
 #ifdef _WIN32
@@ -708,11 +710,10 @@ int auto_compute_matmul_bf16(
             zenEnvObj.zenBF16GEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
             std::get<0>(found_obj->second) += 1;
             matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_type, Layout,
-                                transpose_input,
-                                transpose_filter,
+                                transpose_input, transpose_filter,
                                 M, K, N, alpha, src, lda, weights, ldb, bias,
                                 has_eltwise_relu, po_ops, has_binary_index, geluType,
-                                beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                                beta, dst, ldc, output_scales, scale_size, is_weights_const, is_inplace);
 
         }
     }
@@ -724,11 +725,10 @@ int auto_compute_matmul_bf16(
         zenEnvObj.zenBF16GEMMalgo = matmul_kernel_map[key_obj_auto];
 
         matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_type, Layout,
-                            transpose_input,
-                            transpose_filter,
+                            transpose_input, transpose_filter,
                             M, K, N, alpha, src, lda, weights, ldb, bias,
                             has_eltwise_relu, po_ops, has_binary_index, geluType,
-                            beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                            beta, dst, ldc, output_scales, scale_size, is_weights_const, is_inplace);
     }
     //Updates the map values by running different algorithms
     else {
@@ -745,11 +745,10 @@ int auto_compute_matmul_bf16(
 #endif
 
         matmul_bf16_wrapper(ctx, zenEnvObj, dst_type, bias_type, Layout,
-                            transpose_input,
-                            transpose_filter,
+                            transpose_input, transpose_filter,
                             M, K, N, alpha, src, lda, weights, ldb, bias,
                             has_eltwise_relu, po_ops, has_binary_index, geluType,
-                            beta, dst, ldc, output_scales, scale_size, is_weights_const);
+                            beta, dst, ldc, output_scales, scale_size, is_weights_const, is_inplace);
 
         //timer end
 #ifdef _WIN32
@@ -808,7 +807,8 @@ int auto_compute_matmul_fp32(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
 
     float cur_algo_time; //current algorithm's execution time
@@ -842,7 +842,7 @@ int auto_compute_matmul_fp32(
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
                            k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                           is_weights_const);
+                           is_weights_const, is_inplace);
 
             //Time end
 #ifdef _WIN32
@@ -869,7 +869,7 @@ int auto_compute_matmul_fp32(
             std::get<0>(found_obj->second) += 1;
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
                            k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                           is_weights_const);
+                           is_weights_const, is_inplace);
         }
     }
     //Read Value from map.
@@ -881,7 +881,7 @@ int auto_compute_matmul_fp32(
         zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
         zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
                        k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                       is_weights_const);
+                       is_weights_const, is_inplace);
 
         //Writing Map in file.
         if (persistent_map_flag->first == persistentMapType::WRITE &&
@@ -911,7 +911,7 @@ int auto_compute_matmul_fp32(
         zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_weights, m, k,
                        n,
                        alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                       is_weights_const);
+                       is_weights_const, is_inplace);
         //timer end
 #ifdef _WIN32
         auto end_n = std::chrono::high_resolution_clock::now();
@@ -963,7 +963,8 @@ int auto_compute_matmul(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
     unsigned int algo_type;
 
@@ -1010,10 +1011,8 @@ int auto_compute_matmul(
             zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k,
-                           n,
-                           alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                           is_weights_const);
+                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+                           is_weights_const, is_inplace);
 
         }
         else {
@@ -1021,10 +1020,8 @@ int auto_compute_matmul(
             zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
 
             zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k,
-                           n,
-                           alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
-                           is_weights_const);
+                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+                           is_weights_const, is_inplace);
 
         }
 
@@ -1033,6 +1030,6 @@ int auto_compute_matmul(
 
     algo_type = auto_compute_matmul_fp32(zenEnvObj, &persistent_map_flag, key_obj,
                                          Layout, transpose_input, transpose_weights, m, k, n, alpha, input, lda, weights,
-                                         ldb, bias, relu, gelu, beta, output, ldc, is_weights_const);
+                                         ldb, bias, relu, gelu, beta, output, ldc, is_weights_const, is_inplace);
     return algo_type;
 }

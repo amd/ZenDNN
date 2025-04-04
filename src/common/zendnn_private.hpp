@@ -632,7 +632,8 @@ extern "C"
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const = false
+        bool is_weights_const = false,
+        bool is_inplace = true
     );
 
     void zenMatMul(
@@ -657,7 +658,8 @@ extern "C"
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const = false
+        bool is_weights_const = false,
+        bool is_inplace = true
     );
 
     void zenMatMulWithBias(
@@ -680,7 +682,8 @@ extern "C"
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const = false
+        bool is_weights_const = false,
+        bool is_inplace = true
     );
 
     void zenMatMulWithBiasReLU(
@@ -703,7 +706,8 @@ extern "C"
         const float beta,
         float *output,
         const int ldc,
-        bool is_weights_const = false
+        bool is_weights_const = false,
+        bool is_inplace = true
     );
 
     void zenMatMulWithBiasGeLU(
@@ -727,7 +731,8 @@ extern "C"
         float *output,
         const int ldc,
         const int geluType,
-        bool is_weights_const = false
+        bool is_weights_const = false,
+        bool is_inplace = true
     );
 
     void zenMatMul_refWrapper(
@@ -1204,6 +1209,7 @@ extern "C"
         const int32_t zero_point_dst,
         float do_sum,
         bool is_weights_const,
+        bool is_inplace,
         float *src_scale,
         int src_scale_size,
         bool default_src_scales,
@@ -1275,6 +1281,7 @@ extern "C"
         const int32_t zero_point_dst,
         float do_sum,
         bool is_weights_const,
+        bool is_inplace,
         float *src_scale,
         int src_scale_size,
         bool default_src_scales,
@@ -1346,7 +1353,9 @@ extern "C"
         const int ldc,
         const float *output_scales,
         const int scale_size,
-        bool is_weights_const);
+        bool is_weights_const,
+	bool is_inplace
+    );
 
     int auto_compute_matmul_bf16(
         const impl::exec_ctx_t &ctx,
@@ -1374,7 +1383,8 @@ extern "C"
         const int ldc,
         const float *output_scales,
         const int scale_size,
-        bool is_weights_const
+        bool is_weights_const,
+	bool is_inplace
     );
 }
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -127,7 +127,7 @@ _zendnnLogMessage(LogLevel level, ZendnnLogModule mod, Ts... vs) {
 } while (0)
 
 #define zendnnInfo(mod, ...)    zendnnLogAtLevel(mod, LOG_LEVEL_INFO, ##__VA_ARGS__)
-#define zendnnWarn(mod, ...)    zeddnnLogAtLevel(mod, LOG_LEVEL_WARNING, ##__VA_ARGS__)
+#define zendnnWarn(mod, ...)    zendnnLogAtLevel(mod, LOG_LEVEL_WARNING, ##__VA_ARGS__)
 #define zendnnError(mod, ...)   zendnnLogAtLevel(mod, LOG_LEVEL_ERROR, ##__VA_ARGS__)
 #define zendnnVerbose(mod, ...) zendnnLogAtLevel(mod, LOG_LEVEL_VERBOSE0, ##__VA_ARGS__)
 

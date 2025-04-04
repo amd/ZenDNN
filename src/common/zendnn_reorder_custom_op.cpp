@@ -62,7 +62,7 @@ bool reorder_brgemm_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
         reorderAndCacheWeightsBrgemm(
             key_obj, blocked_matmul_weights_md, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
-            zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
+            true/*is_inplace*/, zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
     else if (weight_dt == zendnn_bf16) {
         memory::desc blocked_matmul_weights_md = memory::desc({k,n}, (
@@ -75,7 +75,7 @@ bool reorder_brgemm_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
         reorderAndCacheWeightsBrgemm(
             key_obj, blocked_matmul_weights_md, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
-            zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
+            true/*is_inplace*/, zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
     else if (weight_dt == zendnn_s8) {
         memory::desc blocked_matmul_weights_md = memory::desc({k,n}, (
@@ -108,7 +108,7 @@ bool reorder_brgemm_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
         reorderAndCacheWeightsBrgemm(
             key_obj, blocked_matmul_weights_md, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, true/*is_weights_const*/,
-            zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
+            true/*is_inplace*/, zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
 
     return true;
@@ -144,8 +144,8 @@ bool reorder_aocl_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
         }
         float *temp = NULL;
         reorderAndCacheWeights<float>(key_obj, (float *)src, temp, k, n,
-                                      trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
-                                      reorder_param1, reorder_param2,
+                                      trans_mem ? k : n, true/*weights const*/, true/*is_inplace*/,
+                                      order, trans, reorder_param0, reorder_param1, reorder_param2,
                                       aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
                                       zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
@@ -160,8 +160,8 @@ bool reorder_aocl_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
         }
         int16_t *temp = NULL;
         reorderAndCacheWeights<int16_t>(key_obj, (int16_t *)src, temp, k, n,
-                                        trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
-                                        reorder_param1, reorder_param2,
+                                        trans_mem ? k : n, true/*weights const*/, true/*is_inplace*/,
+                                        order, trans, reorder_param0, reorder_param1, reorder_param2,
                                         aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                                         zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER);
     }
@@ -179,8 +179,8 @@ bool reorder_aocl_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
             }
             int8_t *temp = NULL;
             reorderAndCacheWeights<int8_t>(key_obj, (int8_t *)src, temp, k, n,
-                                           trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
-                                           reorder_param1, reorder_param2,
+                                           trans_mem ? k : n, true/*weights const*/, true/*is_inplace*/,
+                                           order, trans, reorder_param0, reorder_param1, reorder_param2,
                                            aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
                                            zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER,
                                            weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE ? 0 :
@@ -196,8 +196,8 @@ bool reorder_aocl_inplace(zendnnEnv zenEnvObj, void *src, void *dst, uint k,
             }
             int8_t *temp = NULL;
             reorderAndCacheWeights<int8_t>(key_obj, (int8_t *)src, temp, k, n,
-                                           trans_mem ? k : n, true/*weights const*/, order, trans, reorder_param0,
-                                           reorder_param1, reorder_param2,
+                                           trans_mem ? k : n, true/*weights const*/, true/*is_inplace*/,
+                                           order, trans, reorder_param0, reorder_param1, reorder_param2,
                                            aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
                                            zendnnWeightCacheType::WEIGHT_CACHE_AOT_REORDER,
                                            weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE ? 0 :

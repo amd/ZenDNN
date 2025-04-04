@@ -64,6 +64,7 @@ void zenMatMul_gemm_blocked(
     float *output,
     const int ldc,
     bool is_weights_const = false,
+    bool is_inplace = false,
     bool blocked_format = false
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
@@ -88,8 +89,7 @@ void zenMatMul_gemm_blocked(
         const char order = 'r';
         const char trans = transpose_filter ? 't':'n';
         bool status = reorderAndCacheWeights<float>(key_obj, filter, reorder_filter, k,
-                      n,
-                      ldb, is_weights_const, order, trans, reorder_param0,
+                      n, ldb, is_weights_const, is_inplace, order, trans, reorder_param0,
                       reorder_param1, reorder_param2,
                       aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
                       weight_cache_type);
@@ -243,11 +243,15 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
                         float *C_Array, const float alpha,
                         const float beta, const int lda, const int ldb,
                         const int ldc, const float *bias, const bool relu,
-                        const int gelu, bool blocked_format, bool is_weights_const = false) {
+                        const int gelu, bool blocked_format, bool is_weights_const = false,
+                        bool is_inplace = false) {
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
 
     int weight_cache_type = zenEnvObj.zenWeightCache;
+    if (!is_weights_const) {
+        blocked_format = false;
+    }
     std::vector<primitive> net;
     std::vector<std::unordered_map<int, memory>> net_args;
 
@@ -344,7 +348,7 @@ void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
             key_obj,
             matmul_prim_disc.weights_desc(), user_weights_memory,
             reordered_weights_memory, eng, engine_stream, is_weights_const,
-            weight_cache_type);
+            is_inplace, weight_cache_type);
     }
 
     net.push_back(zendnn::matmul(matmul_prim_disc));
@@ -386,7 +390,8 @@ void zenMatMul_gemm(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const = false
+    bool is_weights_const = false,
+    bool is_inplace = false
 ) {
     //Set Format to GEMM as Matrix multiplication is always GEMM
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
@@ -423,7 +428,7 @@ void zenMatMul_gemm(
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, true,
-                           is_weights_const);
+                           is_weights_const, is_inplace);
 
     }
     else if (zenEnvObj.zenGEMMalgo ==
@@ -431,7 +436,7 @@ void zenMatMul_gemm(
         zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout, transpose_input,
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
-                               output, ldc, is_weights_const, true);
+                               output, ldc, is_weights_const, is_inplace, true);
     }
     else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32) {
         //JIT kernel call
@@ -441,19 +446,19 @@ void zenMatMul_gemm(
         zenMatMulPrimitive(zenEnvObj, Layout, transpose_input, transpose_filter, m, n,
                            k,
                            input, filter, output, alpha, beta, lda, ldb, ldc, bias, relu, gelu, false,
-                           is_weights_const);
+                           is_weights_const, is_inplace);
     }
     else if (zenEnvObj.zenGEMMalgo ==
              zenMatMulAlgoType::MATMUL_AOCL_FP32) {
         zenMatMul_gemm_blocked(zenEnvObj, auto_tuner, Layout, transpose_input,
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
-                               output, ldc, is_weights_const, false);
+                               output, ldc, is_weights_const, is_inplace, false);
     }
     else {
         zenMatmulSplit(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
                        m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta,
-                       output, ldc, is_weights_const);
+                       output, ldc, is_weights_const, is_inplace);
     }
 }
 
@@ -478,7 +483,8 @@ void zenMatMul_gemm_wrapper(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
 
     zendnnEnv zenEnvObj = readEnv();
@@ -502,23 +508,23 @@ void zenMatMul_gemm_wrapper(
         if (false == Layout) { //CblasColMajor
             algo_type = auto_compute_matmul(zenEnvObj, !Layout, transpose_filter,
                                             transpose_input, n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu,
-                                            beta, output, ldc, is_weights_const);
+                                            beta, output, ldc, is_weights_const, is_inplace);
         }
         else {
             algo_type = auto_compute_matmul(zenEnvObj, Layout, transpose_input,
                                             transpose_filter, m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu,
-                                            beta, output, ldc, is_weights_const);
+                                            beta, output, ldc, is_weights_const, is_inplace);
         }
     }
     else if (false == Layout) { //CblasColMajor
         zenMatMul_gemm(zenEnvObj, auto_tuner, !Layout, transpose_filter,
                        transpose_input, n, k, m, alpha, filter, ldb, input, lda, bias, relu, gelu,
-                       beta, output, ldc, is_weights_const);
+                       beta, output, ldc, is_weights_const, is_inplace);
     }
     else {
         zenMatMul_gemm(zenEnvObj, auto_tuner, Layout, transpose_input, transpose_filter,
                        m, k, n, alpha, input, lda, filter, ldb, bias, relu, gelu, beta, output, ldc,
-                       is_weights_const);
+                       is_weights_const, is_inplace);
     }
     // Code for time profiling of this kernel
     float elapsed;
@@ -572,7 +578,8 @@ void zenMatMul(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
     //Check for NULL pointers
     if ((input == NULL)|| (filter == NULL) || (output == NULL)) {
@@ -588,7 +595,7 @@ void zenMatMul(
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + input_offsets[0], lda,
                                filter + weights_offsets[0], ldb, bias, relu, gelu, beta,
-                               output + dst_offsets[0], ldc, is_weights_const);
+                               output + dst_offsets[0], ldc, is_weights_const, is_inplace);
     }
     else {
         int group_count = 1;
@@ -672,7 +679,8 @@ void zenMatMulWithBias(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
     //Check for NULL pointers
     if ((input == NULL)|| (filter == NULL) || (output == NULL)) {
@@ -687,7 +695,7 @@ void zenMatMulWithBias(
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + input_offsets[i], lda,
                                filter + weights_offsets[i], ldb, bias, false, 0,
-                               beta, output + dst_offsets[i], ldc, is_weights_const);
+                               beta, output + dst_offsets[i], ldc, is_weights_const, is_inplace);
 }
 
 void zenMatMulWithBiasReLU(
@@ -710,7 +718,8 @@ void zenMatMulWithBiasReLU(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
     //Check for NULL pointers
     if ((input == NULL)|| (filter == NULL) || (output == NULL) || (bias == NULL)) {
@@ -725,7 +734,7 @@ void zenMatMulWithBiasReLU(
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + input_offsets[i], lda,
                                filter + weights_offsets[i], ldb, bias, true, 0,
-                               beta, output + dst_offsets[i], ldc, is_weights_const);
+                               beta, output + dst_offsets[i], ldc, is_weights_const, is_inplace);
 }
 
 void zenMatMulWithBiasGeLU(
@@ -749,7 +758,8 @@ void zenMatMulWithBiasGeLU(
     float *output,
     const int ldc,
     const int geluType,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
     //Check for NULL pointers
     if ((input == NULL)|| (filter == NULL) || (output == NULL) || (bias == NULL)) {
@@ -764,7 +774,7 @@ void zenMatMulWithBiasGeLU(
                                no_of_images, no_of_channels, no_of_filters, alpha,
                                input + input_offsets[i], lda,
                                filter + weights_offsets[i], ldb, bias, false, geluType,
-                               beta, output + dst_offsets[i], ldc, is_weights_const);
+                               beta, output + dst_offsets[i], ldc, is_weights_const, is_inplace);
 }
 
 
@@ -1333,7 +1343,8 @@ void zenMatmulSplit(
     const float beta,
     float *output,
     const int ldc,
-    bool is_weights_const
+    bool is_weights_const,
+    bool is_inplace
 ) {
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
