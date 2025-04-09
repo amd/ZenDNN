@@ -9,7 +9,7 @@ ZenDNN depends on:
 - Composable Kernel for convolutions using an implicit GEMM algorithm
 - FBGEMM (Facebook GEneral Matrix Multiplication) is a low-precision, high-performance matrix-matrix multiplications and convolution library for server-side inference.
 
-AOCL-BLAS is required dependencies for ZenDNN, whereas AMD Composable Kernel and FBGEMM are an optional dependency.
+AOCL-BLAS is a required dependency for ZenDNN, whereas the AMD Composable Kernel and FBGEMM are optional dependencies.
 
 # Table of Contents
 - [Zen Deep Neural Network Library (ZenDNN)](#zen-deep-neural-network-library-zendnn)
@@ -57,14 +57,13 @@ This release of ZenDNN supports the following Operating Systems (OS) and compile
 Binaires will be supported on
 * Ubuntu® 20.04, 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
->Note: PyTorch v2.6 (Plugin) wheel files are not supported on Red Hat® Enterprise Linux® (RHEL) 8.6
 
 Build from source will be supported on
 * Ubuntu® 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
 
 ## Compilers
-* GCC 13.3.1
+* GCC 12.2 and later
 
 Theoretically, for wheel files any Linux based OS with GLIBC version later than 2.28 could be supported.
 
@@ -72,12 +71,12 @@ For C++ interface binaries, any Linux based OS with GLIBC version later than 2.2
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* AOCL-BLAS v5.0.1 must be installed.
+* AOCL-BLAS v5.0.2 must be installed.
 
 
 # AOCL-BLAS Library Installation
 
-**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from AMD.com portal Developer Central (https://www.amd.com/en/developer/aocl/dense.html).
+**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/AOCL-Mar2025-b2.tar.gz.
 
 Note: ZenDNN depends only on AOCL-BLAS and has no dependency on any other AOCL library.
 ## General Convention
@@ -90,11 +89,11 @@ The following points must be considered while installing AOCL-BLAS:
 Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
 2. Download BLIS
-   wget https://github.com/amd/blis/archive/refs/tags/AOCL-LPGEMM-012925.tar.gz
+   wget https://github.com/amd/blis/archive/refs/tags/AOCL-Mar2025-b2.tar.gz
 3. Execute the following commands:
     ```bash
-    tar -xvf AOCL-LPGEMM-012925.tar.gz
-    cd blis-AOCL-LPGEMM-012925
+    tar -xvf AOCL-Mar2025-b2.tar.gz
+    cd blis-AOCL-Mar2025-b2
     make clean; make distclean; CC=gcc ./configure -a aocl_gemm --prefix=../amd-blis --enable-threading=openmp --enable-cblas amdzen; make -j install
     cd ../amd-blis/include
     mkdir LP64
