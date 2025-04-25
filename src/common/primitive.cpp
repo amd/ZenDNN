@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -113,25 +113,21 @@ status_t primitive_create(primitive_iface_t **primitive_iface,
     // primitive log.
     if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1 ||
             zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 2) {
-        double start_ms = get_msec();
+        auto start_ms = std::chrono::high_resolution_clock::now();
         CHECK(primitive_desc_iface->create_primitive_iface(
                   p_iface, cache_blob));
-        double duration_ms = get_msec() - start_ms;
+        auto end_ms = std::chrono::high_resolution_clock::now();
+        auto duration_ms = std::chrono::duration<double, std::milli>(end_ms - start_ms).count();
 
         const char *str = p_iface.second ? "cache_hit," : "cache_miss,";
         if (cache_blob) {
             str = "from_cache_blob";
         }
-
-        std::string stamp;
-        if (get_verbose_timestamp()) {
-            stamp = "," + std::to_string(start_ms);
-        }
         if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1)
-            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_create,", stamp.c_str(),
+            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_create,",
                        str, p_iface.first->pd()->info(), ",", duration_ms,  ",ms");
         else
-            zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_create,", stamp.c_str(),
+            zendnnInfo(ZENDNN_PERFLOG, "zendnn_primitive_create,",
                        str, p_iface.first->pd()->info(), ",", duration_ms,  ",ms");
     }
 
@@ -162,18 +158,14 @@ status_t primitive_execute(
     // below primitive execute log.
     if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 1) {
         stream->wait();
-        double start_ms = get_msec();
+        auto start_ms = std::chrono::high_resolution_clock::now();
         status = stream->enqueue_primitive(primitive_iface, ctx);
         stream->wait();
-        double duration_ms = get_msec() - start_ms;
-        std::string stamp;
-        if (get_verbose_timestamp()) {
-            stamp = "," + std::to_string(start_ms);
-        }
-
+        auto end_ms = std::chrono::high_resolution_clock::now();
+        auto duration_ms = std::chrono::duration<double, std::milli>(end_ms - start_ms).count();
         zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
         if (obj.is_log) {
-            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
+            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,",
                        primitive_iface->pd()->info(), ",", duration_ms, ",ms");
         }
     }
@@ -217,20 +209,16 @@ status_t primitive_execute(
 #if UPROF_ENABLE
     else if (zendnn_getenv_int("ZENDNN_PRIMITIVE_LOG_ENABLE") == 3) {
         stream->wait();
-        double start_ms = get_msec();
+        auto start_ms = std::chrono::high_resolution_clock::now();
         amdProfileResume();
         status = stream->enqueue_primitive(primitive_iface, ctx);
         stream->wait();
         amdProfilePause();
-        double duration_ms = get_msec() - start_ms;
-        std::string stamp;
-        if (get_verbose_timestamp()) {
-            stamp = "," + std::to_string(start_ms);
-        }
-
+        auto end_ms = std::chrono::high_resolution_clock::now();
+        auto duration_ms = std::chrono::duration<double, std::milli>(end_ms - start_ms).count();
         zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
         if (obj.is_log) {
-            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,", stamp.c_str(),
+            zendnnInfo(ZENDNN_PROFLOG, "zendnn_primitive_execute,",
                        primitive_iface->pd()->info(), ",", duration_ms, ",ms");
         }
     }
