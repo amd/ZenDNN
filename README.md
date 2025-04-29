@@ -38,14 +38,14 @@ AOCL-BLAS is a required dependency for ZenDNN, whereas the AMD Composable Kernel
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.0.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.6 (Plugin).
+* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.7 (Plugin).
 * Python v3.9-v3.12 has been used to generate the TensorFlow v2.18 (Plugin) wheel files (*.whl).
-* Python v3.9-v3.13 has been used to generate the PyTorch v2.6 (Plugin) wheel files (*.whl).
+* Python v3.9-v3.13 has been used to generate the PyTorch v2.7 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -174,7 +174,7 @@ ZenDNN has the following runtime dependencies:
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
 * Python v3.9-v3.12 for TensorFlow v2.18(Plugin)
-* Python v3.9-v3.13 for PyTorch v2.6 (Plugin)
+* Python v3.9-v3.13 for PyTorch v2.7 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
@@ -254,7 +254,7 @@ This distribution includes third party software governed by separate license ter
 This third party software, even if included with the distribution of the Advanced Micro Devices software, may be governed by separate license terms, including without limitation, third party license terms,  and open source software license terms. These separate license terms govern your use of the third party programs as set forth in the **THIRD-PARTY-PROGRAMS** file.
 
 # Technical Support
-Please email zendnnsupport@amd.com for questions, issues, and feedback on ZenDNN.
+Please email Zendnn.Maintainers@amd.com for questions, issues, and feedback on ZenDNN.
 
 Please submit your questions, feature requests, and bug reports on the
 [GitHub issues](https://github.com/amd/ZenDNN/issues) page.
