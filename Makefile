@@ -28,6 +28,7 @@ BLIS_API ?= 0
 
 # build for forced architecture. zero indicates arch is not forced
 GXX_COMPILER = g++
+ABI_COMPILE ?=
 
 # Set ZENDNN_STANDALONE_BUILD to 1 to build ZenDNN stanalone library
 # BLIS include path and lib path is not same when BLIS is build from source vs
@@ -194,6 +195,7 @@ endif
 COMMONFLAGS += -Wno-format-zero-length -Wno-format-truncation
 COMMONFLAGS += -Wno-unused-result -Wno-stringop-overflow
 COMMONFLAGS += -Wno-format -Wno-narrowing
+COMMONFLAGS += $(ABI_COMPILE)
 
 CXX_PREFIX ?= ccache
 ifeq ($(AOCC), 0)
