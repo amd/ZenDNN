@@ -193,6 +193,7 @@ class zendnnEnv {
     bool    zenStaticScaleCache;
     bool    zenBiasCache;
     bool    zenZpCompCache;
+    bool    zenEnableCache;
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
@@ -285,6 +286,9 @@ class zendnnEnv {
 
         //Number of iterations to run for creating map for each layer.
         auto_evaluate_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 0);
+
+        // Enable/Disable cache for MatMul
+        zenEnableCache = (bool)zendnn_getenv_int("ZENDNN_ENABLE_CACHE", 1);
         //ZENDNN_WEIGHT_CACHING is to enable/disable weight caching in MatMul
         zenWeightCache = zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
         if (zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE) {
@@ -298,6 +302,13 @@ class zendnnEnv {
         //ZENDNN_ZP_COMP_CACHING is to enable/disable ZP comp caching in MatMul
         zenZpCompCache = (bool)zendnn_getenv_int("ZENDNN_ZP_COMP_CACHING", 1);
 
+        if (!zenEnableCache) {
+            //Disable all caches
+            zenWeightCache      = 0;
+            zenStaticScaleCache = false;
+            zenBiasCache        = false;
+            zenZpCompCache      = false;
+        }
         //ZENDNN_INT8_SUPPORT is to enable/disable INT8 support
         zenINT8format = (bool)zendnn_getenv_int("ZENDNN_INT8_SUPPORT", 0);
         zenConvAlgo = zendnn_getenv_int("ZENDNN_CONV_ALGO", 1 /* GEMM */);
@@ -307,15 +318,16 @@ class zendnnEnv {
         }
     }
 
+    // Setting algo to favour LLMs
     static int zenMatMulDefaultAlgo(const std::string &name) {
         if (name == "FP32") {
-            return zenMatMulAlgoType::MATMUL_JIT_FP32;
+            return zenMatMulAlgoType::MATMUL_DT_FP32;
         }
         else if (name == "BF16") {
-            return zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
+            return zenBF16MatMulAlgoType::MATMUL_DT_BF16;
         }
         else if (name == "INT8") {
-            return zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
+            return zenINT8MatMulAlgoType::MATMUL_DT_INT8;
         }
         else {
             return -1;
