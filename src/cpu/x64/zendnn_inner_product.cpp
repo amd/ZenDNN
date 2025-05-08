@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -92,23 +92,23 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
     unsigned long input_offsets[] = {0};
     unsigned long weight_offsets[] = {0};
     unsigned long dst_offsets[] = {0};
-
+    zendnnEnv zenEnvObj = readEnv();
     if (bias == NULL) {
         zendnnVerbose(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMul [cpu/inner_product]");
         zenMatMul(
-            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+            ctx, zenEnvObj, Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
             OC, alpha, (float *)src, IC,
-            (float *)weights, wei_tr ? IC : OC, NULL, has_eltwise_relu, geluType, beta_,
+            (float *)weights, wei_tr ? IC : OC, NULL, pd()->attr()->post_ops_, has_eltwise_relu, geluType, beta_,
             (float *)dst, OC);
     }
     else if (!has_eltwise) {
         zendnnVerbose(ZENDNN_CORELOG,
                    "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBias [cpu/inner_product]");
         zenMatMulWithBias(
-            Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+            ctx, zenEnvObj, Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
             OC, alpha, (float *)src, IC,
-            (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+            (float *)weights, wei_tr ? IC : OC, (float *)bias, pd()->attr()->post_ops_, beta_,
             (float *)dst, OC);
     }
     else {
@@ -117,9 +117,9 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasReLU [cpu/inner_product]");
             zenMatMulWithBiasReLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                ctx, zenEnvObj, Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
                 OC, alpha, (float *)src, IC,
-                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, pd()->attr()->post_ops_, beta_,
                 (float *)dst, OC);
         }
         else if (has_eltwise_gelu) {
@@ -128,9 +128,9 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                ctx, zenEnvObj, Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
                 OC, alpha, (float *)src, IC,
-                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, pd()->attr()->post_ops_, beta_,
                 (float *)dst, OC, 1);
 
         }
@@ -140,9 +140,9 @@ status_t zendnn_inner_product_fwd_t<data_type>::execute_forward(
             zendnnVerbose(ZENDNN_CORELOG,
                        "zendnn_inner_product_fwd_t::execute_forward zenMatMulWithBiasGeLU [cpu/inner_product]");
             zenMatMulWithBiasGeLU(
-                Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
+                ctx, zenEnvObj, Layout, false, wei_tr, 1, input_offsets, weight_offsets, dst_offsets, MB, IC,
                 OC, alpha, (float *)src, IC,
-                (float *)weights, wei_tr ? IC : OC, (float *)bias, beta_,
+                (float *)weights, wei_tr ? IC : OC, (float *)bias, pd()->attr()->post_ops_, beta_,
                 (float *)dst, OC, 2);
 
         }

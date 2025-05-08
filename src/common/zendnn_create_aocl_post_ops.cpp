@@ -265,7 +265,6 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu) {
                     // Gelu tanh.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -276,7 +275,6 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
                     // Gelu erf.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -287,7 +285,6 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
                     // Sigmoid
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -298,7 +295,6 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
                     // Silu.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;

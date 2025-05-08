@@ -615,6 +615,7 @@ extern "C"
     );
 
     void zenMatMul_gemm_wrapper(
+        const impl::exec_ctx_t &ctx,
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,
@@ -627,6 +628,7 @@ extern "C"
         const float *filter,
         const int ldb,
         const float *bias,
+        const impl::post_ops_t &po_ops,
         const bool relu,
         const int gelu,
         const float beta,
@@ -637,6 +639,8 @@ extern "C"
     );
 
     void zenMatMul(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,
@@ -653,6 +657,7 @@ extern "C"
         const float *filter,
         const int ldb,
         const float *bias,
+        const impl::post_ops_t &po_ops,
         const bool relu,
         const int gelu,
         const float beta,
@@ -663,6 +668,8 @@ extern "C"
     );
 
     void zenMatMulWithBias(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,
@@ -679,6 +686,7 @@ extern "C"
         const float *filter,
         const int ldb,
         const float *bias,
+        const impl::post_ops_t &po_ops,
         const float beta,
         float *output,
         const int ldc,
@@ -687,6 +695,8 @@ extern "C"
     );
 
     void zenMatMulWithBiasReLU(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,
@@ -703,6 +713,7 @@ extern "C"
         const float *filter,
         const int ldb,
         const float *bias,
+        const impl::post_ops_t &po_ops,
         const float beta,
         float *output,
         const int ldc,
@@ -710,7 +721,61 @@ extern "C"
         bool is_inplace = true
     );
 
+    void zenMatMul_gemm(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        const bool auto_tuner,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const impl::post_ops_t &po_ops,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc,
+        bool is_weights_const,
+        bool is_inplace
+    );
+
+    void zenMatmulSplit(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        const bool auto_tuner,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_filter,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const impl::post_ops_t &po_ops,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc,
+        bool is_weights_const,
+        bool is_inplace
+    );
+
     void zenMatMulWithBiasGeLU(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
         const bool Layout,
         const bool transpose_input,
         const bool transpose_filter,
@@ -727,6 +792,7 @@ extern "C"
         const float *filter,
         const int ldb,
         const float *bias,
+        const impl::post_ops_t &po_ops,
         const float beta,
         float *output,
         const int ldc,
@@ -1220,6 +1286,31 @@ extern "C"
         int dst_scale_size,
         bool default_dst_scales,
         int scale_type
+    );
+
+    int auto_compute_matmul(
+        const impl::exec_ctx_t &ctx,
+        zendnn::zendnnEnv zenEnvObj,
+        const bool Layout,
+        const bool transpose_input,
+        const bool transpose_weights,
+        const int m,
+        const int k,
+        const int n,
+        const float alpha,
+        const float *input,
+        const int lda,
+        const float *filter,
+        const int ldb,
+        const float *bias,
+        const impl::post_ops_t &po_ops,
+        const bool relu,
+        const int gelu,
+        const float beta,
+        float *output,
+        const int ldc,
+        bool is_weights_const,
+        bool is_inplace
     );
 
     int auto_compute_matmul_woq(

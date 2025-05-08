@@ -787,6 +787,7 @@ int auto_compute_matmul_bf16(
   >
 */
 int auto_compute_matmul_fp32(
+    const impl::exec_ctx_t &ctx,
     zendnn::zendnnEnv zenEnvObj,
     std::pair<unsigned int, unsigned int> *persistent_map_flag,
     Key_matmul key_obj,
@@ -802,6 +803,7 @@ int auto_compute_matmul_fp32(
     const float *weights,
     const int ldb,
     const float *bias,
+    const impl::post_ops_t &po_ops,
     const bool relu,
     const int gelu,
     const float beta,
@@ -840,8 +842,8 @@ int auto_compute_matmul_fp32(
             gettimeofday(&start_n, 0);
 #endif
 
-            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                            is_weights_const, is_inplace);
 
             //Time end
@@ -867,8 +869,8 @@ int auto_compute_matmul_fp32(
         else {
             zenEnvObj.zenGEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
             std::get<0>(found_obj->second) += 1;
-            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                            is_weights_const, is_inplace);
         }
     }
@@ -879,8 +881,8 @@ int auto_compute_matmul_fp32(
 
         //Get best algo for given layer from MAP
         zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
-        zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                       k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+        zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                       k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                        is_weights_const, is_inplace);
 
         //Writing Map in file.
@@ -908,9 +910,9 @@ int auto_compute_matmul_fp32(
         gettimeofday(&start_n, 0);
 #endif
 
-        zenMatMul_gemm(zenEnvObj, true, Layout,transpose_input, transpose_weights, m, k,
+        zenMatMul_gemm(ctx, zenEnvObj, true, Layout,transpose_input, transpose_weights, m, k,
                        n,
-                       alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+                       alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                        is_weights_const, is_inplace);
         //timer end
 #ifdef _WIN32
@@ -945,6 +947,7 @@ int auto_compute_matmul_fp32(
 //It calls appropriate version of auto_tuner.
 
 int auto_compute_matmul(
+    const impl::exec_ctx_t &ctx,
     zendnn::zendnnEnv zenEnvObj,
     const bool Layout,
     const bool transpose_input,
@@ -958,6 +961,7 @@ int auto_compute_matmul(
     const float *weights,
     const int ldb,
     const float *bias,
+    const impl::post_ops_t &po_ops,
     const bool relu,
     const int gelu,
     const float beta,
@@ -1010,8 +1014,8 @@ int auto_compute_matmul(
         if (matmul_kernel_map.find(key_obj) != matmul_kernel_map.end()) {
             zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
 
-            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                            is_weights_const, is_inplace);
 
         }
@@ -1019,8 +1023,8 @@ int auto_compute_matmul(
 
             zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
 
-            zenMatMul_gemm(zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                            is_weights_const, is_inplace);
 
         }
@@ -1028,8 +1032,8 @@ int auto_compute_matmul(
         return zenEnvObj.zenGEMMalgo;
     }
 
-    algo_type = auto_compute_matmul_fp32(zenEnvObj, &persistent_map_flag, key_obj,
+    algo_type = auto_compute_matmul_fp32(ctx, zenEnvObj, &persistent_map_flag, key_obj,
                                          Layout, transpose_input, transpose_weights, m, k, n, alpha, input, lda, weights,
-                                         ldb, bias, relu, gelu, beta, output, ldc, is_weights_const, is_inplace);
+                                         ldb, bias, po_ops, relu, gelu, beta, output, ldc, is_weights_const, is_inplace);
     return algo_type;
 }

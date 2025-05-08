@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -354,12 +354,16 @@ void zenMatMul_bf16_Primitive(const bool Layout,
 
 
 template <typename T1, typename T2>
-void zenAttention_Matmul(const T1 *a,
+void zenAttention_Matmul(
+            const impl::exec_ctx_t &ctx,
+            zendnn::zendnnEnv zenEnvObj,
+            const T1 *a,
             memory_desc_wrapper a_mdw,
             const T1 *b,
             memory_desc_wrapper b_mdw,
             float scale,
             const float *c,
+            const impl::post_ops_t &po_ops,
             memory_desc_wrapper c_mdw,
             T2 *o,
             memory_desc_wrapper o_mdw) {
@@ -435,13 +439,13 @@ void zenAttention_Matmul(const T1 *a,
     {
 #if 1
         zenMatMulWithBias(
-                Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+                ctx, zenEnvObj, Layout, strcmp(transA, "N"), strcmp(transB, "N"),
                 batch, a_offsets, b_offsets, o_offsets,
                 M, K, N,
                 scale,//alpha
                 (float *)a, lda,
                 (float *)b, ldb,
-                (float *)c,
+                (float *)c, po_ops,
                 0.0f,//beta
                 (float *)o, ldc
             );
@@ -801,11 +805,11 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
 
     attn_opn_type_t* scp_qBuff = scp_bnsh_0;
     attn_opn_type_t* scp_qtBuff = scp_bnsh_1;
-
-    zendnn::impl::cpu::attention::zenAttention_Matmul(query, query_mdw,
+    zendnnEnv zenEnvObj = readEnv();
+    zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, query, query_mdw,
                                                       weights_query, weights_query_mdw,
                                                       1.0f,
-                                                      bias_query, bias_query_mdw,
+                                                      bias_query, pd()->attr()->post_ops_, bias_query_mdw,
                                                       scp_qBuff, Qbuff_mdw);
 
 #ifdef DEBUG_ATTN
@@ -844,10 +848,10 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
     attn_opn_type_t* scp_kBuff = scp_bnsh_0;
     attn_opn_type_t* scp_ktBuff = scp_bnsh_2;
 
-    zendnn::impl::cpu::attention::zenAttention_Matmul(key, key_mdw,
+    zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, key, key_mdw,
                                                       weights_key, weights_key_mdw,
                                                       1.0f,
-                                                      bias_key, bias_key_mdw,
+                                                      bias_key, pd()->attr()->post_ops_, bias_key_mdw,
                                                       scp_kBuff, Kbuff_mdw);
 
 #ifdef DEBUG_ATTN
@@ -886,10 +890,10 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
     //QK' matmul output is in float type for both f32 and bf16 attention
     float* qk_buff = scp_bnss;
 
-    zendnn::impl::cpu::attention::zenAttention_Matmul(scp_qtBuff, rtQbuff_mdw,
+    zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, scp_qtBuff, rtQbuff_mdw,
                                                     scp_ktBuff, rtKbuff_mdw,
                                                     scale,
-                                                    nullptr, bias_value_mdw,
+                                                    nullptr, pd()->attr()->post_ops_, bias_value_mdw,
                                                     qk_buff , QKbuff_mdw);
 
 #ifdef DEBUG_ATTN
@@ -931,10 +935,10 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
     attn_opn_type_t* scp_vBuff = scp_bnsh_0;
     attn_opn_type_t* scp_vtBuff = scp_bnsh_1;
 
-    zendnn::impl::cpu::attention::zenAttention_Matmul(value, value_mdw,
+    zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, value, value_mdw,
                                                       weights_value, weights_value_mdw,
                                                       1.0f,
-                                                      bias_value, bias_value_mdw,
+                                                      bias_value, pd()->attr()->post_ops_, bias_value_mdw,
                                                       scp_vBuff, Vbuff_mdw);
 
 #ifdef DEBUG_ATTN
@@ -972,10 +976,10 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
     attn_opn_type_t* qkv_buff = scp_bnsh_0;
 
     if(attn_opn_type == data_type::f32) {
-        zendnn::impl::cpu::attention::zenAttention_Matmul((float *)qk_buff, QKbuff_mdw,
+        zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, (float *)qk_buff, QKbuff_mdw,
                                                         (float *)scp_vtBuff, rtVbuff_mdw,
                                                         1.0f,
-                                                        nullptr, bias_value_mdw,
+                                                        nullptr, pd()->attr()->post_ops_, bias_value_mdw,
                                                         (float *)qkv_buff, QKVbuff_mdw);
     }
 
@@ -989,10 +993,10 @@ ref_attention_t<attn_opn_type>::execute_ref(const exec_ctx_t &ctx) const {
 
         zendnn::impl::cpu::attention::zenAttention_Reorder_float_to_bf16(qk_buff , QKbuff_md, (int16_t *)scp_bnss_1, QKbuff_bf16_md);
 
-        zendnn::impl::cpu::attention::zenAttention_Matmul((int16_t *)scp_bnss_1, QKbuff_bf16_mdw,
+        zendnn::impl::cpu::attention::zenAttention_Matmul(ctx, zenEnvObj, (int16_t *)scp_bnss_1, QKbuff_bf16_mdw,
                                                         (int16_t *)scp_vtBuff, rtVbuff_mdw,
                                                         1.0f,
-                                                        nullptr, bias_value_mdw,
+                                                        nullptr, pd()->attr()->post_ops_, bias_value_mdw,
                                                         (int16_t *)qkv_buff, QKVbuff_mdw);
     }
 

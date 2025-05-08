@@ -953,80 +953,10 @@ extern "C" {
         unsigned long size
     );
 
-    void zenMatmulSplit(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool auto_tuner,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc,
-        bool is_weights_const,
-        bool is_inplace
-    );
-
     zendnn_status_t zendnn_sgemm(char transa, char transb, int64_t M, int64_t N,
                                  int64_t K, float alpha, const float *A, int64_t lda, const float *B,
                                  const int64_t ldb, float beta, float *C, int64_t ldc);
 
-    void zenMatMul_gemm(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool auto_tuner,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_filter,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc,
-        bool is_weights_const,
-        bool is_inplace
-    );
-
-    int auto_compute_matmul(
-        zendnn::zendnnEnv zenEnvObj,
-        const bool Layout,
-        const bool transpose_input,
-        const bool transpose_weights,
-        const int m,
-        const int k,
-        const int n,
-        const float alpha,
-        const float *input,
-        const int lda,
-        const float *filter,
-        const int ldb,
-        const float *bias,
-        const bool relu,
-        const int gelu,
-        const float beta,
-        float *output,
-        const int ldc,
-        bool is_weights_const,
-        bool is_inplace
-    );
     int auto_compute_conv(
         int supportedPath,
         void *in_layer,

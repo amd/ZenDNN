@@ -393,7 +393,9 @@ void matmul_example_3D(zendnn::engine eng, zendnn::stream engine_stream) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_3D ends");
 }
 
-std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream, memory::dim M, memory::dim N, memory::dim K, std::vector<float> &weights_data) {
+std::vector<float> matmul_example_2D(zendnn::engine eng,
+                                     zendnn::stream engine_stream, memory::dim M, memory::dim N, memory::dim K,
+                                     std::vector<float> &weights_data) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
     // Source (src), weights, bias, and destination (dst) tensors dimensions.
     memory::dims src_dims = {M, K};
@@ -403,9 +405,10 @@ std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_s
     // Allocate buffers.
     std::vector<float> src_data(M * K);
     weights_data.resize(K * N);
-    std::cout<<"address:"<<(void*)weights_data.data()<<std::endl;
+    std::cout<<"address:"<<(void *)weights_data.data()<<std::endl;
     std::vector<float> bias_data(1 * N);
     std::vector<float> dst_data(M * N);
+    std::vector<float> bin_mul_data(M * N);
     // Initialize src, weights, bias, add_mem
     for (int i=0; i<src_data.size(); i++) {
         src_data[i] = std::cos(i / 10.f);
@@ -418,19 +421,26 @@ std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_s
     for (int i=0; i<bias_data.size(); i++) {
         bias_data[i] = std::tanh(i);
     }
+    for (int i = 0; i < bin_mul_data.size(); i++) {
+        bin_mul_data[i] = i * 0.1015;
+    }
     // Create memory descriptors and memory objects for src, weights, bias, and
     // dst.
     auto src_md = memory::desc(src_dims, dt::f32, tag::ab);
     auto weights_md = memory::desc(weights_dims, dt::f32, tag::ab);
     auto bias_md = memory::desc(bias_dims, dt::f32, tag::ab);
     auto dst_md = memory::desc(dst_dims, dt::f32, tag::ab);
+    auto bin_md = memory::desc(dst_dims, dt::f32, tag::ab);
+
     auto src_mem = memory(src_md, eng);
     auto weights_mem = memory(weights_md, eng, weights_data.data());
     auto bias_mem = memory(bias_md, eng);
     auto dst_mem = memory(dst_md, eng);
+    auto bin_mem = memory(bin_md, eng);
     // Write data to memory object's handles.
     write_to_zendnn_memory(src_data.data(), src_mem);
     write_to_zendnn_memory(bias_data.data(), bias_mem);
+    write_to_zendnn_memory(bin_mul_data.data(), bin_mem);
     // Create operation descriptor
     auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
     // Create primitive post-ops (ReLU).
@@ -438,7 +448,11 @@ std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_s
     const float alpha = 0.f;
     const float beta = 0.f;
     post_ops matmul_ops;
-    matmul_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+    //matmul_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+    //matmul_ops.append_eltwise(scale, algorithm::eltwise_swish, 1.0, beta);
+    //matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, 1.0, beta);
+    matmul_ops.append_binary(zendnn::algorithm::binary_mul, bin_md);
+    //matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     // Create primitive descriptor.
@@ -451,6 +465,7 @@ std::vector<float> matmul_example_2D(zendnn::engine eng, zendnn::stream engine_s
     matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_mem});
     matmul_args.insert({ZENDNN_ARG_BIAS, bias_mem});
     matmul_args.insert({ZENDNN_ARG_DST, dst_mem});
+    matmul_args.insert({ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1, bin_mem});
     // Primitive execution: matrix multiplication with ReLU.
     matmul_prim.execute(engine_stream, matmul_args);
     // Wait for the computation to finalize.
@@ -470,34 +485,20 @@ int main(int argc, char **argv) {
 
 //Setting Primitive Cache capacity to 0.
 #ifdef _WIN32
-_putenv_s("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0");
+    _putenv_s("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0");
 #else
-setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
+    setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
 #endif
-    matmul_example_3D(eng, engine_stream);
+    //matmul_example_3D(eng, engine_stream);
 
     std::vector<float> gemm_jit, zen;
 
     // Define list of M values
-    std::vector<memory::dim> M_list = {4,8,16,64,128}; // Add more M values as needed
+    std::vector<memory::dim> M_list = {4}; // Add more M values as needed
 
     // Define list of (K, N) pairs
     std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
-        {3456,  1024},
-        {3456,512},
-        {512, 3456},
-        {512,256},
-        {13,    512},
-        {256,   128},
-        {1024,  1024},
-        {1024,  512},
-        {256,   1},
-        {512,   256},
-        {13,    512},
-        {256,   64},
-        {415,   512},
-        {512,   512},
-        {256,   1}
+        {3456,  1024}
         // Add more (K, N) pairs as needed
     };
 
@@ -513,23 +514,23 @@ setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
             zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
             obj.is_ref_gemm_bf16 = false;
             obj.is_brgemm = false;
-            
+
             //ZenDNN_Path: FP16:1-AOCL_BLIS, FP16:2-BLOCKED_BRGEMM, FP16:3-BRGEMM
             zen = matmul_example_2D(eng, engine_stream, M, K, N, weights_data);
 
-            
+
             //Gemm-JIT Path
             obj.is_ref_gemm_bf16 = true;
             obj.is_brgemm = true;
             gemm_jit = matmul_example_2D(eng, engine_stream, M, K, N, weights_data);
             //Compare the ZENDNN_PATHS with GEMM_JIT Kernels
             auto rc = compare_vectors(
-                        gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
+                          gemm_jit, zen, 256, "Compare GEMM_JIT MatMul vs ZenDNN Paths");
         }
     }
 
-    sgemm_and_matmul_with_params('N', 'T', 10, 20, 30, 1.1f, fixed_beta, eng,
-                                 engine_stream);
+    //sgemm_and_matmul_with_params('N', 'T', 10, 20, 30, 1.1f, fixed_beta, eng,
+    //                           engine_stream);
 
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test test ends");
     return 0;

@@ -111,7 +111,6 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
         params_.can_fuse_src_batch_dims_
             = matmul_helper_t(src_md(), weights_md(), dst_md())
               .can_fuse_src_batch_dims();
-
     return check_and_configure_attributes();
 }
 
@@ -158,34 +157,6 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
         || (oscale.mask_ == (1 << 1) && batched() == false);
     };
 
-    auto check_attr_post_ops = [&]() -> bool {
-        using namespace primitive_kind;
-        const auto &p = attr()->post_ops_;
-        auto check_sum = [&](int idx) -> bool {
-            return p.contain(sum, idx) && params_.gemm_applies_output_scales_;
-        };
-        switch (p.len()) {
-        case 0:
-            return true;
-        case 1:
-            if (p.contain(eltwise, 0) &&
-                    !utils::one_of(p.entry_[0].eltwise.alg, alg_kind::eltwise_relu,
-                                   alg_kind::eltwise_gelu_erf, alg_kind::eltwise_gelu)) {
-                return false;
-            }
-            return check_sum(0) || p.contain(eltwise, 0);
-        case 2:
-            if (!utils::one_of(p.entry_[1].eltwise.alg, alg_kind::eltwise_relu,
-                               alg_kind::eltwise_gelu_erf, alg_kind::eltwise_gelu)) {
-                return false;
-            }
-
-            return check_sum(0) && p.contain(eltwise, 1);
-        default:
-            return false;
-        }
-    };
-
     // check basic attributes
     if (!check_attr_oscale()) {
         return status::unimplemented;
@@ -203,9 +174,10 @@ status_t zendnn_f32_matmul_t::pd_t::check_and_configure_attributes() {
     if (params_.gemm_applies_output_scales_) {
         params_.pp_attr_.output_scales_.set(1.f);
     }
-
+    int sum_index = params_.pp_attr_.post_ops_.find(primitive_kind::sum);
     // check post-ops
-    if (check_attr_post_ops()) {
+    if (check_post_ops_(params_.pp_attr_.post_ops_) == status::success &&
+            sum_index <= 0) {
         auto &po = params_.pp_attr_.post_ops_;
         const int sum_idx = 0;
         if (po.len() > 0 && po.contain(primitive_kind::sum, sum_idx)) {
@@ -424,52 +396,23 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            woq_scale_size, is_weights_const, group_size,
                            woq_scales_type);
     }
-    else if ((float *)bias == NULL) {
+    else if ((float *)bias == NULL && pd()->attr()->post_ops_.len() == 0) {
         //MatMul without Bias
-        zenMatMul(Layout, strcmp(transA, "N"),strcmp(transB, "N"), batch, input_offsets,
-                  weight_offsets, dst_offsets,                  M, K, N, alpha, (float *)src, lda,
-                  (float *)weights, ldb, NULL, has_eltwise_relu, geluType, beta, (float *)dst,
+        zenMatMul(ctx, zenEnvObj, Layout, strcmp(transA, "N"),strcmp(transB, "N"),
+                  batch, input_offsets,
+                  weight_offsets, dst_offsets,M, K, N, alpha, (float *)src, lda,
+                  (float *)weights, ldb, NULL, pd()->attr()->post_ops_, has_eltwise_relu,
+                  geluType, beta, (float *)dst,
                   ldc, is_weights_const, is_inplace);
     }
-    else if ((float *)bias != NULL && !has_eltwise) {
+    else {
         //MatMul with Bias
-        zenMatMulWithBias(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
+        zenMatMulWithBias(ctx, zenEnvObj, Layout, strcmp(transA, "N"), strcmp(transB,
+                          "N"),
                           batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                           lda, (float *)weights, ldb,
-                          (float *)bias, beta, (float *)dst, ldc, is_weights_const, is_inplace);
-    }
-    else {
-        if (has_eltwise_relu) {
-            //MatMul with BiasRelu
-            zenMatMulWithBiasReLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
-                                  lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, is_weights_const, is_inplace);
-        }
-        else if (has_eltwise_gelu) {
-            //MatMul with BiasGelu
-            //gelu_type is passed as last argument, 1 refers to tanh based gelu
-            zendnnVerbose(ZENDNN_CORELOG,
-                          "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
-            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
-                                  lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 1, is_weights_const, is_inplace);
-
-        }
-        else if (has_eltwise_gelu_erf) {
-            //MatMul with BiasGelu
-            //gelu_type is passed as last argument, 2 refers to erf based gelu
-            zendnnVerbose(ZENDNN_CORELOG,
-                          "zendnn_f32_matmul_t::execute_forward zenMatMulWithBiasGeLU [cpu/zendnn_f32_matmul]");
-            zenMatMulWithBiasGeLU(Layout, strcmp(transA, "N"), strcmp(transB, "N"),
-                                  batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
-                                  lda, (float *)weights, ldb,
-                                  (float *)bias, beta, (float *)dst, ldc, 2, is_weights_const, is_inplace);
-        }
-        else {
-            return status::unimplemented;
-        }
+                          (float *)bias, pd()->attr()->post_ops_, beta, (float *)dst, ldc,
+                          is_weights_const, is_inplace);
     }
 #endif //ZENDNN_ENABLE
 
