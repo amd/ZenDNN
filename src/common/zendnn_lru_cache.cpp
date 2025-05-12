@@ -157,5 +157,6 @@ template struct lru_weight_cache_t <Key_matmul, int8_t *>;
 template struct lru_weight_cache_t <Key_matmul, float *>;
 template struct lru_weight_cache_t <Key_matmul, char *>;
 template struct lru_weight_cache_t <Key_matmul, int32_t *>;
+template struct lru_weight_cache_t <float *, float *>;
 }
 }

@@ -451,7 +451,7 @@ std::vector<float> matmul_example_2D(zendnn::engine eng,
     //matmul_ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
     //matmul_ops.append_eltwise(scale, algorithm::eltwise_swish, 1.0, beta);
     //matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, 1.0, beta);
-    matmul_ops.append_binary(zendnn::algorithm::binary_mul, bin_md);
+    //matmul_ops.append_binary(zendnn::algorithm::binary_mul, bin_md);
     //matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
@@ -465,7 +465,7 @@ std::vector<float> matmul_example_2D(zendnn::engine eng,
     matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_mem});
     matmul_args.insert({ZENDNN_ARG_BIAS, bias_mem});
     matmul_args.insert({ZENDNN_ARG_DST, dst_mem});
-    matmul_args.insert({ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1, bin_mem});
+    //matmul_args.insert({ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(0) | ZENDNN_ARG_SRC_1, bin_mem});
     // Primitive execution: matrix multiplication with ReLU.
     matmul_prim.execute(engine_stream, matmul_args);
     // Wait for the computation to finalize.

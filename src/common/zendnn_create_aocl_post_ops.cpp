@@ -295,6 +295,16 @@ aocl_post_op *create_aocl_post_ops(const exec_ctx_t &ctx,
                     (post_ops->eltwise + eltwise_index)->algo.algo_type = SIGMOID;
                     eltwise_index++;
                 }
+                else if (po_type.eltwise.alg == alg_kind::eltwise_tanh) {
+                    // tanh
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::TANH;
+                    eltwise_index+=1;
+                }
                 else if (po_type.eltwise.alg == alg_kind::eltwise_swish) {
                     // Silu.
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
@@ -548,6 +558,15 @@ void create_post_ops_fp32(aocl_post_op *&post_ops, const exec_ctx_t &ctx,
                     post_ops->eltwise[eltwise_index].algo.alpha = NULL;
                     post_ops->eltwise[eltwise_index].algo.beta = NULL;
                     post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::SIGMOID;
+                    eltwise_index+=1;
+                }
+                else if (po_type.eltwise.alg == alg_kind::eltwise_tanh) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::TANH;
                     eltwise_index+=1;
                 }
                 else if (po_type.eltwise.alg == alg_kind::eltwise_swish) {

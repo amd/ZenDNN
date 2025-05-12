@@ -737,6 +737,18 @@ enum class algorithm {
     groupedquery_attention  = zendnn_groupedquery_attention,
 };
 
+
+
+enum class ActivationPostOp {
+    NONE,
+    RELU,
+    SIGMOID,
+    TANH,
+    GELU_TANH,
+    GELU_ERF,
+    SILU
+};
+
 class zendnn_custom_op {
 
   public:
@@ -844,6 +856,33 @@ class zendnn_custom_op {
     static size_t zendnn_reorder_size(uint k, uint n, bool trans,
                                       zendnn_data_type_t src_dt,
                                       int src_zp, zendnn_data_type_t wei_dt);
+
+    static size_t matmul_direct_select_kernel(int M, int N, int K);
+    static void zendnn_batched_matmul_fp32(const std::vector<float *> &src_batch,
+                                           const std::vector<float *> &weight_batch,
+                                           std::vector<float *> &dst_batch,
+                                           const std::vector<float *> &bias_batch,
+                                           const std::vector<float> &alpha_array,
+                                           const std::vector<float> &beta_array,
+                                           const std::vector<int> &m_array,
+                                           const std::vector<int> &n_array,
+                                           const std::vector<int> &k_array,
+                                           const std::vector<bool> &transB_array,
+                                           const std::vector<ActivationPostOp> &post_op_array,
+                                           int group_count,
+                                           const std::vector<int> &group_size_array);
+
+    static void zendnn_matmul_direct_fp32(const void *src, const void *weight,
+                                          void *dst, void *bias, float alpha, float beta,
+                                          int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc,
+                                          ActivationPostOp post_op,
+                                          int Batch_A=1, int Batch_B=1);
+
+
+    static void quantize_bf16_to_int8(const void *input_bf16, void *output_int8,
+                                      size_t count, float scale, int zero_point);
+    static void dequantize_int8_to_bf16(const void *input_int8, void *output_bf16,
+                                        size_t count, float scale, int zero_point);
 };
 
 /// Converts algorithm kind enum value from C++ API to C API type.

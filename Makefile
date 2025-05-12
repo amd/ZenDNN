@@ -380,6 +380,14 @@ test: $(OUTDIR)/$(LIBDIR)/$(PRODUCT)
 		-Itests/api_tests tests/api_tests/zendnn_matmul_gelu_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
 		$(CK_LINK_FLAGS)
+	 $(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_direct_test $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_matmul_direct_test.cpp -L_out/lib -lamdZenDNN \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
+                $(CK_LINK_FLAGS)
+	 $(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_quantize_dequantize_test $(INCDIRS) \
+                -Itests/api_tests tests/api_tests/zendnn_quantize_dequantize_test.cpp -L_out/lib -lamdZenDNN \
+                -L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
+                $(CK_LINK_FLAGS)
 	$(CXX) $(CXXFLAGSTEST) $(COMMONFLAGS) -o $(OUTDIR)/$(TESTDIR)/zendnn_matmul_weight_cache_test $(INCDIRS) \
 		-Itests/api_tests tests/api_tests/zendnn_matmul_weight_cache_test.cpp -L_out/lib -lamdZenDNN \
 		-L$(BLIS_LIB_PATH) -lblis-mt $(FBGEMM_LIB_PATH) $(LIBXSMM_LIB_PATH) \
