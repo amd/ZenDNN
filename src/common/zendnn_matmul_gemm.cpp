@@ -208,6 +208,12 @@ void zenMatMulPrimitive(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
             post_ops.append_eltwise(scale, algorithm::eltwise_logistic, 0.f, 0.f);
             po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
         }
+        else if (e.eltwise.alg == impl::alg_kind::eltwise_tanh) {
+            // Tanh
+            post_attr = true;
+            post_ops.append_eltwise(scale, algorithm::eltwise_tanh, 0.f, 0.f);
+            po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
+        }
         else if (e.kind == impl::primitive_kind::sum) {
             post_attr = true;
             if (beta != 0.f) {
@@ -359,7 +365,14 @@ void zenMatMul_gemm(
                                m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
                                output, ldc, is_weights_const, is_inplace, true);
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32) {
+    else if (zenEnvObj.zenGEMMalgo ==
+             zenMatMulAlgoType::MATMUL_AOCL_FP32) {
+        zenMatMul_gemm_blocked(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
+                               transpose_filter,
+                               m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
+                               output, ldc, is_weights_const, is_inplace, false);
+    }
+    else{
         //JIT kernel call
         map_mutex.lock();
         obj.is_brgemm = true;
@@ -371,14 +384,7 @@ void zenMatMul_gemm(
                            false,
                            is_weights_const, is_inplace);
     }
-    else if (zenEnvObj.zenGEMMalgo ==
-             zenMatMulAlgoType::MATMUL_AOCL_FP32) {
-        zenMatMul_gemm_blocked(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
-                               transpose_filter,
-                               m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
-                               output, ldc, is_weights_const, is_inplace, false);
-    }
-    else {
+    if(false) {
         zenMatmulSplit(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
                        transpose_filter,
                        m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,

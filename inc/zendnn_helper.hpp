@@ -97,6 +97,7 @@ enum zenMatMulAlgoType {
     MATMUL_AOCL_FP32 = 3,
     MATMUL_JIT_FP32 = 4,
     MATMUL_GEMM_JIT_FP32 = 5,
+    MATMUL_DIRECT_FP32 = 6,
 };
 
 enum zenBF16MatMulAlgoType {
@@ -217,13 +218,13 @@ class zendnnEnv {
         //TODO: Need to implement Decision tree for FP32:0
         zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ?
                       zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 &&
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_DIRECT_FP32 &&
                 zenGEMMalgo!=zenMatMulAlgoType::MATMUL_AUTO_FP32) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
         zenBMMalgo = zendnn_getenv_int("ZENDNN_BMM_ALGO",
                                        zenMatMulAlgoType::MATMUL_JIT_FP32);
-        if (zenBMMalgo>zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 &&
+        if (zenBMMalgo>zenMatMulAlgoType::MATMUL_DIRECT_FP32 &&
                 zenBMMalgo<zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
             zenBMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }

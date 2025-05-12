@@ -287,6 +287,11 @@ void zenMatMulPrimitiveINT8(zendnn::zendnnEnv zenEnvObj,
             post_attr = true;
             post_ops.append_eltwise(scale_po, algorithm::eltwise_logistic, 0.f, 0.f);
         }
+        else if (e.eltwise.alg == impl::alg_kind::eltwise_tanh) {
+            // Tanh
+            post_attr = true;
+            post_ops.append_eltwise(scale_po, algorithm::eltwise_tanh, 0.f, 0.f);
+        }
         else if (e.kind == impl::primitive_kind::sum) {
             post_attr = true;
             post_ops.append_sum(e.sum.scale);
@@ -671,7 +676,6 @@ aocl_post_op *create_aocl_post_ops_int8(
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu) {
                     // Gelu tanh.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -682,7 +686,6 @@ aocl_post_op *create_aocl_post_ops_int8(
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
                     // Gelu erf.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -693,7 +696,6 @@ aocl_post_op *create_aocl_post_ops_int8(
                 }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
                     // SiLU
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;
@@ -703,9 +705,18 @@ aocl_post_op *create_aocl_post_ops_int8(
                     (post_ops->eltwise + eltwise_index)->algo.algo_type = SWISH;
                     eltwise_index++;
                 }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_tanh) {
+                    // tanh
+                    post_ops->seq_vector[post_op_i++] = ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = TANH;
+                    eltwise_index+=1;
+                }
                 else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
                     // Sigmoid.
-                    dim_t eltwise_index = 0;
                     post_ops->seq_vector[post_op_i++] = ELTWISE;
                     (post_ops->eltwise + eltwise_index)->is_power_of_2 = FALSE;
                     (post_ops->eltwise + eltwise_index)->scale_factor = NULL;

@@ -628,6 +628,12 @@ void zenMatMulPrimitiveBF16(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
             post_ops.append_eltwise(scale, algorithm::eltwise_logistic, 0.f, 0.f);
             po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
         }
+        else if (e.eltwise.alg == impl::alg_kind::eltwise_tanh) {
+            // Tanh
+            post_attr = true;
+            post_ops.append_eltwise(scale, algorithm::eltwise_tanh, 0.f, 0.f);
+            po_memory[idx] = memory({{M,N},dt::f32,tag::ab},eng,nullptr);
+        }
         else if (e.kind == impl::primitive_kind::sum) {
             post_attr = true;
             if (beta != 0.f) {

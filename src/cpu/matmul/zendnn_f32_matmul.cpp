@@ -26,6 +26,7 @@
 #include <math.h>
 #include <vector>
 
+#include <zendnn.hpp>
 #include "common/c_types_map.hpp"
 #include "common/zendnn_thread.hpp"
 #include "common/type_helpers.hpp"
@@ -325,6 +326,13 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     //TODO(aakar): Modify f32_matmul API to include Layout
     const bool Layout = true; // CblasRowMajor
 
+    //const dim_t batch = batched ? dst_d.dims()[dst_d.ndims() - 3] : 1;
+    const dim_t input_batch = batched ? src_d.dims()[dst_d.ndims() - 3] : 1;
+    const dim_t weights_batch = batched ? weights_d.dims()[dst_d.ndims() - 3] : 1;
+    const auto src_batch_stride = src_d.blocking_desc().strides[0];
+    const auto weights_batch_stride = weights_d.blocking_desc().strides[0];
+    const auto dst_batch_stride = dst_d.blocking_desc().strides[0];
+
     zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::execute_ref");
     zendnnVerbose(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
                   " transA: ", transA, " transB: ", transB,
@@ -332,6 +340,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                   " alpha: ", alpha, " beta: ", beta, " batch: ", batch,
                   " Layout: ", Layout ? "CblasRowMajor(1)" : "CblasColMajor(0)");
     bool has_eltwise = pd()->attr()->post_ops_.find(primitive_kind::eltwise) >= 0;
+    bool has_binary = pd()->attr()->post_ops_.find(primitive_kind::binary) >= 0;
 
     int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
     bool has_eltwise_relu = elementwise_index>=0 ?
@@ -349,7 +358,36 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
 
     unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
 
-
+    bool direct_algo_check = false;
+    ActivationPostOp activation_post_op = ActivationPostOp::NONE;
+    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_DIRECT_FP32) {
+        alg_kind_t eltwise_alg = elementwise_index == 0 ?
+                                 pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg : alg_kind::undef;
+        direct_algo_check = pd()->attr()->post_ops_.len() <= 1 &&
+                            elementwise_index <= 0 && !has_binary;
+        if (direct_algo_check) {
+            switch (eltwise_alg) {
+            case alg_kind::eltwise_relu:
+                activation_post_op = ActivationPostOp::RELU;
+                break;
+            case alg_kind::eltwise_logistic:
+                activation_post_op = ActivationPostOp::SIGMOID;
+                break;
+            case alg_kind::eltwise_tanh:
+                activation_post_op = ActivationPostOp::TANH;
+                break;
+            case alg_kind::eltwise_gelu_tanh:
+                activation_post_op = ActivationPostOp::GELU_TANH;
+                break;
+            case alg_kind::eltwise_gelu_erf :
+                activation_post_op = ActivationPostOp::GELU_ERF;
+                break;
+            case alg_kind::eltwise_swish:
+                activation_post_op = ActivationPostOp::SILU;
+                break;
+            }
+        }
+    }
 
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
@@ -374,9 +412,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     unsigned long *input_offsets = ip_off.data();
     unsigned long *dst_offsets = dst_off.data();
     unsigned long *weight_offsets = wei_off.data();
-
     int weights_type = pd()->weights_md()->data_type;
-
     if (weights_type == s4 || weights_type == s8) {
         DEFINE_WOQ_SCALES_BUFFER(woqscales);
         float *woq_scales = const_cast<float *>(woqscales);
@@ -395,6 +431,14 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            geluType, beta, (char *)dst, ldc, woq_scales, 0/*zp*/,
                            woq_scale_size, is_weights_const, group_size,
                            woq_scales_type);
+    }
+    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_DIRECT_FP32 &&
+             direct_algo_check) {
+        //Direct MatMul
+        zendnn_custom_op::zendnn_matmul_direct_fp32((float *)src, (float *)weights,
+                (float *)dst, (float *)bias, alpha, beta, M, N, K,
+                transA == 'T', transB == 'T', lda, ldb, ldc, activation_post_op,
+                input_batch, weights_batch);
     }
     else if (ndims == 3) {
         //3D MatMul
