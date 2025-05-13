@@ -182,7 +182,7 @@ aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                 break;
             case impl::primitive_kind::sum:
                 //condition gemm_applies beta for alpha = 1.0
-                if (scale[0] != 1.0) {
+                if (scale != NULL && scale[0] != 1.0) {
                     mem_count[1]++;
                 }
                 break;

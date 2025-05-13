@@ -46,7 +46,6 @@ inline void zendnn_parallel_for(
     const int64_t end,
     const int64_t grain_size,
     const F &f) {
-    if (grain_size >= 0);
     if (begin >= end) {
         return;
     }

@@ -175,10 +175,6 @@ void zenMatMul_gemm_bf16bf16f32of32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const && blocked_format &&
-            weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
-        free(reorder_filter);
-    }
 }
 
 void zenMatMul_gemm_parallel_bf16bf16f32of32(
@@ -296,7 +292,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const) {
+    if (!is_weights_const && reorder_filter != NULL) {
         free(reorder_filter);
     }
 }
@@ -411,10 +407,6 @@ void zenMatMul_gemm_bf16bf16f32obf16(
         }
         free(post_ops->seq_vector);
         free(post_ops);
-    }
-    if (!is_weights_const && blocked_format &&
-            weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
-        free(reorder_filter);
     }
 }
 
@@ -533,7 +525,7 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const) {
+    if (!is_weights_const && reorder_filter != NULL) {
         free(reorder_filter);
     }
 }

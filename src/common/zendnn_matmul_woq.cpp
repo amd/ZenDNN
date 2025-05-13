@@ -94,9 +94,9 @@ int ref_woq_bf16(
     }
     char mem_format_a = 'n', mem_format_b = 'r';
 
-    int16_t *reorder_filter = NULL;
+    int16_t *reorder_weights = NULL;
 
-    woqReorderAndCacheWeightsAocl<int16_t>(key_obj, weights, reorder_filter, K, N,
+    woqReorderAndCacheWeightsAocl<int16_t>(key_obj, weights, reorder_weights, K, N,
                                            ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
                                            reorder_param2,
                                            aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
@@ -109,7 +109,8 @@ int ref_woq_bf16(
         int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type,
-                   has_eltwise_relu, geluType, alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/,
+                   has_eltwise_relu, geluType,
+                   alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/,
                    postop_count, postop_count ? &alpha : NULL, &dummy_scale);
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
@@ -117,7 +118,7 @@ int ref_woq_bf16(
                                    transB ? 't' : 'n', M, N, K,
                                    bias == NULL ? alpha : 1.0,
                                    src, lda, mem_format_a,
-                                   reorder_filter, ldb,
+                                   reorder_weights, ldb,
                                    mem_format_b,
                                    alpha == 1.0 ? beta : 0.0,
                                    (int16_t *)output, ldc,
@@ -127,7 +128,8 @@ int ref_woq_bf16(
         int postop_count = bias == NULL ? 0:1;
         post_ops = create_aocl_post_ops<float>(ctx, po_ops, N,
                                                alpha, (const char *)bias, bias_type,
-                                               has_eltwise_relu, geluType, alpha != 1.0 ? (float *)output : NULL/*sum with beta*/,
+                                               has_eltwise_relu, geluType,
+                                               alpha != 1.0 ? (float *)output : NULL/*sum with beta*/,
                                                postop_count, postop_count ? &alpha : NULL,
                                                &dummy_scale);
         aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
@@ -135,7 +137,7 @@ int ref_woq_bf16(
                                   transB ? 't' : 'n', M, N, K,
                                   bias == NULL ? alpha : 1.0,
                                   src, lda, mem_format_a,
-                                  reorder_filter, ldb,
+                                  reorder_weights, ldb,
                                   mem_format_b,
                                   alpha == 1.0 ? beta : 0.0,
                                   (float *)output, ldc,
@@ -168,7 +170,7 @@ int ref_woq_bf16(
         free(post_ops);
     }
     if (!is_weights_const) {
-        free(reorder_filter);
+        free(reorder_weights);
     }
     return 0;
 }
@@ -225,9 +227,9 @@ int ref_woq_f32(
     }
     char mem_format_a = 'n', mem_format_b = 'r';
 
-    float *reorder_filter = NULL;
+    float *reorder_weights = NULL;
 
-    woqReorderAndCacheWeightsAocl<float>(key_obj, weights, reorder_filter, K, N,
+    woqReorderAndCacheWeightsAocl<float>(key_obj, weights, reorder_weights, K, N,
                                          ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
                                          reorder_param2,
                                          aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
@@ -246,7 +248,7 @@ int ref_woq_f32(
                             transB ? 't' : 'n', M, N, K,
                             alpha,
                             src, lda, mem_format_a,
-                            reorder_filter, ldb,
+                            reorder_weights, ldb,
                             mem_format_b,
                             alpha == 1.0 ? beta : 0.0,
                             (float *)output, ldc,
@@ -279,7 +281,7 @@ int ref_woq_f32(
         free(post_ops);
     }
     if (!is_weights_const) {
-        free(reorder_filter);
+        free(reorder_weights);
     }
     return 0;
 }
@@ -517,13 +519,19 @@ int aocl_woq_bf16(
     }
     char mem_format_a = 'n', mem_format_b = 'r';
 
-    int8_t *reorder_filter = NULL;
+    int8_t *reorder_weights = NULL;
+    bool blocked_format = true;
 
-    reorderAndCacheWeights<int8_t>(key_obj, weights, reorder_filter, K, N,
-                                   ldb, is_weights_const, false, order, trans,
-                                   reorder_param0, reorder_param1, reorder_param2,
-                                   aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
-                                  );
+    bool reorder_status = reorderAndCacheWeights<int8_t>(key_obj, weights,
+                          reorder_weights, K, N,
+                          ldb, is_weights_const, false, order, trans,
+                          reorder_param0, reorder_param1, reorder_param2,
+                          aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
+                                                        );
+    if (!reorder_status) {
+        mem_format_b = 'n';
+        blocked_format = false;
+    }
 
     aocl_post_op *post_ops = NULL;
 
@@ -534,7 +542,8 @@ int aocl_woq_bf16(
     if (dst_type == zendnn_bf16) {
         post_ops = create_aocl_post_ops<int16_t>(ctx, po_ops, N,
                    alpha, (const char *)bias, bias_type, has_eltwise_relu, geluType,
-                   alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/, postop_count, bias !=NULL ? &alpha : &val,
+                   alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/, postop_count,
+                   bias !=NULL ? &alpha : &val,
                    &dummy_scale);
 
         //Add pre-op for S4 API
@@ -573,8 +582,8 @@ int aocl_woq_bf16(
                                  transB ? 't' : 'n', M, N, K,
                                  bias == NULL ? alpha : 1.0,
                                  src, lda, mem_format_a,
-                                 reorder_filter, ldb,
-                                 mem_format_b,
+                                 blocked_format ? reorder_weights : weights,
+                                 ldb, mem_format_b,
                                  alpha == 1.0 ? beta : 0.0,
                                  (int16_t *)output, ldc,
                                  post_ops);
@@ -619,8 +628,8 @@ int aocl_woq_bf16(
                                 transB ? 't' : 'n', M, N, K,
                                 bias == NULL ? alpha : 1.0,
                                 src, lda, mem_format_a,
-                                reorder_filter, ldb,
-                                mem_format_b,
+                                blocked_format ? reorder_weights : weights,
+                                ldb, mem_format_b,
                                 alpha == 1.0 ? beta : 0.0,
                                 (float *)output, ldc,
                                 post_ops);
@@ -658,8 +667,8 @@ int aocl_woq_bf16(
         free(post_ops->pre_ops);
         free(post_ops);
     }
-    if (!is_weights_const) {
-        free(reorder_filter);
+    if (!is_weights_const && reorder_weights != NULL) {
+        free(reorder_weights);
     }
     return 0;
 }

@@ -820,11 +820,9 @@ void free_aocl_po_memory_int8(
 
 void free_cached_memory(
     zendnn::zendnnEnv zenEnvObj,
-    int32_t *comp_acc,
+    int32_t *&comp_acc,
     int32_t wei_zp,
-    float *new_scales,
-    int8_t *reordered_weights,
-    bool free_weights
+    float *&new_scales
 ) {
     bool cache_comp_acc = zenEnvObj.zenZpCompCache;
     bool cache_scale = zenEnvObj.zenStaticScaleCache;
@@ -834,9 +832,6 @@ void free_cached_memory(
     }
     if (!cache_scale && new_scales != NULL) {
         free(new_scales);
-    }
-    if (free_weights && reordered_weights != NULL) {
-        free(reordered_weights);
     }
 }
 
@@ -975,10 +970,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
-                       reorder_filter, free_reorder_weights);
+    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
 }
 void zenMatMul_gemm_s8s8s32ofloat(
     zendnn::zendnnEnv zenEnvObj,
@@ -1115,10 +1107,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
-                       reorder_filter, free_reorder_weights);
+    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
 }
 void zenMatMul_gemm_s8s8s32oInt(
     zendnn::zendnnEnv zenEnvObj,
@@ -1274,10 +1263,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
-                       reorder_filter, free_reorder_weights);
+    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
 }
 
 void zenMatMul_gemm_u8s8s32oInt(
@@ -1426,10 +1412,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    bool free_reorder_weights = !is_weights_const && blocked_format &&
-                                weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE;
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale,
-                       reorder_filter, free_reorder_weights);
+    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
 }
 
 //Temporary checks for post-ops and data type for AOCL

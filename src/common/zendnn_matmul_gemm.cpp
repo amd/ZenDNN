@@ -230,10 +230,6 @@ void zenMatMul_gemm_blocked(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const && blocked_format &&
-            weight_cache_type <= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
-        free(reorder_filter);
-    }
 }
 
 void zenMatMulPrimitive(zendnnEnv zenEnvObj, const bool Layout,
