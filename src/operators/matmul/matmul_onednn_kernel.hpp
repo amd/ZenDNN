@@ -1,0 +1,61 @@
+/********************************************************************************
+# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# *     http://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# *******************************************************************************/
+#ifndef _MATMUL_ONEDNN_KERNEL_HPP_
+#define _MATMUL_ONEDNN_KERNEL_HPP_
+
+#include <vector>
+#include <iostream>
+#include <memory>
+#include <cstring>
+#include <cstdlib>
+#include "dnnl.hpp"
+#include "matmul_context.hpp"
+#include "operators/common/operator_kernel.hpp"
+#include "common/error_handling.hpp"
+
+
+namespace zendnnl {
+namespace ops {
+
+using namespace zendnnl::common;
+using namespace zendnnl::memory;
+using namespace zendnnl::error_handling;
+
+//using namespace dnnl;
+
+class matmul_onednn_kernel_t final : public op_kernel_t<matmul_context_t> {
+public:
+  ~matmul_onednn_kernel_t();
+
+  status_t execute(const context_type& context_,
+                   tensor_map_type& inputs_,
+                   tensor_map_type& outputs_) override;
+private:
+  dnnl::memory::dims       to_dnnl_dims(tensor_t& zendnnl_tensor);
+  dnnl::memory::format_tag to_dnnl_format(tensor_t& zendnnl_tensor);
+  dnnl::memory::data_type  to_dnnl_datatype(tensor_t& zendnnl_tensor);
+
+  dnnl::memory             to_dnnl_tensor(tensor_t& zendnnl_tensor, dnnl::engine eng);
+};
+
+} //namespace ops
+} //namespace zendnnl
+
+extern "C" {
+  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t> get_matmul_onednn_kernel();
+}
+
+#endif

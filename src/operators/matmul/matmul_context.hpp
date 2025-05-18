@@ -1,0 +1,69 @@
+/********************************************************************************
+# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# *     http://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# *******************************************************************************/
+#ifndef _MATMUL_CONTEXT_HPP_
+#define _MATMUL_CONTEXT_HPP_
+
+#include <vector>
+#include <memory>
+#include <optional>
+
+#include "common/zendnnl_global.hpp"
+#include "operators/common/operator_context.hpp"
+#include "operators/matmul/matmul_aocl_utils.hpp"
+
+namespace zendnnl {
+namespace ops {
+
+using namespace zendnnl::memory;
+
+/** @class matmul_context_t
+ *  @brief context for @c matmul_operator_t.
+ *
+ * In order to elable chaining, the first parameter in @c op_context_t template
+ * should be the class itself.
+ * @sa matmul_operator_t
+ */
+class matmul_context_t final : public op_context_t<matmul_context_t> {
+public:
+  /** @brief parent type */
+  using parent_type = op_context_t<matmul_context_t>;
+
+  /** TODO: Add a interface to support different backends */
+  /** @brief get post op pointer */
+  aocl_post_op* get_aocl_post_op_ptr_unsafe() const;
+
+  /** @brief get reordered weights pointer */
+  void* get_aocl_reordered_weights_ptr_unsafe() const;
+
+  /** @brief preprocess */
+  status_t preprocess() override;
+
+protected:
+  /** @brief validate parameters */
+  status_t validate() override;
+
+  std::shared_ptr<aocl_utils_t> aocl_utils_ptr; /**< aocl utils */
+  friend class matmul_operator_t;
+};
+
+} //namespace ops
+
+namespace interface {
+using matmul_context_t = zendnnl::ops::matmul_context_t;
+} //interface
+
+} //namespace zendnnl
+#endif
