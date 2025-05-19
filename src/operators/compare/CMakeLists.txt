@@ -24,6 +24,7 @@ set(compare_operator_public_headers
   compare_operator.hpp)
 
 set(compare_operator_private_headers
+  compare_kernel_list.hpp
   compare_ref_kernel.hpp)
 
 target_sources(zendnnl_archive

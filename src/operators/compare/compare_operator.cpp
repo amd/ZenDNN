@@ -14,6 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 #include "compare_operator.hpp"
+#include "compare_kernel_list.hpp"
 
 namespace zendnnl {
 namespace ops {
