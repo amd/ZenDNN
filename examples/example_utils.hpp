@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@
 
 #include <vector>
 #include <cstring>
+#include <random>
+#include <algorithm>
 
 #include "common/zendnnl_global.hpp"
 #include "memory/tensor.hpp"
@@ -47,6 +49,14 @@ public:
   /** @brief uniform tensor */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
                           float val_);
+
+  /** @brief uniform distributed tensor */
+  tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
+                               data_type dtype_, float range_);
+
+  /** @brief blocked tensor */
+  tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
+                          size_t size, void* reord_buff);
 };
 
 } //examples

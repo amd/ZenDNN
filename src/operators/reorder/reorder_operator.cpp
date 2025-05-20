@@ -1,0 +1,141 @@
+/********************************************************************************
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# *     http://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# *******************************************************************************/
+#include "reorder_operator.hpp"
+#include "reorder_kernel_list.hpp"
+
+#include "blis.h"
+
+namespace zendnnl {
+namespace ops {
+
+status_t reorder_operator_t::validate() {
+  if (parent_type::validate() != status_t::success) {
+    return status_t::failure;
+  }
+
+  auto input        = get_input("reorder_input");
+  auto output       = get_output("reorder_output");
+
+  if (!input || !output) {
+    return status_t::failure;
+  }
+
+  auto input_size  = input->get_size();
+  auto output_size = output->get_size();
+
+  if (input->get_raw_handle_unsafe() == output->get_raw_handle_unsafe()) {
+    size_t input_buffer_size = input->get_buffer_sz_bytes();
+
+    if (reorder_size != input_buffer_size) {
+      log_error("Inplace reorder doesn't work for given matrix");
+      return status_t::failure;
+    }
+    else {
+      log_info("Inplace reorder works for given matrix");
+    }
+  }
+
+  if ((input_size.size() != 2) || (output_size.size() != 2)) {
+    return status_t::failure;
+  }
+
+  if (input_size.at(0) != output_size.at(0)) {
+    return status_t::failure;
+  }
+
+  if (input_size.at(1) != output_size.at(1)) {
+    return status_t::failure;
+  }
+
+  return status_t::success;
+}
+
+status_t reorder_operator_t::kernel_factory() {
+  auto algo_format = context.get_algo_format();
+
+  if (algo_format == "aocl") {
+    kernel = get_reorder_aocl_kernel();
+  }
+  else if (algo_format == "onednn") {
+    log_error("onednn kernel is not supported");
+    return status_t::failure;
+  }
+  else {
+    return status_t::unimplemented;
+  }
+
+  kernel->create();
+  if (! kernel->check()) {
+    return status_t::failure;
+  }
+
+  return status_t::success;
+}
+
+size_t reorder_operator_t::get_reorder_size() {
+  auto algo_format   = context.get_algo_format();
+  auto source_dtype  = context.get_source_dtype();
+
+  if (algo_format == "aocl") {
+
+    auto input_tensor          = get_input("reorder_input");
+    auto reorder_dtype         = input_tensor->get_data_type();
+
+    const char reorder_param0  = 'B';
+    const dim_t reorder_param1 = input_tensor->get_size(0);
+    const dim_t reorder_param2 = input_tensor->get_size(1);
+    const char order           = 'r';
+    bool is_transpose          = input_tensor->get_order() == "ba";
+    const char trans           = is_transpose ? 't' : 'n';
+
+    if (reorder_dtype == data_type_t::f32) {
+      reorder_size = aocl_get_reorder_buf_size_f32f32f32of32(order, trans,
+                     reorder_param0,
+                     reorder_param1, reorder_param2);
+    }
+    else if (reorder_dtype == data_type_t::bf16) {
+      reorder_size = aocl_get_reorder_buf_size_bf16bf16f32of32(order, trans,
+                     reorder_param0,
+                     reorder_param1, reorder_param2);
+    }
+    else if (reorder_dtype == data_type_t::s8) {
+      if (source_dtype == data_type_t::s8) {
+        reorder_size = aocl_get_reorder_buf_size_s8s8s32os32(order, trans,
+                       reorder_param0,
+                       reorder_param1, reorder_param2);
+      }
+      else if (source_dtype == data_type_t::u8) {
+        reorder_size = aocl_get_reorder_buf_size_u8s8s32os32(order, trans,
+                       reorder_param0,
+                       reorder_param1, reorder_param2);
+      }
+    }
+    else if (reorder_dtype == data_type_t::s4) {
+      // WOQ_BF16 api to extract the size.
+      reorder_size = aocl_get_reorder_buf_size_bf16s4f32of32(order, trans,
+                     reorder_param0,
+                     reorder_param1, reorder_param2);
+    }
+  }
+  else {
+    log_error("onednn reorder is not supported");
+  }
+  return reorder_size;
+}
+
+} //namespace ops
+} //namespace zendnnl
+

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include "sample_example.hpp"
 #include "matmul_example.hpp"
 #include "compare_op_example.hpp"
+#include "reorder_example.hpp"
 
 #define  OK          (0)
 #define  NOT_OK      (1)
@@ -41,7 +42,11 @@ int main() {
   matmul_relu_forced_ref_kernel_example();
   matmul_mul_silu_mul_f32_kernel_example();
   matmul_silu_mul_bf16_kernel_example();
-  matmul_relu_forced_ref_kernel_example();
+  reorder_f32_kernel_example();
+  reorder_s8_kernel_example();
+  reorder_matmul_relu_f32_kernel_example();
+  reorder_inplace_bf16_example();
+  reorder_inplace_matmul_relu_bf16_kernel_example();
   compare_op_example();
   compare_ref_and_aocl_matmul_kernel_example();
 

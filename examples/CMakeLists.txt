@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,14 +20,16 @@ set(examples_sources
   tensor_example.cpp
   sample_example.cpp
   matmul_example.cpp
-  compare_op_example.cpp)
+  compare_op_example.cpp
+  reorder_example.cpp)
 
 set(example_headers
   example_utils.hpp
   tensor_example.hpp
   sample_example.hpp
   matmul_example.hpp
-  compare_op_example.hpp)
+  compare_op_example.hpp
+  reorder_example.hpp)
 
 add_executable(examples ${examples_sources})
 target_link_libraries(examples

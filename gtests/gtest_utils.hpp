@@ -24,6 +24,9 @@
 #include "common/zendnnl_global.hpp"
 #include "operators/matmul/matmul_context.hpp"
 #include "operators/matmul/matmul_operator.hpp"
+#include "operators/reorder/reorder_context.hpp"
+#include "operators/reorder/reorder_operator.hpp"
+
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 1000
@@ -65,6 +68,10 @@ class tensor_factory_t {
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_,
                                float range_);
+
+  /** @brief blocked tensor */
+  tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
+                          size_t size, void *reord_buff);
 };
 
 //Supported Postops declaration
@@ -100,4 +107,13 @@ void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
                        uint64_t n, const float tol, bool &flag);
+
+/** @fn reorder_kernel_test
+ *  @brief Function to Reorder tensor
+ *
+ *  This function reorders the tensor either by Inplace or OutofPlace.
+ *  @return Reorderd tensor
+ *
+ * */
+tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder);
 #endif

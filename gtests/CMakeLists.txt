@@ -17,7 +17,8 @@
 set(gtests_sources
     gtest_main.cpp
     gtest_utils.cpp
-    test_matmul.cpp)
+    test_matmul.cpp
+    test_reorder.cpp)
 
 set(gtests_headers
     gtest_utils.hpp)

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -198,6 +198,7 @@ class op_context_t : public hash_object_t {
   virtual status_t validate();
 
   /** @brief Preprocess.
+   *
    * Do any required preprocessing with parameters. Generally this preprocessing
    * requires reordering of parameter tensors, or post-op creations.
    * @return status_t::success if successful, else status_t::failure.

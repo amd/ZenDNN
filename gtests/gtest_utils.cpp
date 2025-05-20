@@ -80,6 +80,25 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
   return udtensor;
 }
 
+tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
+    data_type dtype_,
+    size_t size, void *reord_buff) {
+
+  auto btensor = tensor_t()
+                 .set_name("blocked tensor")
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage(reord_buff, size)
+                 .set_layout(tensor_layout_t::blocked)
+                 .create();
+
+  if (! btensor.check()) {
+    log_warning("tensor creation of ", btensor.get_name(), " failed.");
+  }
+
+  return btensor;
+}
+
 void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                         tensor_t &bias, tensor_t &output_tensor,uint32_t index) {
   try {
@@ -197,3 +216,77 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
   }
   return;
 }
+
+tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
+  try {
+    tensor_factory_t tensor_factory;
+    status_t status;
+
+    input_tensor.set_name("reorder_input");
+
+    // Reorder context creation with backend aocl.
+    auto reorder_context = reorder_context_t()
+                           .set_algo_format("aocl")
+                           .create();
+
+    // Reorder operator creation with name, context and input.
+    auto reorder_operator = reorder_operator_t()
+                            .set_name("reorder_operator")
+                            .set_context(reorder_context)
+                            .create()
+                            .set_input("reorder_input", input_tensor);
+
+    if (! reorder_operator.check()) {
+      log_error(" operator ", reorder_operator.get_name(), " creation failed.");
+      exit(0);
+    }
+
+    // Compute the reorder size
+    size_t reorder_size = reorder_operator.get_reorder_size();
+    tensor_t output_tensor;
+    data_type_t dtype = input_tensor.get_data_type();
+
+    void *reorder_weights;
+    // Inplace reroder    : Extract the buffer from Input Tensor and reuse it
+    // OutofPlace reorder : Create new buffer with reordered size
+    if (inplace_reorder) {
+      reorder_weights = input_tensor.get_raw_handle_unsafe();
+    }
+    else {
+      reorder_weights = aligned_alloc(64, reorder_size);
+    }
+
+    uint64_t rows = input_tensor.get_size(0);
+    uint64_t cols = input_tensor.get_size(1);
+
+    // Create output tensor with blocked layout.
+    output_tensor = tensor_factory.blocked_tensor({rows, cols},
+                    dtype,
+                    reorder_size,
+                    reorder_weights);
+    output_tensor.set_name("reorder_output");
+
+    // Reorder operator execution.
+    status = reorder_operator
+             .set_output("reorder_output", output_tensor)
+             .execute();
+
+    bool reorder_status;
+    if (status != status_t::success) {
+      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      reorder_status = false;
+    }
+    else {
+      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      reorder_status = true;
+    }
+    // If Reorder is successful returns output tensor
+    // else return input tensor(OutofPlace reorder is handled at MatMul level)
+    return reorder_status ? output_tensor : input_tensor;
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return tensor_t();
+  }
+}
+
