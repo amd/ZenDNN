@@ -17,6 +17,7 @@
 #define _MATMUL_AOCL_CONTEXT_HPP_
 
 #include <vector>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -41,6 +42,8 @@ class aocl_utils_t {
 public:
   aocl_utils_t();
   ~aocl_utils_t();
+
+  using tensor_map_type = std::map<std::string, tensor_t>;
 
   /** @brief function pointer type for getting the reorder buffer size */
   using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char, const char,
@@ -82,6 +85,9 @@ public:
   /** @brief free aocl post op */
   void          free_post_op();
 
+  /** @brief sets runtime post-op buffers in aocl_po_ptr */
+  status_t      set_runtime_post_op_buffer(tensor_map_type &inputs);
+
   /** @brief get the post op pointer */
   aocl_post_op* get_aocl_post_op_ptr_unsafe() const;
 
@@ -89,6 +95,7 @@ public:
   void*         get_aocl_reordered_weights_ptr_unsafe() const;
 
 protected:
+  std::map<std::string, uint32_t> post_op_size;
   aocl_post_op* aocl_po_ptr;
   void* reordered_weights_ptr;
 };

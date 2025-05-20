@@ -57,7 +57,7 @@ using namespace zendnnl::common;
  */
 template<typename OP_CONTEXT_T>
 class op_context_t : public hash_object_t {
-public:
+ public:
   /** @brief Parent type. */
   using   parent_type       = hash_object_t;
 
@@ -87,7 +87,7 @@ public:
    * @param param_tensor_ : parameter tensor.
    * @reurn A referene to self.
    */
-  OP_CONTEXT_T& set_param(std::string key_, tensor_t& param_tensor_);
+  OP_CONTEXT_T &set_param(std::string key_, tensor_t &param_tensor_);
 
   /** @brief Get parameter tensor.
    *
@@ -110,7 +110,7 @@ public:
    * @param post_op_ : post_op.
    * @return A reference to self.
    */
-  OP_CONTEXT_T& set_post_op(post_op_t& post_op_);
+  OP_CONTEXT_T &set_post_op(post_op_t &post_op_);
 
   /** @brief Get post op.
    *
@@ -146,7 +146,7 @@ public:
    * creation. The status can be checked using @c hash_object_t.check().
    * @return A reference to self.
    */
-  virtual OP_CONTEXT_T& create();
+  virtual OP_CONTEXT_T &create();
   /**@}*/
 
   /** @name Execution Context */
@@ -156,7 +156,7 @@ public:
    * Set the number of cores for operator execution. This is unused.
    * @return A reference to self.
    */
-  OP_CONTEXT_T& set_core_count(uint32_t count);
+  OP_CONTEXT_T &set_core_count(uint32_t count);
 
   /** @brief Get core count.
    *
@@ -166,7 +166,7 @@ public:
   uint32_t get_core_count() const;
 
   //set and get core binding
-  OP_CONTEXT_T& set_core_binding(std::vector<uint32_t> cores);
+  OP_CONTEXT_T &set_core_binding(std::vector<uint32_t> cores);
   std::vector<uint32_t> get_core_binding() const;
   /**@}*/
 
@@ -180,7 +180,7 @@ public:
    */
   std::size_t   hash() override;
 
-protected:
+ protected:
   /** @brief Default constructor.
    *
    * ZenDNNL follows the convension of making constructors protected (or private),
@@ -206,14 +206,18 @@ protected:
 
   std::map<std::string, tensor_t> params; /**< operator parameters */
   std::vector<post_op_t> post_ops; /**< operator post ops vector */
-  std::vector<uint32_t> core_binding; /**< operator cores vector */
   uint32_t core_count; /**< operator core count */
+  std::vector<uint32_t> core_binding; /**< operator cores vector */
+  uint32_t binary_add_count; /**< element-wise addition count */
+  uint32_t binary_mul_count; /**< element-wise multiplication count */
+  uint32_t activation_count; /**< activation count */
 };
 
 //implementation
 template<typename OP_CONTEXT_T>
 op_context_t<OP_CONTEXT_T>::op_context_t():
-  params{}, post_ops{}, core_count{1}, core_binding{} {
+  params{}, post_ops{}, core_count{1}, core_binding{},
+  binary_add_count{0}, binary_mul_count{0}, activation_count{0} {
 }
 
 template<typename OP_CONTEXT_T>
@@ -221,48 +225,62 @@ op_context_t<OP_CONTEXT_T>::~op_context_t() {
 };
 
 template<typename OP_CONTEXT_T>
-OP_CONTEXT_T& op_context_t<OP_CONTEXT_T>::create() {
+OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("Creating op_context_t");
   if (validate() != status_t::success) {
     status = status_t::failure;
-    return static_cast<OP_CONTEXT_T&>(*this);
+    return static_cast<OP_CONTEXT_T &>(*this);
   }
 
   if (preprocess() != status_t::success) {
     status = status_t::failure;
-    return static_cast<OP_CONTEXT_T&>(*this);
+    return static_cast<OP_CONTEXT_T &>(*this);
   }
 
   status = status_t::success;
   hash();
-  return static_cast<OP_CONTEXT_T&>(*this);
+  return static_cast<OP_CONTEXT_T &>(*this);
 };
 
 template<typename OP_CONTEXT_T>
-OP_CONTEXT_T& op_context_t<OP_CONTEXT_T>::set_param(std::string key, tensor_t& param_tensor) {
+OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::set_param(std::string key,
+    tensor_t &param_tensor) {
   LOG_DEBUG_INFO("Setting param op_context_t");
   params[key] = param_tensor;
   hash_key    = 0;
 
-  return static_cast<OP_CONTEXT_T&>(*this);
+  return static_cast<OP_CONTEXT_T &>(*this);
 }
 
 template<typename OP_CONTEXT_T>
-std::optional<tensor_t> op_context_t<OP_CONTEXT_T>::get_param(std::string key) const {
+std::optional<tensor_t> op_context_t<OP_CONTEXT_T>::get_param(
+  std::string key) const {
   LOG_DEBUG_INFO("Getting param op_context_t");
   for (const auto& [k, v] : params) {
-    if (k == key)
+    if (k == key) {
       return v;
+    }
   }
   return std::nullopt;
 }
 
 template<typename OP_CONTEXT_T>
-OP_CONTEXT_T& op_context_t<OP_CONTEXT_T>::set_post_op(post_op_t& post_op_) {
+OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::set_post_op(post_op_t &post_op_) {
   LOG_DEBUG_INFO("Setting post-op op_context_t");
+  if (post_op_.type == post_op_type_t::binary_add){
+    post_op_.binary_add_params.tensor_name += std::to_string(binary_add_count);
+    binary_add_count++;
+  }
+  else if (post_op_.type == post_op_type_t::binary_mul) {
+    post_op_.binary_mul_params.tensor_name += std::to_string(binary_mul_count);
+    binary_mul_count++;
+  }
+  else {
+    activation_count++;
+  }
   post_ops.push_back(post_op_);
   hash_key = 0;
-  return static_cast<OP_CONTEXT_T&>(*this);
+  return static_cast<OP_CONTEXT_T &>(*this);
 }
 
 template<typename OP_CONTEXT_T>
@@ -270,7 +288,8 @@ post_op_t op_context_t<OP_CONTEXT_T>::get_post_op(uint32_t i_) const {
   LOG_DEBUG_INFO("Getting post-op op_context_t");
   try {
     return post_ops.at(i_);
-  } catch (const std::out_of_range ex) {
+  }
+  catch (const std::out_of_range &ex) {
     EXCEPTION_WITH_LOC("operator post_op out of range encountered.");
   }
 }
@@ -288,11 +307,11 @@ uint32_t op_context_t<OP_CONTEXT_T>::get_post_op_count() const {
 }
 
 template<typename OP_CONTEXT_T>
-OP_CONTEXT_T& op_context_t<OP_CONTEXT_T>::set_core_count(uint32_t count) {
+OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::set_core_count(uint32_t count) {
   LOG_DEBUG_INFO("Setting core count for op_context_t");
   core_count = count;
 
-  return static_cast<OP_CONTEXT_T&>(*this);
+  return static_cast<OP_CONTEXT_T &>(*this);
 }
 
 template<typename OP_CONTEXT_T>
@@ -302,12 +321,13 @@ uint32_t op_context_t<OP_CONTEXT_T>::get_core_count() const {
 }
 
 template<typename OP_CONTEXT_T>
-OP_CONTEXT_T& op_context_t<OP_CONTEXT_T>::set_core_binding(std::vector<uint32_t> cores) {
+OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::set_core_binding(
+  std::vector<uint32_t> cores) {
   LOG_DEBUG_INFO("Setting core binding for op_context_t");
   core_binding = cores;
   core_count   = core_binding.size();
 
-  return static_cast<OP_CONTEXT_T&>(*this);
+  return static_cast<OP_CONTEXT_T &>(*this);
 }
 
 template<typename OP_CONTEXT_T>
@@ -321,8 +341,9 @@ status_t op_context_t<OP_CONTEXT_T>::validate() {
   LOG_DEBUG_INFO("Validating op_context_t");
   for (const auto& [k, v] : params) {
     std::optional<tensor_t> t = v;
-    if (t && !(t->check()))
+    if (t && !(t->check())) {
       return status_t::failure;
+    }
   }
   return status_t::success;
 }
@@ -337,15 +358,16 @@ template<typename OP_CONTEXT_T>
 std::size_t op_context_t<OP_CONTEXT_T>::hash() {
   LOG_DEBUG_INFO("Creating hash for op_context_t");
   if (status == status_t::success) {
-    if (hash_key)
+    if (hash_key) {
       return hash_key;
+    }
 
     for (const auto& [k, v] : params) {
       tensor_t temp = static_cast<tensor_t>(v);
       hash_key = hash_combine(hash_key, temp);
     }
 
-    for (const auto& v : post_ops) {
+    for (const auto &v : post_ops) {
       hash_key = hash_combine(hash_key, uint32_t(v.type));
     }
   }

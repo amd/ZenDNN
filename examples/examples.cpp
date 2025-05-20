@@ -39,6 +39,9 @@ int main() {
   matmul_relu_f32_kernel_example();
   matmul_relu_bf16_kernel_example();
   matmul_relu_forced_ref_kernel_example();
+  matmul_mul_silu_mul_f32_kernel_example();
+  matmul_silu_mul_bf16_kernel_example();
+  matmul_relu_forced_ref_kernel_example();
   compare_op_example();
   compare_ref_and_aocl_matmul_kernel_example();
 

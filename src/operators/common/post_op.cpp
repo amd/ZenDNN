@@ -35,9 +35,13 @@ post_op_t::post_op_t(post_op_type_t type_):
     clip_params.lower = -0.5;
     clip_params.upper = 0.5;
     break;
-  case post_op_type_t::elt_add:
-    elt_add_params.scale       = 1.0;
-    elt_add_params.tensor_name = "elt_add_tensor";
+  case post_op_type_t::binary_add:
+    binary_add_params.scale       = 1.0;
+    binary_add_params.tensor_name = "binary_add_tensor_";
+    break;
+  case post_op_type_t::binary_mul:
+    binary_mul_params.scale       = 1.0;
+    binary_mul_params.tensor_name = "binary_mul_tensor_";
     break;
   }
 }
@@ -62,9 +66,16 @@ post_op_t::post_op_t(clip_params_t params_):
   clip_params = params_;
 }
 
-post_op_t::post_op_t(elt_add_params_t params_):
-  type{post_op_type_t::elt_add} {
-  elt_add_params = params_;
+post_op_t::post_op_t(binary_add_params_t params_):
+  type{post_op_type_t::binary_add} {
+  binary_add_params.scale = params_.scale;
+  binary_add_params.tensor_name = "binary_add_tensor_";
+}
+
+post_op_t::post_op_t(binary_mul_params_t params_):
+  type{post_op_type_t::binary_mul} {
+  binary_mul_params.scale = params_.scale;
+  binary_mul_params.tensor_name = "binary_mul_tensor_";
 }
 
 } //namespace ops

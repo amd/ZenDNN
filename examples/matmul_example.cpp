@@ -22,10 +22,6 @@ namespace examples {
 using namespace zendnnl::interface;
 using namespace zendnnl::error_handling;
 
-// using namespace zendnnl::common;
-// using namespace zendnnl::memory;
-// using namespace zendnnl::ops;
-
 int matmul_relu_f32_kernel_example() {
   log_info("**matmul+relu operator f32 kernel example.");
 
@@ -40,7 +36,7 @@ int matmul_relu_f32_kernel_example() {
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
                                                  -10.0);
-    weights.set_name("bias");
+    bias.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -108,7 +104,7 @@ int matmul_relu_bf16_kernel_example() {
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
                                                  3.0);
-    weights.set_name("bias");
+    bias.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -141,6 +137,169 @@ int matmul_relu_bf16_kernel_example() {
 
     status = matmul_operator
       .set_input("matmul_input", input_tensor)
+      .set_output("matmul_output", output_tensor)
+      .execute();
+
+    if (status == status_t::success) {
+      log_info("operator ", matmul_operator.get_name(), " execution successful.");
+      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
+                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+    }
+    else {
+      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      return NOT_OK;
+    }
+
+  } catch(const exception_t& ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return NOT_OK;
+}
+
+int matmul_mul_silu_mul_f32_kernel_example() {
+  log_info("**matmul binary_mul + silu + binary_mul operator f32 kernel example.");
+
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
+                                                 data_type_t::f32,
+                                                 1.0);
+    weights.set_name("weights");
+
+    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+                                                 data_type_t::f32,
+                                                 3.0);
+    bias.set_name("bias");
+
+    binary_mul_params_t binary_mul;
+    binary_mul.scale = 1.0;
+
+    auto binary_mul_po   = post_op_t{binary_mul};
+    auto silu_post_op = post_op_t{post_op_type_t::swish};
+    auto binary_mul_po_2 = post_op_t{post_op_type_t::binary_mul};
+
+    //define matmul context
+    auto matmul_context = matmul_context_t()
+      .set_param("weights", weights)
+      .set_param("bias", bias)
+      .set_post_op(binary_mul_po)
+      .set_post_op(silu_post_op)
+      .set_post_op(binary_mul_po_2)
+      .create();
+
+    //define matmul operator
+    auto matmul_operator = matmul_operator_t()
+      .set_name("matmul_f32_operator")
+      .set_context(matmul_context)
+      .create();
+
+    if (! matmul_operator.check()) {
+      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
+                                                      data_type_t::f32,
+                                                      1.0);
+    input_tensor.set_name("matmul_put");
+
+    auto mul_tensor   = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                                                      data_type_t::f32,
+                                                      2.0);
+    mul_tensor.set_name("binary_mul_0");
+
+    auto mul_tensor_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                                                      data_type_t::bf16,
+                                                      3.0);
+    mul_tensor_2.set_name("binary_mul_1");
+
+    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
+                                               data_type_t::f32);
+    output_tensor.set_name("matmul_output");
+
+    status = matmul_operator
+      .set_input("matmul_input", input_tensor)
+      .set_input(matmul_context.get_post_op(0).binary_mul_params.tensor_name, mul_tensor)
+      .set_input(matmul_context.get_post_op(2).binary_mul_params.tensor_name, mul_tensor_2)
+      .set_output("matmul_output", output_tensor)
+      .execute();
+
+    if (status == status_t::success) {
+      log_info("operator ", matmul_operator.get_name(), " execution successful.");
+      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
+                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+    }
+    else {
+      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      return NOT_OK;
+    }
+
+  } catch(const exception_t& ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int matmul_silu_mul_bf16_kernel_example() {
+  log_info("**matmul + silu + binary_mul operator bf16 kernel example.");
+
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
+                                                 data_type_t::bf16,
+                                                 1.0);
+    weights.set_name("weights");
+
+    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+                                                 data_type_t::f32,
+                                                 3.0);
+    bias.set_name("bias");
+
+    auto silu_post_op = post_op_t{post_op_type_t::swish};
+    auto binary_mul_po   = post_op_t{post_op_type_t::binary_mul};
+
+    //define matmul context
+    auto matmul_context = matmul_context_t()
+      .set_param("weights", weights)
+      .set_param("bias", bias)
+      .set_post_op(silu_post_op)
+      .set_post_op(binary_mul_po)
+      .create();
+
+    //define matmul operator
+    auto matmul_operator = matmul_operator_t()
+      .set_name("matmul_bf16_operator")
+      .set_context(matmul_context)
+      .create();
+
+    if (! matmul_operator.check()) {
+      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
+                                                      data_type_t::bf16,
+                                                      1.0);
+    input_tensor.set_name("matmul_input");
+
+    auto mul_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                                                      data_type_t::bf16,
+                                                      2.0);
+    mul_tensor.set_name("binary_mul_0");
+
+    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
+                                               data_type_t::f32);
+    output_tensor.set_name("matmul_output");
+
+    status = matmul_operator
+      .set_input("matmul_input", input_tensor)
+      .set_input(matmul_context.get_post_op(1).binary_mul_params.tensor_name, mul_tensor)
       .set_output("matmul_output", output_tensor)
       .execute();
 

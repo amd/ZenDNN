@@ -50,8 +50,8 @@ enum class post_op_type_t {
   exp,/*!< eltwise exp */
   log,/*!< eltwise log */
   clip,/*!< eltwise clip */
-  elt_add,/*!< eltwise add with another tensor */
-  elt_mult/*!< eltwise mult with another tensor */
+  binary_add,/*!< eltwise add with another tensor */
+  binary_mul/*!< eltwise mul with another tensor */
 };
 
 /** @struct elu_params_t
@@ -83,10 +83,18 @@ struct clip_params_t {
   float upper;
 };
 
-/** @struct elt_add_params_t
+/** @struct binary_add_params_t
  *  @brief Eltwise add with another tensor parameters.
  */
-struct elt_add_params_t {
+struct binary_add_params_t {
+  float scale;
+  std::string tensor_name;
+};
+
+/** @struct binary_mul_params_t
+ *  @brief Eltwise add with another tensor parameters.
+ */
+struct binary_mul_params_t {
   float scale;
   std::string tensor_name;
 };
@@ -111,15 +119,18 @@ struct post_op_t {
   post_op_t(swish_params_t params_);
   /** @brief Constructor for clip */
   post_op_t(clip_params_t params_);
-  /** @brief Constructor for eltwise add with a tensor */
-  post_op_t(elt_add_params_t params_);
+  /** @brief Constructor for binary add with a tensor */
+  post_op_t(binary_add_params_t params_);
+  /** @brief Constructor for binary mul with a tensor */
+  post_op_t(binary_mul_params_t params_);
 
   post_op_type_t      type;
   elu_params_t        elu_params;
   swish_params_t      swish_params;
   leaky_relu_params_t leaky_relu_params;
   clip_params_t       clip_params;
-  elt_add_params_t    elt_add_params;
+  binary_add_params_t binary_add_params;
+  binary_mul_params_t binary_mul_params;
 };
 
 } //namespace ops
@@ -130,7 +141,8 @@ using elu_params_t        = zendnnl::ops::elu_params_t;
 using leaky_relu_params_t = zendnnl::ops::leaky_relu_params_t;
 using swish_params_t      = zendnnl::ops::swish_params_t;
 using clip_params_t       = zendnnl::ops::clip_params_t;
-using elt_add_params_t    = zendnnl::ops::elt_add_params_t;
+using binary_add_params_t = zendnnl::ops::binary_add_params_t;
+using binary_mul_params_t = zendnnl::ops::binary_mul_params_t;
 using post_op_t           = zendnnl::ops::post_op_t;
 } //interface
 } //namespace zendnnl

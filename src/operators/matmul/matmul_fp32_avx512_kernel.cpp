@@ -61,7 +61,6 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
   const int   ldb           = is_transpose_weights ? k : n;
   const int   ldc           = n;
 
-
   aocl_gemm_f32f32f32of32(order, trans_input, trans_weight,
                           m,n,k,
                           alpha,

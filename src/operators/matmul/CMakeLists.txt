@@ -31,14 +31,14 @@ set(matmul_operator_sources
 
 set(matmul_operator_public_headers
   matmul_context.hpp
-  matmul_operator.hpp)
+  matmul_operator.hpp
+  matmul_aocl_utils.hpp)
 
 set(matmul_operator_private_headers
   matmul_kernel_list.hpp
   matmul_fp32_ref_kernel.hpp
   matmul_fp32_avx512_kernel.hpp
-  matmul_bf16_avx512_kernel.hpp
-  matmul_aocl_utils.hpp)
+  matmul_bf16_avx512_kernel.hpp)
 
 # add_library(matmul_operator_objects OBJECT)
 

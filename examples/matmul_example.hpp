@@ -53,6 +53,28 @@ int matmul_relu_f32_kernel_example();
  */
 int matmul_relu_bf16_kernel_example();
 
+/** @fn matmul_silu_mul_f32_kernel_example
+ *  @brief Demonstrates matmul+silu+elt_mul fused operator on f32 inputs.
+ *
+ *  matmul operator implements matrix multiplication on 2D tensors. This operator
+ *  can be fused with various post_ops.
+ *
+ *  This example demonstrates matmul binary_mul silu binary_mul fused operator 
+ *  creation and execution of one of its f32 computation based kernel.
+ */
+int matmul_mul_silu_mul_f32_kernel_example();
+
+/** @fn matmul_silu_mul_bf16_kernel_example
+ *  @brief Demonstrates matmul+silu+elt_mul fused operator on bf16 inputs.
+ *
+ *  matmul operator implements matrix multiplication on 2D tensors. This operator
+ *  can be fused with various post_ops.
+ *
+ *  This example demonstrates matmul silu binary_mul fused operator creation and
+ *  execution of one of its bf16 computation based kernel.
+ */
+int matmul_silu_mul_bf16_kernel_example();
+
 /** @fn matmul_relu_forced_ref_kernel_example
  *  @brief Demonstrates matmul+relu fused operator reference kernel enforced by user.
  *

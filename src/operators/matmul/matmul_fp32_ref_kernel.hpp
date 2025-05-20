@@ -63,6 +63,12 @@ class matmul_f32_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
    */
   status_t apply_post_op(tensor_t &tensor_, post_op_t zen_po_);
 
+  /** @brief Apply buffer based post-ops
+   * @returns status_t::success
+   */
+  status_t apply_post_op(tensor_t &tensor_, tensor_t &buffer_tensor_,
+                         post_op_t zen_po_);
+
 
   /** @brief Apply element wise post-ops
    * @returns status_t::success
@@ -93,6 +99,8 @@ class matmul_f32_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
   float exp_fwd(float x);
   float log_fwd(float x);
   float clip_fwd(float x, float lower, float upper);
+  float binary_add_fwd(float x, float y, float scale);
+  float binary_mul_fwd(float x, float y, float scale);
 };
 
 } //namespace ops
