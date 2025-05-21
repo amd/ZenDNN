@@ -68,10 +68,11 @@ size_t aocl_utils_t::reorder_weights_execute(
   LOG_DEBUG_INFO("Reodering weights aocl_utils_t");
   log_info("BLIS reorder weights");
   siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
-                                                     k, n);
+                                k, n);
   /*TODO: add support for tensor which will wrap the pointer instead of raw buffer*/
   reordered_weights_ptr = aligned_alloc(64, b_reorder_buf_siz_req);
-  reorder_func(order, trans, 'B', (T*)weights, (T*)reordered_weights_ptr, k, n, ldb);
+  reorder_func(order, trans, 'B', (T *)weights, (T *)reordered_weights_ptr, k, n,
+               ldb);
 
   return b_reorder_buf_siz_req;
 }
@@ -88,11 +89,11 @@ status_t aocl_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
       if (found_obj_mul != inputs_.end() && aocl_po_ptr->matrix_mul != nullptr) {
         auto mul_buff_tensor = inputs_[key_mul];
         (aocl_po_ptr->matrix_mul + mul_idx)->matrix
-                    = mul_buff_tensor.get_raw_handle_unsafe();
+          = mul_buff_tensor.get_raw_handle_unsafe();
         (aocl_po_ptr->matrix_mul + mul_idx)->stor_type
-                    = get_aocl_store_type(mul_buff_tensor.get_data_type());
+          = get_aocl_store_type(mul_buff_tensor.get_data_type());
         (aocl_po_ptr->matrix_mul + mul_idx)->ldm
-                    = mul_buff_tensor.get_size(1);
+          = mul_buff_tensor.get_size(1);
       }
       else {
         log_error("Not enough inputs passed for matrix mul post-ops");
@@ -107,11 +108,11 @@ status_t aocl_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
       if (found_obj_add != inputs_.end() && aocl_po_ptr->matrix_add != nullptr) {
         auto add_buff_tensor = inputs_[key_add];
         (aocl_po_ptr->matrix_add + add_idx)->matrix
-                    = add_buff_tensor.get_raw_handle_unsafe();
+          = add_buff_tensor.get_raw_handle_unsafe();
         (aocl_po_ptr->matrix_add + add_idx)->stor_type
-                    = get_aocl_store_type(add_buff_tensor.get_data_type());
+          = get_aocl_store_type(add_buff_tensor.get_data_type());
         (aocl_po_ptr->matrix_add + add_idx)->ldm
-                    = add_buff_tensor.get_size(1);
+          = add_buff_tensor.get_size(1);
       }
       else {
         log_error("Not enough inputs passed for matrix add post-ops");
@@ -126,67 +127,70 @@ status_t aocl_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
   return status_t::success;
 }
 
-status_t aocl_utils_t::aocl_post_op_memory_alloc(const std::vector<post_op_t> post_op_vec_,
-                                                    bool is_bias){
-    LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_utils_t");
-    //Allocate memory
-    size_t max_post_ops = post_op_vec_.size();
-    if (is_bias){
-      aocl_po_ptr->bias = (aocl_post_op_bias *) calloc(1, sizeof(aocl_post_op_bias));
-    }
-    if(max_post_ops) {
-      int num_post_ops_eltwise = 0;
-      int num_post_ops_binary_add = 0;
-      int num_post_ops_binary_mul = 0;
-      for (uint32_t i = 0; i < max_post_ops; ++ i) {
-        post_op_t zen_po = post_op_vec_[i];
-        switch (zen_po.type) {
-          case post_op_type_t::relu:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::leaky_relu:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::gelu_tanh:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::gelu_erf:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::tanh:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::swish:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::sigmoid:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::clip:
-            num_post_ops_eltwise++;
-            break;
-          case post_op_type_t::binary_add:
-            num_post_ops_binary_add++;
-            break;
-          case post_op_type_t::binary_mul:
-            num_post_ops_binary_mul++;
-            break;
-          default:
-            log_error("This postop in aocl is not supported");
-            return status_t::failure;
-        }
+status_t aocl_utils_t::aocl_post_op_memory_alloc(const std::vector<post_op_t>
+    post_op_vec_,
+    bool is_bias) {
+  LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_utils_t");
+  //Allocate memory
+  size_t max_post_ops = post_op_vec_.size();
+  if (is_bias) {
+    aocl_po_ptr->bias = (aocl_post_op_bias *) calloc(1, sizeof(aocl_post_op_bias));
+  }
+  if (max_post_ops) {
+    int num_post_ops_eltwise = 0;
+    int num_post_ops_binary_add = 0;
+    int num_post_ops_binary_mul = 0;
+    for (size_t i = 0; i < max_post_ops; ++ i) {
+      post_op_t zen_po = post_op_vec_[i];
+      switch (zen_po.type) {
+      case post_op_type_t::relu:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::leaky_relu:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::gelu_tanh:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::gelu_erf:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::tanh:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::swish:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::sigmoid:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::clip:
+        num_post_ops_eltwise++;
+        break;
+      case post_op_type_t::binary_add:
+        num_post_ops_binary_add++;
+        break;
+      case post_op_type_t::binary_mul:
+        num_post_ops_binary_mul++;
+        break;
+      default:
+        log_error("This postop in aocl is not supported");
+        return status_t::failure;
       }
-      aocl_po_ptr->eltwise    = (aocl_post_op_eltwise *) calloc(num_post_ops_eltwise,
-                                  sizeof(aocl_post_op_eltwise));
-      aocl_po_ptr->matrix_add = (aocl_post_op_matrix_add *) calloc(num_post_ops_binary_add,
-                                  sizeof(aocl_post_op_matrix_add));
-      aocl_po_ptr->matrix_mul = (aocl_post_op_matrix_mul *) calloc(num_post_ops_binary_mul,
-                                  sizeof(aocl_post_op_matrix_mul));
-      post_op_size["eltwise"] = num_post_ops_eltwise;
-      post_op_size["binary_add"] = num_post_ops_binary_add;
-      post_op_size["binary_mul"] = num_post_ops_binary_mul;
     }
-    return status_t::success;
+    aocl_po_ptr->eltwise    = (aocl_post_op_eltwise *) calloc(num_post_ops_eltwise,
+                              sizeof(aocl_post_op_eltwise));
+    aocl_po_ptr->matrix_add = (aocl_post_op_matrix_add *) calloc(
+                                num_post_ops_binary_add,
+                                sizeof(aocl_post_op_matrix_add));
+    aocl_po_ptr->matrix_mul = (aocl_post_op_matrix_mul *) calloc(
+                                num_post_ops_binary_mul,
+                                sizeof(aocl_post_op_matrix_mul));
+    post_op_size["eltwise"] = num_post_ops_eltwise;
+    post_op_size["binary_add"] = num_post_ops_binary_add;
+    post_op_size["binary_mul"] = num_post_ops_binary_mul;
+  }
+  return status_t::success;
 }
 
 status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
@@ -266,7 +270,8 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     case post_op_type_t::binary_add:
       log_info("binary_add post-op being added");
       (aocl_po_ptr->matrix_add + add_index)->scale_factor = malloc(sizeof(float));
-      *((float*)(aocl_po_ptr->matrix_add[add_index]).scale_factor) = zen_po.binary_add_params.scale;
+      *((float *)(aocl_po_ptr->matrix_add[add_index]).scale_factor) =
+        zen_po.binary_add_params.scale;
       (aocl_po_ptr->matrix_add + add_index)->scale_factor_len = 1;
       aocl_po_ptr->seq_vector[post_op_count++] = MATRIX_ADD;
       add_index++;
@@ -274,7 +279,8 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     case post_op_type_t::binary_mul:
       log_info("binary_mul post-op being added");
       (aocl_po_ptr->matrix_mul + mul_index)->scale_factor = malloc(sizeof(float));
-      *((float*)(aocl_po_ptr->matrix_mul[mul_index]).scale_factor) = zen_po.binary_mul_params.scale;
+      *((float *)(aocl_po_ptr->matrix_mul[mul_index]).scale_factor) =
+        zen_po.binary_mul_params.scale;
       (aocl_po_ptr->matrix_mul + mul_index)->scale_factor_len = 1;
       aocl_po_ptr->seq_vector[post_op_count++] = MATRIX_MUL;
       mul_index++;
@@ -364,9 +370,9 @@ void aocl_utils_t::free_post_op() {
   int count_elt        = 0;
   int count_matrix_add = 0;
   int count_matrix_mul = 0;
-  for(int idx = 0; idx < aocl_po_ptr->seq_length; idx++){
-    if(aocl_po_ptr->seq_vector[idx] == ELTWISE) {
-      if (aocl_po_ptr->eltwise[count_elt].algo.alpha){
+  for (int idx = 0; idx < aocl_po_ptr->seq_length; idx++) {
+    if (aocl_po_ptr->seq_vector[idx] == ELTWISE) {
+      if (aocl_po_ptr->eltwise[count_elt].algo.alpha) {
         free(aocl_po_ptr->eltwise[count_elt].algo.alpha);
       }
       if (aocl_po_ptr->eltwise[count_elt].algo.beta) {
@@ -375,13 +381,15 @@ void aocl_utils_t::free_post_op() {
       count_elt++;
     }
     else if (aocl_po_ptr->seq_vector[idx] == MATRIX_ADD) {
-      if (aocl_po_ptr->matrix_add[count_matrix_add].scale_factor)
+      if (aocl_po_ptr->matrix_add[count_matrix_add].scale_factor) {
         free(aocl_po_ptr->matrix_add[count_matrix_add].scale_factor);
+      }
       count_matrix_add++;
     }
     else if (aocl_po_ptr->seq_vector[idx] == MATRIX_MUL) {
-      if (aocl_po_ptr->matrix_mul[count_matrix_mul].scale_factor)
+      if (aocl_po_ptr->matrix_mul[count_matrix_mul].scale_factor) {
         free(aocl_po_ptr->matrix_mul[count_matrix_mul].scale_factor);
+      }
       count_matrix_mul++;
     }
   }
@@ -465,9 +473,9 @@ void *aocl_utils_t::get_aocl_reordered_weights_ptr_unsafe() const {
 
 aocl_utils_t::aocl_utils_t()
   :aocl_po_ptr{nullptr}, reordered_weights_ptr{nullptr} {
-    post_op_size.insert({"eltwise",0});
-    post_op_size.insert({"binary_add",0});
-    post_op_size.insert({"binary_mul",0});
+  post_op_size.insert({"eltwise",0});
+  post_op_size.insert({"binary_add",0});
+  post_op_size.insert({"binary_mul",0});
 }
 
 aocl_utils_t::~aocl_utils_t() {

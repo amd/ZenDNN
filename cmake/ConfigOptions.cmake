@@ -29,6 +29,8 @@ set(ZENDNNL_BUILD_DOXYGEN_DOCS ON CACHE BOOL "Build doxygen docs")
 # special flags
 ##
 set(ZENDNNL_USE_CXX11_ABI_FLAG ON CACHE BOOL "Use CXX11 ABI")
+set(CMAKE_EXPORT_COMPILE_COMMANDS OFF)
+add_compile_options(-Wall -Werror)
 
 ##
 # dependencies

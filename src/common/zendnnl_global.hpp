@@ -71,15 +71,15 @@ namespace common {
  * Initializes ZenDNNL by creating its persistent global block singleton
  */
 static inline void zendnnl_init() {
-  zendnnl_global_block_t* ins = zendnnl_global_block_t::get();
-  platform_info_t& platform_info = ins->get_platform_info();
+  //zendnnl_global_block_t* ins = zendnnl_global_block_t::get();
+  //platform_info_t& platform_info = ins->get_platform_info();
 }
 
 /** @fn zendnnl_global_block()
  * @brief Get a reference to zendnnl global block singleton
  * @return A reference to zendnnl global block singleton.
  */
-static inline zendnnl_global_block_t&  zendnnl_global_block() {
+static inline zendnnl_global_block_t  &zendnnl_global_block() {
   return (*(zendnnl_global_block_t::get()));
 }
 
@@ -87,7 +87,7 @@ static inline zendnnl_global_block_t&  zendnnl_global_block() {
  * @brief Get a reference to zendnnl platform information block
  * @return A reference to zendnnl platform information block.
  */
-static inline platform_info_t& zendnnl_platform_info() {
+static inline platform_info_t &zendnnl_platform_info() {
   return (zendnnl_global_block_t::get())->get_platform_info();
 }
 
@@ -96,9 +96,9 @@ static inline platform_info_t& zendnnl_platform_info() {
  * @param abs_path : absolute path
  * @return A Relative path string
  */
-static inline const char* get_relative_path(const char* abs_path_) {
-  const char* rel = std::strstr(abs_path_, "ZenDNNL/");
-  return(rel? rel : abs_path_);
+static inline const char *get_relative_path(const char *abs_path_) {
+  const char *rel = std::strstr(abs_path_, "ZenDNNL/");
+  return (rel? rel : abs_path_);
 }
 
 }//common

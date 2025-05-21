@@ -45,11 +45,11 @@ status_t compare_operator_t::validate() {
   if ((expec_size.size() != test_size.size()) ||
       (test_size.size()  != diff_size.size()) ||
       (expec_size.size() != diff_size.size())) {
-        log_error("<", get_name(), "> tensors are of same shape.");
+    log_error("<", get_name(), "> tensors are of same shape.");
     return status_t::failure;
   }
 
-  for (auto i=0; i<expec_size.size(); i++) {
+  for (size_t i=0; i<expec_size.size(); i++) {
     if ((expec_size.at(i) != test_size.at(i)) ||
         (test_size.at(i)  != diff_size.at(i)) ||
         (expec_size.at(i) != diff_size.at(i))) {

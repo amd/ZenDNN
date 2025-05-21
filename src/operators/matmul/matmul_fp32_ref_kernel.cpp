@@ -111,11 +111,11 @@ status_t matmul_f32_ref_kernel_t::apply_post_op(tensor_t &tensor_,
     float add_po_scale = zen_po_.binary_add_params.scale;
     for (int i = 0; i < size; ++i) {
       if (buff_data == data_type_t::bf16) {
-        float temp = float(((bfloat16_t*)buffer)[i]);
+        float temp = float(((bfloat16_t *)buffer)[i]);
         output[i] = binary_add_fwd(output[i], temp, add_po_scale);
       }
       else {
-        output[i] = binary_add_fwd(output[i], ((float*)buffer)[i], add_po_scale);
+        output[i] = binary_add_fwd(output[i], ((float *)buffer)[i], add_po_scale);
       }
     }
   }
@@ -123,11 +123,11 @@ status_t matmul_f32_ref_kernel_t::apply_post_op(tensor_t &tensor_,
     float mul_po_scale = zen_po_.binary_mul_params.scale;
     for (int i = 0; i < size; ++i) {
       if (buff_data == data_type_t::bf16) {
-        float temp = float(((bfloat16_t*)buffer)[i]);
+        float temp = float(((bfloat16_t *)buffer)[i]);
         output[i] = binary_mul_fwd(output[i], temp, mul_po_scale);
       }
       else {
-        output[i] = binary_mul_fwd(output[i], ((float*)buffer)[i], mul_po_scale);
+        output[i] = binary_mul_fwd(output[i], ((float *)buffer)[i], mul_po_scale);
       }
     }
   }
@@ -204,13 +204,13 @@ status_t matmul_f32_ref_kernel_t::apply_post_op(tensor_t &tensor_,
 
 template<typename... Args>
 status_t matmul_f32_ref_kernel_t::apply_eltwise_post_op(float (
-    matmul_f32_ref_kernel_t::*post_op_func)(float, Args...),
+      matmul_f32_ref_kernel_t::*post_op_func)(float, Args...),
     tensor_t &tensor_,
     Args... args) {
   float *output_t = (float *)tensor_.get_raw_handle_unsafe();
-  auto  size         = tensor_.get_nelem();
+  uint64_t  size         = tensor_.get_nelem();
 
-  for (auto i = 0; i < size; ++i) {
+  for (uint64_t i = 0; i < size; ++i) {
     output_t[i] = (this->*post_op_func)(output_t[i], std::forward<Args>(args)...);
   }
   return status_t::success;
@@ -218,22 +218,22 @@ status_t matmul_f32_ref_kernel_t::apply_eltwise_post_op(float (
 
 status_t matmul_f32_ref_kernel_t::apply_softmax(tensor_t &tensor_) {
   float   *output_t = (float *)tensor_.get_raw_handle_unsafe();
-  const int rows    = tensor_.get_size(0);
-  const int cols    = tensor_.get_size(1);
+  const uint64_t rows    = tensor_.get_size(0);
+  const uint64_t cols    = tensor_.get_size(1);
 
-  for (size_t row = 0; row < rows; ++row) {
+  for (uint64_t row = 0; row < rows; ++row) {
     // Compute exponentials for the current row
     double sumExp = 0.0;
     std::vector<double> expRow(cols);
 
-    for (size_t col = 0; col < cols; ++col) {
-      size_t index = row * cols + col;
+    for (uint64_t col = 0; col < cols; ++col) {
+      uint64_t index = row * cols + col;
       expRow[col] = expf((output_t[index]));
       sumExp += expRow[col];
     }
 
     // Normalize each exponential by the sum to get softmax probabilities
-    for (size_t col = 0; col < cols; ++col) {
+    for (uint64_t col = 0; col < cols; ++col) {
       size_t index = row * cols + col;
       output_t[index] = expRow[col] / sumExp;
     }
@@ -260,7 +260,7 @@ float matmul_f32_ref_kernel_t::gelu_tanh_fwd(float x) {
 
 float matmul_f32_ref_kernel_t::gelu_erf_fwd(float x) {
   float v = x * SQRT_2_OVER_2;
-  return (0.5f * x * (1.0f + erff(x)));
+  return (0.5f * x * (1.0f + erff(v)));
 }
 
 float matmul_f32_ref_kernel_t::sigmoid_fwd(float x) {

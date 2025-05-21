@@ -267,7 +267,7 @@ std::optional<tensor_t> op_context_t<OP_CONTEXT_T>::get_param(
 template<typename OP_CONTEXT_T>
 OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::set_post_op(post_op_t &post_op_) {
   LOG_DEBUG_INFO("Setting post-op op_context_t");
-  if (post_op_.type == post_op_type_t::binary_add){
+  if (post_op_.type == post_op_type_t::binary_add) {
     post_op_.binary_add_params.tensor_name += std::to_string(binary_add_count);
     binary_add_count++;
   }

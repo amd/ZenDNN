@@ -77,7 +77,7 @@ using namespace zendnnl::error_handling;
  */
 template<typename OP_T, typename OP_CONTEXT_T>
 class operator_t : public hash_object_t {
-public:
+ public:
   /** @brief Parent type */
   using   parent_type                =  hash_object_t;
   /** @brief Operator type */
@@ -91,7 +91,7 @@ public:
   /** @brief A map type from strings to tensors */
   using   tensor_map_type            =  std::map<std::string, tensor_t>;
   /** @brief Kernel handle type */
-  using   create_kernel_handle_type  =  kernel_sptr_type (*)();
+  using   create_kernel_handle_type  =  kernel_sptr_type(*)();
 
   /** @brief Virtual destructor
    *
@@ -114,7 +114,7 @@ public:
    * @param context_ : operator context.
    * @return A reference to self.
    */
-  OP_T&         set_context(const context_type& context_);
+  OP_T         &set_context(const context_type &context_);
 
   /** @brief Get operator context.
    *
@@ -135,7 +135,7 @@ public:
    * creation. The status can be checked using @c hash_object_t.check().
    * @return A reference to self.
    */
-  virtual OP_T&       create();
+  virtual OP_T       &create();
   /**@}*/
 
   /**@name Execute
@@ -148,7 +148,7 @@ public:
    * validation and return status_t::op_bad_io error. All mandatory inputs
    * and outputs need to be given before @c execute().
    */
-  OP_T&         set_input(std::string key_, tensor_t& input_tensor_);
+  OP_T         &set_input(std::string key_, tensor_t &input_tensor_);
 
   /** @brief Get an input tensor.
    *
@@ -166,7 +166,7 @@ public:
    * consistent with the inputs and outputs, else status_t::bad_forced_kernel
    * will be returned.
    */
-  OP_T&         set_forced_kernel(std::string forced_kernel_name_);
+  OP_T         &set_forced_kernel(std::string forced_kernel_name_);
 
   /** @brief Get forced kernel.
    *
@@ -182,7 +182,7 @@ public:
    * validation and return status_t::op_bad_io error. All mandatory inputs
    * and outputs need to be given before @c execute().
    */
-  OP_T&         set_output(std::string key_, tensor_t& input_tensor_);
+  OP_T         &set_output(std::string key_, tensor_t &input_tensor_);
   std::optional<tensor_t> get_output(std::string key_);
 
   /** @brief Execute an operator
@@ -206,7 +206,7 @@ public:
    * @param name_ : object name.
    * @return A reference to self.
    */
-  OP_T&         set_name(std::string name_);
+  OP_T         &set_name(std::string name_);
 
   /** @brief Get name.
    * @return Object name.
@@ -216,7 +216,7 @@ public:
 
   std::size_t   hash() override;
 
-protected:
+ protected:
   /** @brief Default constructor.
    *
    * ZenDNNL follows the convension of making constructors protected (or private),
@@ -277,16 +277,14 @@ protected:
   //data
   tensor_map_type                      inputs; /**< Input tensors. */
   tensor_map_type                      outputs; /**< Output tensors. */
-
-  platform_info_t                      platform_info; /**< HW platform info. */
-
   context_type                         context; /**< Operator context. */
+  std::string                          name; /**< Name for diagnostic purpose */
   kernel_sptr_type                     kernel; /**< Pointer to the kernel chosen
                                                   for execution. */
-  std::shared_ptr<dynamic_module_t>    dynamic_module; /**< To load dynamic modules. */
+  std::shared_ptr<dynamic_module_t>
+  dynamic_module; /**< To load dynamic modules. */
   std::string                          forced_kernel;
-
-  std::string                          name; /**< Name for diagnostic purpose */
+  platform_info_t                      platform_info; /**< HW platform info. */
 };
 
 //implementation
@@ -299,12 +297,14 @@ operator_t<OP_T, OP_CONTEXT_T>::operator_t():
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::set_context(const OP_CONTEXT_T& context_) {
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_context(const OP_CONTEXT_T
+    &context_) {
   LOG_DEBUG_INFO("<", name, "> Setting context for operator_t");
-  if (status != status_t::success)
+  if (status != status_t::success) {
     context = context_;
+  }
 
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
@@ -314,10 +314,10 @@ OP_CONTEXT_T operator_t<OP_T, OP_CONTEXT_T>::get_context() {
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::set_name(std::string name_) {
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_name(std::string name_) {
   LOG_DEBUG_INFO("<", name, "> Setting name for operator_t as ", name_);
   name = name_;
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
@@ -327,20 +327,20 @@ std::string operator_t<OP_T, OP_CONTEXT_T>::get_name() {
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::create() {
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("<", name, "> Creating operator");
   if (status != status_t::success) {
     if (! context.check()) {
       log_error("operator <", name, "> : bad context");
       status =  status_t::op_bad_context;
-      return static_cast<OP_T&>(*this);
+      return static_cast<OP_T &>(*this);
     }
 
     // make operator complete
     status = status_t::success;
     hash();
   }
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
@@ -348,7 +348,7 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
   try {
     // check if pre_processing is successful
-    if(status != status_t::success) {
+    if (status != status_t::success) {
       log_error("<", name, "> bad object");
       return status;
     }
@@ -382,7 +382,8 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
     inputs.clear();
     outputs.clear();
 
-  } catch (const exception_t& ex) {
+  }
+  catch (const exception_t &ex) {
     EXCEPTION_WITH_LOC(ex.what());
   }
 
@@ -390,22 +391,27 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::set_input(std::string key_, tensor_t& input_tensor_) {
-  LOG_DEBUG_INFO("<", name, "> Setting input tensor for ", key_, " for operator_t");
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_input(std::string key_,
+    tensor_t &input_tensor_) {
+  LOG_DEBUG_INFO("<", name, "> Setting input tensor for ", key_,
+                 " for operator_t");
   if (status == status_t::success) {
     inputs[key_] = input_tensor_;
   }
 
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_input(std::string key_) {
-  LOG_DEBUG_INFO("<", name, "> Getting input tensor for ", key_, " for operator_t");
+std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_input(
+  std::string key_) {
+  LOG_DEBUG_INFO("<", name, "> Getting input tensor for ", key_,
+                 " for operator_t");
   if (status == status_t::success) {
     for (const auto& [k, v] : inputs) {
-      if (k == key_)
+      if (k == key_) {
         return v;
+      }
     }
   }
 
@@ -413,22 +419,27 @@ std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_input(std::string ke
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::set_output(std::string key_, tensor_t& output_tensor_) {
-  LOG_DEBUG_INFO("<", name, "> Setting output tensor for ", key_, " for operator_t");
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_output(std::string key_,
+    tensor_t &output_tensor_) {
+  LOG_DEBUG_INFO("<", name, "> Setting output tensor for ", key_,
+                 " for operator_t");
   if (status == status_t::success) {
     outputs[key_] = output_tensor_;
   }
 
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_output(std::string key_) {
-  LOG_DEBUG_INFO("<", name, "> Getting output tensor for ", key_, " for operator_t");
+std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_output(
+  std::string key_) {
+  LOG_DEBUG_INFO("<", name, "> Getting output tensor for ", key_,
+                 " for operator_t");
   if (status == status_t::success) {
     for (const auto& [k, v] : outputs) {
-      if (k == key_)
+      if (k == key_) {
         return v;
+      }
     }
   }
 
@@ -436,20 +447,22 @@ std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_output(std::string k
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-OP_T& operator_t<OP_T, OP_CONTEXT_T>::set_forced_kernel(std::string forced_kernel_) {
+OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_forced_kernel(
+  std::string forced_kernel_) {
   LOG_DEBUG_INFO("<", name, "> Setting forced kernel operaor_t");
   if (status == status_t::success) {
     forced_kernel = forced_kernel_;
   }
 
-  return dynamic_cast<OP_T&>(*this);
+  return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
 std::string operator_t<OP_T, OP_CONTEXT_T>::get_forced_kernel() {
   LOG_DEBUG_INFO("<", name, "> Getting forced kernel for operator_t");
-  if(status == status_t::success)
+  if (status == status_t::success) {
     return forced_kernel;
+  }
 
   return std::string();
 }
@@ -458,8 +471,9 @@ template<typename OP_T, typename OP_CONTEXT_T>
 std::size_t operator_t<OP_T, OP_CONTEXT_T>::hash() {
   LOG_DEBUG_INFO("<", name, "> Getting hash for operator_t");
   if (status == status_t::success) {
-    if (hash_key)
+    if (hash_key) {
       return hash_key;
+    }
     hash_key =  context.hash();
   }
 
@@ -473,7 +487,8 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::load_module(std::string module_) {
     if ((*dynamic_module).set_name(module_).load() != status_t::success) {
       EXCEPTION_WITH_LOC("dynamic module load failed.");
     }
-  } catch (const exception_t& ex) {
+  }
+  catch (const exception_t &ex) {
     EXCEPTION_WITH_LOC(ex.what());
   }
 
@@ -485,13 +500,16 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::load_kernel(std::string symbol_) {
   LOG_DEBUG_INFO("<", name, "> Loading dynamic kernel operator_t");
   try {
     create_kernel_handle_type create_kernel_handle =
-      reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(symbol_));
+      reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(
+            symbol_));
 
-    if(! create_kernel_handle)
+    if (! create_kernel_handle) {
       EXCEPTION_WITH_LOC("dynamic symbol load returned null.");
+    }
 
     kernel = create_kernel_handle();
-  } catch (const exception_t& ex) {
+  }
+  catch (const exception_t &ex) {
     EXCEPTION_WITH_LOC(ex.what());
   }
 
@@ -503,14 +521,16 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::validate() {
   LOG_DEBUG_INFO("<", name, "> Validating operator_t");
   for (const auto& [k, v] : inputs) {
     std::optional<tensor_t> t = v;
-    if (t && !(t->check()))
+    if (t && !(t->check())) {
       return status_t::failure;
+    }
   }
 
   for (const auto& [k, v] : outputs) {
     std::optional<tensor_t> t = v;
-    if (t && !(t->check()))
+    if (t && !(t->check())) {
       return status_t::failure;
+    }
   }
 
   return status_t::success;
@@ -519,8 +539,9 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::validate() {
 template<typename OP_T, typename OP_CONTEXT_T>
 status_t operator_t<OP_T, OP_CONTEXT_T>::validate_forced_kernel() {
   LOG_DEBUG_INFO("<", name, "> Validating forced kernel operator_t");
-  if(! forced_kernel.empty())
+  if (! forced_kernel.empty()) {
     return status_t::failure;
+  }
 
   return status_t::success;
 }

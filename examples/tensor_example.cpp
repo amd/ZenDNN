@@ -32,10 +32,10 @@ using namespace zendnnl::error_handling;
 int tensor_unaligned_allocation_example() {
   log_info("**tensor unaligned memory allocation example.");
   auto tensor =  tensor_t()
-    .set_name("contigeous_f32_tensor")
-    .set_size({MATMUL_ROWS, MATMUL_COLS})
-    .set_storage()
-    .create();
+                 .set_name("contigeous_f32_tensor")
+                 .set_size({MATMUL_ROWS, MATMUL_COLS})
+                 .set_storage()
+                 .create();
 
   if (tensor.check()) {
     log_info("tensor creation of ", tensor.get_name(), " successful.");
@@ -55,10 +55,10 @@ int tensor_unaligned_allocation_example() {
 int tensor_aligned_allocation_example() {
   log_info("**tensor aligned memory allocation example.");
   auto tensor =  tensor_t()
-    .set_name("aligned_f32_tensor")
-    .set_size({MATMUL_ROWS, MATMUL_COLS})
-    .set_storage(ALIGNMENT_BOUNDARY)
-    .create();
+                 .set_name("aligned_f32_tensor")
+                 .set_size({MATMUL_ROWS, MATMUL_COLS})
+                 .set_storage(ALIGNMENT_BOUNDARY)
+                 .create();
 
   if (tensor.check()) {
     log_info("tensor creation of ", tensor.get_name(), " successful.");
@@ -78,11 +78,11 @@ int tensor_aligned_allocation_example() {
 int tensor_strided_aligned_allocation_example() {
   log_info("**tensor strided aligned memory allocation example");
   auto tensor =  tensor_t()
-    .set_name("aligned_strided_f32_tensor")
-    .set_stride_size({MATMUL_ROWS, MATMUL_STRIDE_COLS})
-    .set_size({MATMUL_ROWS, MATMUL_COLS})
-    .set_storage(ALIGNMENT_BOUNDARY)
-    .create();
+                 .set_name("aligned_strided_f32_tensor")
+                 .set_stride_size({MATMUL_ROWS, MATMUL_STRIDE_COLS})
+                 .set_size({MATMUL_ROWS, MATMUL_COLS})
+                 .set_storage(ALIGNMENT_BOUNDARY)
+                 .create();
 
   if (tensor.check()) {
     log_info("tensor creation of ", tensor.get_name(), " successful.");
@@ -102,11 +102,11 @@ int tensor_strided_aligned_allocation_example() {
 int tensor_copy_and_compare_example() {
   log_info("**tensor copy and compare example.");
   auto tensor =  tensor_t()
-    .set_name("contigeous_bf16_tensor")
-    .set_size({MATMUL_ROWS, MATMUL_COLS})
-    .set_data_type(data_type_t::bf16)
-    .set_storage()
-    .create();
+                 .set_name("contigeous_bf16_tensor")
+                 .set_size({MATMUL_ROWS, MATMUL_COLS})
+                 .set_data_type(data_type_t::bf16)
+                 .set_storage()
+                 .create();
 
   if (tensor.check()) {
     log_verbose("tensor creation of ", tensor.get_name(), " successful.");
@@ -144,11 +144,11 @@ int tensor_copy_and_compare_example() {
 int tensor_move_and_refcount_example() {
   log_info("**tensor move and refcount example.");
   auto tensor =  tensor_t()
-    .set_name("contigeous_s8_tensor")
-    .set_size({MATMUL_ROWS, MATMUL_COLS})
-    .set_data_type(data_type_t::s8)
-    .set_storage()
-    .create();
+                 .set_name("contigeous_s8_tensor")
+                 .set_size({MATMUL_ROWS, MATMUL_COLS})
+                 .set_data_type(data_type_t::s8)
+                 .set_storage()
+                 .create();
 
   if (tensor.check()) {
     log_verbose("tensor creation of ", tensor.get_name(), " successful.");
@@ -171,11 +171,11 @@ int tensor_move_and_refcount_example() {
     log_info("tensor move of ", tensor.get_name(),
              " to ", move_tensor.get_name(), " is successful");
     log_info(move_tensor.get_name(),
-                " hash :", move_tensor.hash(),
-                " storage count : ", move_tensor.get_storage_count());
+             " hash :", move_tensor.hash(),
+             " storage count : ", move_tensor.get_storage_count());
     log_info(tensor.get_name(),
-                " hash :", tensor.hash(),
-                " storage count : ", tensor.get_storage_count());
+             " hash :", tensor.hash(),
+             " storage count : ", tensor.get_storage_count());
   }
   else {
     log_error("move tensor failed.");
@@ -191,23 +191,26 @@ int tensor_constness_example() {
   //use tensor factor to create a uniform tensor
   tensor_factory_t tensor_factory;
   auto utensor = tensor_factory.uniform_tensor({MATMUL_DEPTH, MATMUL_ROWS, MATMUL_COLS},
-                                               data_type_t::f32,
-                                               2.5);
+                 data_type_t::f32,
+                 2.5);
 
   //make the tensor const
   utensor.set_const(true);
 
   //try to grab its raw pointer
   try {
-    void* ptr = utensor.get_raw_handle_unsafe();
-  } catch(const exception_t& ex) {
+    void *ptr = utensor.get_raw_handle_unsafe();
+    log_info("raw pointer of const tensor", ptr);
+  }
+  catch (const exception_t &ex) {
     log_info("caught exception of attempt to get raw pointer of a const tensor.");
     log_verbose(ex.what());
   }
 
   //try to get const handle
   try {
-    const float* const_ptr = static_cast<const float*>(utensor.get_raw_handle_const());
+    const float *const_ptr = static_cast<const float *>
+                             (utensor.get_raw_handle_const());
 
     //try to modify data
     //const_ptr[2] = 3.0;
@@ -218,7 +221,8 @@ int tensor_constness_example() {
 
     //at() works
     log_info(utensor.get_name(), "[2,2,2] = ", utensor.at({2,2,2}));
-  } catch (const exception_t& ex) {
+  }
+  catch (const exception_t &ex) {
     log_error(ex.what());
     return NOT_OK;
   }
@@ -232,22 +236,22 @@ int tensor_create_alike_example() {
   //use tensor factor to create a uniform tensor
   tensor_factory_t tensor_factory;
   auto utensor = tensor_factory.uniform_tensor({MATMUL_DEPTH, MATMUL_ROWS, MATMUL_COLS},
-                                               data_type_t::f32,
-                                               2.5);
+                 data_type_t::f32,
+                 2.5);
 
   //make the tensor const
   auto tensor_option = utensor.get_tensor_option();
 
   try {
     tensor_t atensor = tensor_t()
-      .set_tensor_option(tensor_option)
-      .set_storage()
-      .create();
+                       .set_tensor_option(tensor_option)
+                       .set_storage()
+                       .create();
 
     //check few options
-    if((utensor.get_size() == atensor.get_size()) &&
-       (utensor.get_data_type() == atensor.get_data_type()) &&
-       (utensor.get_layout() == atensor.get_layout())) {
+    if ((utensor.get_size() == atensor.get_size()) &&
+        (utensor.get_data_type() == atensor.get_data_type()) &&
+        (utensor.get_layout() == atensor.get_layout())) {
       log_info("created a tensor with same options");
     }
     else {
@@ -255,7 +259,8 @@ int tensor_create_alike_example() {
       return NOT_OK;
     }
 
-  } catch (const exception_t& ex) {
+  }
+  catch (const exception_t &ex) {
     log_error(ex.what());
     return NOT_OK;
   }

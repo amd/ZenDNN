@@ -43,7 +43,7 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
       return NOT_OK;
     }
     auto diff_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                         data_type_t::f32);
+                       data_type_t::f32);
     diff_tensor.set_name("diff_tensor");
 
     status = compare_operator
@@ -78,7 +78,6 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
 int compare_op_example() {
   log_info("**compare op example**");
   try {
-    status_t status;
     tensor_factory_t tensor_factory;
 
     auto input_tensor_1 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
@@ -105,9 +104,8 @@ int compare_ref_and_aocl_matmul_kernel_example() {
   log_info("**compare ref and aocl matmul kernel example**");
 
   try {
-    status_t status;
     tensor_factory_t tensor_factory;
-
+    status_t status;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                    data_type_t::f32,
                    1.0);
@@ -157,6 +155,13 @@ int compare_ref_and_aocl_matmul_kernel_example() {
              .set_output("matmul_output", output_tensor_ref)
              .set_forced_kernel("reference")
              .execute();
+    if (status == status_t::success) {
+      log_info("operator ", matmul_operator_ref.get_name(), " execution successful.");
+    }
+    else {
+      log_info("operator ", matmul_operator_ref.get_name(), " execution failed.");
+      return NOT_OK;
+    }
 
     //Call to aocl matmul kernel
     auto matmul_operator = matmul_operator_t()
@@ -171,6 +176,13 @@ int compare_ref_and_aocl_matmul_kernel_example() {
              .set_input("matmul_input", input_tensor)
              .set_output("matmul_output", output_tensor_aocl)
              .execute();
+    if (status == status_t::success) {
+      log_info("operator ", matmul_operator.get_name(), " execution successful.");
+    }
+    else {
+      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      return NOT_OK;
+    }
 
     //Call to compare operator
     compare_operator_execute(output_tensor_ref, output_tensor_aocl);

@@ -23,8 +23,8 @@ post_op_t::post_op_t(post_op_type_t type_):
   LOG_DEBUG_INFO("Setting Post-op post_op_t");
   switch (type_) {
   case post_op_type_t::elu:
-  elu_params.alpha = 1.0;
-  break;
+    elu_params.alpha = 1.0;
+    break;
   case post_op_type_t::leaky_relu:
     leaky_relu_params.nslope = 0.0;
     break;
@@ -42,6 +42,8 @@ post_op_t::post_op_t(post_op_type_t type_):
   case post_op_type_t::binary_mul:
     binary_mul_params.scale       = 1.0;
     binary_mul_params.tensor_name = "binary_mul_tensor_";
+    break;
+  default:
     break;
   }
 }
