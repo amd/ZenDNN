@@ -58,7 +58,6 @@ ZenDNNL
 |   |   |- sample_operator : demonstrates how to create an operator.
 |   |   |- matmul_operator : implements matrix multiplication with optional post-op.
 |   |   |- compare_operator : perform element-wise comparision of tensors.
-|   |   |- reorder_operator : copies data between different memory formats.
 ```
 ## 1.4. Third Party Libraries
 
@@ -131,9 +130,10 @@ Examples could be run by executing
 
 ## 3.2. GoogleTest
 
+To build googletest, open cmake/ConfigOptions.cmake and set ZENDNNL_DEPENDS_GTEST to ON.
 GoogleTest could be run by executing
 ```bash
-TODO
+./gtests/gtests
 ```
 
 ### known issues

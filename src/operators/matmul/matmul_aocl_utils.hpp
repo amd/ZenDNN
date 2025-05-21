@@ -93,27 +93,6 @@ protected:
   void* reordered_weights_ptr;
 };
 
-template <typename T>
-size_t aocl_utils_t::reorder_weights_execute(
-  const void *weights,
-  const int k,
-  const int n,
-  const int ldb,
-  const char order,
-  const char trans,
-  get_reorder_buff_size_func_ptr get_reorder_buf_size,
-  reorder_func_ptr<T> reorder_func) {
-  LOG_DEBUG_INFO("Reodering weights aocl_utils_t");
-  log_info("BLIS reorder weights");
-  siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
-                                                     k, n);
-  /*TODO: add support for tensor which will wrap the pointer instead of raw buffer*/
-  reordered_weights_ptr = aligned_alloc(64, b_reorder_buf_siz_req);
-  reorder_func(order, trans, 'B', (T*)weights, (T*)reordered_weights_ptr, k, n, ldb);
-
-  return b_reorder_buf_siz_req;
-}
-
 } // namespace ops
 } // namespace zendnnl
 #endif
