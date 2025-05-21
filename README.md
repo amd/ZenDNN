@@ -92,8 +92,8 @@ in cmake/ConfigOptions.cmake.
 1. Open cmake/ConfigOptions.cmake. If pre-installed AMD BLIS is to be used, then set
    ZENDNNL_AMDBLIS_USE_LOCAL_REPO to ON and provide local path to ZENDNNL_AMDBLIS_DIR. If
    ZenDNNL is required to download AMD BLIS then leave the settings as they are.
-
-2. Activate conda environment. (scripts/zendnnl_conda_env_create.sh creates a conda
+2. To build googletest, open cmake/ConfigOptions.cmake and set ZENDNNL_DEPENDS_GTEST to ON.
+3. Activate conda environment. (scripts/zendnnl_conda_env_create.sh creates a conda
    environment named zendnnltorch).
 
 ### 2.2.1. Create a build directory 
@@ -130,7 +130,6 @@ Examples could be run by executing
 
 ## 3.2. GoogleTest
 
-To build googletest, open cmake/ConfigOptions.cmake and set ZENDNNL_DEPENDS_GTEST to ON.
 GoogleTest could be run by executing
 ```bash
 ./gtests/gtests
