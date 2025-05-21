@@ -37,6 +37,7 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
   float* weights_raw_handle = (float *)weight_tensor.get_raw_handle_unsafe();
 
   bool is_transpose_weights = weight_tensor.get_order() == "ba";
+  bool is_transpose_src = input_tensor.get_order() == "ba";
   bool is_blocked = weight_tensor.get_layout() == tensor_layout_t::blocked ? true : false;
 
   bool is_reordered_weights = false;
@@ -50,13 +51,13 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
   const int   n             = output_tensor.get_size(1);
 
   const char  order         = 'r';
-  const char  trans_input   = 'n';
+  const char  trans_input   = is_transpose_src ? 't' : 'n';
   const char  trans_weight  = is_transpose_weights ? 't' : 'n';
   const char  input_format  = 'n';
   const char  weight_format = is_blocked ? 'r': 'n';
   const float alpha         = 1.0;
   const float beta          = 0.0;
-  const int   lda           = k;
+  const int   lda           = is_transpose_src ? m : k;
   const int   ldb           = is_transpose_weights ? k : n;
   const int   ldc           = n;
 
