@@ -41,14 +41,10 @@ add_dependencies(GTest_gtest zendnnl_gtest)
 target_link_libraries(GTest_gtest INTERFACE ${GTEST_GTEST_LIB})
 set_target_properties(GTest_gtest PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                "${GTEST_GTEST_INCLUDE_DIR}"
-                                "${GTEST_GMOCK_INCLUDE_DIR}"
   INTERFACE_LINK_LIBRARIES "Threads::Threads"
-  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GMOCK_INCLUDE_DIR}")
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
 
-add_library(Gtest::gtest ALIAS GTest_gtest)
+add_library(GTest::gtest ALIAS GTest_gtest)
 
 # Create imported target GTest::gtest_main
 add_library(GTest_gtest_main INTERFACE)
@@ -56,12 +52,8 @@ add_dependencies(GTest_gtest_main zendnnl_gtest)
 target_link_libraries(GTest_gtest_main INTERFACE ${GTEST_GTEST_MAIN_LIB})
 set_target_properties(GTest_gtest_main PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                "${GTEST_GTEST_INCLUDE_DIR}"
-                                "${GTEST_GMOCK_INCLUDE_DIR}"
   INTERFACE_LINK_LIBRARIES "Threads::Threads;GTest::gtest"
-  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GMOCK_INCLUDE_DIR}")
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
 
 add_library(GTest::gtest_main ALIAS GTest_gtest_main)
 
@@ -72,12 +64,8 @@ target_link_libraries(GTest_gmock INTERFACE ${GTEST_GMOCK_LIB})
 
 set_target_properties(GTest_gmock PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                "${GTEST_GTEST_INCLUDE_DIR}"
-                                "${GTEST_GMOCK_INCLUDE_DIR}"
   INTERFACE_LINK_LIBRARIES "Threads::Threads;GTest::gtest"
-  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GMOCK_INCLUDE_DIR}")
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
 
 add_library(GTest::gmock ALIAS GTest_gmock)
 
@@ -88,11 +76,7 @@ target_link_libraries(GTest_gmock_main INTERFACE ${GTEST_GMOCK_MAIN_LIB})
 
 set_target_properties(GTest_gmock_main PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                "${GTEST_GTEST_INCLUDE_DIR}"
-                                "${GTEST_GMOCK_INCLUDE_DIR}"
   INTERFACE_LINK_LIBRARIES "Threads::Threads;GTest::gmock"
-  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GTEST_INCLUDE_DIR}"
-                                       "${GTEST_GMOCK_INCLUDE_DIR}")
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
 
 add_library(GTest::gmock_main ALIAS GTest_gmock_main)

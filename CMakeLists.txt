@@ -104,26 +104,31 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   endif()
 endif()
 
-if(ZENDNNL_DEPENDS_GTEST)
-  get_property(GTEST_INSTALL_DIR GLOBAL PROPERTY GTESTROOT)
-  set(GTest_ROOT "${GTEST_INSTALL_DIR}")
-  message(DEBUG "Seraching for GTEST in ${GTest_ROOT}")
-  find_file(GTESTCONFIG
-    NAMES GTestConfig.cmake
-    PATHS ${GTest_ROOT}
-    PATH_SUFFIXES lib lib/cmake lib/cmake/GTest)
+#if(ZENDNNL_DEPENDS_GTEST)
+#  get_property(GTEST_INSTALL_DIR GLOBAL PROPERTY GTESTROOT)
+#  set(GTest_ROOT "${GTEST_INSTALL_DIR}")
+#  message(DEBUG "Seraching for GTEST in ${GTest_ROOT}")
+#  find_file(GTESTCONFIG
+#    NAMES GTestConfig.cmake
+#    PATHS ${GTest_ROOT}
+#    PATH_SUFFIXES lib lib/cmake lib/cmake/GTest)
 
-  if("${GTESTCONFIG}" STREQUAL "GTESTCONFIG-NOTFOUND")
-    message(DEBUG "Could not find prebuilt GTEST")
-    message(DEBUG "Setting up external_project build for GTEST")
-    include(ExternProjGTEST)
-  else()
-    set(GTest_DIR "${GTest_ROOT}/lib/cmake/GTest")
-    find_package(GTest REQUIRED)
+#  if("${GTESTCONFIG}" STREQUAL "GTESTCONFIG-NOTFOUND")
+#    message(DEBUG "Could not find prebuilt GTEST")
+#    message(DEBUG "Setting up external_project build for GTEST")
+#    include(ExternProjGTEST)
+#  else()
+#    set(GTest_DIR "${GTest_ROOT}/lib/cmake/GTest")
+#    find_package(GTest REQUIRED)
     # include_directories(${GTEST_ROOT}/include)
     # include_directories(${GTEST_ROOT}/include/gtest)
     # include_directories(${GTEST_ROOT}/include/gmock)
-  endif()
+   #  endif()
+#endif()
+
+if(ZENDNNL_DEPENDS_GTEST)
+  message(DEBUG "Building gtest library")
+  include(FetchGoogleTest)
 endif()
 
 # build sources
@@ -138,6 +143,12 @@ endif()
 if(ZENDNNL_BUILD_DOXYGEN_DOCS)
   message(DEBUG "Building doxygen documentation")
   add_subdirectory(doxygen)
+endif()
+
+#build gtests
+if(ZENDNNL_BUILD_GTESTS)
+  message(DEBUG "Building gtests")
+  add_subdirectory(gtests)
 endif()
 
 # export targets

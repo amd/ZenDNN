@@ -24,6 +24,7 @@ set(CONFIG_OTIONS_INCLUDED)
 ##
 set(ZENDNNL_BUILD_EXAMPLES ON CACHE BOOL "Build examples")
 set(ZENDNNL_BUILD_DOXYGEN_DOCS ON CACHE BOOL "Build doxygen docs")
+set(ZENDNNL_BUILD_GTESTS ON CACHE BOOL "Build tests")
 
 ##
 # special flags
@@ -37,7 +38,7 @@ add_compile_options(-Wall -Werror)
 ##
 set(ZENDNNL_DEPENDS_AMDBLIS ON CACHE BOOL "Add AMD BLIS as a dependency")
 set(ZENDNNL_DEPENDS_ONEDNN OFF CACHE BOOL "Add ONEDNN as a dependency")
-set(ZENDNNL_DEPENDS_GTEST OFF CACHE BOOL "Use google test framework for testing")
+set(ZENDNNL_DEPENDS_GTEST ON CACHE BOOL "Use google test framework for testing")
 set(ZENDNNL_DEPENDS_AOCLUTILS OFF CACHE BOOL "Use aocl utils for hardware identification")
 
 set(ZENDNNL_DEP_DIR ${CMAKE_SOURCE_DIR}/dependencies)
@@ -88,7 +89,7 @@ if(ZENDNNL_DEPENDS_GTEST)
   set_property(GLOBAL
       PROPERTY GTESTROOT "${ZENDNNL_GTEST_DIR}/${ZENDNNL_DEP_INSTALL_SUBDIR}")
   set(GTEST_GIT_REPO "https://github.com/google/googletest.git")
-  set(GTEST_GIT_TAG "v1.16.0")
+  set(GTEST_GIT_TAG "v1.17.0")
 endif()
 
 if(ZENDNNL_DEPENDS_AOCLUTILS)
