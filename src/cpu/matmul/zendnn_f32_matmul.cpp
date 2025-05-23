@@ -82,18 +82,21 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
     // control is redirected to BRGEMM.
     // TODO: Generate more heuristics for M,N,K for smaller dimensions to make
     // the check generalized
-    if (((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
+
+    // Batch MatMul with BLOCKED_JIT is JIT.
+    if (ndims() > 2 &&
+            (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 ||
+             zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32)) {
+        return status::unimplemented;
+    }
+
+    if ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
             zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 ||
-            (zenEnvObj.zenGEMMalgo != zenMatMulAlgoType::MATMUL_AOCL_FP32 &&
-             (weights_md()->is_memory_const == false ||
-              (weights_md()->is_inplace == false &&
-               zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
-            weights_md()->data_type == f32) ||
             (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 &&
-             thread_qty == 1 &&
-             zenEnvObj.zenWeightCache < zendnnWeightCacheType::WEIGHT_CACHE_AOT_INPLACE &&
-             src_md()->dims[0] <= 128 && weights_md()->dims[0] <= 512 &&
-             weights_md()->dims[1] <= 512)) {
+             (weights_md()->is_memory_const == false ||
+              weights_md()->is_inplace == false &&
+              zenEnvObj.zenWeightCache >= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE))) &&
+            weights_md()->data_type == f32) {
         return status::unimplemented;
     }
 
@@ -133,6 +136,7 @@ bool zendnn_f32_matmul_t::pd_t::set_default_formats() {
         if (!mdw.matches_tag(zendnn::impl::format_tag::ab) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::ba) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abc) &&
+                !mdw.matches_tag(zendnn::impl::format_tag::acb) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abcd) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abcde) &&
                 !mdw.matches_tag(zendnn::impl::format_tag::abcdef) &&
@@ -397,17 +401,17 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            woq_scale_size, is_weights_const, group_size,
                            woq_scales_type);
     }
-    else if ((float *)bias == NULL && pd()->attr()->post_ops_.len() == 0) {
-        //MatMul without Bias
+    else if (ndims == 3) {
+        //3D MatMul
         zenMatMul(ctx, zenEnvObj, Layout, strcmp(transA, "N"),strcmp(transB, "N"),
                   batch, input_offsets,
                   weight_offsets, dst_offsets,M, K, N, alpha, (float *)src, lda,
-                  (float *)weights, ldb, NULL, pd()->attr()->post_ops_, has_eltwise_relu,
+                  (float *)weights, ldb, (float *)bias, pd()->attr()->post_ops_, has_eltwise_relu,
                   geluType, beta, (float *)dst,
                   ldc, is_weights_const, is_inplace);
     }
     else {
-        //MatMul with Bias
+        //2D MatMul
         zenMatMulWithBias(ctx, zenEnvObj, Layout, strcmp(transA, "N"), strcmp(transB,
                           "N"),
                           batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,

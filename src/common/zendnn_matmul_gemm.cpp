@@ -102,225 +102,12 @@ void zenMatMul_gemm_blocked(
     else {
         mem_format_b = 'n';
     }
-    aocl_post_op *post_ops = NULL;
-    int postop_count = 0;
-    float dummy_scale = 1.0f;
-
-    if (bias != NULL) {
-        ++postop_count;
-    }
-
     dim_t eltwise_index = 0;
-    dim_t bias_index = 0;
-    dim_t add_index = 0;
-    dim_t mul_index = 0;
+    aocl_post_op *post_ops = NULL;
+    float dummy_scale = 1.0f;
+    create_post_ops_fp32(post_ops, ctx, po_ops, bias, alpha, n, thread_qty,
+                         eltwise_index, dummy_scale);
 
-    if (po_ops.len() + postop_count > 0) {
-        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
-        if (post_ops == NULL) {
-            return;
-        }
-
-        dim_t max_post_ops_seq_length = po_ops.len() + postop_count;
-        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
-                               sizeof(AOCL_POST_OP_TYPE));
-        if (post_ops->seq_vector == NULL) {
-            free(post_ops);
-            return;
-        }
-
-        int post_op_i = 0;
-        post_ops->eltwise = NULL;
-        post_ops->bias = NULL;
-        post_ops->sum = NULL;
-        post_ops->matrix_add = NULL;
-        post_ops->matrix_mul = NULL;
-
-        if (bias != NULL) {
-            // Add bias postop
-            float *bias_ = NULL;
-            if (alpha != 1.0f) {
-                bias_ = new float[n]();
-                #pragma omp parallel for num_threads(thread_qty)
-                for (int i=0; i<n; ++i) {
-                    bias_[i] = alpha * bias[i];
-                }
-            }
-            post_ops->seq_vector[post_op_i++] = BIAS;
-            post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
-                                 aocl_post_op_bias));
-
-            (post_ops->bias)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
-        }
-
-        int mem_count[3] = {0};
-        for (auto idx = 0; idx < po_ops.len(); ++idx) {
-            const auto &po_type = po_ops.entry_[idx];
-            switch (po_type.kind) {
-            case impl::primitive_kind::eltwise:
-                mem_count[0]++;
-                break;
-            case impl::primitive_kind::binary:
-                if (po_type.binary.alg == impl::alg_kind::binary_add) {
-                    mem_count[1]++;
-                }
-                else if (po_type.binary.alg == impl::alg_kind::binary_mul) {
-                    mem_count[2]++;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-
-        if (mem_count[0] > 0) {
-            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
-                                    aocl_post_op_eltwise) * mem_count[0]);
-            if (post_ops->eltwise == NULL) {
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return;
-            }
-        }
-        if (mem_count[1] > 0) {
-            post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
-                                       aocl_post_op_matrix_add) * mem_count[1]);
-            if (post_ops->matrix_add == NULL) {
-                if (post_ops->eltwise != NULL) {
-                    free(post_ops->eltwise);
-                }
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return;
-            }
-        }
-        if (mem_count[2] > 0) {
-            post_ops->matrix_mul = (aocl_post_op_matrix_mul *) malloc(sizeof(
-                                       aocl_post_op_matrix_mul) * mem_count[2]);
-            if (post_ops->matrix_mul == NULL) {
-                if (post_ops->matrix_add != NULL) {
-                    free(post_ops->matrix_add);
-                }
-                if (post_ops->eltwise != NULL) {
-                    free(post_ops->eltwise);
-                }
-                if (post_ops->bias != NULL) {
-                    free(post_ops->bias);
-                }
-                free(post_ops->seq_vector);
-                free(post_ops);
-                return;
-            }
-        }
-
-        for (auto idx = 0; idx < po_ops.len(); ++idx) {
-            const auto &po_type = po_ops.entry_[idx];
-            if (po_type.kind == impl::primitive_kind::eltwise &&
-                    post_ops->eltwise != NULL) {
-                if (po_type.eltwise.alg == impl::alg_kind::eltwise_relu) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
-                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
-                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
-                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
-                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
-                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::RELU;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
-                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
-                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
-                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
-                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
-                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::GELU_TANH;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
-                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
-                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
-                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
-                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
-                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::GELU_ERF;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
-                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
-                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
-                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
-                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
-                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::SIGMOID;
-                    eltwise_index++;
-                }
-                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
-                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
-                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
-                    post_ops->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-                    *((float *)(post_ops->eltwise[eltwise_index].algo.alpha)) = 1.0f;
-                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
-                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::SWISH;
-                    eltwise_index++;
-                }
-            }
-            else if (po_type.kind == impl::primitive_kind::binary) {
-                if (po_type.binary.alg == impl::alg_kind::binary_add &&
-                        post_ops->matrix_add != NULL) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::MATRIX_ADD;
-                    post_ops->matrix_add[add_index].ldm = n;
-                    auto binary_po = CTX_IN_MEM(const void *,
-                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    post_ops->matrix_add[add_index].scale_factor = &dummy_scale;
-                    post_ops->matrix_add[add_index].scale_factor_len = 1;
-                    auto b_dt = po_type.binary.src1_desc.data_type;
-                    if (b_dt == zendnn_bf16) {
-                        post_ops->matrix_add[add_index].stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-                        auto addA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        post_ops->matrix_add[add_index].matrix = (float *)addA;
-                    }
-                    else if (b_dt == zendnn_f32) {
-                        post_ops->matrix_add[add_index].stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-                        auto addA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        post_ops->matrix_add[add_index].matrix = (float *)addA;
-                    }
-                    add_index++;
-                }
-                else if (po_type.binary.alg == impl::alg_kind::binary_mul &&
-                         post_ops->matrix_mul != NULL) {
-                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::MATRIX_MUL;
-                    post_ops->matrix_mul[mul_index].ldm = n;
-                    auto binary_po = CTX_IN_MEM(const void *,
-                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
-                    post_ops->matrix_mul[mul_index].scale_factor = &dummy_scale;
-                    post_ops->matrix_mul[mul_index].scale_factor_len = 1;
-                    auto b_dt = po_type.binary.src1_desc.data_type;
-                    if (b_dt == zendnn_bf16) {
-                        post_ops->matrix_mul[mul_index].stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16;
-                        auto mulA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        post_ops->matrix_mul[mul_index].matrix = (float *)mulA;
-                    }
-                    else if (b_dt == zendnn_f32) {
-                        post_ops->matrix_mul[mul_index].stor_type =
-                            AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
-                        auto mulA = reinterpret_cast<float *>(const_cast<void *>(binary_po));
-                        post_ops->matrix_mul[mul_index].matrix = (float *)mulA;
-                    }
-                    mul_index++;
-                }
-            }
-        }
-        post_ops->seq_length = po_ops.len() + postop_count;
-    }
     zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_f32f32f32of32");
     //Perform MatMul using AMD BLIS
     aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
@@ -331,36 +118,8 @@ void zenMatMul_gemm_blocked(
                             beta,
                             output, ldc,
                             post_ops);
-
     // Free memory for postops.
-    if (post_ops != NULL) {
-        if (post_ops->bias != NULL) {
-            //Bias is directly passed
-            if (alpha != 1.0) {
-                delete ((float *)post_ops->bias->bias);
-            }
-            else {
-                post_ops->bias->bias = NULL;
-            }
-            free(post_ops->bias);
-        }
-        if (post_ops->matrix_add != NULL) {
-            free(post_ops->matrix_add);
-        }
-        if (post_ops->matrix_mul != NULL) {
-            free(post_ops->matrix_mul);
-        }
-        if (post_ops->eltwise != NULL) {
-            for (int i = 0; i < eltwise_index; ++i) {
-                if (post_ops->eltwise[i].algo.alpha != NULL) {
-                    free(post_ops->eltwise[i].algo.alpha);
-                }
-            }
-            free(post_ops->eltwise);
-        }
-        free(post_ops->seq_vector);
-        free(post_ops);
-    }
+    clear_post_ops_memory(post_ops, alpha, eltwise_index);
 }
 
 void zenMatMulPrimitive(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
@@ -727,6 +486,102 @@ void zenMatMul_gemm_wrapper(
     map_mutex.unlock();
 }
 
+void run_aocl_batch_gemm(
+    const impl::exec_ctx_t &ctx,
+    zendnn::zendnnEnv zenEnvObj,
+    char order,
+    char transa,
+    char transb,
+    int batch_size,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float beta,
+    const float **src,
+    const float **weight,
+    float **dst,
+    const float *bias,
+    const impl::post_ops_t &po_ops
+) {
+    unsigned int thread_qty = zenEnvObj.omp_num_threads;
+
+    int binary_idx =  po_ops.find(impl::primitive_kind::binary);
+    aocl_post_op *post_ops = nullptr;
+    aocl_post_op *post_op_array[batch_size];
+    float dummy_scale = 1.0f;
+    dim_t eltwise_index[batch_size];
+    if (binary_idx != -1) {
+        for (int i = 0; i < batch_size; ++i) {
+            eltwise_index[i] = 0;
+            post_op_array[i] = nullptr;
+            create_post_ops_fp32(post_op_array[i], ctx, po_ops, bias, alpha, N, thread_qty,
+                                 eltwise_index[i], dummy_scale, i);
+        }
+    }
+    else {
+        eltwise_index[0] = 0;
+        create_post_ops_fp32(post_ops, ctx, po_ops, bias, alpha, N, thread_qty,
+                             eltwise_index[0], dummy_scale);
+        for (int i = 0; i < batch_size; ++i) {
+            post_op_array[i] = post_ops;
+        }
+    }
+    // Arrays for batch parameters
+    char order_array[batch_size];
+    char transa_array[batch_size];
+    char transb_array[batch_size];
+    dim_t M_array[batch_size];
+    dim_t N_array[batch_size];
+    dim_t K_array[batch_size];
+    float alpha_array[batch_size];
+    float beta_array[batch_size];
+    char mem_format_a_array[batch_size];
+    char mem_format_b_array[batch_size];
+
+    for (int i = 0; i < batch_size; ++i) {
+        order_array[i] = order;
+        transa_array[i] = transa;
+        transb_array[i] = transb;
+        M_array[i] = M;
+        N_array[i] = N;
+        K_array[i] = K;
+        alpha_array[i] = alpha;
+        beta_array[i] = beta;
+        mem_format_a_array[i] = 'n';
+        mem_format_b_array[i] = 'n';
+    }
+    zendnnVerbose(ZENDNN_PROFLOG,
+                  "Using AOCL GEMM API: aocl_batch_gemm_f32f32f32of32");
+    aocl_batch_gemm_f32f32f32of32(order_array,
+                                  transa_array,
+                                  transb_array,
+                                  batch_size,
+                                  M_array,
+                                  N_array,
+                                  K_array,
+                                  alpha_array,
+                                  src,
+                                  transa == 't' ? M_array : K_array,
+                                  mem_format_a_array,
+                                  weight,
+                                  transb == 't' ? K_array : N_array,
+                                  mem_format_b_array,
+                                  beta_array,
+                                  dst,
+                                  N_array,
+                                  post_op_array);
+    // Free memory for postops.
+    if (binary_idx != -1) {
+        for (int i = 0; i < batch_size; ++i) {
+            clear_post_ops_memory(post_op_array[i], alpha, eltwise_index[i]);
+        }
+    }
+    else {
+        clear_post_ops_memory(post_ops, alpha, eltwise_index[0]);
+    }
+}
+
 void zenMatMul(
     const impl::exec_ctx_t &ctx,
     zendnn::zendnnEnv zenEnvObj,
@@ -761,68 +616,65 @@ void zenMatMul(
                     "zenMatMul Memory is not defined for input or filter or output");
         return;
     }
+    int group_count = 1;
 
-    if (batch_size == 1) {
-        // Perform zen matmul. 'NULL' parameter indicates no biasadd fusion and
-        // 'false' parameter disables ReLU activation on the MatMul output.
-        zenMatMul_gemm_wrapper(ctx, Layout, transpose_input, transpose_filter,
-                               no_of_images, no_of_channels, no_of_filters, alpha,
-                               input + input_offsets[0], lda,
-                               filter + weights_offsets[0], ldb, bias, po_ops, relu, gelu, beta,
-                               output + dst_offsets[0], ldc, is_weights_const, is_inplace);
+    std::vector<int> M_Array;
+    std::vector<int> N_Array;
+    std::vector<int> K_Array;
+    std::vector<float> alpha_Array;
+    std::vector<float> beta_Array;
+    std::vector<const float *> A_Array;
+    std::vector<const float *> B_Array;
+    std::vector<float *> C_Array;
+    std::vector<const float *> bias_Array;
+    std::vector<int> lda_Array;
+    std::vector<int> ldb_Array;
+    std::vector<int> ldc_Array;
+    std::vector<int> group_size;
+    std::vector<const float *> Add_Array(1, nullptr);
+
+
+    group_size.resize(group_count);
+    M_Array.resize(group_count);
+    N_Array.resize(group_count);
+    K_Array.resize(group_count);
+    alpha_Array.resize(group_count);
+    beta_Array.resize(group_count);
+    lda_Array.resize(group_count);
+    ldb_Array.resize(group_count);
+    ldc_Array.resize(group_count);
+    A_Array.resize(batch_size);
+    B_Array.resize(batch_size);
+    C_Array.resize(batch_size);
+    bias_Array.resize(batch_size);
+
+    M_Array[0] = no_of_images;
+    K_Array[0] = no_of_channels;
+    N_Array[0] = no_of_filters;
+    alpha_Array[0] = alpha;
+    beta_Array[0] = beta;
+    lda_Array[0] = lda;
+    ldb_Array[0] = ldb;
+    ldc_Array[0] = ldc;
+    group_size[0] = batch_size;
+
+    for (int i=0; i<batch_size; ++i) {
+
+        A_Array[i] = input + input_offsets[i];
+        B_Array[i] = filter + weights_offsets[i];
+        C_Array[i] = output + dst_offsets[i];
+        bias_Array[i] = bias;
+    }
+
+    //TO-DO: Need to update this comment after bug fix from AOCL team
+    if (true) {
+        run_aocl_batch_gemm(ctx, zenEnvObj, Layout ? 'r' : 'c',
+                            transpose_input ? 't' : 'n', transpose_filter ? 't' : 'n',
+                            batch_size, no_of_images, no_of_filters, no_of_channels, alpha, beta,
+                            A_Array.data(), B_Array.data(), C_Array.data(), bias, po_ops);
     }
     else {
-        int group_count = 1;
-
-        std::vector<int> M_Array;
-        std::vector<int> N_Array;
-        std::vector<int> K_Array;
-        std::vector<float> alpha_Array;
-        std::vector<float> beta_Array;
-        std::vector<const float *> A_Array;
-        std::vector<const float *> B_Array;
-        std::vector<float *> C_Array;
-        std::vector<const float *> bias_Array;
-        std::vector<int> lda_Array;
-        std::vector<int> ldb_Array;
-        std::vector<int> ldc_Array;
-        std::vector<int> group_size;
-        std::vector<const float *> Add_Array(1, nullptr);
-
-
-        group_size.resize(group_count);
-        M_Array.resize(group_count);
-        N_Array.resize(group_count);
-        K_Array.resize(group_count);
-        alpha_Array.resize(group_count);
-        beta_Array.resize(group_count);
-        lda_Array.resize(group_count);
-        ldb_Array.resize(group_count);
-        ldc_Array.resize(group_count);
-        A_Array.resize(batch_size);
-        B_Array.resize(batch_size);
-        C_Array.resize(batch_size);
-        bias_Array.resize(batch_size);
-
-        M_Array[0] = no_of_images;
-        K_Array[0] = no_of_channels;
-        N_Array[0] = no_of_filters;
-        alpha_Array[0] = alpha;
-        beta_Array[0] = beta;
-        lda_Array[0] = lda;
-        ldb_Array[0] = ldb;
-        ldc_Array[0] = ldc;
-        group_size[0] = batch_size;
-
-        for (int i=0; i<batch_size; ++i) {
-
-            A_Array[i] = input + input_offsets[i];
-            B_Array[i] = filter+ weights_offsets[i];
-            C_Array[i] = output + dst_offsets[i];
-            bias_Array[i] = bias + (N_Array[0]*i);
-        }
-
-        zenBatchMatMul(Layout, transpose_input, transpose_filter,
+        zenBatchMatMul(ctx, po_ops, Layout, transpose_input, transpose_filter,
                        M_Array.data(), N_Array.data(), K_Array.data(),
                        alpha_Array.data(), A_Array.data(), lda_Array.data(),
                        B_Array.data(), ldb_Array.data(),
@@ -1037,9 +889,11 @@ void zenBatchMatMulSplitV1(const impl::exec_ctx_t &ctx, zendnnEnv zenEnvObj,
 }
 
 
-//This version internally call cblas_sgemm for each SGEMM in single batch
+//This version internally call aocl_gemm for each SGEMM in single batch
 //Parallelism and dividing data across threads happens at batch level.
-void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
+void zenBatchMatMulSplitV2(const impl::exec_ctx_t &ctx,
+                           const impl::post_ops_t &po_ops,
+                           zendnnEnv zenEnvObj, bool Layout,
                            CBLAS_TRANSPOSE *TransA_Array,
                            CBLAS_TRANSPOSE *TransB_Array, int *M_Array,
                            int *N_Array, int *K_Array, const float *alpha_Array,
@@ -1057,7 +911,8 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     unsigned int grp_start = 0;
-
+    zendnnVerbose(ZENDNN_PROFLOG,
+                  "Using aocl_gemm_f32f32f32of32 for zenBatchMatMul");
     for (int i=0; i<group_count; i++) {
         bool transpose_input = (TransA_Array[i] == CblasNoTrans)?0:1;
         bool transpose_filter = (TransB_Array[i] == CblasNoTrans)?0:1;
@@ -1079,56 +934,24 @@ void zenBatchMatMulSplitV2(zendnnEnv zenEnvObj, bool Layout,
                 if (threadOffset >= group_size[i]) {
                     break;
                 }
+                dim_t eltwise_index = 0;
+                aocl_post_op *post_ops = NULL;
+                float dummy_scale = 1.0f;
+                create_post_ops_fp32(post_ops, ctx, po_ops, bias[i],
+                                     alpha_Array[i], n, thread_qty,
+                                     eltwise_index, dummy_scale, threadOffset);
 
-                //if ZENDNN_GEMM_ALGO is set to 3, then zendnn_sgemm
-                // jit based kernel will be called.
-                // refer src/common/zendnn_utils.cpp
-                if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
-                    zendnn_sgemm(transpose_input ? 'T' : 'N',
-                                 transpose_filter ? 'T' : 'N', m, n, k,
-                                 alpha_Array[i],
-                                 A_Array[grp_start + threadOffset], lda_Array[i],
-                                 B_Array[grp_start + threadOffset], ldb_Array[i],
-                                 beta_Array[i],
-                                 C_Array[grp_start + threadOffset], ldc_Array[i]);
-                }
-                else {
-                    cblas_sgemm(Layout ? CblasRowMajor: CblasColMajor,
-                                TransA_Array[i], TransB_Array[i], m, n, k,
-                                alpha_Array[i],
-                                A_Array[grp_start + threadOffset], lda_Array[i],
-                                B_Array[grp_start + threadOffset], ldb_Array[i],
-                                beta_Array[i],
-                                C_Array[grp_start + threadOffset], ldc_Array[i]);
-                }
-                if (relu || gelu)
-                    zenPostOps(zenEnvObj, C_Array[grp_start + threadOffset], NULL, m, 1, n,
-                               ldc_Array[i], 0,
-                               bias[grp_start + threadOffset], relu, gelu, NULL,
-                               thread_qty);
+                aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
+                                        transpose_input ? 't' : 'n',
+                                        transpose_filter ? 't' : 'n', m, n, k, alpha_Array[i],
+                                        A_Array[grp_start + threadOffset], lda_Array[i], 'n',
+                                        B_Array[grp_start + threadOffset], ldb_Array[i], 'n',
+                                        beta_Array[i],
+                                        C_Array[grp_start + threadOffset], ldc_Array[i],
+                                        post_ops);
 
-                if (*Add_Array != nullptr) {
-                    // BatchMatMul + Mul + Add
-                    #pragma omp simd
-                    for (int k = 0; k < m * n; k++) {
-                        // Add Array is traversed, used for computation when we have different shapes
-                        // C_Array: [Batchsize x Attentionheads x M x N]
-                        // Add_array: [Batchsize x 1 x M x N] or [Batchsize x 1 x 1 x N] or
-                        //            [Batchsize x 1 x M x 1]
-                        C_Array[grp_start + threadOffset][k] =
-                            (C_Array[grp_start + threadOffset][k] * mul_node) +
-                            Add_Array[(grp_start + threadOffset) / (group_size[i] / batch_size)][k %
-                                    (add_shape[1] * add_shape[2])];
-                    }
-                }
-                else if (mul_node != 1) {
-                    // BatchMatMul + Mul
-                    #pragma omp simd
-                    for (int k = 0; k < m * n; k++) {
-                        C_Array[grp_start + threadOffset][k] =
-                            (C_Array[grp_start + threadOffset][k] * mul_node);
-                    }
-                }
+                // Clear memory after operations
+                clear_post_ops_memory(post_ops, alpha_Array[i], eltwise_index);
             }
         }
         grp_start +=group_size[i];
@@ -1399,7 +1222,8 @@ void zenBatchMatMulPrimitive(zendnnEnv zenEnvObj, bool Layout,
 //Batched MatMul Wrapper, internally calls BLAS cblas_sgemm_batch from BLIS
 //or //zenBatchMatMulSplitV1/V2/V3
 //TODO: Add support for group_count TransA and TransB
-void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
+void zenBatchMatMul(const impl::exec_ctx_t &ctx, const impl::post_ops_t &po_ops,
+                    bool Layout, bool TransA, bool TransB, int *M_Array,
                     int *N_Array, int *K_Array, const float *alpha_Array,
                     const float **A_Array, int *lda_Array,
                     const float **B_Array, int *ldb_Array, const float *beta_Array,
@@ -1445,7 +1269,8 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
     alpha_Array+group_count, [](int value) {
         return value == 1.0f;
     });
-    if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 &&
+    if ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
+            zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) &&
             TransA==false && isAlphaOne && group_count==1) {
         //Todo: Fix the BatchedMatMul Primitive
         //Todo: Apply alpha_Array to BatchedMatMul Primitive.
@@ -1461,23 +1286,13 @@ void zenBatchMatMul(bool Layout, bool TransA, bool TransB, int *M_Array,
         //TODO: Test zenBatchMatMulSplitV1/V3 perf with different sizes
         //zenBatchMatMulSplitV1(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
         //zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-        if (group_size[0] == 1) {
-            // For Matrices with 2Dimensions we use zenBatchMatMulSplitV3
-            zenBatchMatMulSplitV3(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                                  M_Array, N_Array, K_Array, alpha_Array,
-                                  A_Array, lda_Array, B_Array, ldb_Array,
-                                  beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, Add_Array, add_shape,
-                                  mul_node, batch_size, bias, relu, gelu);
-        }
-        else {
-            zenBatchMatMulSplitV2(zenEnvObj, Layout, &TransA_Array[0], &TransB_Array[0],
-                                  M_Array, N_Array, K_Array, alpha_Array,
-                                  A_Array, lda_Array, B_Array, ldb_Array,
-                                  beta_Array, C_Array, ldc_Array,
-                                  group_count, group_size, Add_Array, add_shape,
-                                  mul_node, batch_size, bias, relu, gelu);
-        }
+        zenBatchMatMulSplitV2(ctx, po_ops, zenEnvObj, Layout, &TransA_Array[0],
+                              &TransB_Array[0],
+                              M_Array, N_Array, K_Array, alpha_Array,
+                              A_Array, lda_Array, B_Array, ldb_Array,
+                              beta_Array, C_Array, ldc_Array,
+                              group_count, group_size, Add_Array, add_shape,
+                              mul_node, batch_size, bias, relu, gelu);
     }
     map_mutex.lock();
     obj.is_log = true;

@@ -222,11 +222,19 @@ struct hash<Key_conv> {
 
 template<typename T>
 aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
-    const impl::post_ops_t &po,
-    int n, const float alpha, const char *bias,
-    int bias_type, const bool relu, const int gelu,
-    T *sum_buff, int &postop_count,
-    const float *scale, float *dummy_scale);
+                                   const impl::post_ops_t &po,
+                                   int n, const float alpha, const char *bias,
+                                   int bias_type, const bool relu, const int gelu,
+                                   T *sum_buff, int &postop_count,
+                                   const float *scale, float *dummy_scale);
+
+void create_post_ops_fp32(aocl_post_op *&post_ops, const impl::exec_ctx_t &ctx,
+                          const impl::post_ops_t &po_ops,
+                          const float *bias, float alpha, int n, int thread_qty, dim_t &eltwise_index,
+                          float &dummy_scale, size_t index_offset = 0);
+
+void clear_post_ops_memory(aocl_post_op *post_ops, float alpha,
+                           dim_t eltwise_index);
 
 extern "C"
 {
@@ -612,6 +620,34 @@ extern "C"
         float *out_layer,
         int data_format,
         const bool relu
+    );
+
+    void zenBatchMatMul(
+        const impl::exec_ctx_t &ctx,
+        const impl::post_ops_t &po_ops,
+        bool Layout,
+        bool TransA,
+        bool TransB,
+        int *M_Array,
+        int *N_Array,
+        int *K_Array,
+        const float *alpha_Array,
+        const float **A_Array,
+        int *lda_Array,
+        const float **B_Array,
+        int *ldb_Array,
+        const float *beta_Array,
+        float **C_Array,
+        int *ldc_Array,
+        int group_count,
+        int *group_size,
+        const float **Add_Array,
+        int *add_shape = NULL,
+        float mul_node = 1.0f,
+        int batch_size = 1,
+        const float **bias = NULL,
+        const bool relu = 0,
+        const int gelu = 0
     );
 
     void zenMatMul_gemm_wrapper(
@@ -1445,7 +1481,7 @@ extern "C"
         const float *output_scales,
         const int scale_size,
         bool is_weights_const,
-	bool is_inplace
+        bool is_inplace
     );
 
     int auto_compute_matmul_bf16(
@@ -1475,7 +1511,7 @@ extern "C"
         const float *output_scales,
         const int scale_size,
         bool is_weights_const,
-	bool is_inplace
+        bool is_inplace
     );
 }
 
