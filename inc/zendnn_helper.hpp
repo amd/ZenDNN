@@ -865,32 +865,6 @@ extern "C" {
         const int total_filters = 0
     );
 
-    void zenBatchMatMul(
-        bool Layout,
-        bool TransA,
-        bool TransB,
-        int *M_Array,
-        int *N_Array,
-        int *K_Array,
-        const float *alpha_Array,
-        const float **A_Array,
-        int *lda_Array,
-        const float **B_Array,
-        int *ldb_Array,
-        const float *beta_Array,
-        float **C_Array,
-        int *ldc_Array,
-        int group_count,
-        int *group_size,
-        const float **Add_Array,
-        int *add_shape = NULL,
-        float mul_node = 1.0f,
-        int batch_size = 1,
-        const float **bias = NULL,
-        const bool relu = 0,
-        const int gelu = 0
-    );
-
     void max_pooling(
         const float *input,
         const int number_of_images,

@@ -391,3 +391,256 @@ template aocl_post_op *create_aocl_post_ops<int16_t>(const impl::exec_ctx_t
         int bias_type, const bool relu, const int gelu,
         int16_t *sum_buff, int &postop_count,
         const float *scale, float *dummy_scale);
+
+void create_post_ops_fp32(aocl_post_op *&post_ops, const impl::exec_ctx_t &ctx,
+                          const impl::post_ops_t &po_ops,
+                          const float *bias, float alpha, int n, int thread_qty, dim_t &eltwise_index,
+                          float &dummy_scale, size_t index_offset) {
+
+    int postop_count = 0;
+
+    if (bias != NULL) {
+        ++postop_count;
+    }
+
+    dim_t bias_index = 0;
+    dim_t add_index = 0;
+    dim_t mul_index = 0;
+
+    if (po_ops.len() + postop_count > 0) {
+        post_ops = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+        if (post_ops == NULL) {
+            return ;
+        }
+
+        dim_t max_post_ops_seq_length = po_ops.len() + postop_count;
+        post_ops->seq_vector = (AOCL_POST_OP_TYPE *) malloc(max_post_ops_seq_length *
+                               sizeof(AOCL_POST_OP_TYPE));
+        if (post_ops->seq_vector == NULL) {
+            free(post_ops);
+            return ;
+        }
+
+        int post_op_i = 0;
+        post_ops->eltwise = NULL;
+        post_ops->bias = NULL;
+        post_ops->sum = NULL;
+        post_ops->matrix_add = NULL;
+        post_ops->matrix_mul = NULL;
+
+        if (bias != NULL) {
+            // Add bias postop
+            float *bias_ = NULL;
+            if (alpha != 1.0f) {
+                bias_ = new float[n]();
+                #pragma omp parallel for num_threads(thread_qty)
+                for (int i=0; i<n; ++i) {
+                    bias_[i] = alpha * bias[i];
+                }
+            }
+            post_ops->seq_vector[post_op_i++] = BIAS;
+            post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
+                                 aocl_post_op_bias));
+
+            (post_ops->bias)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
+        }
+
+        int mem_count[3] = {0};
+        for (auto idx = 0; idx < po_ops.len(); ++idx) {
+            const auto &po_type = po_ops.entry_[idx];
+            switch (po_type.kind) {
+            case impl::primitive_kind::eltwise:
+                mem_count[0]++;
+                break;
+            case impl::primitive_kind::binary:
+                if (po_type.binary.alg == impl::alg_kind::binary_add) {
+                    mem_count[1]++;
+                }
+                else if (po_type.binary.alg == impl::alg_kind::binary_mul) {
+                    mem_count[2]++;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        if (mem_count[0] > 0) {
+            post_ops->eltwise = (aocl_post_op_eltwise *) malloc(sizeof(
+                                    aocl_post_op_eltwise) * mem_count[0]);
+            if (post_ops->eltwise == NULL) {
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return ;
+            }
+        }
+        if (mem_count[1] > 0) {
+            post_ops->matrix_add = (aocl_post_op_matrix_add *) malloc(sizeof(
+                                       aocl_post_op_matrix_add) * mem_count[1]);
+            if (post_ops->matrix_add == NULL) {
+                if (post_ops->eltwise != NULL) {
+                    free(post_ops->eltwise);
+                }
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return ;
+            }
+        }
+        if (mem_count[2] > 0) {
+            post_ops->matrix_mul = (aocl_post_op_matrix_mul *) malloc(sizeof(
+                                       aocl_post_op_matrix_mul) * mem_count[2]);
+            if (post_ops->matrix_mul == NULL) {
+                if (post_ops->matrix_add != NULL) {
+                    free(post_ops->matrix_add);
+                }
+                if (post_ops->eltwise != NULL) {
+                    free(post_ops->eltwise);
+                }
+                if (post_ops->bias != NULL) {
+                    free(post_ops->bias);
+                }
+                free(post_ops->seq_vector);
+                free(post_ops);
+                return ;
+            }
+        }
+
+        for (auto idx = 0; idx < po_ops.len(); ++idx) {
+            const auto &po_type = po_ops.entry_[idx];
+            if (po_type.kind == impl::primitive_kind::eltwise &&
+                    post_ops->eltwise != NULL) {
+                if (po_type.eltwise.alg == impl::alg_kind::eltwise_relu) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::RELU;
+                    eltwise_index+=1;
+                }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::GELU_TANH;
+                    eltwise_index+=1;
+                }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::GELU_ERF;
+                    eltwise_index+=1;
+                }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_logistic) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = NULL;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::SIGMOID;
+                    eltwise_index+=1;
+                }
+                else if (po_type.eltwise.alg == impl::alg_kind::eltwise_swish) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::ELTWISE;
+                    post_ops->eltwise[eltwise_index].is_power_of_2 = FALSE;
+                    post_ops->eltwise[eltwise_index].scale_factor = NULL;
+                    post_ops->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
+                    *((float *)(post_ops->eltwise[eltwise_index].algo.alpha)) = 1.0f;
+                    post_ops->eltwise[eltwise_index].algo.beta = NULL;
+                    post_ops->eltwise[eltwise_index].algo.algo_type = AOCL_ELT_ALGO_TYPE::SWISH;
+                    eltwise_index+=1;
+                }
+            }
+            else if (po_type.kind == impl::primitive_kind::binary) {
+                if (po_type.binary.alg == impl::alg_kind::binary_add &&
+                        post_ops->matrix_add != NULL) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::MATRIX_ADD;
+                    post_ops->matrix_add[add_index].ldm = n;
+                    auto binary_po = CTX_IN_MEM(const void *,
+                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
+                    post_ops->matrix_add[add_index].scale_factor = &dummy_scale;
+                    post_ops->matrix_add[add_index].scale_factor_len = 1;
+                    auto b_dt = po_type.binary.src1_desc.data_type;
+                    const zendnn_dim_t *dims = po_type.binary.src1_desc.dims;
+                    int ndims = po_type.binary.src1_desc.ndims;
+                    size_t binary_offset = 0;
+                    if (ndims == 3) {
+                        binary_offset = index_offset * dims[1] * dims[2];
+                    }
+                    post_ops->matrix_add[add_index].stor_type =
+                        AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+                    auto addA = reinterpret_cast<float *>(const_cast<void *>
+                                                          (binary_po)) + binary_offset;
+                    post_ops->matrix_add[add_index].matrix = (float *)addA;
+                    add_index++;
+                }
+                else if (po_type.binary.alg == impl::alg_kind::binary_mul &&
+                         post_ops->matrix_mul != NULL) {
+                    post_ops->seq_vector[post_op_i++] = AOCL_POST_OP_TYPE::MATRIX_MUL;
+                    post_ops->matrix_mul[mul_index].ldm = n;
+                    auto binary_po = CTX_IN_MEM(const void *,
+                                                (ZENDNN_ARG_ATTR_MULTIPLE_POST_OP(idx) | ZENDNN_ARG_SRC_1));
+                    post_ops->matrix_mul[mul_index].scale_factor = &dummy_scale;
+                    post_ops->matrix_mul[mul_index].scale_factor_len = 1;
+                    auto b_dt = po_type.binary.src1_desc.data_type;
+                    const zendnn_dim_t *dims = po_type.binary.src1_desc.dims;
+                    int ndims = po_type.binary.src1_desc.ndims;
+                    size_t binary_offset = 0;
+                    if (ndims == 3) {
+                        binary_offset = index_offset * dims[1] * dims[2];
+                    }
+                    post_ops->matrix_mul[mul_index].stor_type =
+                        AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+                    auto mulA = reinterpret_cast<float *>(const_cast<void *>
+                                                          (binary_po)) + binary_offset;
+                    post_ops->matrix_mul[mul_index].matrix = (float *)mulA;
+                    mul_index++;
+                }
+            }
+        }
+        post_ops->seq_length = po_ops.len() + postop_count;
+    }
+    return ;
+}
+
+void clear_post_ops_memory(aocl_post_op *post_ops, float alpha,
+                           dim_t eltwise_index) {
+    if (post_ops != NULL) {
+        if (post_ops->bias != NULL) {
+            if (alpha != 1.0) {
+                delete ((float *)post_ops->bias->bias);
+            }
+            else {
+                post_ops->bias->bias = NULL;
+            }
+            free(post_ops->bias);
+        }
+        if (post_ops->matrix_add != NULL) {
+            free(post_ops->matrix_add);
+        }
+        if (post_ops->matrix_mul != NULL) {
+            free(post_ops->matrix_mul);
+        }
+        if (post_ops->eltwise != NULL) {
+            for (int i = 0; i < eltwise_index; ++i) {
+                if (post_ops->eltwise[i].algo.alpha != NULL) {
+                    free(post_ops->eltwise[i].algo.alpha);
+                }
+            }
+            free(post_ops->eltwise);
+        }
+        free(post_ops->seq_vector);
+        free(post_ops);
+    }
+}

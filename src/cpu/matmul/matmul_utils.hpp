@@ -46,13 +46,16 @@ inline status_t check_post_ops_(post_ops_t po_ops) {
             }
             break;
         case primitive_kind::binary:
-            if (!utils::one_of(e.binary.alg, alg_kind::binary_add,
-                               alg_kind::binary_mul)) {
-                return status::unimplemented;
-            }
-            if (e.binary.src1_desc.format_desc.blocking.strides[1] != 1 ||
-                    e.binary.src1_desc.format_desc.blocking.strides[0] == 0) {
-                return status::unimplemented;
+            {
+                if (!utils::one_of(e.binary.alg, alg_kind::binary_add,
+                                alg_kind::binary_mul)) {
+                    return status::unimplemented;
+                }
+                int dims_size = e.binary.src1_desc.ndims;
+                if (e.binary.src1_desc.format_desc.blocking.strides[dims_size - 1] != 1 ||
+                        e.binary.src1_desc.format_desc.blocking.strides[dims_size - 2] == 0) {
+                    return status::unimplemented;
+                }
             }
             break;
         default:

@@ -489,16 +489,30 @@ int main(int argc, char **argv) {
 #else
     setenv("ZENDNN_PRIMITIVE_CACHE_CAPACITY","0",1);
 #endif
-    //matmul_example_3D(eng, engine_stream);
+    matmul_example_3D(eng, engine_stream);
 
     std::vector<float> gemm_jit, zen;
 
     // Define list of M values
-    std::vector<memory::dim> M_list = {4}; // Add more M values as needed
+    std::vector<memory::dim> M_list = {4,8,16,64,128}; // Add more M values as needed
 
     // Define list of (K, N) pairs
     std::vector<std::pair<memory::dim, memory::dim>> KN_list = {
-        {3456,  1024}
+        {3456,  1024},
+        {3456,512},
+        {512, 3456},
+        {512,256},
+        {13,    512},
+        {256,   128},
+        {1024,  1024},
+        {1024,  512},
+        {256,   1},
+        {512,   256},
+        {13,    512},
+        {256,   64},
+        {415,   512},
+        {512,   512},
+        {256,   1}
         // Add more (K, N) pairs as needed
     };
 
@@ -529,8 +543,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    //sgemm_and_matmul_with_params('N', 'T', 10, 20, 30, 1.1f, fixed_beta, eng,
-    //                           engine_stream);
+    sgemm_and_matmul_with_params('N', 'T', 10, 20, 30, 1.1f, fixed_beta, eng,
+                               engine_stream);
 
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test test ends");
     return 0;
