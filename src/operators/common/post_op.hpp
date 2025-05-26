@@ -131,6 +131,8 @@ struct post_op_t {
   clip_params_t       clip_params;
   binary_add_params_t binary_add_params;
   binary_mul_params_t binary_mul_params;
+
+  std::string post_op_info(post_op_t post_op);
 };
 
 } //namespace ops

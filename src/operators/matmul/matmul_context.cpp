@@ -20,23 +20,27 @@ namespace ops {
 
 status_t matmul_context_t::validate() {
   LOG_DEBUG_INFO("Validating matmul_context_t");
-  if (parent_type::validate() != status_t::success)
+  if (parent_type::validate() != status_t::success) {
     return status_t::failure;
+  }
 
   auto weights = get_param("weights");
   auto bias    = get_param("bias");
 
-  if (!weights)
+  if (!weights) {
     return status_t::failure;
+  }
 
   auto weights_size = weights->get_size();
-  if(weights_size.size() != 2)
+  if (weights_size.size() != 2) {
     return status_t::failure;
+  }
 
   if (bias) {
     auto bias_size = bias->get_size();
-    if (weights_size.at(1) != bias_size.at(0))
+    if (weights_size.at(1) != bias_size.at(0)) {
       return status_t::failure;
+    }
   }
 
   return status_t::success;
@@ -49,12 +53,30 @@ status_t matmul_context_t::preprocess() {
   return status_t::success;
 }
 
-aocl_post_op* matmul_context_t::get_aocl_post_op_ptr_unsafe() const {
+std::string matmul_context_t::context_info() {
+  std::stringstream ss;
+  auto weights = get_param("weights").value();
+  auto bias    = get_param("bias").value();
+
+  auto post_op_count = get_post_op_count();
+
+  ss <<weights.tensor_info()<<","<<bias.tensor_info()<<","
+     <<"post-op:";
+
+  for (uint32_t i = 0; i < post_op_count; ++i) {
+    post_op_t zen_po = get_post_op(i);
+    ss << zen_po.post_op_info(zen_po)<<",";
+  }
+
+  return ss.str();
+}
+
+aocl_post_op *matmul_context_t::get_aocl_post_op_ptr_unsafe() const {
   LOG_DEBUG_INFO("Getting aocl_post_op_ptr from matmul_context_t");
   return aocl_utils_ptr->get_aocl_post_op_ptr_unsafe();
 }
 
-void* matmul_context_t::get_aocl_reordered_weights_ptr_unsafe() const {
+void *matmul_context_t::get_aocl_reordered_weights_ptr_unsafe() const {
   LOG_DEBUG_INFO("Getting aocl_reordered_weights_ptr from matmul_context_t");
   return aocl_utils_ptr->get_aocl_reordered_weights_ptr_unsafe();
 }

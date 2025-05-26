@@ -66,6 +66,7 @@ protected:
   status_t validate_forced_kernel() override;
   status_t kernel_factory() override;
   status_t preprocess();
+  std::string operator_info() override;
 };
 } //namespace ops
 

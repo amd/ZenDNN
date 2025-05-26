@@ -44,11 +44,12 @@ public:
   using data_type  = common::data_type_t;
 
   /** @brief zero tensor */
-  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_);
+  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
+                       std::string tensor_name_="zero");
 
   /** @brief uniform tensor */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          float val_);
+                          float val_, std::string tensor_name_="uniform");
 
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,

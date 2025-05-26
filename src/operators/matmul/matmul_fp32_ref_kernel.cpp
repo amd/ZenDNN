@@ -23,8 +23,8 @@ using namespace zendnnl::error_handling;
 status_t matmul_f32_ref_kernel_t::execute(const context_type &context_,
     tensor_map_type &inputs_,
     tensor_map_type &outputs_) {
-  LOG_DEBUG_INFO("Executing matmul_fp32_ref");
-  log_info("matmul_fp32_ref_kernel");
+  LOG_DEBUG_INFO("Executing matmul_fp32_ref kernel");
+  log_info("Executing matmul_fp32_ref kernel");
 
   auto  input_tensor  = inputs_.find("matmul_input")->second;
   auto  output_tensor = outputs_.find("matmul_output")->second;

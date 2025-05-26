@@ -205,6 +205,14 @@ class op_context_t : public hash_object_t {
    */
   virtual status_t    preprocess();
 
+  /** @brief Returns context information.
+   *
+   * Returns a string containing opearator context meta data.
+   * This is used for logging and profiling.
+   * @return std::string containing context information.
+   */
+  virtual std::string context_info();
+
   std::map<std::string, tensor_t> params; /**< operator parameters */
   std::vector<post_op_t> post_ops; /**< operator post ops vector */
   uint32_t core_count; /**< operator core count */
@@ -228,6 +236,8 @@ op_context_t<OP_CONTEXT_T>::~op_context_t() {
 template<typename OP_CONTEXT_T>
 OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("Creating op_context_t");
+  apilog_info("Context create - ", context_info());
+
   if (validate() != status_t::success) {
     status = status_t::failure;
     return static_cast<OP_CONTEXT_T &>(*this);
@@ -353,6 +363,12 @@ template<typename OP_CONTEXT_T>
 status_t op_context_t<OP_CONTEXT_T>::preprocess() {
   LOG_DEBUG_INFO("Preprocessing for op_context_t");
   return status_t::success;
+}
+
+template<typename OP_CONTEXT_T>
+std::string op_context_t<OP_CONTEXT_T>::context_info() {
+  LOG_DEBUG_INFO("Getting context info");
+  return "";
 }
 
 template<typename OP_CONTEXT_T>

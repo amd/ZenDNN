@@ -274,6 +274,15 @@ class operator_t : public hash_object_t {
    */
   virtual status_t    kernel_factory()  = 0;
 
+  /** @brief Returns operator information.
+   *
+   * Returns a string containing opearator meta data.
+   * This includes operator name, context information, input and
+   * output tensor information. This is used for logging and profiling.
+   * @return std:string containing operator information.
+   */
+  virtual std::string operator_info();
+
   //data
   tensor_map_type                      inputs; /**< Input tensors. */
   tensor_map_type                      outputs; /**< Output tensors. */
@@ -329,6 +338,7 @@ std::string operator_t<OP_T, OP_CONTEXT_T>::get_name() {
 template<typename OP_T, typename OP_CONTEXT_T>
 OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("<", name, "> Creating operator");
+  apilog_info("Operator create - ",name);
   if (status != status_t::success) {
     if (! context.check()) {
       log_error("operator <", name, "> : bad context");
@@ -346,6 +356,7 @@ OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
 template<typename OP_T, typename OP_CONTEXT_T>
 status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
+  apilog_info("Operator execute - ",name,",",operator_info());
   try {
     // check if pre_processing is successful
     if (status != status_t::success) {
@@ -367,7 +378,7 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
 
     //kernel factory assigns a kernel
     if (kernel_factory() != status_t::success) {
-      log_error("<", name, "> failed to generate kernel");
+      apilog_error("<", name, "> failed to generate kernel");
       return status_t::failure;
     }
 
@@ -544,6 +555,12 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::validate_forced_kernel() {
   }
 
   return status_t::success;
+}
+
+template<typename OP_T, typename OP_CONTEXT_T>
+std::string operator_t<OP_T, OP_CONTEXT_T>::operator_info() {
+  LOG_DEBUG_INFO("Getting operator info");
+  return "";
 }
 
 } //namespace ops

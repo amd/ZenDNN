@@ -278,6 +278,8 @@ void tensor_t::reset() {
 
 tensor_t &tensor_t::create() {
   LOG_DEBUG_INFO("Creating tensor object");
+  apilog_info("Tensor create - ",tensor_info());
+
   if (status != status_t::success) {
     validate_meta_info();
     if (status != status_t::success) {
@@ -443,6 +445,26 @@ void tensor_t::validate_meta_info() {
   }
 
   status = status_t::success;
+}
+
+std::string tensor_t::tensor_info() {
+  std::stringstream ss;
+  ss << get_name() << "[";
+
+  uint32_t dim = get_dim();
+  if(dim == 1) {
+    ss << "1,";
+  }
+  for (uint32_t i = 0; i < dim; ++i) {
+    ss << get_size(i);
+    if (i < dim - 1) {
+      ss << ",";
+    }
+  }
+
+  ss << "]";
+
+  return ss.str();
 }
 
 } //memory

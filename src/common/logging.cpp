@@ -23,6 +23,7 @@ logger_t::logger_t()
   :log_file{}, log_ofstream{nullptr}, log_start_time{cn::steady_clock::now()},
    log_cout_flag{true} {
   log_level_map[log_module_t::common]  = log_level_t::verbose;
+  log_level_map[log_module_t::api]     = log_level_t::verbose;
   log_level_map[log_module_t::test]    = log_level_t::verbose;
   log_level_map[log_module_t::profile] = log_level_t::verbose;
   log_level_map[log_module_t::debug]   = log_level_t::verbose;
@@ -102,13 +103,15 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
 std::string logger_t::log_module_to_str(log_module_t module_) {
   switch (module_) {
   case log_module_t::common:
-    return "common ";
+    return "COMMON ";
+  case log_module_t::api:
+    return "API    ";
   case log_module_t::test:
-    return "test   ";
+    return "TEST   ";
   case log_module_t::profile:
-    return "profile";
+    return "PROFILE";
   case log_module_t::debug:
-    return "debug  ";
+    return "DEBUG  ";
   default:
     return "unknown";
   }

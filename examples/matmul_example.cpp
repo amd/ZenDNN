@@ -23,19 +23,18 @@ using namespace zendnnl::interface;
 using namespace zendnnl::error_handling;
 
 int matmul_relu_f32_kernel_example() {
-  log_info("**matmul+relu operator f32 kernel example.");
 
   try {
     status_t status;
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::f32,
-                                                 1.0);
+                                                 1.0, "weights");
     weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
-                                                 -10.0);
+                                                 -10.0, "bias");
     bias.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
@@ -49,22 +48,22 @@ int matmul_relu_f32_kernel_example() {
 
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
-      .set_name("matmul_f32_operator")
+      .set_name("matmul_f32")
       .set_context(matmul_context)
       .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::f32,
-                                                      1.0);
+                                                      1.0, "matmul_input");
     input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32);
+                                               data_type_t::f32, "matmul_output");
     output_tensor.set_name("matmul_output");
 
     status = matmul_operator
@@ -73,12 +72,10 @@ int matmul_relu_f32_kernel_example() {
       .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
-                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("<",matmul_operator.get_name(),">", " operator execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_error("<",matmul_operator.get_name(),">", " operator execution failed.");
       return NOT_OK;
     }
 
@@ -91,20 +88,19 @@ int matmul_relu_f32_kernel_example() {
 }
 
 int matmul_relu_bf16_kernel_example() {
-  log_info("**matmul+relu operator bf16 kernel example.");
 
   try {
     status_t status;
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::bf16,
-                                                 1.0);
+                                                 1.0, "weights");
     weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
-                                                 3.0);
-    bias.set_name("bias");
+                                                 3.0, "bias");
+    weights.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -122,17 +118,17 @@ int matmul_relu_bf16_kernel_example() {
       .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::bf16,
-                                                      1.0);
+                                                      1.0, "matmul_input");
     input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32);
+                                               data_type_t::f32, "matmul_output");
     output_tensor.set_name("matmul_output");
 
     status = matmul_operator
@@ -141,12 +137,10 @@ int matmul_relu_bf16_kernel_example() {
       .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
-                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 
@@ -159,7 +153,7 @@ int matmul_relu_bf16_kernel_example() {
 }
 
 int matmul_mul_silu_mul_f32_kernel_example() {
-  log_info("**matmul binary_mul + silu + binary_mul operator f32 kernel example.");
+  testlog_info("**matmul binary_mul + silu + binary_mul operator f32 kernel example.");
 
   try {
     status_t status;
@@ -197,7 +191,7 @@ int matmul_mul_silu_mul_f32_kernel_example() {
       .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
@@ -228,12 +222,10 @@ int matmul_mul_silu_mul_f32_kernel_example() {
       .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
-                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 
@@ -246,7 +238,7 @@ int matmul_mul_silu_mul_f32_kernel_example() {
 }
 
 int matmul_silu_mul_bf16_kernel_example() {
-  log_info("**matmul + silu + binary_mul operator bf16 kernel example.");
+  testlog_info("**matmul + silu + binary_mul operator bf16 kernel example.");
 
   try {
     status_t status;
@@ -279,7 +271,7 @@ int matmul_silu_mul_bf16_kernel_example() {
       .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
@@ -304,12 +296,10 @@ int matmul_silu_mul_bf16_kernel_example() {
       .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
-                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 
@@ -322,19 +312,19 @@ int matmul_silu_mul_bf16_kernel_example() {
 }
 
 int matmul_relu_forced_ref_kernel_example() {
-  log_info("**matmul+relu operator enforced reference kernel example.");
+  testlog_info("Reference matmul kernel example.");
 
   try {
     status_t status;
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::f32,
-                                                 1.0);
+                                                 1.0, "weights");
     weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
-                                                 3.0);
+                                                 3.0, "bias");
     weights.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
@@ -353,17 +343,17 @@ int matmul_relu_forced_ref_kernel_example() {
       .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::f32,
-                                                      1.0);
+                                                      1.0, "matmul_input");
     input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32);
+                                               data_type_t::f32, "matmul_output");
     output_tensor.set_name("matmul_output");
 
     status = matmul_operator
@@ -373,12 +363,10 @@ int matmul_relu_forced_ref_kernel_example() {
       .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
-                  output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 

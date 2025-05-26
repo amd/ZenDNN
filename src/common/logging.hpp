@@ -58,6 +58,7 @@ enum class log_level_t : uint32_t {
  */
 enum class log_module_t : uint32_t {
   common = 0,       /*!< Common log */
+  api,              /*!< API log */
   test,             /*!< Test log */
   profile,          /*!< Profile log */
   debug,            /*!< Debug log */

@@ -19,14 +19,15 @@
 namespace zendnnl {
 namespace ops {
 
-status_t validate_buffer_post_op(std::vector<uint64_t> &output_size, std::vector<post_op_t> &po,
-    std::map<std::string,tensor_t> &inputs) {
+status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
+                                 std::vector<post_op_t> &po,
+                                 std::map<std::string,tensor_t> &inputs) {
   /**
   * @todo Add validation support for per tensor and per channel
   * for binary post-ops
   */
   if (!po.empty()) {
-    for (const auto& op : po) {
+    for (const auto &op : po) {
       if (op.type == post_op_type_t::binary_add) {
         auto add_tensor_obj = inputs.find(op.binary_add_params.tensor_name);
         if (add_tensor_obj == inputs.end()) {
@@ -61,9 +62,11 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size, std::vector
 }
 
 status_t matmul_operator_t::validate() {
-  LOG_DEBUG_INFO("<", get_name(), "> Validating matmul op parameters matmul_operator_t");
-  if (parent_type::validate() != status_t::success)
+  LOG_DEBUG_INFO("<", get_name(),
+                 "> Validating matmul op parameters matmul_operator_t");
+  if (parent_type::validate() != status_t::success) {
     return status_t::failure;
+  }
 
   auto input        = get_input("matmul_input");
   auto output       = get_output("matmul_output");
@@ -71,23 +74,28 @@ status_t matmul_operator_t::validate() {
   auto weights      = context.get_param("weights");
   auto weights_size = weights->get_size();
 
-  if (!input || !output)
+  if (!input || !output) {
     return status_t::failure;
+  }
 
   auto input_size  = input->get_size();
   auto output_size = output->get_size();
 
-  if ((input_size.size() != 2) || (output_size.size() != 2))
+  if ((input_size.size() != 2) || (output_size.size() != 2)) {
     return status_t::failure;
+  }
 
-  if (input_size.at(0) != output_size.at(0))
+  if (input_size.at(0) != output_size.at(0)) {
     return status_t::failure;
+  }
 
-  if (input_size.at(1) != weights_size.at(0))
+  if (input_size.at(1) != weights_size.at(0)) {
     return status_t::failure;
+  }
 
-  if (weights_size.at(1) != output_size.at(1))
+  if (weights_size.at(1) != output_size.at(1)) {
     return status_t::failure;
+  }
 
   // validate post-ops
   auto post_ops = context.get_post_op();
@@ -96,8 +104,9 @@ status_t matmul_operator_t::validate() {
 
 status_t matmul_operator_t::validate_forced_kernel() {
 
-  if (forced_kernel.empty())
+  if (forced_kernel.empty()) {
     return status_t::success;
+  }
 
   LOG_DEBUG_INFO("<", get_name(), "> Validating forced kernel matmul_operator_t");
   if (forced_kernel == "reference") {
@@ -119,7 +128,8 @@ status_t matmul_operator_t::validate_forced_kernel() {
         (in_layout != tensor_layout_t::contiguous) ||
         (out_layout != tensor_layout_t::contiguous) ||
         (wt_layout  != tensor_layout_t::contiguous)) {
-      log_error("<", get_name(), "> forced reference kernel needs f32 contiguous tensors.");
+      log_error("<", get_name(),
+                "> forced reference kernel needs f32 contiguous tensors.");
       return status_t::failure;
     }
   }
@@ -138,16 +148,38 @@ status_t matmul_operator_t::preprocess() {
   auto weight_tensor = context.get_param("weights");
 
   if (context.aocl_utils_ptr->reorder_weights(weight_tensor)
-      == status_t::failure){
+      == status_t::failure) {
     return status_t::failure;
   }
   //initialize aocl po
-  if (context.aocl_utils_ptr->alloc_post_op(context.get_post_op(), optional_bias_tensor)
-        == status_t::failure){
+  if (context.aocl_utils_ptr->alloc_post_op(context.get_post_op(),
+      optional_bias_tensor)
+      == status_t::failure) {
     return status_t::failure;
   }
   //set runtime post ops from inputs
   return context.aocl_utils_ptr->set_runtime_post_op_buffer(inputs);
+}
+
+std::string matmul_operator_t::operator_info() {
+  std::stringstream ss;
+  auto input   = get_input("matmul_input").value();
+  auto output  = get_output("matmul_output").value();
+
+  auto weights       = context.get_param("weights").value();
+  auto bias          = context.get_param("bias").value();
+  auto post_op_count = context.get_post_op_count();
+
+  ss <<input.tensor_info()<<","<<weights.tensor_info()
+     <<","<<bias.tensor_info()<<","<<output.tensor_info()
+     <<","<<"post-op:";
+
+  for (uint32_t i = 0; i < post_op_count; ++i) {
+    post_op_t zen_po = context.get_post_op(i);
+    ss << zen_po.post_op_info(zen_po)<<",";
+  }
+
+  return ss.str();
 }
 
 status_t matmul_operator_t::kernel_factory() {
@@ -174,13 +206,15 @@ status_t matmul_operator_t::kernel_factory() {
     }
     if ((weight_dtype == data_type_t::f32) &&
         (input_dtype  == data_type_t::f32) &&
-        (output_dtype == data_type_t::f32))
+        (output_dtype == data_type_t::f32)) {
       kernel = get_matmul_f32_avx512_kernel();
+    }
     else if ((weight_dtype == data_type_t::bf16) &&
              (input_dtype  == data_type_t::bf16) &&
              (output_dtype == data_type_t::f32 ||
-             output_dtype == data_type_t::bf16))
+              output_dtype == data_type_t::bf16)) {
       kernel = get_matmul_bf16_avx512_kernel();
+    }
 
     else {
       log_error("<", name, "> kernel unimplemented.");
@@ -188,22 +222,25 @@ status_t matmul_operator_t::kernel_factory() {
     }
   }
   else {
-    if (forced_kernel == "reference")
+    if (forced_kernel == "reference") {
       kernel = get_matmul_f32_ref_kernel();
+    }
     else if (forced_kernel == "onednn") {
       //kernel = get_linear_onednn_kernel();
       log_error("<", name, "> kernel unimplemented using onednn");
       return status_t::unimplemented;
     }
     else {
-      log_error("<", name, "> kernel unimplemented using forced kernel ", forced_kernel);
+      log_error("<", name, "> kernel unimplemented using forced kernel ",
+                forced_kernel);
       return status_t::unimplemented;
     }
   }
 
   kernel->create();
-  if (! kernel->check())
+  if (! kernel->check()) {
     return kernel->get_last_status();
+  }
 
   return status_t::success;
 }

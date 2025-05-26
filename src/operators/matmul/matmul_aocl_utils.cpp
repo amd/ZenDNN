@@ -208,13 +208,13 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
 
     switch (zen_po.type) {
     case post_op_type_t::relu:
-      log_info("relu post-op being added");
+      log_info("Adding relu post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, RELU);
       eltwise_index++;
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::leaky_relu:
-      log_info("leaky relu post-op being added");
+      log_info("Adding leaky_relu post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, PRELU);
       (aocl_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_po_ptr->eltwise[eltwise_index]).algo.alpha)
@@ -223,25 +223,25 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::gelu_tanh:
-      log_info("gelu_tanh post-op being added");
+      log_info("Adding gelu_tanh post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, GELU_TANH);
       eltwise_index++;
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::gelu_erf:
-      log_info("gelu_erf post-op being added");
+      log_info("Adding gelu_erf post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, GELU_ERF);
       eltwise_index++;
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::tanh:
-      log_info("tanh post-op being added");
+      log_info("Adding tanh post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, TANH);
       eltwise_index++;
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::swish:
-      log_info("swish post-op being added");
+      log_info("Adding swish post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, SWISH);
       (aocl_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_po_ptr->eltwise[eltwise_index]).algo.alpha) =
@@ -250,13 +250,13 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::sigmoid:
-      log_info("sigmoid post-op being added");
+      log_info("Adding sigmoid post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, SIGMOID);
       eltwise_index++;
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::clip:
-      log_info("clip post-op being added");
+      log_info("Adding clip post-op");
       eltwise_init(aocl_po_ptr, eltwise_index, CLIP);
       (aocl_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_po_ptr->eltwise[eltwise_index]).algo.alpha) =
@@ -268,7 +268,7 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       aocl_po_ptr->seq_vector[post_op_count++] = ELTWISE;
       break;
     case post_op_type_t::binary_add:
-      log_info("binary_add post-op being added");
+      log_info("Adding binary_add post-op");
       (aocl_po_ptr->matrix_add + add_index)->scale_factor = malloc(sizeof(float));
       *((float *)(aocl_po_ptr->matrix_add[add_index]).scale_factor) =
         zen_po.binary_add_params.scale;
@@ -277,7 +277,7 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       add_index++;
       break;
     case post_op_type_t::binary_mul:
-      log_info("binary_mul post-op being added");
+      log_info("Adding binary_mul post-op");
       (aocl_po_ptr->matrix_mul + mul_index)->scale_factor = malloc(sizeof(float));
       *((float *)(aocl_po_ptr->matrix_mul[mul_index]).scale_factor) =
         zen_po.binary_mul_params.scale;
@@ -286,7 +286,7 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       mul_index++;
       break;
     default:
-      log_error("this postop in aocl is not supported");
+      log_error("This postop in aocl is not supported");
       return status_t::failure;
     }
   }
@@ -434,7 +434,7 @@ status_t aocl_utils_t::reorder_weights(std::optional<tensor_t> weights) {
   auto weights_ptr = weights->get_raw_handle_const();
   data_type_t weight_data_type = weights->get_data_type();
   if (weight_data_type == data_type_t::f32) {
-    log_info("reordering f32");
+    log_info("Reordering f32 weights");
     reorder_weights_execute<float>(
       weights_ptr, // weights
       k, // k
@@ -447,7 +447,7 @@ status_t aocl_utils_t::reorder_weights(std::optional<tensor_t> weights) {
     );
   }
   else if (weight_data_type == data_type_t::bf16) {
-    log_info("reordering BF16");
+    log_info("Reordering BF16 weights");
     reorder_weights_execute<int16_t>(
       weights_ptr, // weights
       k, // k

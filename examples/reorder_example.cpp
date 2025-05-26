@@ -22,7 +22,7 @@ using namespace zendnnl::interface;
 using namespace zendnnl::error_handling;
 
 int reorder_f32_kernel_example() {
-  log_info("**reorder operator f32 kernel example.");
+  testlog_info("**reorder operator f32 kernel example.");
   try {
     tensor_factory_t tensor_factory;
     status_t status;
@@ -58,7 +58,7 @@ int reorder_f32_kernel_example() {
 
     // Check if reorder operation creation is successful.
     if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed");
+      testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
 
@@ -68,10 +68,10 @@ int reorder_f32_kernel_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      testlog_info("operator ", reorder_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
     }
 
     // Free reordered size buffer.
@@ -86,7 +86,7 @@ int reorder_f32_kernel_example() {
 }
 
 int reorder_s8_kernel_example() {
-  log_info("**reorder operator s8 kernel example.");
+  testlog_info("**reorder operator s8 kernel example.");
   try {
     tensor_factory_t tensor_factory;
     status_t status;
@@ -123,7 +123,7 @@ int reorder_s8_kernel_example() {
 
     // Check if reorder operation creation is successful.
     if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed");
+      testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
 
@@ -133,10 +133,10 @@ int reorder_s8_kernel_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      testlog_info("operator ", reorder_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
     }
 
     // Free reordered size buffer.
@@ -151,7 +151,7 @@ int reorder_s8_kernel_example() {
 }
 
 int reorder_matmul_relu_f32_kernel_example() {
-  log_info("**matmul(reorder weights)+relu operator f32 kernel example.");
+  testlog_info("**matmul(reorder weights)+relu operator f32 kernel example.");
 
   try {
     tensor_factory_t tensor_factory;
@@ -188,7 +188,7 @@ int reorder_matmul_relu_f32_kernel_example() {
 
     // Check if reorder operation creation is successful.
     if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed");
+      testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
 
@@ -198,10 +198,10 @@ int reorder_matmul_relu_f32_kernel_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      testlog_info("operator ", reorder_operator.get_name(), " execution successful.");
     }
     else {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
     }
 
     reorder_weights_tensor.set_name("weights");
@@ -228,7 +228,7 @@ int reorder_matmul_relu_f32_kernel_example() {
 
     // Check if matmul operation creation is successful.
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
@@ -250,12 +250,12 @@ int reorder_matmul_relu_f32_kernel_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
+      testlog_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
                   output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_error("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 
@@ -271,7 +271,7 @@ int reorder_matmul_relu_f32_kernel_example() {
 }
 
 int reorder_inplace_bf16_example() {
-  log_info("**Inplace reorder operator bf16 kernel example.");
+  testlog_info("**Inplace reorder operator bf16 kernel example.");
   try {
     tensor_factory_t tensor_factory;
     status_t status;
@@ -298,7 +298,7 @@ int reorder_inplace_bf16_example() {
 
     // Check if inplace reorder operation creation is successful.
     if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed");
+      testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
 
@@ -309,11 +309,11 @@ int reorder_inplace_bf16_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      testlog_info("operator ", reorder_operator.get_name(), " execution successful.");
       input_tensor.set_layout(tensor_layout_t::blocked);
     }
     else {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
     }
 
   }
@@ -326,7 +326,7 @@ int reorder_inplace_bf16_example() {
 }
 
 int reorder_inplace_matmul_relu_bf16_kernel_example() {
-  log_info("**matmul(reorder weights)+relu operator bf16 kernel example.");
+  testlog_info("**matmul(reorder weights)+relu operator bf16 kernel example.");
 
   try {
     tensor_factory_t tensor_factory;
@@ -356,7 +356,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_example() {
 
     // Check if inplace reorder operation creation is successful.
     if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed");
+      testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
 
@@ -378,11 +378,11 @@ int reorder_inplace_matmul_relu_bf16_kernel_example() {
 
     bool reorder_status;
     if (status == status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
+      testlog_info("operator ", reorder_operator.get_name(), " execution successful.");
       reorder_status = true;
     }
     else {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
+      testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
       reorder_status = false;
     }
 
@@ -415,7 +415,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_example() {
 
     // Check if matmul operation creation is successful.
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
@@ -437,12 +437,12 @@ int reorder_inplace_matmul_relu_bf16_kernel_example() {
              .execute();
 
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
-      log_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
+      testlog_verbose("output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",
                   output_tensor.at({MATMUL_M/2, MATMUL_N/2}));
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_error("operator ", matmul_operator.get_name(), " execution failed.");
       return NOT_OK;
     }
 

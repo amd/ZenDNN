@@ -23,10 +23,10 @@ using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
-                                       data_type dtype_) {
+                                       data_type dtype_, std::string tensor_name_) {
 
   auto ztensor = tensor_t()
-    .set_name("zero tensor")
+    .set_name(tensor_name_)
     .set_size(size_)
     .set_data_type(dtype_)
     .set_storage()
@@ -44,10 +44,10 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 
 tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
                                           data_type dtype_,
-                                          float val_) {
+                                          float val_, std::string tensor_name_) {
 
   auto utensor = tensor_t()
-    .set_name("uniform tensor")
+    .set_name(tensor_name_)
     .set_size(size_)
     .set_data_type(dtype_)
     .set_storage()

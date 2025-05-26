@@ -23,8 +23,8 @@ using namespace zendnnl::error_handling;
 status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
                                              tensor_map_type& inputs_,
                                              tensor_map_type& outputs_) {
-  LOG_DEBUG_INFO("Executing matmul_fp32_avx512");
-  log_info("matmul_fp32_avx512_kernel");
+  LOG_DEBUG_INFO("Executing matmul_fp32_avx512 kernel");
+  log_info("Executing matmul_fp32_avx512 kernel");
 
   auto   aocl_po_ptr        = context_.get_aocl_post_op_ptr_unsafe();
   auto   reorder_weights    = (float*)context_.get_aocl_reordered_weights_ptr_unsafe();

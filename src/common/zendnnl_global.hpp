@@ -118,6 +118,11 @@ LOGGER_MACRO(common, warning)
 LOGGER_MACRO(common, info)
 LOGGER_MACRO(common, verbose)
 
+LOGGER_MACRO(api, error)
+LOGGER_MACRO(api, warning)
+LOGGER_MACRO(api, info)
+LOGGER_MACRO(api, verbose)
+
 LOGGER_MACRO(test, error)
 LOGGER_MACRO(test, warning)
 LOGGER_MACRO(test, info)

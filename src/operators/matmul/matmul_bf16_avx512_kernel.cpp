@@ -24,8 +24,8 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type& context_,
                                               tensor_map_type& inputs_,
                                               tensor_map_type& outputs_) {
 
-  LOG_DEBUG_INFO("Executing matmul_bf16_avx512");
-  log_info("matmul_bf16_avx512_kernel");
+  LOG_DEBUG_INFO("Executing matmul_bf16_avx512 kernel");
+  log_info("Executing matmul_bf16_avx512 kernel");
 
   auto     aocl_po_ptr        = context_.get_aocl_post_op_ptr_unsafe();
   auto     reorder_weights    = (int16_t*)context_.get_aocl_reordered_weights_ptr_unsafe();

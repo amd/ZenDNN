@@ -466,7 +466,15 @@ public:
   std::size_t            hash() override;
   /**@}*/
 
-private:
+  /** @brief Returns tensor information.
+   *
+   * Returns a string containing tensor meta data like size, stride size
+   * and data type. This is used for logging and profiling.
+   * @return std::string containing tensor information.
+   */
+  std::string tensor_info();
+
+protected:
   /** @brief Compute offset corresponding to an index.
    *
    * For example in a 5x10 tensor with zero base index, offset for index (2,1)

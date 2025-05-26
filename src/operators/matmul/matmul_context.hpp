@@ -55,6 +55,8 @@ protected:
   /** @brief validate parameters */
   status_t validate() override;
 
+  std::string context_info() override;
+
   std::shared_ptr<aocl_utils_t> aocl_utils_ptr; /**< aocl utils */
   friend class matmul_operator_t;
 };
