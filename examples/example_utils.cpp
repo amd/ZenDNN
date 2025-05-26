@@ -18,9 +18,7 @@
 namespace zendnnl {
 namespace examples {
 
-using namespace zendnnl::memory;
-using namespace zendnnl::error_handling;
-using namespace zendnnl::common;
+using namespace zendnnl::interface;
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
                                        data_type dtype_, std::string tensor_name_) {

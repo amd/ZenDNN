@@ -21,18 +21,14 @@
 #include <random>
 #include <algorithm>
 
-#include "common/zendnnl_global.hpp"
-#include "memory/tensor.hpp"
-
+#include "zendnnl.hpp"
 
 namespace zendnnl {
 /** @namespace zendnnl::examples
  *  @brief A namespace that contains examples of how to use ZenDNNL.
  */
 namespace examples {
-using namespace zendnnl::memory;
-using namespace zendnnl::error_handling;
-using namespace zendnnl::common;
+using namespace zendnnl::interface;
 
 /** @class tensor_factory_t
  * @brief Quick generation of predefined tensors.

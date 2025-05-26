@@ -19,7 +19,6 @@ namespace zendnnl {
 namespace examples {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::error_handling;
 
 int reorder_f32_kernel_example() {
   testlog_info("**reorder operator f32 kernel example.");

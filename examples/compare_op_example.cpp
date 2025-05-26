@@ -20,7 +20,6 @@ namespace zendnnl {
 namespace examples {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::error_handling;
 
 int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
   try {

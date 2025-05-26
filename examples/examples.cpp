@@ -23,9 +23,8 @@
 #define  OK          (0)
 #define  NOT_OK      (1)
 
+using namespace zendnnl::interface;
 using namespace zendnnl::examples;
-using namespace zendnnl::error_handling;
-using namespace zendnnl::common;
 
 int main() {
   tensor_unaligned_allocation_example();

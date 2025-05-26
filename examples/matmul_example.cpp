@@ -20,7 +20,6 @@ namespace zendnnl {
 namespace examples {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::error_handling;
 
 int matmul_relu_f32_kernel_example() {
 

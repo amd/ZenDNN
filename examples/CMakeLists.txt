@@ -14,6 +14,39 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+cmake_minimum_required(VERSION 3.25)
+
+# project information
+project(ZENDNNL_EXAMPLES)
+#set(ZENDNNL_EXAMPLES_VERSION "${PROJECT_VERSION}")
+set(ZENDNNL_EXAMPLES_VERSION "1.0.0")
+
+# specify c++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED true)
+
+# cmake module path
+set(CMAKE_MODULE_PATH "${ZENDNNL_SOURCE_DIR}/cmake")
+set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH} ${CMAKE_MODULE_PATH}")
+
+# display cmake variables
+message(DEBUG "EXAMPLES CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
+message(DEBUG "EXAMPLES CMAKE_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
+
+# find common packages
+find_package(OpenMP REQUIRED)
+find_package(Threads REQUIRED)
+
+# find zendnnl
+cmake_path(GET CMAKE_INSTALL_PREFIX PARENT_PATH ZENDNNL_INSTALL_PREFIX)
+set(ZENDNNL_INSTALL_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl")
+set(zendnnl_ROOT "${ZENDNNL_INSTALL_DIR}")
+set(zendnnl_DIR "${zendnnl_ROOT}/lib/cmake")
+find_package(zendnnl REQUIRED)
+if(zendnnl_FOUND)
+  message(STATUS "zendnnl forund at ${zendnnl_ROOT}")
+endif()
+
 set(examples_sources
   examples.cpp
   example_utils.cpp
@@ -33,10 +66,10 @@ set(example_headers
 
 add_executable(examples ${examples_sources})
 target_link_libraries(examples
-  zendnnl_archive
-  amdblis::amdblis_archive
-  OpenMP::OpenMP_CXX)
+  OpenMP::OpenMP_CXX
+  zendnnl::zendnnl_archive)
 
-install(TARGETS examples
-  DESTINATION ${CMAKE_INSTALL_PREFIX}/examples)
+#  amdblis::amdblis_archive
+install(TARGETS examples)
+
 

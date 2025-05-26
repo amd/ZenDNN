@@ -13,48 +13,32 @@
 #  * See the License for the specific language governing permissions and
 #  * limitations under the License.
 #  *******************************************************************************
+include_guard(GLOBAL)
 
-include(ConfigOptions)
+include(ZenDnnlOptions)
 
-get_property(AMDBLIS_INSTALL_DIR GLOBAL PROPERTY AMDBLISROOT)
+if(ZENDNNL_DEPENDS_AMDBLIS)
+  list(APPEND AMDBLIS_CMAKE_ARGS "-DBLIS_CONFIG_FAMILY=amdzen")
+  list(APPEND AMDBLIS_CMAKE_ARGS "-DENABLE_ADDON=aocl_gemm")
+  list(APPEND AMDBLIS_CMAKE_ARGS "-DENABLE_THREADING=openmp")
+  list(APPEND AMDBLIS_CMAKE_ARGS "-DENABLE_CBLAS=ON")
+  list(APPEND AMDBLIS_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-# set(CONFIGURE_OPTIONS "-a aocl_gemm ")
-# set(CONFIGURE_OPTIONS "${CONFIGURE_OPTIONS} --enable-threading=openmp ")
-# set(CONFIGURE_OPTIONS "${CONFIGURE_OPTIONS} --enable-cblas ")
-# set(CONFIGURE_OPTIONS "${CONFIGURE_OPTIONS} amdzen ")
+  message(DEBUG "AMDBLIS_CMAKE_ARGS=${AMDBLIS_CMAKE_ARGS}")
 
-ExternalProject_ADD(zendnnl_amdblis
-  SOURCE_DIR "${ZENDNNL_AMDBLIS_DIR}"
-  INSTALL_DIR "${AMDBLIS_INSTALL_DIR}"
-  GIT_REPOSITORY ${AMDBLIS_GIT_REPO}
-  GIT_TAG ${AMDBLIS_GIT_TAG}
-  GIT_PROGRESS ${AMDBLIS_GIT_PROGRESS}
-  CMAKE_ARGS -DBLIS_CONFIG_FAMILY=amdzen -DENABLE_ADDON=aocl_gemm -DENABLE_THREADING=openmp -DENABLE_CBLAS=ON -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
-  BUILD_COMMAND cmake --build . --config release --target install -j
-  UPDATE_DISCONNECTED TRUE)
+  ExternalProject_ADD(zendnnl_deps_amdblis
+    SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
+    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis"
+    GIT_REPOSITORY ${AMDBLIS_GIT_REPO}
+    GIT_TAG ${AMDBLIS_GIT_TAG}
+    GIT_PROGRESS ${AMDBLIS_GIT_PROGRESS}
+    CMAKE_ARGS ${AMDBLIS_CMAKE_ARGS}
+    BUILD_COMMAND cmake --build . --config release --target install -j
+    UPDATE_DISCONNECTED TRUE)
 
-#set(AMDBLIS_INCLUDE_DIR ${AMDBLIS_INSTALL_DIR}/include/blis)
-set(AMDBLIS_INCLUDE_DIR ${AMDBLIS_INSTALL_DIR}/include)
-set(AMDBLIS_LIB ${AMDBLIS_INSTALL_DIR}/lib/libblis-mt.so)
-set(AMDBLIS_ARCHIVE_LIB ${AMDBLIS_INSTALL_DIR}/lib/libblis-mt.a)
+  list(APPEND ZENDNNL_DEPS "zendnnl_deps_amdblis")
+else()
+  message(DEBUG "skipping building amdblis.")
+endif()
 
-add_library(amdblis_amdblis INTERFACE)
-add_dependencies(amdblis_amdblis zendnnl_amdblis)
-target_link_libraries(amdblis_amdblis INTERFACE ${AMDBLIS_LIB})
-set_target_properties(amdblis_amdblis
-  PROPERTIES
-  IMPORTED_LOCATION ${AMDBLIS_LIB}
-  INTERFACE_INCLUDE_DIRECTORIES ${AMDBLIS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${AMDBLIS_INCLUDE_DIR})
 
-add_library(amdblis::amdblis ALIAS amdblis_amdblis)
-
-add_library(amdblis_amdblis_archive INTERFACE)
-add_dependencies(amdblis_amdblis_archive zendnnl_amdblis)
-target_link_libraries(amdblis_amdblis_archive INTERFACE ${AMDBLIS_ARCHIVE_LIB})
-set_target_properties(amdblis_amdblis_archive
-  PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES ${AMDBLIS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${AMDBLIS_INCLUDE_DIR})
-
-add_library(amdblis::amdblis_archive ALIAS amdblis_amdblis_archive)

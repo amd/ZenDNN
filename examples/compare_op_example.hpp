@@ -16,13 +16,8 @@
 #ifndef _COMPARE_EXAMPLE_HPP_
 #define _COMPARE_EXAMPLE_HPP_
 
+#include "zendnnl.hpp"
 #include "example_utils.hpp"
-#include "memory/tensor.hpp"
-#include "operators/compare/compare_context.hpp"
-#include "operators/compare/compare_operator.hpp"
-#include "operators/matmul/matmul_context.hpp"
-#include "operators/matmul/matmul_operator.hpp"
-
 
 #define  OK          (0)
 #define  NOT_OK      (1)

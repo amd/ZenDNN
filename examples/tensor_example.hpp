@@ -19,8 +19,7 @@
 #include <optional>
 #include <cstdint>
 
-#include "common/zendnnl_global.hpp"
-#include "memory/tensor.hpp"
+#include "zendnnl.hpp"
 #include "example_utils.hpp"
 
 #define  OK                 (0)

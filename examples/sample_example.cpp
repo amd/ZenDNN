@@ -18,11 +18,7 @@
 namespace zendnnl {
 namespace examples {
 
-//using namespace zendnnl::interface;
-using namespace zendnnl::error_handling;
-using namespace zendnnl::common;
-using namespace zendnnl::memory;
-using namespace zendnnl::ops;
+using namespace zendnnl::interface;
 
 int sample_f32_kernel_example() {
   log_info("**sample operator f32 kernel example.");

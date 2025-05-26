@@ -17,45 +17,42 @@
 cmake_minimum_required(VERSION 3.25)
 
 # project information
-project(ZENDNNL VERSION 1.0.0
-  DESCRIPTION "Accelerated Deep Learning Inference on AMD Zen Architecture"
-  LANGUAGES CXX)
-
-set(CMAKE_MESSAGE_LOG_LEVEL "DEBUG")
-
-# display project information
-message(DEBUG "PROJECT_NAME = ${PROJECT_NAME}")
-message(DEBUG "PROJECT_VERSION = ${PROJECT_VERSION}")
-message(DEBUG "ZENDNNL_SOURCE_DIR=${ZENDNNL_SOURCE_DIR}")
-message(DEBUG "ZENDNNL_BINARY_DIR=${ZENDNNL_BINARY_DIR}")
+project(ZENDNNL_LIBRARY)
+#set(ZENDNNL_LIBRARY_VERSION "${PROJECT_VERSION}")
+set(ZENDNNL_LIBRARY_VERSION "1.0.0")
 
 # specify c++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 
 # cmake variables
-set(ZENDNNL_INSTALL_PREFIX "${ZENDNNL_BINARY_DIR}/install")
-set(ZENDNNL_MODULE_PATH "${ZENDNNL_SOURCE_DIR}/cmake")
-
-set(CMAKE_BUILD_TYPE Release)
-message(DEBUG "CMAKE_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
-set(CMAKE_INSTALL_PREFIX "${ZENDNNL_INSTALL_PREFIX}")
-message(DEBUG "CMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}")
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${ZENDNNL_SOURCE_DIR}/cmake)
-message(DEBUG "CMAKE_MODULE_PATH=${CMAKE_MODULE_PATH}")
+set(CMAKE_MODULE_PATH "${ZENDNNL_SOURCE_DIR}/cmake")
 set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH} ${CMAKE_MODULE_PATH}")
 
-# cmake modules
-include(ExternalProject)
+message(DEBUG "ZENDNNL_LIBRARY_INSTALL_PREFIX = ${CMAKE_INSTALL_PREFIX}")
+message(DEBUG "ZENDNNL_LIBRARY_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
 
-# zendnnl modules
+# include zendnnl files
 include(ZenDnnlMacros)
 include(ZenDnnlOptions)
 
-# build dependencies
-include(BuildDependencies)
+# global cxx flags
+set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=1 ${CMAKE_CXX_FLAGS}")
 
-# build zendnnl library
-include(ExternProjZENDNNL)
-include(ExternProjZenDnnlExamples)
+# find common packages
+zendnnl_required_packages()
+
+# find required dependencies
+find_dependencies(${CMAKE_INSTALL_PREFIX})
+
+# build library
+add_subdirectory(src)
+
+# build gtests
+add_subdirectory(gtests)
+
+# build doxygen
+add_subdirectory(doxygen)
+
+
 

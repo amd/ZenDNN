@@ -25,9 +25,6 @@ namespace zendnnl {
 namespace examples {
 
 using namespace zendnnl::interface;
-using namespace zendnnl::error_handling;
-// using namespace zendnnl::common;
-// using namespace zendnnl::memory;
 
 int tensor_unaligned_allocation_example() {
   testlog_info("Tensor unaligned memory allocation example");

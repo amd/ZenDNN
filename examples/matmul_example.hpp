@@ -16,10 +16,8 @@
 #ifndef _MATMUL_EXAMPLE_HPP_
 #define _MATMUL_EXAMPLE_HPP_
 
+#include "zendnnl.hpp"
 #include "example_utils.hpp"
-#include "memory/tensor.hpp"
-#include "operators/matmul/matmul_context.hpp"
-#include "operators/matmul/matmul_operator.hpp"
 
 #define  OK          (0)
 #define  NOT_OK      (1)

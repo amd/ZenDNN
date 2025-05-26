@@ -17,22 +17,26 @@ include_guard(GLOBAL)
 
 include(ZenDnnlOptions)
 
-if(ZENDNNL_BUILD_GTEST)
-  list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+if(ZENDNNL_BUILD_EXAMPLES)
+  message(STATUS "building examples...")
 
-  message(DEBUG "GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
+  set(ZENDNNL_EXAMPLES_ROOT ${ZENDNNL_SOURCE_DIR}/examples)
 
-  ExternalProject_ADD(zendnnl_deps_gtest
-    SOURCE_DIR "${GTEST_ROOT_DIR}"
-    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/gtest"
-    GIT_REPOSITORY ${GTEST_GIT_REPO}
-    GIT_TAG ${GTEST_GIT_TAG}
-    GIT_PROGRESS ${GTEST_GIT_PROGRESS}
-    CMAKE_ARGS ${GTEST_CMAKE_ARGS}
-    INSTALL_COMMAND cmake --build . --config release --target install -j
-    UPDATE_DISCONNECTED TRUE)
+  list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_SOURCE_DIR=${ZENDNNL_SOURCE_DIR}")
+  list(APPEND ZLE_CMAKE_ARGS "-DPROJECT_VERSION=${PROJECT_VERSION}")
+  list(APPEND ZLE_CMAKE_ARGS "-DCMAKE_MESSAGE_LOG_LEVEL=${CMAKE_MESSAGE_LOG_LEVEL}")
+  list(APPEND ZLE_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+  list(APPEND ZLE_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-  list(APPEND ZENDNNL_DEPS "zendnnl_deps_gtest")
+  message(DEBUG "ZLE_CMAKE_ARGS = ${ZLE_CMAKE_ARGS}")
+
+  ExternalProject_ADD(zendnnl_examples
+    SOURCE_DIR "${ZENDNNL_EXAMPLES_ROOT}"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/examples"
+    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/examples"
+    CMAKE_ARGS "${ZLE_CMAKE_ARGS}"
+    BUILD_COMMAND cmake --build .
+    INSTALL_COMMAND cmake --install .)
 else()
-  message(DEBUG "skipping building gtests...")
+  message(DEBUG "skipping building examples...")
 endif()
