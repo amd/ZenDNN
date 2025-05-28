@@ -29,12 +29,10 @@ int matmul_relu_f32_kernel_example() {
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::f32,
                                                  1.0, "weights");
-    weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
                                                  -10.0, "bias");
-    bias.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -59,11 +57,10 @@ int matmul_relu_f32_kernel_example() {
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::f32,
                                                       1.0, "matmul_input");
-    input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32, "matmul_output");
-    output_tensor.set_name("matmul_output");
+                                                     data_type_t::f32,
+                                                     "matmul_output");
 
     status = matmul_operator
       .set_input("matmul_input", input_tensor)
@@ -94,12 +91,10 @@ int matmul_relu_bf16_kernel_example() {
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::bf16,
                                                  1.0, "weights");
-    weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
                                                  3.0, "bias");
-    weights.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -124,11 +119,10 @@ int matmul_relu_bf16_kernel_example() {
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::bf16,
                                                       1.0, "matmul_input");
-    input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32, "matmul_output");
-    output_tensor.set_name("matmul_output");
+                                                    data_type_t::f32,
+                                                    "matmul_output");
 
     status = matmul_operator
       .set_input("matmul_input", input_tensor)
@@ -159,13 +153,11 @@ int matmul_mul_silu_mul_f32_kernel_example() {
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::f32,
-                                                 1.0);
-    weights.set_name("weights");
+                                                 1.0, "weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
-                                                 3.0);
-    bias.set_name("bias");
+                                                 3.0, "bias");
 
     binary_mul_params_t binary_mul;
     binary_mul.scale = 1.0;
@@ -196,22 +188,19 @@ int matmul_mul_silu_mul_f32_kernel_example() {
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::f32,
-                                                      1.0);
-    input_tensor.set_name("matmul_put");
+                                                      1.0, "matmul_input");
 
     auto mul_tensor   = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
                                                       data_type_t::f32,
-                                                      2.0);
-    mul_tensor.set_name("binary_mul_0");
+                                                      2.0, "binary_mul_0");
 
     auto mul_tensor_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
                                                       data_type_t::bf16,
-                                                      3.0);
-    mul_tensor_2.set_name("binary_mul_1");
+                                                      3.0, "binary_mul_1");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32);
-    output_tensor.set_name("matmul_output");
+                                                    data_type_t::f32,
+                                                    "matmul_output");
 
     status = matmul_operator
       .set_input("matmul_input", input_tensor)
@@ -244,13 +233,11 @@ int matmul_silu_mul_bf16_kernel_example() {
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::bf16,
-                                                 1.0);
-    weights.set_name("weights");
+                                                 1.0, "weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
-                                                 3.0);
-    bias.set_name("bias");
+                                                 3.0, "bias");
 
     auto silu_post_op = post_op_t{post_op_type_t::swish};
     auto binary_mul_po   = post_op_t{post_op_type_t::binary_mul};
@@ -276,16 +263,14 @@ int matmul_silu_mul_bf16_kernel_example() {
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::bf16,
-                                                      1.0);
-    input_tensor.set_name("matmul_input");
+                                                      1.0, "matmul_input");
 
     auto mul_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
-                                                      data_type_t::bf16,
-                                                      2.0);
-    mul_tensor.set_name("binary_mul_0");
+                                                    data_type_t::bf16,
+                                                    2.0, "binary_mul_0");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32);
+                                                    data_type_t::f32);
     output_tensor.set_name("matmul_output");
 
     status = matmul_operator
@@ -311,7 +296,7 @@ int matmul_silu_mul_bf16_kernel_example() {
 }
 
 int matmul_relu_forced_ref_kernel_example() {
-  testlog_info("Reference matmul kernel example.");
+  testlog_info("Reference matmul kernel example");
 
   try {
     status_t status;
@@ -319,12 +304,10 @@ int matmul_relu_forced_ref_kernel_example() {
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                                                  data_type_t::f32,
                                                  1.0, "weights");
-    weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                                                  data_type_t::f32,
                                                  3.0, "bias");
-    weights.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -342,18 +325,17 @@ int matmul_relu_forced_ref_kernel_example() {
       .create();
 
     if (! matmul_operator.check()) {
-      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error("operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                                                       data_type_t::f32,
                                                       1.0, "matmul_input");
-    input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                                               data_type_t::f32, "matmul_output");
-    output_tensor.set_name("matmul_output");
+                                                    data_type_t::f32,
+                                                    "matmul_output");
 
     status = matmul_operator
       .set_input("matmul_input", input_tensor)

@@ -29,7 +29,7 @@ using namespace zendnnl::interface;
 int tensor_unaligned_allocation_example() {
   testlog_info("Tensor unaligned memory allocation example");
   auto tensor =  tensor_t()
-                 .set_name("contigeous_f32_tensor")
+                 .set_name("unaligned_tensor")
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_storage()
                  .create();
@@ -50,22 +50,22 @@ int tensor_unaligned_allocation_example() {
 }
 
 int tensor_aligned_allocation_example() {
-  testlog_info("Tensor aligned memory allocation example.");
+  testlog_info("Tensor aligned memory allocation example");
   auto tensor =  tensor_t()
-                 .set_name("aligned_f32_tensor")
+                 .set_name("aligned_tensor")
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_storage(ALIGNMENT_BOUNDARY)
                  .create();
 
   if (tensor.check()) {
-    testlog_info("tensor creation of ", tensor.get_name(), " successful.");
+    testlog_info("Tensor creation of ", tensor.get_name(), " successful.");
     testlog_verbose(tensor.get_name(),
                 " elements :", tensor.get_nelem(),
                 " buffer size :", tensor.get_buffer_sz_bytes(),
                 " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
   }
   else {
-    testlog_error("tensor creation of ", tensor.get_name(), " failed!");
+    testlog_error("Tensor creation of ", tensor.get_name(), " failed!");
     return NOT_OK;
   }
 
@@ -75,21 +75,21 @@ int tensor_aligned_allocation_example() {
 int tensor_strided_aligned_allocation_example() {
   testlog_info("Tensor strided aligned memory allocation example");
   auto tensor =  tensor_t()
-                 .set_name("aligned_strided_f32_tensor")
+                 .set_name("aligned_strided_tensor")
                  .set_stride_size({MATMUL_ROWS, MATMUL_STRIDE_COLS})
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_storage(ALIGNMENT_BOUNDARY)
                  .create();
 
   if (tensor.check()) {
-    testlog_info("tensor creation of ", tensor.get_name(), " successful.");
+    testlog_info("Tensor creation of ", tensor.get_name(), " successful.");
     testlog_verbose(tensor.get_name(),
                 " elements :", tensor.get_nelem(),
                 " buffer size :", tensor.get_buffer_sz_bytes(),
                 " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
   }
   else {
-    testlog_error("tensor creation of ", tensor.get_name(), " failed!");
+    testlog_error("Tensor creation of ", tensor.get_name(), " failed!");
     return NOT_OK;
   }
 
@@ -97,16 +97,16 @@ int tensor_strided_aligned_allocation_example() {
 }
 
 int tensor_copy_and_compare_example() {
-  testlog_info("Tensor copy and compare example.");
+  testlog_info("Tensor copy and compare example");
   auto tensor =  tensor_t()
-                 .set_name("contigeous_bf16_tensor")
+                 .set_name("contiguous_tensor")
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_data_type(data_type_t::bf16)
                  .set_storage()
                  .create();
 
   if (tensor.check()) {
-    testlog_verbose("Tensor creation of ", tensor.get_name(), " successful.");
+    testlog_verbose("Tensor creation of ", tensor.get_name(), " successful");
     testlog_verbose(tensor.get_name(),
                 " hash :", tensor.hash(),
                 " elements :", tensor.get_nelem(),
@@ -114,7 +114,7 @@ int tensor_copy_and_compare_example() {
                 " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
   }
   else {
-    testlog_error("tensor creation of ", tensor.get_name(), " failed!");
+    testlog_error("Tensor creation of ", tensor.get_name(), " failed!");
     return NOT_OK;
   }
 
@@ -141,14 +141,14 @@ int tensor_copy_and_compare_example() {
 int tensor_move_and_refcount_example() {
   testlog_info("Tensor move and refcount example.");
   auto tensor =  tensor_t()
-                 .set_name("contigeous_s8_tensor")
+                 .set_name("contiguous_tensor")
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_data_type(data_type_t::s8)
                  .set_storage()
                  .create();
 
   if (tensor.check()) {
-    testlog_verbose("tensor creation of ", tensor.get_name(), " successful.");
+    testlog_verbose("Tensor creation of ", tensor.get_name(), " successful");
     testlog_verbose(tensor.get_name(),
                 " hash :", tensor.hash(),
                 " elements :", tensor.get_nelem(),
@@ -156,7 +156,7 @@ int tensor_move_and_refcount_example() {
                 " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
   }
   else {
-    testlog_error("tensor creation of ", tensor.get_name(), " failed!");
+    testlog_error("Tensor creation of ", tensor.get_name(), " failed!");
     return NOT_OK;
   }
 
@@ -175,7 +175,7 @@ int tensor_move_and_refcount_example() {
              " storage count : ", tensor.get_storage_count());
   }
   else {
-    log_error("move tensor failed.");
+    testlog_error("move tensor failed.");
     return NOT_OK;
   }
 
@@ -183,13 +183,13 @@ int tensor_move_and_refcount_example() {
 }
 
 int tensor_constness_example() {
-  testlog_info("**tensor constness example.");
+  testlog_info("Tensor constness example");
 
   //use tensor factor to create a uniform tensor
   tensor_factory_t tensor_factory;
   auto utensor = tensor_factory.uniform_tensor({MATMUL_DEPTH, MATMUL_ROWS, MATMUL_COLS},
                  data_type_t::f32,
-                 2.5);
+                 2.5, "tensor");
 
   //make the tensor const
   utensor.set_const(true);
@@ -220,7 +220,7 @@ int tensor_constness_example() {
     testlog_info(utensor.get_name(), "[2,2,2] = ", utensor.at({2,2,2}));
   }
   catch (const exception_t &ex) {
-    log_error(ex.what());
+    testlog_error(ex.what());
     return NOT_OK;
   }
 
@@ -228,13 +228,13 @@ int tensor_constness_example() {
 }
 
 int tensor_create_alike_example() {
-  testlog_info("**tensor create alike example.");
+  testlog_info("Tensor create alike example");
 
-  //use tensor factor to create a uniform tensor
+  //use tensor factory to create a uniform tensor
   tensor_factory_t tensor_factory;
   auto utensor = tensor_factory.uniform_tensor({MATMUL_DEPTH, MATMUL_ROWS, MATMUL_COLS},
                  data_type_t::f32,
-                 2.5);
+                 2.5, "tensor");
 
   //make the tensor const
   auto tensor_option = utensor.get_tensor_option();
@@ -249,16 +249,16 @@ int tensor_create_alike_example() {
     if ((utensor.get_size() == atensor.get_size()) &&
         (utensor.get_data_type() == atensor.get_data_type()) &&
         (utensor.get_layout() == atensor.get_layout())) {
-      testlog_info("created a tensor with same options");
+      testlog_info("Created a tensor with same options");
     }
     else {
-      log_error("failed to create tensor with same options");
+      testlog_error("Failed to create tensor with same options");
       return NOT_OK;
     }
 
   }
   catch (const exception_t &ex) {
-    log_error(ex.what());
+    testlog_error(ex.what());
     return NOT_OK;
   }
 

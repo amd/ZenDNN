@@ -38,7 +38,7 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
                             .create();
 
     if (! compare_operator.check()) {
-      log_error("operator ", compare_operator.get_name(), " creation failed.");
+      testlog_error("operator ", compare_operator.get_name(), " creation failed");
       return NOT_OK;
     }
     auto diff_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
@@ -53,15 +53,16 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
 
     auto stats = compare_operator.get_compare_stats();
     if (status == status_t::success) {
-      log_info("operator ", compare_operator.get_name(), " execution successful.");
-      log_verbose("Match Percent:",stats.match_percent, "%, ",
-                  "Mean Deviation:",stats.mean_deviation,", ",
-                  "Max Deviation:",stats.max_deviation,", ",
-                  "Min Deviation:",stats.min_deviation,", ",
-                  "output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",diff_tensor.at({MATMUL_M/2, MATMUL_N/2}));
+      testlog_info("operator ", compare_operator.get_name(),
+                   " execution successful.");
+      testlog_verbose("Match Percent:",stats.match_percent, "%, ",
+                      "Mean Deviation:",stats.mean_deviation,", ",
+                      "Max Deviation:",stats.max_deviation,", ",
+                      "Min Deviation:",stats.min_deviation,", ",
+                      "output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",diff_tensor.at({MATMUL_M/2, MATMUL_N/2}));
     }
     else {
-      log_info("operator ", compare_operator.get_name(), " execution failed.");
+      testlog_info("operator ", compare_operator.get_name(), " execution failed");
       return NOT_OK;
     }
 
@@ -75,19 +76,17 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
 }
 
 int compare_op_example() {
-  log_info("**compare op example**");
+  testlog_info("Compare operator example");
   try {
     tensor_factory_t tensor_factory;
 
     auto input_tensor_1 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
                           data_type_t::f32,
-                          2.0);
-    input_tensor_1.set_name("compare_input1");
+                          2.0, "compare_input1");
 
     auto input_tensor_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
                           data_type_t::f32,
-                          2.0);
-    input_tensor_2.set_name("compare_input2");
+                          2.0, "compare_input2");
 
     //Call to compare operator
     compare_operator_execute(input_tensor_1, input_tensor_2);
@@ -100,20 +99,18 @@ int compare_op_example() {
 }
 
 int compare_ref_and_aocl_matmul_kernel_example() {
-  log_info("**compare ref and aocl matmul kernel example**");
+  testlog_info("Compare ref and aocl matmul kernel example");
 
   try {
     tensor_factory_t tensor_factory;
     status_t status;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                    data_type_t::f32,
-                   1.0);
-    weights.set_name("weights");
+                   1.0, "weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                    data_type_t::f32,
-                   -10.0);
-    weights.set_name("bias");
+                   -10.0, "bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -126,16 +123,15 @@ int compare_ref_and_aocl_matmul_kernel_example() {
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                         data_type_t::f32,
-                        1.0);
-    input_tensor.set_name("matmul_input");
+                        1.0, "matmul_input");
 
     auto output_tensor_ref = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                             data_type_t::f32);
-    output_tensor_ref.set_name("matmul_output");
+                             data_type_t::f32,
+                             "matmul_output");
 
     auto output_tensor_aocl = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                              data_type_t::f32);
-    output_tensor_aocl.set_name("matmul_output");
+                              data_type_t::f32,
+                              "matmul_output");
 
 
     //Call to reference matmul kernel
@@ -145,7 +141,8 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                                .create();
 
     if (! matmul_operator_ref.check()) {
-      log_error(" operator ", matmul_operator_ref.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator_ref.get_name(),
+                    " creation failed.");
       return NOT_OK;
     }
 
@@ -155,10 +152,11 @@ int compare_ref_and_aocl_matmul_kernel_example() {
              .set_forced_kernel("reference")
              .execute();
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator_ref.get_name(), " execution successful.");
+      testlog_info("operator ", matmul_operator_ref.get_name(),
+                   " execution successful.");
     }
     else {
-      log_info("operator ", matmul_operator_ref.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator_ref.get_name(), " execution failed");
       return NOT_OK;
     }
 
@@ -168,7 +166,7 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                            .set_context(matmul_context)
                            .create();
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed");
       return NOT_OK;
     }
     status = matmul_operator
@@ -176,10 +174,10 @@ int compare_ref_and_aocl_matmul_kernel_example() {
              .set_output("matmul_output", output_tensor_aocl)
              .execute();
     if (status == status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution successful.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful");
     }
     else {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed");
       return NOT_OK;
     }
 

@@ -24,54 +24,55 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
                                        data_type dtype_, std::string tensor_name_) {
 
   auto ztensor = tensor_t()
-    .set_name(tensor_name_)
-    .set_size(size_)
-    .set_data_type(dtype_)
-    .set_storage()
-    .create();
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
 
   if (! ztensor.check()) {
     log_warning("tensor creation of ", ztensor.get_name(), " failed.");
-  } else {
+  }
+  else {
     auto  buf_size = ztensor.get_buffer_sz_bytes();
-    void* buf_ptr  = ztensor.get_raw_handle_unsafe();
+    void *buf_ptr  = ztensor.get_raw_handle_unsafe();
     std::memset(buf_ptr, 0, buf_size);
   }
   return ztensor;
 }
 
 tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
-                                          data_type dtype_,
-                                          float val_, std::string tensor_name_) {
+                                          data_type dtype_, float val_,
+                                          std::string tensor_name_) {
 
   auto utensor = tensor_t()
-    .set_name(tensor_name_)
-    .set_size(size_)
-    .set_data_type(dtype_)
-    .set_storage()
-    .create();
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
 
   if (! utensor.check()) {
     log_warning("tensor creation of ", utensor.get_name(), " failed.");
   }
   else {
     auto  buf_nelem  = utensor.get_nelem();
-    void* buf_vptr   = utensor.get_raw_handle_unsafe();
+    void *buf_vptr   = utensor.get_raw_handle_unsafe();
 
     if (dtype_ == data_type::f32) {
-      float* buf_ptr = static_cast<float*>(buf_vptr);
+      float *buf_ptr = static_cast<float *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = val_;
       }
     }
     else if (dtype_ == data_type::bf16) {
-      bfloat16_t* buf_ptr = static_cast<bfloat16_t*>(buf_vptr);
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = bfloat16_t(val_);
       }
     }
-    else if(dtype_ == data_type::s8) {
-      int8_t* buf_ptr = static_cast<int8_t*>(buf_vptr);
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = static_cast<int8_t>(val_);
       }
@@ -84,14 +85,15 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
 }
 
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type> size_,
-                                               data_type dtype_, float range_) {
+                                               data_type dtype_, float range_,
+                                               std::string tensor_name_) {
 
   auto udtensor = tensor_t()
-    .set_name("uniform dist tensor")
-    .set_size(size_)
-    .set_data_type(dtype_)
-    .set_storage()
-    .create();
+                  .set_name(tensor_name_)
+                  .set_size(size_)
+                  .set_data_type(dtype_)
+                  .set_storage()
+                  .create();
 
   if (! udtensor.check()) {
     log_warning("tensor creation of ", udtensor.get_name(), " failed.");
@@ -101,19 +103,19 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type> siz
     std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
 
     auto  buf_nelem  = udtensor.get_nelem();
-    void* buf_vptr   = udtensor.get_raw_handle_unsafe();
+    void *buf_vptr   = udtensor.get_raw_handle_unsafe();
 
     if (dtype_ == data_type::f32) {
-      float* buf_ptr = static_cast<float*>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr+buf_nelem, [&]{return dist(gen);});
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return dist(gen);});
     }
     else if (dtype_ == data_type::bf16) {
-      bfloat16_t* buf_ptr = static_cast<bfloat16_t*>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr+buf_nelem, [&]{return bfloat16_t(dist(gen));});
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
     }
-    else if(dtype_ == data_type::s8) {
-      int8_t* buf_ptr = static_cast<int8_t*>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr+buf_nelem, [&]{return int8_t(dist(gen));});
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
     }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
@@ -122,16 +124,17 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type> siz
   return udtensor;
 }
 
-tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                                          size_t size, void* reord_buff) {
+tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
+                                          data_type dtype_, size_t size,
+                                          void *reord_buff, std::string tensor_name_) {
 
   auto btensor = tensor_t()
-    .set_name("blocked tensor")
-    .set_size(size_)
-    .set_data_type(dtype_)
-    .set_storage(reord_buff, size)
-    .set_layout(tensor_layout_t::blocked)
-    .create();
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage(reord_buff, size)
+                 .set_layout(tensor_layout_t::blocked)
+                 .create();
 
   if (! btensor.check()) {
     log_warning("tensor creation of ", btensor.get_name(), " failed.");

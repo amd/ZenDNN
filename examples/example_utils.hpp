@@ -34,7 +34,7 @@ using namespace zendnnl::interface;
  * @brief Quick generation of predefined tensors.
  */
 class tensor_factory_t {
-public:
+ public:
   /** @brief Index type */
   using index_type = tensor_t::index_type;
   using data_type  = common::data_type_t;
@@ -49,11 +49,12 @@ public:
 
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
-                               data_type dtype_, float range_);
+                               data_type dtype_, float range_,
+                               std::string tensor_name_="uniform dist");
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          size_t size, void* reord_buff);
+                          size_t size, void *reord_buff_, std::string tensor_name_="blocked");
 };
 
 } //examples
