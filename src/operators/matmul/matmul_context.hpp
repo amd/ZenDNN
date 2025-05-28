@@ -55,6 +55,7 @@ protected:
   /** @brief validate parameters */
   status_t validate() override;
 
+  /** @brief Returns matmul context information */
   std::string context_info() override;
 
   std::shared_ptr<aocl_utils_t> aocl_utils_ptr; /**< aocl utils */

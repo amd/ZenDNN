@@ -33,7 +33,9 @@ class reorder_operator_t final : public
 
  protected:
   status_t validate() override;
+  std::string operator_info() override;
   status_t kernel_factory() override;
+
 };
 
 } //namespace ops

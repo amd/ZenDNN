@@ -449,10 +449,28 @@ void tensor_t::validate_meta_info() {
 
 std::string tensor_t::tensor_info() {
   std::stringstream ss;
-  ss << get_name() << "[";
+  auto layout = get_layout();
 
+  switch (layout) {
+  case tensor_layout_t::contiguous:
+    ss << "contiguous,";
+    break;
+  case tensor_layout_t::strided:
+    ss << "strided,";
+    break;
+  case tensor_layout_t::blocked:
+    ss << "blocked,";
+    break;
+  case tensor_layout_t::oblique:
+    ss << "oblique,";
+    break;
+  default:
+    ss << "";
+  }
+
+  ss << get_name() << "[";
   uint32_t dim = get_dim();
-  if(dim == 1) {
+  if (dim == 1) {
     ss << "1,";
   }
   for (uint32_t i = 0; i < dim; ++i) {
@@ -461,7 +479,6 @@ std::string tensor_t::tensor_info() {
       ss << ",";
     }
   }
-
   ss << "]";
 
   return ss.str();

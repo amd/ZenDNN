@@ -49,6 +49,9 @@ class reorder_context_t final : public op_context_t<reorder_context_t> {
   /** @brief get source data type */
   data_type_t get_source_dtype() const;
 
+  /** @brief Returns reorder context information */
+  std::string context_info() override;
+
  protected:
   /** @brief validate parameters */
   status_t validate() override;

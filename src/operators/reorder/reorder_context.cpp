@@ -51,5 +51,19 @@ data_type_t reorder_context_t::get_source_dtype() const {
   return source_dtype;
 }
 
+std::string reorder_context_t::context_info() {
+  std::stringstream ss;
+  auto algo_format = get_algo_format();
+
+  if (algo_format.empty()) {
+    ss << "";
+  }
+  else {
+    ss << "algo_format:" << algo_format;
+  }
+
+  return ss.str();
+}
+
 } //namespace ops
 } //namespace zendnnl

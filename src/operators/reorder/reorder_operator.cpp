@@ -63,6 +63,17 @@ status_t reorder_operator_t::validate() {
   return status_t::success;
 }
 
+std::string reorder_operator_t::operator_info() {
+  std::stringstream ss;
+  auto input   = get_input("reorder_input").value();
+  auto output  = get_output("reorder_output").value();
+
+  ss <<input.tensor_info()<<","<<output.tensor_info()<<","
+     <<context.context_info();
+
+  return ss.str();
+}
+
 status_t reorder_operator_t::kernel_factory() {
   auto algo_format = context.get_algo_format();
 

@@ -22,7 +22,7 @@ using namespace zendnnl::error_handling;
 status_t reorder_kernel_t::execute(const context_type &context_,
                                    tensor_map_type &inputs_,
                                    tensor_map_type &outputs_) {
-  log_info("reorder_kernel");
+  log_info("Executing reorder kernel");
   auto     reorder_algo    = context_.get_algo_format();
   if (reorder_algo == "aocl") {
     auto     input_tensor  = inputs_.find("reorder_input")->second;
