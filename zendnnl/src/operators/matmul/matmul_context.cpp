@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ status_t matmul_context_t::validate() {
 status_t matmul_context_t::preprocess() {
   LOG_DEBUG_INFO("Preprocessing matmul_context_t");
   //aocl context pointer
-  aocl_utils_ptr = std::make_shared<aocl_utils_t>();
+  aocl_utils_ptr = std::make_shared<aocl_blis_utils_t>();
   return status_t::success;
 }
 

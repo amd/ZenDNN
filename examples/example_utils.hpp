@@ -52,6 +52,12 @@ class tensor_factory_t {
                                data_type dtype_, float range_,
                                std::string tensor_name_="uniform dist");
 
+  /** @brief uniform distributed strided tensor */
+  tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
+                                       const std::vector<index_type> stride_,
+                                       data_type dtype_, float range_,
+                                       std::string tensor_name_="strided uniform dist");
+
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
                           size_t size, void *reord_buff_, std::string tensor_name_="blocked");

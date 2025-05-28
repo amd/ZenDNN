@@ -27,6 +27,10 @@ using namespace zendnnl::interface;
 using namespace zendnnl::examples;
 
 int main() {
+  /** Tensor functionality examples.
+   *  Demonstrates strided, unaligned allocation, aligned allocation,
+   *  constness of tensor functionalities of tensor.
+   */
   tensor_unaligned_allocation_example();
   tensor_aligned_allocation_example();
   tensor_strided_aligned_allocation_example();
@@ -34,20 +38,37 @@ int main() {
   tensor_move_and_refcount_example();
   tensor_constness_example();
   tensor_create_alike_example();
-  sample_f32_kernel_example();
-  sample_bf16_kernel_example();
+
+  /** MatMul operator functionality examples.
+   *  Demonstrates fused post-ops, different data types computation,
+   *  strided input MatMul functionalities of MatMul operator.
+   */
   matmul_relu_f32_kernel_example();
   matmul_relu_bf16_kernel_example();
   matmul_relu_forced_ref_kernel_example();
   matmul_mul_silu_mul_f32_kernel_example();
   matmul_silu_mul_bf16_kernel_example();
+  matmul_strided_f32_kernel_example();
+
+  /** Reorder operator functionality examples.
+   *  Demonstrates reordering to blocked format,
+   *  inplace reorder functionalities of Reorder operator.
+   */
   reorder_f32_kernel_example();
   reorder_s8_kernel_example();
   reorder_matmul_relu_f32_kernel_example();
   reorder_inplace_bf16_example();
   reorder_inplace_matmul_relu_bf16_kernel_example();
+
+  /** Compare operator functionality examples.
+   *  Demonstrates compare operator usage for comparison of tensors.
+   */
   compare_op_example();
   compare_ref_and_aocl_matmul_kernel_example();
+
+  // Sample functionality examples.
+  sample_f32_kernel_example();
+  sample_bf16_kernel_example();
 
   return OK;
 }

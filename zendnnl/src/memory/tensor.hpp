@@ -240,6 +240,11 @@ public:
    * it is not a CNN for processing image data), therefor it is represented
    * as a string. DNN can set this string as their context requires it.
    *
+   * Tensor order for a 2D tensor in case of MatMul can be used by library
+   * to compute in transposed or non-transposed manner.
+   * If the order is set as "ab" then tensor is treated non-transposed.
+   * If the order is set as "ba" then tensor is treated transposed.
+   *
    * There is no default channel order.
    * @param order_: tensor channel order.
    * @return A reference to self.

@@ -13,7 +13,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "operators/matmul/matmul_aocl_utils.hpp"
+#include "operators/matmul/matmul_aocl_blis_utils.hpp"
 #include "common/data_types.hpp" // Ensure this header defines data_type_t
 
 namespace zendnnl {
@@ -28,6 +28,7 @@ inline void eltwise_init(aocl_post_op *&aocl_po_ptr, int eltwise_count,
   (aocl_po_ptr->eltwise[eltwise_count]).algo.beta = nullptr;
   (aocl_po_ptr->eltwise[eltwise_count]).algo.algo_type = algo_type;
 }
+
 //Returns AOCL data type
 AOCL_PARAMS_STORAGE_TYPES get_aocl_store_type(data_type_t dt) {
   switch (dt) {
@@ -56,7 +57,7 @@ AOCL_PARAMS_STORAGE_TYPES get_aocl_store_type(data_type_t dt) {
 }
 
 template <typename T>
-size_t aocl_utils_t::reorder_weights_execute(
+size_t aocl_blis_utils_t::reorder_weights_execute(
   const void *weights,
   const int k,
   const int n,
@@ -65,7 +66,7 @@ size_t aocl_utils_t::reorder_weights_execute(
   const char trans,
   get_reorder_buff_size_func_ptr get_reorder_buf_size,
   reorder_func_ptr<T> reorder_func) {
-  LOG_DEBUG_INFO("Reodering weights aocl_utils_t");
+  LOG_DEBUG_INFO("Reodering weights aocl_blis_utils_t");
   log_info("BLIS reorder weights");
   siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                 k, n);
@@ -77,7 +78,7 @@ size_t aocl_utils_t::reorder_weights_execute(
   return b_reorder_buf_siz_req;
 }
 
-status_t aocl_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
+status_t aocl_blis_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
   uint32_t max_matrix_mul_po = post_op_size["binary_mul"];
   uint32_t max_matrix_add_po = post_op_size["binary_add"];
   if (inputs_.size() > max_matrix_mul_po + max_matrix_add_po) {
@@ -127,10 +128,10 @@ status_t aocl_utils_t::set_runtime_post_op_buffer(tensor_map_type &inputs_) {
   return status_t::success;
 }
 
-status_t aocl_utils_t::aocl_post_op_memory_alloc(const std::vector<post_op_t>
+status_t aocl_blis_utils_t::aocl_post_op_memory_alloc(const std::vector<post_op_t>
     post_op_vec_,
     bool is_bias) {
-  LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_utils_t");
+  LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_blis_utils_t");
   //Allocate memory
   size_t max_post_ops = post_op_vec_.size();
   if (is_bias) {
@@ -193,9 +194,9 @@ status_t aocl_utils_t::aocl_post_op_memory_alloc(const std::vector<post_op_t>
   return status_t::success;
 }
 
-status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
+status_t aocl_blis_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     post_op_vec_, int &post_op_count) {
-  LOG_DEBUG_INFO("Initializing aocl post-op in aocl_utils_t");
+  LOG_DEBUG_INFO("Initializing aocl post-op in aocl_blis_utils_t");
   //add remaining post-ops
   size_t max_post_ops = post_op_vec_.size();
   //Index for each post-op
@@ -293,9 +294,9 @@ status_t aocl_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
   return status_t::success;
 }
 
-status_t aocl_utils_t::alloc_post_op(const std::vector<post_op_t> post_op_vec_,
+status_t aocl_blis_utils_t::alloc_post_op(const std::vector<post_op_t> post_op_vec_,
                                      std::optional<tensor_t> optional_bias_tensor_) {
-  LOG_DEBUG_INFO("Allocating post-ops in aocl_utils_t");
+  LOG_DEBUG_INFO("Allocating post-ops in aocl_blis_utils_t");
 
   // Iterate through each postop, check and add it if needed.
   int post_op_count = 0;
@@ -354,8 +355,8 @@ status_t aocl_utils_t::alloc_post_op(const std::vector<post_op_t> post_op_vec_,
   return status_t::success;
 }
 
-void aocl_utils_t::free_post_op() {
-  LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_utils_t");
+void aocl_blis_utils_t::free_post_op() {
+  LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_blis_utils_t");
   if (aocl_po_ptr == nullptr) {
     return;
   }
@@ -411,13 +412,13 @@ void aocl_utils_t::free_post_op() {
   free(aocl_po_ptr);
 }
 
-aocl_post_op *aocl_utils_t::get_aocl_post_op_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl post-op ptr from aocl_utils_t");
+aocl_post_op *aocl_blis_utils_t::get_aocl_post_op_ptr_unsafe() const {
+  LOG_DEBUG_INFO("Getting aocl post-op ptr from aocl_blis_utils_t");
   return aocl_po_ptr;
 }
 
-status_t aocl_utils_t::reorder_weights(std::optional<tensor_t> weights) {
-  LOG_DEBUG_INFO("Selecting aocl reorder fucntion based on data type");
+status_t aocl_blis_utils_t::reorder_weights(std::optional<tensor_t> weights) {
+  LOG_DEBUG_INFO("Selecting aocl_blis reorder function based on data type");
   if (!weights) {
     log_error("Weights tensor is not set");
     return status_t::failure;
@@ -430,7 +431,8 @@ status_t aocl_utils_t::reorder_weights(std::optional<tensor_t> weights) {
   bool trans_weights = weights->get_order() == "ba";
   int k = weights->get_size(0);
   int n = weights->get_size(1);
-  int ldb = trans_weights ? k : n;
+  int ldb = trans_weights ? weights->get_stride_size(0) :
+            weights->get_stride_size(1);
   auto weights_ptr = weights->get_raw_handle_const();
   data_type_t weight_data_type = weights->get_data_type();
   if (weight_data_type == data_type_t::f32) {
@@ -466,20 +468,20 @@ status_t aocl_utils_t::reorder_weights(std::optional<tensor_t> weights) {
   return status_t::success;
 }
 
-void *aocl_utils_t::get_aocl_reordered_weights_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl reordered weights ptr aocl_utils_t");
+void *aocl_blis_utils_t::get_aocl_reordered_weights_ptr_unsafe() const {
+  LOG_DEBUG_INFO("Getting aocl reordered weights ptr aocl_blis_utils_t");
   return reordered_weights_ptr;
 }
 
-aocl_utils_t::aocl_utils_t()
+aocl_blis_utils_t::aocl_blis_utils_t()
   :aocl_po_ptr{nullptr}, reordered_weights_ptr{nullptr} {
   post_op_size.insert({"eltwise",0});
   post_op_size.insert({"binary_add",0});
   post_op_size.insert({"binary_mul",0});
 }
 
-aocl_utils_t::~aocl_utils_t() {
-  LOG_DEBUG_INFO("Destroying aocl_utils_t");
+aocl_blis_utils_t::~aocl_blis_utils_t() {
+  LOG_DEBUG_INFO("Destroying aocl_blis_utils_t");
   if (reordered_weights_ptr) {
     free(reordered_weights_ptr);
     reordered_weights_ptr = nullptr;

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -80,6 +80,12 @@ status_t matmul_operator_t::validate() {
 
   auto input_size  = input->get_size();
   auto output_size = output->get_size();
+  auto out_order   = output->get_order();
+
+  if (out_order == "ba") {
+    log_error("<", get_name(), "> kernel needs non-transposed output tensors.");
+    return status_t::failure;
+  }
 
   if ((input_size.size() != 2) || (output_size.size() != 2)) {
     return status_t::failure;
@@ -104,7 +110,8 @@ status_t matmul_operator_t::validate() {
 
 status_t matmul_operator_t::validate_forced_kernel() {
 
-  if (forced_kernel.empty()) {
+  if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
+      forced_kernel == "aocl_blis_blocked") {
     return status_t::success;
   }
 
@@ -142,9 +149,11 @@ status_t matmul_operator_t::preprocess() {
   //get weight tensor for reorder
   auto weight_tensor = context.get_param("weights");
 
-  if (context.aocl_utils_ptr->reorder_weights(weight_tensor)
-      == status_t::failure) {
-    return status_t::failure;
+  if (forced_kernel == "aocl_blis_blocked") {
+    if (context.aocl_utils_ptr->reorder_weights(weight_tensor)
+        == status_t::failure) {
+      return status_t::failure;
+    }
   }
   //initialize aocl po
   if (context.aocl_utils_ptr->alloc_post_op(context.get_post_op(),
@@ -194,7 +203,8 @@ status_t matmul_operator_t::kernel_factory() {
   //   return status_t::unimplemented;
 
   //get forced kernel if any
-  if (forced_kernel.empty() || forced_kernel == "aocl") {
+  if (forced_kernel.empty() || forced_kernel == "aocl_blis_blocked" ||
+      forced_kernel == "aocl_blis") {
     /**TODO: move the preprocess to specific kernel */
     if (preprocess() != status_t::success) {
       return status_t::failure;

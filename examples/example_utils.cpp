@@ -20,6 +20,49 @@ namespace examples {
 
 using namespace zendnnl::interface;
 
+tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
+    std::vector<index_type> size_, const std::vector<index_type> stride_,
+    data_type dtype_, float range_, std::string tensor_name_) {
+  auto udstensor = tensor_t()
+                   .set_name(tensor_name_)
+                   .set_size(size_)
+                   .set_data_type(dtype_)
+                   .set_stride_size(stride_)
+                   .set_storage()
+                   .create();
+
+  if (! udstensor.check()) {
+    log_warning("tensor creation of ", udstensor.get_name(), " failed.");
+  }
+  else {
+    std::mt19937 gen(100);
+    std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
+
+    auto  buf_nelem   = stride_[0];
+    for (size_t i = 1;i<stride_.size();i++) {
+      buf_nelem *=stride_[i];
+    }
+    void *buf_vptr    = udstensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return dist(gen);});
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
+    }
+    else {
+      log_warning("tensor ", udstensor.get_name(), " unsupported data type.");
+    }
+  }
+  return udstensor;
+}
+
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
                                        data_type dtype_, std::string tensor_name_) {
 

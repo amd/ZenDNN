@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ int matmul_relu_bf16_kernel_example();
  *  matmul operator implements matrix multiplication on 2D tensors. This operator
  *  can be fused with various post_ops.
  *
- *  This example demonstrates matmul binary_mul silu binary_mul fused operator 
+ *  This example demonstrates matmul binary_mul silu binary_mul fused operator
  *  creation and execution of one of its f32 computation based kernel.
  */
 int matmul_mul_silu_mul_f32_kernel_example();
@@ -72,6 +72,17 @@ int matmul_mul_silu_mul_f32_kernel_example();
  *  execution of one of its bf16 computation based kernel.
  */
 int matmul_silu_mul_bf16_kernel_example();
+
+/** @fn matmul_strided_f32_kernel_example
+ *  @brief Demonstrates matmul with strided weights fused operator on f32 inputs.
+ *
+ *  matmul operator implements matrix multiplication on 2D tensors. This operator
+ *  can be fused with various post_ops.
+ *
+ *  This example demonstrates matmul with strided weights fused operator creation and
+ *  execution of one of its f32 computation based kernel.
+ */
+int matmul_strided_f32_kernel_example();
 
 /** @fn matmul_relu_forced_ref_kernel_example
  *  @brief Demonstrates matmul+relu fused operator reference kernel enforced by user.

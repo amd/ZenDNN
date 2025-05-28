@@ -13,8 +13,8 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _MATMUL_AOCL_CONTEXT_HPP_
-#define _MATMUL_AOCL_CONTEXT_HPP_
+#ifndef _MATMUL_AOCL_BLIS_CONTEXT_HPP_
+#define _MATMUL_AOCL_BLIS_CONTEXT_HPP_
 
 #include <vector>
 #include <map>
@@ -32,16 +32,16 @@ namespace ops {
 
 using namespace zendnnl::memory;
 
-/** @class aocl_utils_t
- *  @brief reordering to blocked format for @c tensor_t and setting AOCL post-ops.
+/** @class aocl_blis_utils_t
+ *  @brief reordering to blocked format for @c tensor_t and setting AOCL BLIS post-ops.
  *
  * Reorders the tensor to blocked format according to data type.
- * Sets AOCL post-ops for MatMul
+ * Sets AOCL BLIS post-ops for MatMul
  */
-class aocl_utils_t {
+class aocl_blis_utils_t {
 public:
-  aocl_utils_t();
-  ~aocl_utils_t();
+  aocl_blis_utils_t();
+  ~aocl_blis_utils_t();
 
   using tensor_map_type = std::map<std::string, tensor_t>;
 

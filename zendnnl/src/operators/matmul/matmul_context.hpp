@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_context.hpp"
-#include "operators/matmul/matmul_aocl_utils.hpp"
+#include "operators/matmul/matmul_aocl_blis_utils.hpp"
 
 namespace zendnnl {
 namespace ops {
@@ -58,7 +58,7 @@ protected:
   /** @brief Returns matmul context information */
   std::string context_info() override;
 
-  std::shared_ptr<aocl_utils_t> aocl_utils_ptr; /**< aocl utils */
+  std::shared_ptr<aocl_blis_utils_t> aocl_utils_ptr; /**< aocl blis utils */
   friend class matmul_operator_t;
 };
 

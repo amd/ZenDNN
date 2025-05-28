@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,25 +20,27 @@ namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
 
-status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
-                                             tensor_map_type& inputs_,
-                                             tensor_map_type& outputs_) {
+status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
+    tensor_map_type &inputs_,
+    tensor_map_type &outputs_) {
   LOG_DEBUG_INFO("Executing matmul_fp32_avx512 kernel");
   log_info("Executing matmul_fp32_avx512 kernel");
 
   auto   aocl_po_ptr        = context_.get_aocl_post_op_ptr_unsafe();
-  auto   reorder_weights    = (float*)context_.get_aocl_reordered_weights_ptr_unsafe();
+  auto   reorder_weights    = (float *)
+                              context_.get_aocl_reordered_weights_ptr_unsafe();
   auto   input_tensor       = inputs_.find("matmul_input")->second;
   auto   output_tensor      = outputs_.find("matmul_output")->second;
   auto   weight_tensor      = context_.get_param("weights").value();
 
-  float* input_raw_handle   = (float *)input_tensor.get_raw_handle_unsafe();
-  float* output_raw_handle  = (float *)output_tensor.get_raw_handle_unsafe();
-  float* weights_raw_handle = (float *)weight_tensor.get_raw_handle_unsafe();
+  float *input_raw_handle   = (float *)input_tensor.get_raw_handle_unsafe();
+  float *output_raw_handle  = (float *)output_tensor.get_raw_handle_unsafe();
+  float *weights_raw_handle = (float *)weight_tensor.get_raw_handle_unsafe();
 
+  bool is_transpose_src     = input_tensor.get_order() == "ba";
   bool is_transpose_weights = weight_tensor.get_order() == "ba";
-  bool is_transpose_src = input_tensor.get_order() == "ba";
-  bool is_blocked = weight_tensor.get_layout() == tensor_layout_t::blocked ? true : false;
+  bool is_blocked           = weight_tensor.get_layout() ==
+                              tensor_layout_t::blocked ? true : false;
 
   bool is_reordered_weights = false;
   if (reorder_weights != nullptr) {
@@ -57,9 +59,11 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
   const char  weight_format = is_blocked ? 'r': 'n';
   const float alpha         = 1.0;
   const float beta          = 0.0;
-  const int   lda           = is_transpose_src ? m : k;
-  const int   ldb           = is_transpose_weights ? k : n;
-  const int   ldc           = n;
+  const int   lda           = is_transpose_src ? input_tensor.get_stride_size(
+                                0) : input_tensor.get_stride_size(1);
+  const int   ldb           = is_transpose_weights ?
+                              weight_tensor.get_stride_size(0) : weight_tensor.get_stride_size(1);
+  const int   ldc           = output_tensor.get_stride_size(1);
 
   aocl_gemm_f32f32f32of32(order, trans_input, trans_weight,
                           m,n,k,
@@ -78,7 +82,8 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type& context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_f32_avx512_kernel_t> get_matmul_f32_avx512_kernel() {
+  std::shared_ptr<zendnnl::ops::matmul_f32_avx512_kernel_t>
+  get_matmul_f32_avx512_kernel() {
     return std::make_shared<zendnnl::ops::matmul_f32_avx512_kernel_t>();
   }
 }
