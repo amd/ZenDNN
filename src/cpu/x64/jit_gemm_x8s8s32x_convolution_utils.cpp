@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -368,7 +368,7 @@ void jit_pp_ker_t::load_as_f32(const Xbyak::Zmm &dst,
 }
 
 void jit_pp_ker_t::generate() {
-    using namespace Xbyak;
+    using namespace zendnn::Xbyak;
     using namespace utils;
 
     size_t vlen = cpu_isa_traits<avx512_core>::vlen / sizeof(float);

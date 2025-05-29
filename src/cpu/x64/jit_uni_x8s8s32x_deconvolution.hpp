@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -47,7 +47,7 @@ template <cpu_isa_t isa, typename Vmm>
 class jit_uni_postops_injector_t;
 } // namespace injector
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 template <cpu_isa_t isa, typename Vmm>
 struct _jit_uni_x8s8s32x_deconv_fwd_kernel : public jit_generator {

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -72,7 +72,7 @@ struct jit_uni_rnn_postgemm : public jit_generator {
 
     virtual status_t init(data_type_t src_data_t) {
         // no need to check as bf16 is guarded for avx512 and above in rnn primtive
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
         if (src_data_t == data_type::bf16 && !mayiuse(avx512_core_bf16)) {
             bf16_emu_ = new bf16_emulation_t(this, bf16_reg1, bf16_reg2,
                     bf16_reg3, bf16_reg4, bf16_reg5);

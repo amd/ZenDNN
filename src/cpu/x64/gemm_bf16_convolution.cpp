@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -83,7 +83,7 @@ gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::pp_ker_t(const pd_t *pd)
     , compute_reg_step_(1)
     , data_reg_base_idx_(0) {
     using namespace types;
-    using namespace Xbyak;
+    using namespace zendnn::Xbyak;
 
     if (!mayiuse(avx512_core))
         // bf16 is not supported
@@ -158,7 +158,7 @@ void gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::apply_postops(
 
 template <data_type_t dst_data_type>
 void gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::generate() {
-    using namespace Xbyak;
+    using namespace zendnn::Xbyak;
     using namespace utils;
 
     preamble();

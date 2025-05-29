@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -35,7 +35,7 @@ namespace x64 {
 using namespace zendnn::impl::prop_kind;
 using namespace zendnn::impl::utils;
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 void jit_avx512_core_bf16_sum_kernel::loop_iteration(int current_unroll) {
     Label loop_label, exit_label;
     const int num_compute_elements = 2 * f32_simd_w * current_unroll;

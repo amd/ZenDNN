@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -46,7 +46,7 @@ namespace x64 {
 using namespace zendnn::impl::utils;
 using namespace zendnn::impl::data_type;
 using namespace zendnn::impl::prop_kind;
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 template <typename Vmm>
 _jit_avx512_core_x8s8s32x_1x1_conv_kernel<Vmm>::

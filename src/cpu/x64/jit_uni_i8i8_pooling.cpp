@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -47,7 +47,7 @@ static inline dim_t get_offset(
     return 0;
 }
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 using namespace zendnn::impl::utils;
 using namespace zendnn::impl::utils;

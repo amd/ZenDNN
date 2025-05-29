@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -33,7 +33,7 @@ namespace lnorm_utils {
 using namespace zendnn::impl::cpu::lnorm_utils;
 using namespace zendnn::impl::cpu::x64;
 using namespace data_type;
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 using namespace Xbyak::util;
 
 template <data_type_t>

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -54,7 +54,7 @@ struct xbyak_gemm_smalln_tn_t : public jit_generator {
         : jit_generator(code_ptr, code_size), N(N), beta(beta), alpha(alpha) {}
 
     void generate() override ATTRIBUTE_OPTIMIZE {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
         /**
          * numN = 1 : 16 rows of A, 1x16 accumulators
          * numN = 2 : 8  rows of A, 2x8  accumulators

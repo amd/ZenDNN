@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -57,7 +57,7 @@ bool is_supported(cpu_isa_t isa, alg_kind_t alg) {
 
 } // namespace eltwise_injector
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 template <cpu_isa_t isa, typename Wmm>
 void jit_uni_eltwise_injector_f32<isa, Wmm>::injector_preamble(

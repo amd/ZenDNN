@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -32,7 +32,7 @@ namespace impl {
 namespace cpu {
 namespace x64 {
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 #define GET_OFF(field) offsetof(jit_shuffle_call_s, field)
 

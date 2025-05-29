@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -234,7 +234,7 @@ bool check_kernel_cond(int dimM_block, int dimM_reg_block, int dimM_simd_block,
 
 using namespace zendnn::impl::format_tag;
 using namespace zendnn::impl::utils;
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 void _jit_avx512_core_f32_wino_conv_4x3_data_kernel::gemm_loop_generate() {
     // for (int dimM_block =0; dimM_block < jcp.dimM_block; dimM_block++)

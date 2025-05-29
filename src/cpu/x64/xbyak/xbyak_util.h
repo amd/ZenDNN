@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -131,7 +131,7 @@
 	#define XBYAK_USE_PERF
 #endif
 
-namespace Xbyak { namespace util {
+namespace zendnn { namespace Xbyak { namespace util {
 
 typedef enum {
    SmtLevel = 1,
@@ -820,7 +820,7 @@ public:
 		, p(p_)
 		, t(t_)
 	{
-		using namespace Xbyak;
+		using namespace zendnn::Xbyak;
 		if (pNum < 0 || pNum > 4) XBYAK_THROW(ERR_BAD_PNUM)
 		const int allRegNum = pNum + tNum_ + (useRcx_ ? 1 : 0) + (useRdx_ ? 1 : 0);
 		if (tNum_ < 0 || allRegNum > maxRegNum) XBYAK_THROW(ERR_BAD_TNUM)
@@ -852,7 +852,7 @@ public:
 	*/
 	void close(bool callRet = true)
 	{
-		using namespace Xbyak;
+		using namespace zendnn::Xbyak;
 		const Reg64& _rsp = code_->rsp;
 		const int *tbl = getOrderTbl() + noSaveNum;
 		if (P_ > 0) code_->add(_rsp, P_);
@@ -870,7 +870,7 @@ public:
 private:
 	const int *getOrderTbl() const
 	{
-		using namespace Xbyak;
+		using namespace zendnn::Xbyak;
 		static const int tbl[] = {
 #ifdef XBYAK64_WIN
 			Operand::RCX, Operand::RDX, Operand::R8, Operand::R9, Operand::R10, Operand::R11, Operand::RDI, Operand::RSI,
@@ -884,7 +884,7 @@ private:
 	int getRegIdx(int& pos) const
 	{
 		assert(pos < maxRegNum);
-		using namespace Xbyak;
+		using namespace zendnn::Xbyak;
 		const int *tbl = getOrderTbl();
 		int r = tbl[pos++];
 		if (useRcx_) {
@@ -1031,6 +1031,6 @@ public:
 };
 #endif // XBYAK_ONLY_CLASS_CPU
 
-} } // end of util
+} } }// end of util
 
 #endif

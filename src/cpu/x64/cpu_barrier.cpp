@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -34,7 +34,7 @@ void generate(
         jit_generator &code, Xbyak::Reg64 reg_ctx, Xbyak::Reg64 reg_nthr) {
 #define BAR_CTR_OFF offsetof(ctx_t, ctr)
 #define BAR_SENSE_OFF offsetof(ctx_t, sense)
-    using namespace Xbyak;
+    using namespace zendnn::Xbyak;
 
     Xbyak::Reg64 reg_tmp = [&]() {
         /* returns register which is neither reg_ctx nor reg_nthr */

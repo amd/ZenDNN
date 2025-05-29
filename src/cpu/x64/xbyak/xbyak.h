@@ -1,4 +1,9 @@
 /*******************************************************************************
+* Modifications Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+* Notified per clause 4(b) of the license.
+*******************************************************************************/
+
+/*******************************************************************************
 * Copyright 2016-2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -176,6 +181,7 @@
 	#pragma warning(disable : 4127) /* constant expresison */
 #endif
 
+namespace zendnn {
 namespace Xbyak {
 
 enum {
@@ -2871,5 +2877,7 @@ static const XBYAK_CONSTEXPR Segment es(Segment::es), cs(Segment::cs), ss(Segmen
 #endif
 
 } // end of namespace
+
+} //zendnn
 
 #endif // XBYAK_XBYAK_H_

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -184,7 +184,7 @@ struct rtus_driver_t : public jit_generator {
         , typesize_(typesize)
         , ic_(ic)
         , is_nspc_(is_nspc) {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
 
         assert(ic_ > 0);
 
@@ -251,7 +251,7 @@ struct rtus_driver_t : public jit_generator {
     }
 
     void loop_is() {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
 
         mov(reg_cur_src, reg_src);
         mov(reg_cur_iw, reg_iw_start);
@@ -307,7 +307,7 @@ struct rtus_driver_t : public jit_generator {
     }
 
     void loop_is_nspc() {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
 
         assert(is_nspc_);
 
@@ -495,7 +495,7 @@ struct rtus_driver_t : public jit_generator {
     }
 
     void generate() override {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
         assert(utils::one_of(isa, sse41, avx2, avx512_core));
 
         preamble();

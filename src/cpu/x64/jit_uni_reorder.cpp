@@ -1,5 +1,5 @@
 ﻿/*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -58,7 +58,7 @@ constexpr static bool is_windows = true;
 constexpr static bool is_windows = false;
 #endif
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;;
 using namespace zendnn::impl::types;
 
 namespace zendnn {

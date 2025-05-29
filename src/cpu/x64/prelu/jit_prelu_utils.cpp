@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -202,7 +202,7 @@ size_t get_block_tail_size(const memory_desc_t *mem) noexcept {
 void apply_zero_padding(jit_generator *host, const size_t tail_size,
         const data_type_t dt, const size_t block_tail_size,
         const Xbyak::Reg64 &reg_dst, const Xbyak::Reg64 *reg_offset) noexcept {
-    using namespace Xbyak;
+    using namespace zendnn::Xbyak;
     using namespace Xbyak::util;
 
     const Reg32 &reg_zero = eax;

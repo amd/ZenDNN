@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -87,7 +87,7 @@ protected:
     const Vmm tmp2_vmm = Vmm(10);
 
     void generate() override {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
         const auto is_training
                 = pd_->desc()->prop_kind == prop_kind::forward_training;
 

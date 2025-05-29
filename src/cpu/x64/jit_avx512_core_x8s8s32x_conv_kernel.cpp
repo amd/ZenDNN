@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -42,7 +42,7 @@ namespace x64 {
 using namespace zendnn::impl::memory_tracking::names;
 using namespace zendnn::impl::utils;
 using namespace zendnn::impl::data_type;
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 namespace {
 void pick_loop_order(jit_conv_conf_t &jcp, int nthr) {

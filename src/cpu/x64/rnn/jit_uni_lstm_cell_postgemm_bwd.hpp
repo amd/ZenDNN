@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -74,7 +74,7 @@ protected:
     const size_t scratch_dt_size_ = types::data_type_size(scratch_data_t);
 
     void generate() override {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
 
         // Labels declaration
         Label vector_loop_start_label, vector_loop_end_label;

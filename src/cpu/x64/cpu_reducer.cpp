@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -99,7 +99,7 @@ void reduce_balancer_t::balance() {
 
 /* reducer jit-ted driver */
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 template <impl::data_type_t data_type>
 struct reducer_2d_driver_t : public jit_generator {

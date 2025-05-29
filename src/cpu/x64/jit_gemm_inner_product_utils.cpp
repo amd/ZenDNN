@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -39,7 +39,7 @@ namespace x64 {
 namespace inner_product_utils {
 
 using namespace zendnn::impl::cpu::inner_product_utils;
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 using namespace data_type;
 
 template <cpu_isa_t isa>

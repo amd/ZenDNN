@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -45,7 +45,7 @@ namespace x64 {
 
 using namespace memory_tracking::names;
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 namespace barrier = simple_barrier;
 
 using acc_data_t = float;

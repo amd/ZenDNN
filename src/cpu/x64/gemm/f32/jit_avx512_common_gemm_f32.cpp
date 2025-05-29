@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -77,7 +77,7 @@ struct xbyak_gemm_t : public jit_generator {
         , STACK_K_CAPACITY((STACK_CAPACITY - 256) / (SIZE * UNROLL_M)) {}
 
     void generate() override ATTRIBUTE_OPTIMIZE {
-        using namespace Xbyak;
+        using namespace zendnn::Xbyak;
         bool isBeta0 = (beta == 0.0);
         bool isBetaN = (!isBeta0 && beta != 1.0);
 

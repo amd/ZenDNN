@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -40,7 +40,7 @@ using namespace zendnn::impl::format_tag;
 using namespace zendnn::impl::prop_kind;
 using namespace zendnn::impl::utils;
 
-using namespace Xbyak;
+using namespace zendnn::Xbyak;
 
 jit_sse41_conv_fwd_kernel_f32::jit_sse41_conv_fwd_kernel_f32(
         const jit_conv_conf_t &ajcp, const primitive_attr_t &attr,
