@@ -16,8 +16,10 @@
 #ifndef  _ZENDNNL_GLOBAL_BLOCK_HPP_
 #define  _ZENDNNL_GLOBAL_BLOCK_HPP_
 
+#include <cstdlib>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include "common/error_status.hpp"
 #include "common/zendnnl_exceptions.hpp"
 #include "common/platform_info.hpp"
@@ -87,6 +89,11 @@ private:
    * Deleted to prevent multiple instances creation.
    */
   zendnnl_global_block_t& operator=(const zendnnl_global_block_t&) = delete;
+
+  /** @brief set log levels based on env variables
+   *
+   */
+  void set_env_log_levels();
 
   static std::mutex              instance_mutex; /*!< mutex for thread safety */
   static zendnnl_global_block_t* instance; /*!< singleton instance pointer */

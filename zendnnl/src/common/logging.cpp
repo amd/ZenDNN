@@ -24,7 +24,7 @@ logger_t::logger_t()
    log_cout_flag{true} {
   log_level_map[log_module_t::common]  = log_level_t::disabled;
   log_level_map[log_module_t::api]     = log_level_t::disabled;
-  log_level_map[log_module_t::test]    = log_level_t::verbose;
+  log_level_map[log_module_t::test]    = log_level_t::disabled;
   log_level_map[log_module_t::profile] = log_level_t::disabled;
   log_level_map[log_module_t::debug]   = log_level_t::disabled;
 }
