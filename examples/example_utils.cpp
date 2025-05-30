@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
 
     auto  buf_nelem   = stride_[0];
-    for (size_t i = 1;i<stride_.size();i++) {
+    for (size_t i = 1; i<stride_.size(); i++) {
       buf_nelem *=stride_[i];
     }
     void *buf_vptr    = udstensor.get_raw_handle_unsafe();
@@ -85,8 +85,8 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 }
 
 tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
-                                          data_type dtype_, float val_,
-                                          std::string tensor_name_) {
+    data_type dtype_, float val_,
+    std::string tensor_name_) {
 
   auto utensor = tensor_t()
                  .set_name(tensor_name_)
@@ -127,9 +127,10 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
   return utensor;
 }
 
-tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type> size_,
-                                               data_type dtype_, float range_,
-                                               std::string tensor_name_) {
+tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
+    size_,
+    data_type dtype_, float range_,
+    std::string tensor_name_) {
 
   auto udtensor = tensor_t()
                   .set_name(tensor_name_)
@@ -168,16 +169,25 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type> siz
 }
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
-                                          data_type dtype_, size_t size,
-                                          void *reord_buff, std::string tensor_name_) {
+    data_type dtype_,
+    StorageParam param, std::string tensor_name_) {
 
   auto btensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage(reord_buff, size)
-                 .set_layout(tensor_layout_t::blocked)
-                 .create();
+                 .set_layout(tensor_layout_t::blocked);
+
+  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
+    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
+    btensor.set_storage(reorder_buff, reorder_size);
+  }
+  else if (std::holds_alternative<tensor_t>(param)) {
+    tensor_t input_tensor = std::get<tensor_t>(param);
+    btensor.set_storage(input_tensor);
+  }
+
+  btensor.create();
 
   if (! btensor.check()) {
     log_warning("tensor creation of ", btensor.get_name(), " failed.");

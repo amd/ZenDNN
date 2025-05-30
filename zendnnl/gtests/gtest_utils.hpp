@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include <string>
 #include <random>
 #include <algorithm>
+#include <variant>
 #include <omp.h>
 #include "memory/tensor.hpp"
 #include "common/zendnnl_global.hpp"
@@ -35,6 +36,8 @@ using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
 using namespace zendnnl::ops;
+
+using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
 /** @brief Matmul Op Parameters Structure */
 struct MatmulType {
@@ -54,6 +57,7 @@ extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern std::vector<MatmulType> matmul_test;
 
+// TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
 class tensor_factory_t {
  public:
@@ -71,7 +75,7 @@ class tensor_factory_t {
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          size_t size, void *reord_buff);
+                          StorageParam param);
 };
 
 //Supported Postops declaration

@@ -26,7 +26,8 @@ status_t reorder_context_t::validate() {
     return status_t::failure;
   }
 
-  if (!((get_algo_format() == "aocl") || (get_algo_format() == "onednn"))) {
+  // TODO: Add support for OneDNN backend
+  if (!(get_algo_format() == "aocl")) {
     return status_t::failure;
   }
 

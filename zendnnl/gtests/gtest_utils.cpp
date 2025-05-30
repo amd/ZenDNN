@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -82,15 +82,24 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     data_type dtype_,
-    size_t size, void *reord_buff) {
+    StorageParam param) {
 
   auto btensor = tensor_t()
                  .set_name("blocked tensor")
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage(reord_buff, size)
-                 .set_layout(tensor_layout_t::blocked)
-                 .create();
+                 .set_layout(tensor_layout_t::blocked);
+
+  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
+    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
+    btensor.set_storage(reorder_buff, reorder_size);
+  }
+  else if (std::holds_alternative<tensor_t>(param)) {
+    tensor_t input_tensor = std::get<tensor_t>(param);
+    btensor.set_storage(input_tensor);
+  }
+
+  btensor.create();
 
   if (! btensor.check()) {
     log_warning("tensor creation of ", btensor.get_name(), " failed.");
@@ -242,51 +251,64 @@ tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
     }
 
     // Compute the reorder size
-    size_t reorder_size = reorder_operator.get_reorder_size();
-    tensor_t output_tensor;
-    data_type_t dtype = input_tensor.get_data_type();
+    size_t reorder_size         = reorder_operator.get_reorder_size();
+    // Extract the input buffer size
+    size_t input_buffer_size    = input_tensor.get_buffer_sz_bytes();
+    data_type_t dtype           = input_tensor.get_data_type();
 
-    void *reorder_weights;
-    // Inplace reroder    : Extract the buffer from Input Tensor and reuse it
-    // OutofPlace reorder : Create new buffer with reordered size
+    uint64_t rows               = input_tensor.get_size(0);
+    uint64_t cols               = input_tensor.get_size(1);
+    tensor_t output_tensor;
+
+    // InPlace reorder
     if (inplace_reorder) {
-      reorder_weights = input_tensor.get_raw_handle_unsafe();
+      // InPlace reorder works when reorder size is equal to input buffer size.
+      if (reorder_size != input_buffer_size) {
+        log_info("Inplace reorder is not possible for given input");
+        return input_tensor;
+      }
+      else {
+        // Assign input_tensor to buffer_params as a tensor_t variant
+        StorageParam buffer_params = input_tensor;
+
+        // Output Tensor creation with seperate view for input tensor
+        output_tensor = tensor_factory.blocked_tensor({rows, cols},
+                        data_type_t::bf16,
+                        buffer_params);
+        output_tensor.set_name("reorder_output");
+      }
     }
     else {
-      reorder_weights = aligned_alloc(64, reorder_size);
+      // create a buffer with reorderd size
+      float *reorder_weights = (float *) aligned_alloc(64, reorder_size);
+
+      // Create a Pair of storage params [reorder size and reorder weights] and
+      // use it in tensor creation
+      StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
+
+      // Create output tensor with blocked layout.
+      output_tensor = tensor_factory.blocked_tensor({rows, cols},
+                      dtype,
+                      buffer_params);
+      output_tensor.set_name("reorder_output");
     }
-
-    uint64_t rows = input_tensor.get_size(0);
-    uint64_t cols = input_tensor.get_size(1);
-
-    // Create output tensor with blocked layout.
-    output_tensor = tensor_factory.blocked_tensor({rows, cols},
-                    dtype,
-                    reorder_size,
-                    reorder_weights);
-    output_tensor.set_name("reorder_output");
 
     // Reorder operator execution.
     status = reorder_operator
              .set_output("reorder_output", output_tensor)
              .execute();
 
-    bool reorder_status;
     if (status != status_t::success) {
       log_info("operator ", reorder_operator.get_name(), " execution failed.");
-      reorder_status = false;
     }
     else {
       log_info("operator ", reorder_operator.get_name(), " execution successful.");
-      reorder_status = true;
     }
-    // If Reorder is successful returns output tensor
-    // else return input tensor(OutofPlace reorder is handled at MatMul level)
-    return reorder_status ? output_tensor : input_tensor;
+
+    return output_tensor;
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());
     return tensor_t();
   }
 }
-

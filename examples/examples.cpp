@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -54,9 +54,9 @@ int main() {
    *  Demonstrates reordering to blocked format,
    *  inplace reorder functionalities of Reorder operator.
    */
-  reorder_f32_kernel_example();
-  reorder_s8_kernel_example();
-  reorder_matmul_relu_f32_kernel_example();
+  reorder_outofplace_f32_kernel_example();
+  reorder_outofplace_s8_kernel_example();
+  reorder_outofplace_matmul_relu_f32_kernel_example();
   reorder_inplace_bf16_example();
   reorder_inplace_matmul_relu_bf16_kernel_example();
 

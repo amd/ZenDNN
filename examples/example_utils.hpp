@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include <cstring>
 #include <random>
 #include <algorithm>
+#include <variant>
 
 #include "zendnnl.hpp"
 
@@ -29,6 +30,7 @@ namespace zendnnl {
  */
 namespace examples {
 using namespace zendnnl::interface;
+using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
 /** @class tensor_factory_t
  * @brief Quick generation of predefined tensors.
@@ -60,7 +62,7 @@ class tensor_factory_t {
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          size_t size, void *reord_buff_, std::string tensor_name_="blocked");
+                          StorageParam param, std::string tensor_name_="blocked");
 };
 
 } //examples

@@ -60,6 +60,12 @@ status_t reorder_operator_t::validate() {
     return status_t::failure;
   }
 
+  auto source_dtype  = context.get_source_dtype();
+  if ((input->get_data_type() == data_type_t::s8) &&
+      (!((source_dtype == data_type_t::s8) || (source_dtype == data_type_t::u8)))) {
+    return status_t::failure;
+  }
+
   return status_t::success;
 }
 
@@ -82,7 +88,7 @@ status_t reorder_operator_t::kernel_factory() {
   }
   else if (algo_format == "onednn") {
     log_error("onednn kernel is not supported");
-    return status_t::failure;
+    return status_t::unimplemented;
   }
   else {
     return status_t::unimplemented;

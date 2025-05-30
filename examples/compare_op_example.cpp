@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -30,6 +30,11 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
     auto compare_context = compare_context_t()
                            .set_tolerance(1e-07f)
                            .create();
+
+    if (! compare_context.check()) {
+      testlog_error("compare context creation failed");
+      return NOT_OK;
+    }
 
     //define compare operator
     auto compare_operator = compare_operator_t()
@@ -120,6 +125,11 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                           .set_param("bias", bias)
                           .set_post_op(relu_post_op)
                           .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
 
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                         data_type_t::f32,

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -38,6 +38,11 @@ int sample_f32_kernel_example() {
       .set_param("sample_param", param_tensor)
       .set_post_op(relu_post_op)
       .create();
+
+    if (! sample_context.check()) {
+      testlog_error("sample context creation failed");
+      return NOT_OK;
+    }
 
     auto sample_operator = sample_operator_t()
       .set_name("sample operator")

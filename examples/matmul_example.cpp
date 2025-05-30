@@ -42,6 +42,11 @@ int matmul_strided_f32_kernel_example() {
                                   .set_post_op(relu_post_op)
                                   .create();
 
+    if (! matmul_context_strided.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
                            .set_name("matmul_f32")
@@ -109,6 +114,11 @@ int matmul_relu_f32_kernel_example() {
                           .set_post_op(relu_post_op)
                           .create();
 
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
                            .set_name("matmul_f32")
@@ -175,6 +185,11 @@ int matmul_relu_bf16_kernel_example() {
                           .set_param("bias", bias)
                           .set_post_op(relu_post_op)
                           .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
 
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
@@ -247,6 +262,11 @@ int matmul_mul_silu_mul_f32_kernel_example() {
                           .set_post_op(silu_post_op)
                           .set_post_op(binary_mul_po_2)
                           .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
 
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
@@ -326,6 +346,11 @@ int matmul_silu_mul_bf16_kernel_example() {
                           .set_post_op(binary_mul_po)
                           .create();
 
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
                            .set_name("matmul_bf16_operator")
@@ -395,6 +420,11 @@ int matmul_relu_forced_ref_kernel_example() {
                           .set_param("bias", bias)
                           .set_post_op(relu_post_op)
                           .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
 
     //define matmul operator
     auto matmul_operator = matmul_operator_t()
