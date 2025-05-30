@@ -26,40 +26,53 @@ status_t matmul_f32_ref_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_fp32_ref kernel");
   log_info("Executing matmul_fp32_ref kernel");
 
-  auto  input_tensor  = inputs_.find("matmul_input")->second;
-  auto  output_tensor = outputs_.find("matmul_output")->second;
-  auto  weight_tensor = context_.get_param("weights").value();
+  auto  input_tensor    = inputs_.find("matmul_input")->second;
+  auto  output_tensor   = outputs_.find("matmul_output")->second;
+  auto  weight_tensor   = context_.get_param("weights").value();
 
-  float *input   = (float *)input_tensor.get_raw_handle_unsafe();
-  float *output  = (float *)output_tensor.get_raw_handle_unsafe();
-  float *weights = (float *)weight_tensor.get_raw_handle_unsafe();
+  float *input          = (float *)input_tensor.get_raw_handle_unsafe();
+  float *output         = (float *)output_tensor.get_raw_handle_unsafe();
+  float *weights        = (float *)weight_tensor.get_raw_handle_unsafe();
 
-  const int M    = input_tensor.get_size(0);
-  const int K    = input_tensor.get_size(1);
-  const int N    = output_tensor.get_size(1);
+  const int M           = input_tensor.get_size(0);
+  const int K           = input_tensor.get_size(1);
+  const int N           = output_tensor.get_size(1);
+
+  bool is_trans_src     = input_tensor.get_order() == "ba";
+  bool is_trans_weights = weight_tensor.get_order() == "ba";
+
+  const int   lda       = is_trans_src ? input_tensor.get_stride_size(
+                            0) : input_tensor.get_stride_size(1);
+  const int   ldb       = is_trans_weights ? weight_tensor.get_stride_size(
+                            0) : weight_tensor.get_stride_size(1);
+  const int   ldc       = output_tensor.get_stride_size(1);
 
   auto optional_bias_tensor = context_.get_param("bias");
   if (optional_bias_tensor) {
     auto bias_tensor   = context_.get_param("bias").value();
     float   *bias      = (float *)bias_tensor.get_raw_handle_unsafe();
-    for (int i = 0; i < M; ++i) {
-      for (int j = 0; j < N; ++j) {
+    for (size_t i = 0; i < M; ++i) {
+      for (size_t j = 0; j < N; ++j) {
         float sum = 0.0f;
-        for (int k = 0; k < K; ++k) {
-          sum += input[i * K + k] * weights[k * N + j];
+        for (size_t k = 0; k < K; ++k) {
+          size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
+          size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
+          sum += input[ip_idx] * weights[wt_idx];
         }
-        output[i * N + j] = sum + bias[j];
+        output[i * ldc + j] = sum + bias[j];
       }
     }
   }
   else {
-    for (int i = 0; i < M; ++i) {
-      for (int j = 0; j < N; ++j) {
+    for (size_t i = 0; i < M; ++i) {
+      for (size_t j = 0; j < N; ++j) {
         float sum = 0.0f;
-        for (int k = 0; k < K; ++k) {
-          sum += input[i * K + k] * weights[k * N + j];
+        for (size_t k = 0; k < K; ++k) {
+          size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
+          size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
+          sum += input[ip_idx] * weights[wt_idx];
         }
-        output[i * N + j] = sum;
+        output[i * ldc + j] = sum;
       }
     }
   }

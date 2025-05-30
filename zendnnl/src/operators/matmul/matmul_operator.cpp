@@ -117,19 +117,14 @@ status_t matmul_operator_t::validate_forced_kernel() {
     auto in_dtype     = input->get_data_type();
     auto out_dtype    = output->get_data_type();
     auto wt_dtype     = weights->get_data_type();
-    auto in_layout    = input->get_layout();
-    auto out_layout   = output->get_layout();
-    auto wt_layout    = weights->get_layout();
-
+    auto out_order   = output->get_order();
 
     if ((in_dtype  != data_type_t::f32) ||
         (out_dtype != data_type_t::f32) ||
         (wt_dtype  != data_type_t::f32) ||
-        (in_layout != tensor_layout_t::contiguous) ||
-        (out_layout != tensor_layout_t::contiguous) ||
-        (wt_layout  != tensor_layout_t::contiguous)) {
+        (out_order == "ba")) {
       log_error("<", get_name(),
-                "> forced reference kernel needs f32 contiguous tensors.");
+                "> forced reference kernel needs f32 tensors and non-transposed dst.");
       return status_t::failure;
     }
   }
