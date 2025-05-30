@@ -36,6 +36,7 @@ namespace zendnnl {
 namespace ops {
 
 using namespace zendnnl::common;
+using namespace zendnnl::profile;
 using namespace zendnnl::error_handling;
 
 /** @class operator_t
@@ -339,6 +340,7 @@ template<typename OP_T, typename OP_CONTEXT_T>
 OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("<", name, "> Creating operator");
   apilog_info("Operator create - ",name);
+
   if (status != status_t::success) {
     if (! context.check()) {
       log_error("operator <", name, "> : bad context");
@@ -357,6 +359,7 @@ template<typename OP_T, typename OP_CONTEXT_T>
 status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
   apilog_info("Operator execute - ",name,",",operator_info());
+
   try {
     // check if pre_processing is successful
     if (status != status_t::success) {
@@ -382,11 +385,23 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
       return status_t::failure;
     }
 
+    // create a profiler instance
+    profiler_t obj;
+
+    //start the timer
+    obj.tbp_start();
+
     //execute kernel
     if (kernel->execute(context, inputs, outputs) != status_t::success) {
       log_error("<", name, "> kernel execution failed");
       return status_t::failure;
     }
+
+    //stop the timer
+    obj.tbp_stop();
+
+    profilelog_info("Operator execute - ",name,",",operator_info(),
+                    ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
 
     //cleanup
     kernel.reset();
@@ -512,7 +527,7 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::load_kernel(std::string symbol_) {
   try {
     create_kernel_handle_type create_kernel_handle =
       reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(
-            symbol_));
+          symbol_));
 
     if (! create_kernel_handle) {
       EXCEPTION_WITH_LOC("dynamic symbol load returned null.");

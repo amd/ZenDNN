@@ -61,11 +61,11 @@ std::string matmul_context_t::context_info() {
   auto post_op_count = get_post_op_count();
 
   ss <<weights.tensor_info()<<","<<bias.tensor_info()<<","
-     <<"post-op:";
+     <<"post-op";
 
   for (uint32_t i = 0; i < post_op_count; ++i) {
     post_op_t zen_po = get_post_op(i);
-    ss << zen_po.post_op_info(zen_po)<<",";
+    ss << ":" << zen_po.post_op_info(zen_po);
   }
 
   return ss.str();

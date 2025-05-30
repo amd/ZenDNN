@@ -282,7 +282,6 @@ void tensor_t::reset() {
 
 tensor_t &tensor_t::create() {
   LOG_DEBUG_INFO("Creating tensor object");
-  apilog_info("Tensor create - ",tensor_info());
 
   if (status != status_t::success) {
     validate_meta_info();
@@ -330,7 +329,7 @@ tensor_t &tensor_t::create() {
     status = status_t::success;
     hash();
   }
-
+  apilog_info("Tensor create - ",tensor_info());
   return *this;
 }
 
@@ -455,23 +454,7 @@ void tensor_t::validate_meta_info() {
 std::string tensor_t::tensor_info() {
   std::stringstream ss;
   auto layout = get_layout();
-
-  switch (layout) {
-  case tensor_layout_t::contiguous:
-    ss << "contiguous,";
-    break;
-  case tensor_layout_t::strided:
-    ss << "strided,";
-    break;
-  case tensor_layout_t::blocked:
-    ss << "blocked,";
-    break;
-  case tensor_layout_t::oblique:
-    ss << "oblique,";
-    break;
-  default:
-    ss << "";
-  }
+  auto dtype  = get_data_type();
 
   ss << get_name() << "[";
   uint32_t dim = get_dim();
@@ -484,7 +467,25 @@ std::string tensor_t::tensor_info() {
       ss << ",";
     }
   }
-  ss << "]";
+  ss << "]:"
+     << dtype_info(dtype) << ":";
+
+  switch (layout) {
+  case tensor_layout_t::contiguous:
+    ss << "contiguous";
+    break;
+  case tensor_layout_t::strided:
+    ss << "strided";
+    break;
+  case tensor_layout_t::blocked:
+    ss << "blocked";
+    break;
+  case tensor_layout_t::oblique:
+    ss << "oblique";
+    break;
+  default:
+    ss << "";
+  }
 
   return ss.str();
 }

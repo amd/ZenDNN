@@ -20,6 +20,7 @@ set(common_sources
   dynamic_module.cpp
   zendnnl_exceptions.cpp
   logging.cpp
+  profiler.cpp
   hash_object.cpp
   platform_info.cpp
   zendnnl_global_block.cpp)
@@ -30,6 +31,7 @@ set(common_headers
   dynamic_module.hpp
   zendnnl_exceptions.hpp
   logging.hpp
+  profiler.hpp
   hash_object.hpp
   platform_info.hpp
   zendnnl_global_block.hpp

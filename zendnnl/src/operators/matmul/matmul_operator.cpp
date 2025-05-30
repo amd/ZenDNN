@@ -176,11 +176,11 @@ std::string matmul_operator_t::operator_info() {
 
   ss <<input.tensor_info()<<","<<weights.tensor_info()
      <<","<<bias.tensor_info()<<","<<output.tensor_info()
-     <<","<<"post-op:";
+     <<","<<"post-op";
 
   for (uint32_t i = 0; i < post_op_count; ++i) {
     post_op_t zen_po = context.get_post_op(i);
-    ss << zen_po.post_op_info(zen_po)<<",";
+    ss << ":" <<zen_po.post_op_info(zen_po);
   }
 
   return ss.str();

@@ -14,6 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#include <string>
 #include "data_types.hpp"
 
 namespace zendnnl {
@@ -43,6 +44,35 @@ uint32_t size_of(data_type_t data_type) {
     return sizeof(prec_traits<data_type_t::u8>::type);
   case data_type_t::u4 :
     return sizeof(prec_traits<data_type_t::u4>::type);
+  }
+
+  return 0;
+}
+
+std::string dtype_info(data_type_t data_type) {
+switch(data_type) {
+  case data_type_t::f32 :
+    return "f32";
+  case data_type_t::f16 :
+    return "f16";
+  case data_type_t::bf16 :
+    return "bf16";
+  case data_type_t::s32 :
+    return "s32";
+  case data_type_t::s16 :
+    return "s16";
+  case data_type_t::s8 :
+    return "s8";
+  case data_type_t::s4 :
+    return "s4";
+  case data_type_t::u32 :
+    return "u32";
+  case data_type_t::u16 :
+    return "u16";
+  case data_type_t::u8 :
+    return "u8";
+  case data_type_t::u4 :
+    return "u4";
   }
 
   return 0;

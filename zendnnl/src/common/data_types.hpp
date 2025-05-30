@@ -17,6 +17,7 @@
 #define _DATA_TYPES_HPP_
 
 #include <cstdint>
+#include <string>
 #include "bfloat16.hpp"
 
 /** @namespace zendnnl
@@ -191,9 +192,15 @@ struct data_traits<uint8_t> {
 
 /** @brief Get size of a data type
  *  @param data_type : the data type
- *  @return Size of the data type 
+ *  @return Size of the data type
  */
 uint32_t size_of(data_type_t data_type);
+
+/** @brief Get name of the data type
+ *  @param data_type : the data type
+ *  @return Name of the data type
+ */
+std::string dtype_info(data_type_t data_type);
 
 }//common
 

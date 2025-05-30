@@ -24,6 +24,7 @@
 #include "common/zendnnl_exceptions.hpp"
 #include "common/platform_info.hpp"
 #include "common/logging.hpp"
+#include "common/profiler.hpp"
 
 namespace zendnnl {
 namespace common {

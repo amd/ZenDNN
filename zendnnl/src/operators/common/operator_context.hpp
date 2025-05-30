@@ -36,6 +36,7 @@ namespace zendnnl {
 namespace ops {
 
 using namespace zendnnl::memory;
+using namespace zendnnl::profile;
 using namespace zendnnl::common;
 
 /** @class op_context_t
@@ -238,6 +239,12 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("Creating op_context_t");
   apilog_info("Context create - ", context_info());
 
+  // create a profiler instance
+  profiler_t obj;
+
+  //start the timer
+  obj.tbp_start();
+
   if (validate() != status_t::success) {
     status = status_t::failure;
     return static_cast<OP_CONTEXT_T &>(*this);
@@ -250,6 +257,13 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
 
   status = status_t::success;
   hash();
+
+//stop the timer
+obj.tbp_stop();
+
+profilelog_info("Operator context - ",context_info(),
+                  ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
+
   return static_cast<OP_CONTEXT_T &>(*this);
 };
 

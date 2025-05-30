@@ -85,7 +85,7 @@ enum class log_module_t : uint32_t {
  *  @endverbatim
  */
 class logger_t {
-public:
+ public:
   using log_level_map_type = std::map<log_module_t, log_level_t>;
 
   /** @brief default constructor */
@@ -96,7 +96,7 @@ public:
    * @param level_  : log level to setup.
    * @return A reference to self.
    */
-  logger_t& set_log_level(log_module_t module_, log_level_t level_);
+  logger_t &set_log_level(log_module_t module_, log_level_t level_);
 
   /** @brief Get log module level
    * @param module_ : log module
@@ -109,7 +109,7 @@ public:
    * @param log_file_ : log file name.
    * @return A reference to self.
    */
-  logger_t& set_log_file(std::string log_file_);
+  logger_t &set_log_file(std::string log_file_);
 
   /** @brief Get log file
    * @return log file name
@@ -125,14 +125,15 @@ public:
   void log_msg(log_module_t log_module_, log_level_t log_level_,
                MSG_T msg_arg0_, MSG_TS... msg_args_);
 
-private:
+ private:
   /** @brief recursive function to log a message */
   template<typename MSG_T, typename... MSG_TS>
   void log_msg_r(log_module_t log_module_, log_level_t log_level_,
-                 std::string& message_, MSG_T msg_arg0_, MSG_TS... msg_args_);
+                 std::string &message_, MSG_T msg_arg0_, MSG_TS... msg_args_);
 
   /** @brief recursive terminating function to log a message */
-  void log_msg_r(log_module_t log_module_, log_level_t log_level_, std::string& message_);
+  void log_msg_r(log_module_t log_module_, log_level_t log_level_,
+                 std::string &message_);
 
   /** @brief convert from module enum to string */
   std::string log_module_to_str(log_module_t module_);
@@ -140,7 +141,7 @@ private:
   /** @brief convert from level enum to string */
   std::string log_level_to_str(log_level_t level_);
 
-private:
+ private:
   std::string                   log_file;         /*!< Log file name */
   std::ofstream                 log_ofstream;     /*!< Log file stream */
   cn::steady_clock::time_point  log_start_time;   /*!< Logger creation time stamp */
@@ -164,7 +165,7 @@ void logger_t::log_msg(log_module_t log_module_, log_level_t log_level_,
 
 template<typename MSG_T, typename... MSG_TS>
 void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
-                         std::string& message_, MSG_T msg_arg0_, MSG_TS... msg_args_) {
+                         std::string &message_, MSG_T msg_arg0_, MSG_TS... msg_args_) {
   std::stringstream stream;
   stream << msg_arg0_;
   message_ += stream.str();

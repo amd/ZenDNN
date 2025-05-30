@@ -109,7 +109,7 @@ std::string logger_t::log_module_to_str(log_module_t module_) {
   case log_module_t::test:
     return "TEST   ";
   case log_module_t::profile:
-    return "PROFILE";
+    return "PROF   ";
   case log_module_t::debug:
     return "DEBUG  ";
   default:
