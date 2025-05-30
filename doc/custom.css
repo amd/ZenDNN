@@ -1,0 +1,24 @@
+/* Increase the width of the navigation panel */
+.navpath {
+    width: 700px !important; /* Adjust as needed */
+}
+
+#side-nav {
+    width: 520px !important;
+}
+
+#doc-content {
+    margin-left: 450px !important; /* Adjust to match nav width + spacing */
+}
+
+#top {
+    width:100% !important;
+}
+
+#titlearea table, #titlearea {
+      width: 100% !important;
+}
+ 
+#MSearchBox {
+    margin-left: auto !important;
+}

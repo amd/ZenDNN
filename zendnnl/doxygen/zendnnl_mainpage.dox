@@ -13,7 +13,8 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-/** @mainpage ZenDNNL Documentation
+#/** @mainpage ZenDNNL Documentation
+/**  ZenDNNL Documentation
 *
 * ZenDNNL an accelerated operators library for deep neural network inference
 * on AMD Zen platforms. The library can be integrated with any DNN framework like

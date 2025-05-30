@@ -15,8 +15,18 @@
 # *******************************************************************************/
 
 if(ZENDNNL_BUILD_DOXYGEN)
-  find_package(Doxygen)
+  message(DEBUG "adding doxygen-awesome-css ")
+  include(FetchContent)
+  
+  FetchContent_Declare(
+  doxygen-awesome-css
+  URL https://github.com/jothepro/doxygen-awesome-css/archive/refs/heads/main.zip)
+  
+  FetchContent_Populate(doxygen-awesome-css)
+  
+  set(DOXYGEN_AWESOME_CSS_DIR ${doxygen-awesome-css_SOURCE_DIR})
 
+  find_package(Doxygen)
   if(DOXYGEN_FOUND)
     message(DEBUG "building doxygen documentation...")
     set(DOXYFILE_IN "${CMAKE_CURRENT_SOURCE_DIR}/doxyfile.in")
