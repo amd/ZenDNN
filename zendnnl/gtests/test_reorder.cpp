@@ -62,13 +62,17 @@ TEST_P(TestReorder,F32) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::f32,
                       2.0);
+  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::f32,
+                       2.0);
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
-  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index);
+  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
+                     binary_tensor);
 
   auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   auto reorder_weights = reorder_kernel_test(weights, inplace_reorder);
   matmul_kernel_test(input_tensor, reorder_weights, bias, output_tensor,
-                     po_index);
+                     po_index, binary_tensor);
 
   bool flag=false;
   compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL, flag);
@@ -86,13 +90,17 @@ TEST_P(TestReorder, BF16_F32) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k},
                       data_type_t::bf16, 2.0);
+  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::f32,
+                       2.0);
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
-  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index);
+  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
+                     binary_tensor);
 
   auto reorder_weights = reorder_kernel_test(weights, inplace_reorder);
   auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   matmul_kernel_test(input_tensor, reorder_weights, bias, output_tensor,
-                     po_index);
+                     po_index, binary_tensor);
 
   bool flag=false;
   compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,
@@ -111,13 +119,17 @@ TEST_P(TestReorder, BF16_BF16) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k},
                       data_type_t::bf16, 2.0);
+  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::f32,
+                       2.0);
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
-  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index);
+  matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
+                     binary_tensor);
 
   auto reorder_weights = reorder_kernel_test(weights, inplace_reorder);
   auto output_tensor = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   matmul_kernel_test(input_tensor, reorder_weights, bias, output_tensor,
-                     po_index);
+                     po_index, binary_tensor);
 
   bool flag=false;
   compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,

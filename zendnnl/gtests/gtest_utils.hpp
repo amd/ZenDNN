@@ -45,6 +45,8 @@ struct MatmulType {
   uint64_t matmul_k;
   uint64_t matmul_n;
   uint32_t po_index;
+  bool     transA;
+  bool     transB;
   MatmulType();
 };
 
@@ -71,7 +73,12 @@ class tensor_factory_t {
   /** @brief uniformly distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_,
-                               float range_);
+                               float range_, bool trans = false);
+
+  /** @brief uniformly distributed strided tensor */
+  tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
+                                       const std::vector<index_type> stride_,
+                                       data_type dtype_, float range_, bool trans);
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
@@ -90,7 +97,8 @@ extern std::unordered_map<std::string, int> po_map;
  *
  * */
 void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                        tensor_t &bias, tensor_t &output_tensor, uint32_t index);
+                        tensor_t &bias, tensor_t &output_tensor, uint32_t index,
+                        tensor_t &binary_tensor);
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -101,7 +109,8 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
  *
  * */
 void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                                   tensor_t &bias, tensor_t &output_tensor, uint32_t index);
+                                   tensor_t &bias, tensor_t &output_tensor,
+                                   uint32_t index, tensor_t &binary_tensor);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

@@ -20,6 +20,8 @@ MatmulType::MatmulType() {
   matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_k = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_n = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  transA   = rand() % 2;
+  transB   = rand() % 2;
   po_index = rand() % (po_size + 1);
 }
 
@@ -47,13 +49,17 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     size_,
     data_type dtype_,
-    float range_) {
+    float range_,
+    bool trans) {
   auto udtensor = tensor_t()
                   .set_name("uniform distributed tensor")
                   .set_size(size_)
                   .set_data_type(dtype_)
-                  .set_storage()
-                  .create();
+                  .set_storage();
+  if (trans) {
+    udtensor.set_order("ba");
+  }
+  udtensor.create();
 
   if (! udtensor.check()) {
     log_warning("tensor creation of ", udtensor.get_name(), " failed.");
@@ -78,6 +84,49 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     }
   }
   return udtensor;
+}
+
+tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
+    std::vector<index_type> size_, const std::vector<index_type> stride_,
+    data_type dtype_, float range_, bool trans) {
+  auto udstensor = tensor_t()
+                   .set_name("uniform distributed strided tensor")
+                   .set_size(size_)
+                   .set_data_type(dtype_)
+                   .set_stride_size(stride_)
+                   .set_storage()
+                   .create();
+
+  if (! udstensor.check()) {
+    log_warning("tensor creation of ", udstensor.get_name(), " failed.");
+  }
+  else {
+    std::mt19937 gen(100);
+    std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
+
+    auto  buf_nelem   = stride_[0];
+    for (size_t i = 1; i < stride_.size(); i++) {
+      buf_nelem *= stride_[i];
+    }
+    void *buf_vptr = udstensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return dist(gen);});
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return int8_t(dist(gen));});
+    }
+    else {
+      log_warning("tensor ", udstensor.get_name(), " unsupported data type.");
+    }
+  }
+  return udstensor;
 }
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
@@ -109,7 +158,8 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
 }
 
 void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                        tensor_t &bias, tensor_t &output_tensor,uint32_t index) {
+                        tensor_t &bias, tensor_t &output_tensor,
+                        uint32_t index, tensor_t &binary_tensor) {
   try {
     // default postop relu
     post_op_t post_op = post_op_t{po_arr[0]};
@@ -142,6 +192,13 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
+    // Set binary tensor for binary postops
+    if (po_arr[index] == post_op_type_t::binary_add) {
+      matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+    }
+    else if (po_arr[index] == post_op_type_t::binary_mul) {
+      matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+    }
     status_t status = matmul_operator
                       .set_input("matmul_input", input_tensor)
                       .set_output("matmul_output", output_tensor)
@@ -158,7 +215,8 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 }
 
 void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                                   tensor_t &bias, tensor_t &output_tensor, uint32_t index) {
+                                   tensor_t &bias, tensor_t &output_tensor,
+                                   uint32_t index, tensor_t &binary_tensor) {
   try {
     // Default postop relu
     post_op_t post_op = post_op_t{po_arr[0]};
@@ -191,6 +249,13 @@ void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
 
+    if (po_arr[index] == post_op_type_t::binary_add) {
+      matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+    }
+    else if (po_arr[index] == post_op_type_t::binary_mul) {
+      // Set binary tensor for binary postops
+      matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+    }
     status_t status = matmul_operator.set_input("matmul_input", input_tensor)
                       .set_output("matmul_output", output_tensor)
                       .set_forced_kernel("reference")

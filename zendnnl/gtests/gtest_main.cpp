@@ -23,7 +23,7 @@ using namespace std;
 int gtest_argc;
 char **gtest_argv;
 
-const uint32_t po_size = 6; //Supported postop
+const uint32_t po_size = 8; //Supported postop
 vector<post_op_type_t> po_arr;
 unordered_map<std::string, int> po_map;
 
@@ -43,7 +43,8 @@ int main(int argc, char **argv) {
   //Supported Postop
   po_arr = { post_op_type_t::relu, post_op_type_t::gelu_tanh,
              post_op_type_t::gelu_erf, post_op_type_t::sigmoid,
-             post_op_type_t::swish, post_op_type_t::tanh
+             post_op_type_t::swish, post_op_type_t::tanh,
+             post_op_type_t::binary_add, post_op_type_t::binary_mul
            };
 
   //Postop string to index
@@ -53,8 +54,10 @@ int main(int argc, char **argv) {
   po_map["sigmoid"]=3;
   po_map["swish"]=4;
   po_map["tanh"]=5;
+  po_map["binary_add"]=6;
+  po_map["binary_mul"]=7;
 
-  //If Seed is provided as command line argument
+  // If Seed is provided as command line argument
   if (argc==3) {
     try {
       seed = stoi(argv[2]);
@@ -64,7 +67,7 @@ int main(int argc, char **argv) {
     }
   }
   srand(seed);
-  log_info("Value ", seed, " is used as seed. ");
+  std::cout<<"Value "<<seed<<" is used as seed. ";
 
   //Creating Random parameters for Matmul
   matmul_test.resize(TEST_NUM);
