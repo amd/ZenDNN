@@ -537,6 +537,7 @@ private:
   storage_sptr_type   storage; /**< A shared pointer to tensor storage. See
                                 @c tensor_storage_t for further description */
 
+  bool                allocate; /**< Allocate strorage to tensor */
   std::string         name; /**< Tensor name. This is relevant only for profiling
                              and diagnostic purposes. */
 };

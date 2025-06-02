@@ -26,6 +26,7 @@ using namespace zendnnl::error_handling;
 tensor_t::tensor_t():
   option{}, quant{},
   storage{std::make_shared<tensor_storage_t>()},
+  allocate{false},
   name{"unknown tensor"} {
 }
 
@@ -34,6 +35,7 @@ tensor_t::tensor_t(tensor_t &&other_):
   option   = other_.option;
   quant    = other_.quant;
   storage  = other_.storage;
+  allocate = other_.allocate;
   name     = other_.name;
 
   other_.reset();
@@ -45,6 +47,7 @@ tensor_t &tensor_t::operator=(tensor_t &&other_) {
     option   = other_.option;
     quant    = other_.quant;
     storage  = other_.storage;
+    allocate = other_.allocate;
     name     = other_.name;
 
     other_.reset();
@@ -273,7 +276,8 @@ void tensor_t::reset() {
   quant.reset();
   storage.reset();
 
-  storage = std::make_shared<tensor_storage_t>();
+  allocate = false;
+  storage  = std::make_shared<tensor_storage_t>();
 }
 
 tensor_t &tensor_t::create() {
@@ -287,11 +291,12 @@ tensor_t &tensor_t::create() {
     }
 
     uint64_t buffer_size = option.strided_nelem * size_of(option.data_type);
-    if (storage->allocated) {
+    if (allocate) {
       // allocate new storage
       if (buffer_size) {
         try {
           storage->allocate(buffer_size);
+          storage->allocated = true;
         }
         catch (const exception_t &ex) {
           std::string message = get_name() + "-" + ex.what();
