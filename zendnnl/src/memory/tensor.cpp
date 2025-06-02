@@ -241,14 +241,14 @@ const void *tensor_t::get_raw_handle_const() const {
 
 tensor_t &tensor_t::set_storage() {
   if (status != status_t::success) {
-    storage->allocated = true;
+    allocate = true;
   }
   return (*this);
 }
 
 tensor_t &tensor_t::set_storage(uint32_t aligned_to_) {
   if (status != status_t::success) {
-    storage->allocated    = true;
+    allocate              = true;
     storage->aligned_to   = aligned_to_;
   }
   return (*this);
