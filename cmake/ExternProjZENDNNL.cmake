@@ -40,6 +40,6 @@ ExternalProject_ADD(zendnnl_library
   BINARY_DIR "${CMAKE_BINARY_DIR}/zendnnl"
   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}"
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
-  BUILD_COMMAND cmake --build .
-  INSTALL_COMMAND cmake --install .)
+  INSTALL_COMMAND cmake --build . --target install -j )
 
+#  BUILD_COMMAND cmake --build . --target install -j

@@ -54,13 +54,16 @@ set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
 cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
-add_custom_target(append_common_headers ALL
-  COMMAND ${CMAKE_COMMAND}
-  -DINC_FILE_NAME="${zendnnl_inc_file}"
-  -DINC_SUBDIR=${inc_subdir}
-  -DINC_FILE_LIST="${common_headers}"
-  -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
-  BYPRODUCTS ${zendnnl_inc_file})
+list(APPEND common_headers_list ${common_headers})
+create_header_file(${zendnnl_inc_file} ${inc_subdir} "${common_headers_list}")
+
+# add_custom_target(append_common_headers ALL
+#   COMMAND ${CMAKE_COMMAND}
+#   -DINC_FILE_NAME="${zendnnl_inc_file}"
+#   -DINC_SUBDIR=${inc_subdir}
+#   -DINC_FILE_LIST="${common_headers}"
+#   -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
+#   BYPRODUCTS ${zendnnl_inc_file})
 
 # install(FILES ${common_headers}
 #   DESTINATION include/impl)

@@ -51,10 +51,10 @@ status_t matmul_f32_ref_kernel_t::execute(const context_type &context_,
   if (optional_bias_tensor) {
     auto bias_tensor   = context_.get_param("bias").value();
     float   *bias      = (float *)bias_tensor.get_raw_handle_unsafe();
-    for (size_t i = 0; i < M; ++i) {
-      for (size_t j = 0; j < N; ++j) {
+    for (auto i = 0; i < M; ++i) {
+      for (auto j = 0; j < N; ++j) {
         float sum = 0.0f;
-        for (size_t k = 0; k < K; ++k) {
+        for (auto k = 0; k < K; ++k) {
           size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
           size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
           sum += input[ip_idx] * weights[wt_idx];
@@ -64,10 +64,10 @@ status_t matmul_f32_ref_kernel_t::execute(const context_type &context_,
     }
   }
   else {
-    for (size_t i = 0; i < M; ++i) {
-      for (size_t j = 0; j < N; ++j) {
+    for (auto i = 0; i < M; ++i) {
+      for (auto j = 0; j < N; ++j) {
         float sum = 0.0f;
-        for (size_t k = 0; k < K; ++k) {
+        for (auto k = 0; k < K; ++k) {
           size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
           size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
           sum += input[ip_idx] * weights[wt_idx];

@@ -38,6 +38,7 @@ include(ZenDnnlOptions)
 
 # global cxx flags
 set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=1 ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "-Wall -Werror ${CMAKE_CXX_FLAGS}")
 
 # find common packages
 zendnnl_required_packages()

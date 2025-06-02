@@ -47,13 +47,18 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-add_custom_target(append_reorder_operator_headers ALL
-  COMMAND ${CMAKE_COMMAND}
-  -DINC_FILE_NAME=${zendnnl_inc_file}
-  -DINC_SUBDIR=${inc_subdir}
-  -DINC_FILE_LIST="${reorder_operator_public_headers}"
-  -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
-  BYPRODUCTS ${zendnnl_inc_file})
+list(APPEND reorder_operator_public_headers_list ${reorder_operator_public_headers})
+create_header_file(${zendnnl_inc_file}
+  ${inc_subdir}
+  "${reorder_operator_public_headers_list}")
+
+# add_custom_target(append_reorder_operator_headers ALL
+#   COMMAND ${CMAKE_COMMAND}
+#   -DINC_FILE_NAME=${zendnnl_inc_file}
+#   -DINC_SUBDIR=${inc_subdir}
+#   -DINC_FILE_LIST="${reorder_operator_public_headers}"
+#   -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
+#   BYPRODUCTS ${zendnnl_inc_file})
 
 # list(APPEND OBJECT_FILES $<TARGET_OBJECTS:reorder_operator_objects>)
 # set(OBJECT_FILES ${OBJECT_FILES} PARENT_SCOPE)

@@ -70,13 +70,18 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-add_custom_target(append_matmul_operator_headers ALL
-  COMMAND ${CMAKE_COMMAND}
-  -DINC_FILE_NAME=${zendnnl_inc_file}
-  -DINC_SUBDIR=${inc_subdir}
-  -DINC_FILE_LIST="${matmul_operator_public_headers}"
-  -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
-  BYPRODUCTS ${include_file})
+list(APPEND matmul_operator_public_headers_list
+  ${matmul_operator_public_headers})
+create_header_file(${zendnnl_inc_file}
+  ${inc_subdir}
+  "${matmul_operator_public_headers_list}")
+# add_custom_target(append_matmul_operator_headers ALL
+#   COMMAND ${CMAKE_COMMAND}
+#   -DINC_FILE_NAME=${zendnnl_inc_file}
+#   -DINC_SUBDIR=${inc_subdir}
+#   -DINC_FILE_LIST="${matmul_operator_public_headers}"
+#   -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
+#   BYPRODUCTS ${include_file})
 
 # list(APPEND OBJECT_FILES $<TARGET_OBJECTS:matmul_operator_objects>)
 # set(OBJECT_FILES ${OBJECT_FILES} PARENT_SCOPE)

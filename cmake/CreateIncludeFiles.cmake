@@ -13,10 +13,21 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-
 #include_guard(GLOBAL)
-function(create_header_file inc_file inc_subdir inc_list_str)
-  separate_arguments(inc_list NATIVE_COMMAND ${inc_list_str})
+
+function(prolog_header_file inc_file)
+  set(prolog_banner
+"/**************************************************************************
+* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* This is a system generated file.
+****************************************************************************/
+#ifndef _ZENDNNL_HPP_
+#define _ZENDNNL_HPP_\n\n")
+  file(APPEND ${inc_file} ${prolog_banner})
+endfunction()
+
+function(create_header_file inc_file inc_subdir inc_list)
+  #separate_arguments(inc_list NATIVE_COMMAND ${inc_list_str})
   #set(inc_pre_str "#include \"impl/")
   set(inc_pre_str "#include \"")
   string(CONCAT inc_pre_str ${inc_pre_str} ${inc_subdir} "/")
@@ -27,4 +38,10 @@ function(create_header_file inc_file inc_subdir inc_list_str)
   endforeach()
 endfunction()
 
-create_header_file(${INC_FILE_NAME} ${INC_SUBDIR} ${INC_FILE_LIST})
+function(epilog_header_file inc_file)
+  set(epilog_banner "\n#endif")
+  file(APPEND ${inc_file} ${epilog_banner})
+endfunction()
+
+#prolog_header_file(${INC_FILE_NAME})
+#create_header_file(${INC_FILE_NAME} ${INC_SUBDIR} ${INC_FILE_LIST})

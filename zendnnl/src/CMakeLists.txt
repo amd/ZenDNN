@@ -13,6 +13,9 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
+
+include(CreateIncludeFiles)
+
 # build zendnnl_archive and zendnnl library
 set(zendnnl_src_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(zendnnl_inc_file "${CMAKE_BINARY_DIR}/zendnnl.hpp")
@@ -47,9 +50,14 @@ target_include_directories(zendnnl
 target_link_libraries(zendnnl
   PUBLIC ${CMAKE_DL_LIBS})
 
+# create top level include file
+prolog_header_file(${zendnnl_inc_file})
+
 add_subdirectory(common)
 add_subdirectory(memory)
 add_subdirectory(operators)
+
+epilog_header_file(${zendnnl_inc_file})
 
 # install zendnnl and create package config files
 install(TARGETS zendnnl_archive zendnnl EXPORT zendnnl_targets
