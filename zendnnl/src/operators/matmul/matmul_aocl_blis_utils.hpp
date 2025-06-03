@@ -39,21 +39,23 @@ using namespace zendnnl::memory;
  * Sets AOCL BLIS post-ops for MatMul
  */
 class aocl_blis_utils_t {
-public:
+ public:
   aocl_blis_utils_t();
   ~aocl_blis_utils_t();
 
   using tensor_map_type = std::map<std::string, tensor_t>;
 
   /** @brief function pointer type for getting the reorder buffer size */
-  using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char, const char,
-                                                               const char, const dim_t,
-                                                               const dim_t);
+  using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
+                                         const char,
+                                         const char, const dim_t,
+                                         const dim_t);
 
   /** @brief template function pointer type for reordering */
   template <typename T>
-  using reorder_func_ptr = void (*)(const char, const char, const char, const T *, T *,
-                               const dim_t, const dim_t, const dim_t);
+  using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
+                                    T *,
+                                    const dim_t, const dim_t, const dim_t);
 
   /** @brief entry function for tensor reordering for the AOCL */
   status_t      reorder_weights(std::optional<tensor_t> weights);
@@ -61,43 +63,46 @@ public:
   /** @brief weight reordering for the AOCL */
   template <typename T>
   size_t        reorder_weights_execute(
-                 const void *weights,
-                 const int k,
-                 const int n,
-                 const int ldb,
-                 const char order,
-                 const char trans,
-                 get_reorder_buff_size_func_ptr get_reorder_buf_size,
-                 reorder_func_ptr<T> reorder_func);
+    const void *weights,
+    const int k,
+    const int n,
+    const int ldb,
+    const char order,
+    const char trans,
+    get_reorder_buff_size_func_ptr get_reorder_buf_size,
+    reorder_func_ptr<T> reorder_func);
 
   /** @brief allocate memory for the AOCL post-ops */
-  status_t      aocl_post_op_memory_alloc(const std::vector<post_op_t> post_op_vec_,
-                                          bool is_bias);
+  status_t      aocl_post_op_memory_alloc(const std::vector<post_op_t>
+                                          post_op_vec_,
+                                          bool is_bias, std::map<std::string, zendnnl::memory::tensor_t> inputs_);
 
   /** @brief initialize the post-ops */
   status_t      aocl_post_op_initialize(const std::vector<post_op_t> post_op_vec_,
-                                        int &post_op_count);
+                                        int &post_op_count, bool is_bias,
+                                        std::map<std::string, zendnnl::memory::tensor_t> inputs_);
 
   /** @brief allocate aocl post op */
   status_t      alloc_post_op(const std::vector<post_op_t> post_op_vec_,
-                              std::optional<tensor_t> optional_bias_tensor_);
+                              std::optional<tensor_t> optional_bias_tensor_,
+                              std::map<std::string, zendnnl::memory::tensor_t> inputs_);
 
   /** @brief free aocl post op */
   void          free_post_op();
 
-  /** @brief sets runtime post-op buffers in aocl_po_ptr */
-  status_t      set_runtime_post_op_buffer(tensor_map_type &inputs);
+  /** @brief sets runtime post-op buffers in aocl_blis_po_ptr */
+  status_t      set_runtime_post_op_buffer(tensor_map_type &inputs, bool is_bias);
 
   /** @brief get the post op pointer */
-  aocl_post_op* get_aocl_post_op_ptr_unsafe() const;
+  aocl_post_op *get_aocl_blis_post_op_ptr_unsafe() const;
 
   /** @brief get the reordered weights pointer*/
-  void*         get_aocl_reordered_weights_ptr_unsafe() const;
+  void         *get_aocl_blis_reordered_weights_ptr_unsafe() const;
 
-protected:
+ protected:
   std::map<std::string, uint32_t> post_op_size;
-  aocl_post_op* aocl_po_ptr;
-  void* reordered_weights_ptr;
+  aocl_post_op *aocl_blis_po_ptr;
+  void *reordered_weights_ptr;
 };
 
 } // namespace ops

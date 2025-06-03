@@ -37,28 +37,28 @@ using namespace zendnnl::memory;
  * @sa matmul_operator_t
  */
 class matmul_context_t final : public op_context_t<matmul_context_t> {
-public:
+ public:
   /** @brief parent type */
   using parent_type = op_context_t<matmul_context_t>;
 
   /** TODO: Add a interface to support different backends */
   /** @brief get post op pointer */
-  aocl_post_op* get_aocl_post_op_ptr_unsafe() const;
+  aocl_post_op *get_aocl_blis_post_op_ptr_unsafe() const;
 
   /** @brief get reordered weights pointer */
-  void* get_aocl_reordered_weights_ptr_unsafe() const;
+  void *get_aocl_blis_reordered_weights_ptr_unsafe() const;
 
   /** @brief preprocess */
   status_t preprocess() override;
 
-protected:
+ protected:
   /** @brief validate parameters */
   status_t validate() override;
 
   /** @brief Returns matmul context information */
   std::string context_info() override;
 
-  std::shared_ptr<aocl_blis_utils_t> aocl_utils_ptr; /**< aocl blis utils */
+  std::shared_ptr<aocl_blis_utils_t> aocl_blis_utils_ptr; /**< aocl blis utils */
   friend class matmul_operator_t;
 };
 

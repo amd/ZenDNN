@@ -283,7 +283,7 @@ int matmul_mul_silu_mul_f32_kernel_example() {
                                                       data_type_t::f32,
                                                       1.0, "matmul_input");
 
-    auto mul_tensor   = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+    auto mul_tensor   = tensor_factory.uniform_tensor({MATMUL_N},
                                                       data_type_t::f32,
                                                       2.0, "binary_mul_0");
 

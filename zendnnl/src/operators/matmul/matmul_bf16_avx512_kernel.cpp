@@ -27,9 +27,9 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_bf16_avx512 kernel");
   log_info("Executing matmul_bf16_avx512 kernel");
 
-  auto     aocl_po_ptr        = context_.get_aocl_post_op_ptr_unsafe();
+  auto     aocl_blis_po_ptr   = context_.get_aocl_blis_post_op_ptr_unsafe();
   auto     reorder_weights    = (int16_t *)
-                                context_.get_aocl_reordered_weights_ptr_unsafe();
+                                context_.get_aocl_blis_reordered_weights_ptr_unsafe();
   auto     input_tensor       = inputs_.find("matmul_input")->second;
   auto     output_tensor      = outputs_.find("matmul_output")->second;
   auto     weight_tensor      = context_.get_param("weights").value();
@@ -76,7 +76,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                               ldb, weight_format,
                               beta,
                               (float *)output_raw_handle, ldc,
-                              aocl_po_ptr);
+                              aocl_blis_po_ptr);
   }
   else if (output_tensor.get_data_type() == data_type_t::bf16) {
     aocl_gemm_bf16bf16f32obf16(order, trans_input, trans_weight,
@@ -87,7 +87,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                                ldb, weight_format,
                                beta,
                                (int16_t *)output_raw_handle, ldc,
-                               aocl_po_ptr);
+                               aocl_blis_po_ptr);
   }
   else {
     log_error("Unsupported output data type");

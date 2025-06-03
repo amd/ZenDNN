@@ -114,21 +114,23 @@ status_t matmul_f32_ref_kernel_t::execute(const context_type &context_,
 
 status_t matmul_f32_ref_kernel_t::apply_post_op(tensor_t &tensor_,
     tensor_t &buffer_tensor_, post_op_t zen_po_) {
-  float *output   = (float *)tensor_.get_raw_handle_unsafe();
-  void *buffer   = buffer_tensor_.get_raw_handle_unsafe();
-  auto  buff_data = buffer_tensor_.get_data_type();
+  float *output      = (float *)tensor_.get_raw_handle_unsafe();
+  void *buffer       = buffer_tensor_.get_raw_handle_unsafe();
+  auto  buff_data    = buffer_tensor_.get_data_type();
 
-  const int size  = tensor_.get_nelem();
+  const int size     = tensor_.get_nelem();
+  const int buf_size = buffer_tensor_.get_nelem();
 
   if (zen_po_.type == post_op_type_t::binary_add) {
     float add_po_scale = zen_po_.binary_add_params.scale;
     for (int i = 0; i < size; ++i) {
       if (buff_data == data_type_t::bf16) {
-        float temp = float(((bfloat16_t *)buffer)[i]);
+        float temp = float(((bfloat16_t *)buffer)[i % buf_size]);
         output[i] = binary_add_fwd(output[i], temp, add_po_scale);
       }
       else {
-        output[i] = binary_add_fwd(output[i], ((float *)buffer)[i], add_po_scale);
+        output[i] = binary_add_fwd(output[i], ((float *)buffer)[i % buf_size],
+                                   add_po_scale);
       }
     }
   }
@@ -136,11 +138,12 @@ status_t matmul_f32_ref_kernel_t::apply_post_op(tensor_t &tensor_,
     float mul_po_scale = zen_po_.binary_mul_params.scale;
     for (int i = 0; i < size; ++i) {
       if (buff_data == data_type_t::bf16) {
-        float temp = float(((bfloat16_t *)buffer)[i]);
+        float temp = float(((bfloat16_t *)buffer)[i % buf_size]);
         output[i] = binary_mul_fwd(output[i], temp, mul_po_scale);
       }
       else {
-        output[i] = binary_mul_fwd(output[i], ((float *)buffer)[i], mul_po_scale);
+        output[i] = binary_mul_fwd(output[i], ((float *)buffer)[i % buf_size],
+                                   mul_po_scale);
       }
     }
   }

@@ -49,7 +49,7 @@ status_t matmul_context_t::validate() {
 status_t matmul_context_t::preprocess() {
   LOG_DEBUG_INFO("Preprocessing matmul_context_t");
   //aocl context pointer
-  aocl_utils_ptr = std::make_shared<aocl_blis_utils_t>();
+  aocl_blis_utils_ptr = std::make_shared<aocl_blis_utils_t>();
   return status_t::success;
 }
 
@@ -76,14 +76,14 @@ std::string matmul_context_t::context_info() {
   return ss.str();
 }
 
-aocl_post_op *matmul_context_t::get_aocl_post_op_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl_post_op_ptr from matmul_context_t");
-  return aocl_utils_ptr->get_aocl_post_op_ptr_unsafe();
+aocl_post_op *matmul_context_t::get_aocl_blis_post_op_ptr_unsafe() const {
+  LOG_DEBUG_INFO("Getting aocl_blis_post_op_ptr from matmul_context_t");
+  return aocl_blis_utils_ptr->get_aocl_blis_post_op_ptr_unsafe();
 }
 
-void *matmul_context_t::get_aocl_reordered_weights_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl_reordered_weights_ptr from matmul_context_t");
-  return aocl_utils_ptr->get_aocl_reordered_weights_ptr_unsafe();
+void *matmul_context_t::get_aocl_blis_reordered_weights_ptr_unsafe() const {
+  LOG_DEBUG_INFO("Getting aocl_blis_reordered_weights_ptr from matmul_context_t");
+  return aocl_blis_utils_ptr->get_aocl_blis_reordered_weights_ptr_unsafe();
 }
 
 } //namespace ops

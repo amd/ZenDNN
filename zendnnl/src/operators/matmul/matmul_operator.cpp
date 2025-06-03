@@ -30,29 +30,56 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
     for (const auto &op : po) {
       if (op.type == post_op_type_t::binary_add) {
         auto add_tensor_obj = inputs.find(op.binary_add_params.tensor_name);
+        auto tensor_size = add_tensor_obj->second.get_size();
         if (add_tensor_obj == inputs.end()) {
           log_error("Invalid post-op: ",
                     op.binary_add_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
-        if (output_size.at(0) != add_tensor_obj->second.get_size(0) ||
-            output_size.at(1) != add_tensor_obj->second.get_size(1)) {
+        if (add_tensor_obj->second.get_order() == "ba") {
+          log_error("Invalid post-op: ",
+                    op.binary_add_params.tensor_name, " transposed buffer not supported.");
+          return status_t::failure;
+        }
+        /** todo: support 1d add scale*/
+        if (tensor_size.size() == 1 && tensor_size[0] == output_size.at(1) &&
+            op.binary_add_params.scale == 1.0) {
+          continue;
+        }
+        else if (tensor_size.size() == 2 && (tensor_size[0] == output_size.at(0) &&
+                                             tensor_size[1] == output_size.at(1))) {
+          continue;
+        }
+        else {
           log_error(add_tensor_obj->second.get_name(),
-                    " Invalid post-op: output size mismatch for binary_add post op.");
+                    " Invalid post-op: size mismatch for binary_add post op.");
           return status_t::failure;
         }
       }
       else if (op.type == post_op_type_t::binary_mul) {
         auto mul_tensor_obj = inputs.find(op.binary_mul_params.tensor_name);
+        auto tensor_size = mul_tensor_obj->second.get_size();
         if (mul_tensor_obj == inputs.end()) {
           log_error("Invalid post-op: ",
                     op.binary_mul_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
-        if (output_size.at(0) != mul_tensor_obj->second.get_size(0) ||
-            output_size.at(1) != mul_tensor_obj->second.get_size(1)) {
+        if (mul_tensor_obj->second.get_order() == "ba") {
+          log_error("Invalid post-op: ",
+                    op.binary_mul_params.tensor_name, " transposed buffer not supported.");
+          return status_t::failure;
+        }
+        if (tensor_size.size() == 1 && tensor_size[0] == output_size.at(1) &&
+            op.binary_mul_params.scale == 1.0) {
+          continue;
+        }
+        else if (tensor_size.size() == 2 && (tensor_size[0] == output_size.at(0) &&
+                                             tensor_size[1] == output_size.at(1))) {
+          continue;
+        }
+        else {
           log_error(mul_tensor_obj->second.get_name(),
-                    " Invalid post-op: output size mismatch for binary_mul post op.");
+                    " Invalid post-op: size mismatch for binary_mul post op.");
           return status_t::failure;
         }
       }
@@ -150,19 +177,20 @@ status_t matmul_operator_t::preprocess() {
   auto weight_tensor = context.get_param("weights");
 
   if (forced_kernel == "aocl_blis_blocked") {
-    if (context.aocl_utils_ptr->reorder_weights(weight_tensor)
+    if (context.aocl_blis_utils_ptr->reorder_weights(weight_tensor)
         == status_t::failure) {
       return status_t::failure;
     }
   }
   //initialize aocl po
-  if (context.aocl_utils_ptr->alloc_post_op(context.get_post_op(),
-      optional_bias_tensor)
+  if (context.aocl_blis_utils_ptr->alloc_post_op(context.get_post_op(),
+      optional_bias_tensor, inputs)
       == status_t::failure) {
     return status_t::failure;
   }
   //set runtime post ops from inputs
-  return context.aocl_utils_ptr->set_runtime_post_op_buffer(inputs);
+  return context.aocl_blis_utils_ptr->set_runtime_post_op_buffer(inputs,
+         optional_bias_tensor ? true : false);
 }
 
 std::string matmul_operator_t::operator_info() {
