@@ -171,12 +171,16 @@ std::string matmul_operator_t::operator_info() {
   auto output  = get_output("matmul_output").value();
 
   auto weights       = context.get_param("weights").value();
-  auto bias          = context.get_param("bias").value();
+  auto bias          = context.get_param("bias");
   auto post_op_count = context.get_post_op_count();
 
-  ss <<input.tensor_info()<<","<<weights.tensor_info()
-     <<","<<bias.tensor_info()<<","<<output.tensor_info()
-     <<","<<"post-op";
+  ss <<input.tensor_info()<<","<<weights.tensor_info() <<",";
+
+  if (bias) {
+    ss <<bias.value().tensor_info()<<",";
+  }
+
+  ss <<output.tensor_info() <<","<<"post-op";
 
   for (uint32_t i = 0; i < post_op_count; ++i) {
     post_op_t zen_po = context.get_post_op(i);

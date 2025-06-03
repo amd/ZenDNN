@@ -99,7 +99,7 @@ static inline platform_info_t &zendnnl_platform_info() {
  * @return A Relative path string
  */
 static inline const char *get_relative_path(const char *abs_path_) {
-  const char *rel = std::strstr(abs_path_, "ZenDNNL/");
+  const char *rel = std::strstr(abs_path_, "ZenDNN/");
   return (rel? rel : abs_path_);
 }
 

@@ -56,12 +56,17 @@ status_t matmul_context_t::preprocess() {
 std::string matmul_context_t::context_info() {
   std::stringstream ss;
   auto weights = get_param("weights").value();
-  auto bias    = get_param("bias").value();
+  auto bias    = get_param("bias");
 
   auto post_op_count = get_post_op_count();
 
-  ss <<weights.tensor_info()<<","<<bias.tensor_info()<<","
-     <<"post-op";
+  ss <<weights.tensor_info()<<",";
+
+  if (bias) {
+    ss <<bias.value().tensor_info()<<",";
+  }
+
+  ss <<"post-op";
 
   for (uint32_t i = 0; i < post_op_count; ++i) {
     post_op_t zen_po = get_post_op(i);
