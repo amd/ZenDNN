@@ -138,6 +138,8 @@ void zenMatMul_gemm_bf16bf16f32of32(
     aocl_post_op *post_ops = create_aocl_post_ops<float>(ctx, po, n,
                              alpha, (char *) bias, bias_type, relu, gelu, output,
                              postop_count, &alpha, &dummy_scale);
+
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32of32");
     //Perform MatMul using AMD BLIS
     aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                               transpose_input ? 't' : 'n',
@@ -238,6 +240,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32of32(
     aocl_post_op *post_ops = create_aocl_post_ops<float>(ctx, po, n,
                              alpha, (char *) bias, bias_type, relu, gelu, output,
                              postop_count, &alpha, &dummy_scale);
+
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32of32");
     omp_set_max_active_levels(1);
     int16_t *data_col = (int16_t *)input;
     unsigned int m_rem_dim = m%thread_qty;
@@ -371,6 +375,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
     aocl_post_op *post_ops = create_aocl_post_ops<int16_t>(ctx, po, n,
                              alpha, (char *) bias, bias_type, relu, gelu, output,
                              postop_count, &alpha, &dummy_scale);
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32obf16");
     //Perform MatMul using AMD BLIS
     aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
                                transpose_input ? 't' : 'n',
@@ -471,6 +476,8 @@ void zenMatMul_gemm_parallel_bf16bf16f32obf16(
     aocl_post_op *post_ops = create_aocl_post_ops<int16_t>(ctx, po, n,
                              alpha, (char *) bias, bias_type, relu, gelu, output,
                              postop_count, &alpha, &dummy_scale);
+
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32obf16");
     omp_set_max_active_levels(1);
     int16_t *data_col = (int16_t *)input;
     unsigned int m_rem_dim = m%thread_qty;

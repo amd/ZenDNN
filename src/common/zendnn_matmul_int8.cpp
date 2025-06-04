@@ -944,7 +944,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int16_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32obf16");
         aocl_gemm_u8s8s32obf16(order, transA, transB, m,
                                n,
                                k, alpha, input,
@@ -960,7 +960,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (float *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32of32");
         aocl_gemm_u8s8s32of32(order, transA, transB, m,
                               n,
                               k, alpha, input,
@@ -1081,7 +1081,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int16_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_s8s8s32obf16");
         aocl_gemm_s8s8s32obf16(order, transA, transB, m,
                                n,
                                k, alpha, input,
@@ -1097,7 +1097,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (float *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_s8s8s32of32");
         aocl_gemm_s8s8s32of32(order, transA, transB, m,
                               n,
                               k, alpha, input,
@@ -1219,7 +1219,7 @@ void zenMatMul_gemm_s8s8s32oInt(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_s8s8s32os8");
         aocl_gemm_s8s8s32os8(order, transA, transB, m,
                              n,
                              k, alpha, input,
@@ -1253,7 +1253,7 @@ void zenMatMul_gemm_s8s8s32oInt(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int32_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_s8s8s32os32");
         aocl_gemm_s8s8s32os32(order, transA, transB, m,
                               n,
                               k, alpha, input,
@@ -1375,7 +1375,7 @@ void zenMatMul_gemm_u8s8s32oInt(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32os8");
         aocl_gemm_u8s8s32os8(order, transA, transB, m,
                              n, k, alpha, input,
                              lda, mem_format_a, blocked_format ? reorder_filter : filter,
@@ -1389,7 +1389,7 @@ void zenMatMul_gemm_u8s8s32oInt(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32ou8");
         aocl_gemm_u8s8s32ou8(order, transA, transB, m,
                              n, k, alpha, input,
                              lda, mem_format_a, blocked_format ? reorder_filter : filter,
@@ -1403,7 +1403,7 @@ void zenMatMul_gemm_u8s8s32oInt(
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int32_t *)output, &dummy_scale,
                    &dummy_zp);
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32os32");
         aocl_gemm_u8s8s32os32(order, transA, transB, m,
                               n, k, alpha, input,
                               lda, mem_format_a, blocked_format ? reorder_filter : filter,

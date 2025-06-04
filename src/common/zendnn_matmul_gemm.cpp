@@ -71,7 +71,6 @@ void zenMatMul_gemm_blocked(
     bool blocked_format = false
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    zendnnVerbose(ZENDNN_PROFLOG,"AOCL GEMM used");
 
     int weight_cache_type = zenEnvObj.zenWeightCache;
     Key_matmul key_obj(transpose_input, transpose_filter, m, k, n, lda, ldb, ldc,
@@ -322,6 +321,7 @@ void zenMatMul_gemm_blocked(
         }
         post_ops->seq_length = po_ops.len() + postop_count;
     }
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_f32f32f32of32");
     //Perform MatMul using AMD BLIS
     aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                             transpose_input ? 't' : 'n',

@@ -112,6 +112,7 @@ int ref_woq_bf16(
                    has_eltwise_relu, geluType,
                    alpha != 1.0 ? (int16_t *)output : NULL/*sum with beta*/,
                    postop_count, postop_count ? &alpha : NULL, &dummy_scale);
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32obf16");
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16bf16f32obf16(Layout? 'r' : 'c',
                                    transA ? 't' : 'n',
@@ -132,6 +133,7 @@ int ref_woq_bf16(
                                                alpha != 1.0 ? (float *)output : NULL/*sum with beta*/,
                                                postop_count, postop_count ? &alpha : NULL,
                                                &dummy_scale);
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32of32");
         aocl_gemm_bf16bf16f32of32(Layout? 'r' : 'c',
                                   transA ? 't' : 'n',
                                   transB ? 't' : 'n', M, N, K,
@@ -243,6 +245,7 @@ int ref_woq_f32(
                                            alpha, bias == NULL ? NULL :(const char *)bias, bias_type,
                                            has_eltwise_relu, geluType, (float *)output,
                                            postop_count, NULL, &dummy_scale);
+    zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_f32f32f32of32");
     aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
                             transA ? 't' : 'n',
                             transB ? 't' : 'n', M, N, K,
@@ -503,8 +506,6 @@ int aocl_woq_bf16(
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
                        false);
 
-    zendnnVerbose(ZENDNN_PROFLOG,"aocl_bf16s4 kernel");
-
     // Blocked BLIS API for matmul
     // Set post_ops to NULL and define reorder_param0 as 'B' for B matrix
     // Define dimentions of B matrix as reorder_param1 and reorder_param2
@@ -575,7 +576,7 @@ int aocl_woq_bf16(
         }
         (post_ops->pre_ops)->seq_length = 1;
         (post_ops->pre_ops)->group_size = group_size;
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16s4f32obf16");
         //Perform MatMul using AMD BLIS
         aocl_gemm_bf16s4f32obf16(Layout? 'r' : 'c',
                                  transA ? 't' : 'n',
@@ -622,7 +623,7 @@ int aocl_woq_bf16(
         }
         (post_ops->pre_ops)->seq_length = 1;
         (post_ops->pre_ops)->group_size = group_size;
-
+        zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16s4f32of32");
         aocl_gemm_bf16s4f32of32(Layout? 'r' : 'c',
                                 transA ? 't' : 'n',
                                 transB ? 't' : 'n', M, N, K,
