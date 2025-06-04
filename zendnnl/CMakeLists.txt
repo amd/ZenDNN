@@ -52,8 +52,5 @@ add_subdirectory(src)
 # build gtests
 add_subdirectory(gtests)
 
-# build doxygen
-add_subdirectory(doxygen)
-
 
 

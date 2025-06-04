@@ -15,15 +15,75 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+#------------------------------------------------------------------------------
+# functions
+
+# argument parsing
+function parse_args() {
+    while [[ $# -gt 0 ]]
+    do
+	key="$1"
+
+	case $key in
+	    --zendnnl-nogtest )
+		ZENDNNL_NOGTEST=1
+		shift
+		shift
+		;;
+	    --zendnnl )
+		ZENDNNL=1
+		shift
+		;;
+	    --examples )
+		ZENDNNL_EXAMPLES=1
+		shift
+		;;
+	    --doxygen )
+		ZENDNNL_DOXYGEN=1
+		shift
+		;;
+	    --all )
+		ZENDNNL_ALL=1
+		shift
+		;;
+	    --clean )
+		ZENDNNL_CLEAN=1
+		shift
+		;;
+	    --no-deps )
+                ZENDNNL_NODEPS=1
+                shift
+		;;
+            --help )
+                echo "zendnnl-build <options>"
+                echo "--all      : build and install all targets."
+                echo "--clean    : clean all targets."
+                echo "--zendnnl  : build and install zendnnl lib."
+                echo "--examples : build and install examples."
+                echo "--doxygen  : build and install doxygen docs."
+                echo "--no-deps  : don't rebuild (or clean) dependencies."
+                shift
+                ;;
+	    * )
+		echo "unknown command line option $1"
+		return
+	esac
+    done
+
+    return 0
+}
+
+# sanity check
 curr_dir="$(pwd)"
 parent_dir="$(dirname "$curr_dir")"
 last_dir="$(basename $curr_dir)"
 
 if [ ${last_dir} != "scripts" ];then
     echo "error: <${last_dir}> does not seem to be <scripts> folder."
-    return;
+    return 0;
 fi
 
+# create build folder
 echo "switching to <${parent_dir}>."
 cd ${parent_dir}
 
@@ -34,13 +94,72 @@ else
     echo "<build> directory exists."
 fi
 
-if [ ! -z "$(ls -A "./build")" ];then
-    echo "<build> is not empty. please empty it manually for fresh build."
+# if [ ! -z "$(ls -A "./build")" ];then
+#     echo "<build> is not empty. please empty it manually for fresh build."
+# fi
+
+# parse arguments
+ZENDNNL_NOGTEST=0
+ZENDNNL=0
+ZENDNNL_EXAMPLES=0
+ZENDNNL_DOXYGEN=0
+ZENDNNL_ALL=0
+ZENDNNL_CLEAN=0
+ZENDNNL_NODEPS=0
+
+if ! parse_args $@;
+then
+    return 0
 fi
 
-echo "building zendnnl..."
+# go to build folder
+echo "switching to <build>..."
 cd build
-cmake ..
-cmake --build .
+
+# configure and build
+CMAKE_OPTIONS=""
+TARGET_OPTIONS=""
+
+if [ ${ZENDNNL_NODEPS} -eq 1 ];then
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=OFF"
+else
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
+fi
+
+if [ ${ZENDNNL_ALL} -eq 1 ];then
+
+    cmake ${CMAKE_OPTIONS} ..
+    #cmake --build . --target clean
+    cmake --build . --target all
+
+elif [ ${ZENDNNL_CLEAN} -eq 1 ];then
+
+    cmake ${CMAKE_OPTIONS} ..
+    cmake --build . --target clean
+
+else
+    if [ ${ZENDNNL} -eq 1 ];then
+        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl"
+    fi
+
+    if [ ${ZENDNNL_EXAMPLES} -eq 1 ];then
+        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-examples"
+    fi
+
+    if [ ${ZENDNNL_DOXYGEN} -eq 1 ];then
+        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-doxygen"
+    fi
+
+    echo "building targets ${TARGET_OPTIONS}"
+
+    if [[ ! -z ${TARGET_OPTIONS} ]];then
+        cmake ${CMAKE_OPTIONS} ..
+        #cmake --build . --target clean
+        cmake --build . --target ${TARGET_OPTIONS}
+    else
+        echo "no targets given... nothing to do."
+    fi
+fi
+
 
 cd ${curr_dir}

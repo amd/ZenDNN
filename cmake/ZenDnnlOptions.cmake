@@ -13,10 +13,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-if(_ZENDNNL_OPTIONS_INCLUDED_)
-  return()
-endif()
-set(_ZENDNNL_OTIONS_INCLUDED_ TRUE)
+include_guard(GLOBAL)
 
 include(ZenDnnlComponentsOptions)
 include(ZenDnnlDependenciesInfo)

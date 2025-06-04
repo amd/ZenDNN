@@ -26,8 +26,9 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
 
   message(DEBUG "AMDBLIS_CMAKE_ARGS=${AMDBLIS_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl_deps_amdblis
+  ExternalProject_ADD(zendnnl-deps-amdblis
     SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/amdblis"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis"
     GIT_REPOSITORY ${AMDBLIS_GIT_REPO}
     GIT_TAG ${AMDBLIS_GIT_TAG}
@@ -36,9 +37,17 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
     BUILD_COMMAND cmake --build . --config release --target install -j
     UPDATE_DISCONNECTED TRUE)
 
-  list(APPEND ZENDNNL_DEPS "zendnnl_deps_amdblis")
+  list(APPEND AMDBLIS_CLEAN_FILES "${CMAKE_BINARY_DIR}/amdblis")
+  list(APPEND AMDBLIS_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/amdblis")
+
+  set_target_properties(zendnnl-deps-amdblis
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${AMDBLIS_CLEAN_FILES}")
+
+  list(APPEND ZENDNNL_DEPS "zendnnl-deps-amdblis")
 else()
   message(DEBUG "skipping building amdblis.")
 endif()
+
 
 

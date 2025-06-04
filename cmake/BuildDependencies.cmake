@@ -15,10 +15,19 @@
 # *******************************************************************************/
 include_guard(GLOBAL)
 
-include(ExternProjAMDBLIS)
-include(ExternProjAOCLUTILS)
-include(ExternProjGTEST)
+if(ZENDNNL_BUILD_DEPS)
+  include(ExternProjAMDBLIS)
+  include(ExternProjAOCLUTILS)
+  include(ExternProjGTEST)
+else()
+  message(STATUS
+    "Skipping building dependencies. Build will fail if they are not pre-built.")
+endif()
 
+# add a custom target to build only dependencies
+add_custom_target(zendnnl-deps
+  DEPENDS ${ZENDNNL_DEPS}
+)
 
 
 

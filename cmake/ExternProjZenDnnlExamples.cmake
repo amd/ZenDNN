@@ -30,13 +30,22 @@ if(ZENDNNL_BUILD_EXAMPLES)
 
   message(DEBUG "ZLE_CMAKE_ARGS = ${ZLE_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl_examples
+  ExternalProject_ADD(zendnnl-examples
+    DEPENDS    "zendnnl"
     SOURCE_DIR "${ZENDNNL_EXAMPLES_ROOT}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/examples"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/examples"
     CMAKE_ARGS "${ZLE_CMAKE_ARGS}"
     BUILD_COMMAND cmake --build .
     INSTALL_COMMAND cmake --install .)
+
+  list(APPEND EXAMPLES_CLEAN_FILES "${CMAKE_BINARY_DIR}/examples")
+  list(APPEND EXAMPLES_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/examples")
+
+  set_target_properties(zendnnl-examples
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${EXAMPLES_CLEAN_FILES}")
+
 else()
   message(DEBUG "skipping building examples...")
 endif()

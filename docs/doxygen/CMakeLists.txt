@@ -17,14 +17,18 @@
 if(ZENDNNL_BUILD_DOXYGEN)
   message(DEBUG "adding doxygen-awesome-css ")
   include(FetchContent)
-  
+
   FetchContent_Declare(
   doxygen-awesome-css
   URL https://github.com/jothepro/doxygen-awesome-css/archive/refs/heads/main.zip)
-  
-  FetchContent_Populate(doxygen-awesome-css)
-  
-  set(DOXYGEN_AWESOME_CSS_DIR ${doxygen-awesome-css_SOURCE_DIR})
+
+  FetchContent_MakeAvailable(doxygen-awesome-css)
+
+  # Save the location the files were cloned into
+  # This allows us to get the path to doxygen-awesome.css
+  FetchContent_GetProperties(doxygen-awesome-css SOURCE_DIR DOXYGEN_AWESOME_CSS_DIR)
+
+  #set(DOXYGEN_AWESOME_CSS_DIR ${doxygen-awesome-css_SOURCE_DIR})
 
   find_package(Doxygen)
   if(DOXYGEN_FOUND)
@@ -34,8 +38,15 @@ if(ZENDNNL_BUILD_DOXYGEN)
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_INSTALL_PREFIX}/doxygen")
 
     configure_file(${DOXYFILE_IN} ${DOXYFILE_OUT} @ONLY)
-    doxygen_add_docs(doxygen ALL
+    doxygen_add_docs(zendnnl-doxygen ALL
       CONFIG_FILE ${DOXYFILE_OUT})
+
+  list(APPEND DOXYGEN_CLEAN_FILES "${DOXYGEN_OUTPUT_DIRECTORY}")
+
+  set_target_properties(zendnnl-doxygen
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${DOXYGEN_CLEAN_FILES}")
+
   else()
     message(WARNING "Doxygen not found, unable to build documentation.")
   endif()

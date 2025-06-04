@@ -22,8 +22,9 @@ if(ZENDNNL_BUILD_GTEST)
 
   message(DEBUG "GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl_deps_gtest
+  ExternalProject_ADD(zendnnl-deps-gtest
     SOURCE_DIR "${GTEST_ROOT_DIR}"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/gtest"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/gtest"
     GIT_REPOSITORY ${GTEST_GIT_REPO}
     GIT_TAG ${GTEST_GIT_TAG}
@@ -32,7 +33,14 @@ if(ZENDNNL_BUILD_GTEST)
     INSTALL_COMMAND cmake --build . --config release --target install -j
     UPDATE_DISCONNECTED TRUE)
 
-  list(APPEND ZENDNNL_DEPS "zendnnl_deps_gtest")
+  list(APPEND GTEST_CLEAN_FILES "${CMAKE_BINARY_DIR}/gtest")
+  list(APPEND GTEST_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/gtest")
+
+  set_target_properties(zendnnl-deps-gtest
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${GTEST_CLEAN_FILES}")
+
+  list(APPEND ZENDNNL_DEPS "zendnnl-deps-gtest")
 else()
   message(DEBUG "skipping building gtests...")
 endif()

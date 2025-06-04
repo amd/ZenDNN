@@ -59,3 +59,6 @@ include(BuildDependencies)
 include(ExternProjZENDNNL)
 include(ExternProjZenDnnlExamples)
 
+# build doxygen docs
+add_subdirectory(docs/doxygen)
+

@@ -34,12 +34,22 @@ message(DEBUG "ZL_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
 # cmake install prefix need to be same as projects install prefix, as all the
 # paths will be computed relative to it.
 
-ExternalProject_ADD(zendnnl_library
-  DEPENDS "${ZENDNNL_DEPS}"
+ExternalProject_ADD(zendnnl
+  DEPENDS "zendnnl-deps"
   SOURCE_DIR "${ZENDNNL_ROOT}"
   BINARY_DIR "${CMAKE_BINARY_DIR}/zendnnl"
   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}"
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
-  INSTALL_COMMAND cmake --build . --target install -j )
+  INSTALL_COMMAND cmake --build . --target install -j
+  BUILD_ALWAYS TRUE
+  CONFIGURE_HANDLED_BY_BUILD TRUE)
+
+  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_BINARY_DIR}/zendnnl")
+  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/zendnnl")
+  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/gtests")
+
+  set_target_properties(zendnnl
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
 
 #  BUILD_COMMAND cmake --build . --target install -j

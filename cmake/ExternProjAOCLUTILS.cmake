@@ -27,8 +27,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   message(DEBUG "AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl_deps_aoclutils
+  ExternalProject_ADD(zendnnl-deps-aoclutils
     SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/aoclutils"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
     GIT_REPOSITORY ${AOCLUTILS_GIT_REPO}
     GIT_TAG ${AOCLUTILS_GIT_TAG}
@@ -37,7 +38,14 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     INSTALL_COMMAND cmake --build . --config release --target install -j
     UPDATE_DISCONNECTED TRUE)
 
-  list(APPEND ZENDNNL_DEPS "zendnnl_deps_aoclutils")
+  list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_BINARY_DIR}/aoclutils")
+  list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/aoclutils")
+
+  set_target_properties(zendnnl-deps-aoclutils
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${AOCLUTILS_CLEAN_FILES}")
+
+  list(APPEND ZENDNNL_DEPS "zendnnl-deps-aoclutils")
 else()
   message(DEBUG "skipping building aocl-utils.")
 endif()
