@@ -55,48 +55,34 @@ function parse_args() {
                 shift
 		;;
             --help )
-                echo "zendnnl-build <options>"
-                echo "--all      : build and install all targets."
-                echo "--clean    : clean all targets."
-                echo "--zendnnl  : build and install zendnnl lib."
-                echo "--examples : build and install examples."
-                echo "--doxygen  : build and install doxygen docs."
-                echo "--no-deps  : don't rebuild (or clean) dependencies."
-                shift
+                echo " usage   : zendnnl-build <options>"
+                echo
+                echo " options :"
+                echo " --all      : build and install all targets."
+                echo " --clean    : clean all targets."
+                echo " --zendnnl  : build and install zendnnl lib."
+                echo " --examples : build and install examples."
+                echo " --doxygen  : build and install doxygen docs."
+                echo " --no-deps  : don't rebuild (or clean) dependencies."
+                echo
+                echo " examples :"
+                echo " build all targets including dependencies"
+                echo " source zendnnl_build.sh --all"
+                echo
+                echo " build all targets if dependencies are already built"
+                echo " (will fail if dependencies are not built by previous build)"
+                echo " source zendnnl_build.sh --no-deps --all"
+                echo
+                return 1
                 ;;
 	    * )
 		echo "unknown command line option $1"
-		return
+		return 1
 	esac
     done
 
     return 0
 }
-
-# sanity check
-curr_dir="$(pwd)"
-parent_dir="$(dirname "$curr_dir")"
-last_dir="$(basename $curr_dir)"
-
-if [ ${last_dir} != "scripts" ];then
-    echo "error: <${last_dir}> does not seem to be <scripts> folder."
-    return 0;
-fi
-
-# create build folder
-echo "switching to <${parent_dir}>."
-cd ${parent_dir}
-
-if [ ! -d "build" ];then
-    echo "creating <build> directory."
-    mkdir -p build
-else
-    echo "<build> directory exists."
-fi
-
-# if [ ! -z "$(ls -A "./build")" ];then
-#     echo "<build> is not empty. please empty it manually for fresh build."
-# fi
 
 # parse arguments
 ZENDNNL_NOGTEST=0
@@ -109,11 +95,37 @@ ZENDNNL_NODEPS=0
 
 if ! parse_args $@;
 then
-    return 0
+   return 1
 fi
 
+# sanity check
+curr_dir="$(pwd)"
+parent_dir="$(dirname "$curr_dir")"
+last_dir="$(basename $curr_dir)"
+
+if [ ${last_dir} != "scripts" ];then
+    echo "error: <${last_dir}> does not seem to be <scripts> folder."
+    return 1;
+fi
+
+# create build folder
+# echo "switching to <${parent_dir}>."
+cd ${parent_dir}
+
+if [ ! -d "build" ];then
+    echo "creating ${parent_dir}/build directory..."
+    mkdir -p build
+# else
+#     echo "<build> directory exists."
+fi
+
+# if [ ! -z "$(ls -A "./build")" ];then
+#     echo "<build> is not empty. please empty it manually for fresh build."
+# fi
+
+
 # go to build folder
-echo "switching to <build>..."
+echo "switching to ${parent_dir}/build ..."
 cd build
 
 # configure and build
@@ -150,9 +162,8 @@ else
         TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-doxygen"
     fi
 
-    echo "building targets ${TARGET_OPTIONS}"
-
     if [[ ! -z ${TARGET_OPTIONS} ]];then
+        echo "building targets ${TARGET_OPTIONS}"
         cmake ${CMAKE_OPTIONS} ..
         #cmake --build . --target clean
         cmake --build . --target ${TARGET_OPTIONS}
