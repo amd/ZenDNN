@@ -13,8 +13,8 @@
 - [ZenDNNL : Build and Install](#2-zendnnl-build-and-install)
   - [Build Dependencies](#21-build-dependencies)
   - [Build and install](#22-build-and-install)
-- [ZenDNNL : Tests](#3-zendnnl-tests)
-  - [Unit Tests](#31-unit-tests)
+- [ZenDNNL : Examples and Tests](#3-zendnnl-examples-tests)
+  - [Examples](#31-examples)
   - [GoogleTest](#32-googletest)
 <!-- tocstop -->
 
@@ -43,26 +43,32 @@ ZenDNNL as a new primitive library is envisaged to address these problems with c
 ZenDNNL has the following top level directory structure
 
 ```
-ZenDNNL
+ZenDNN
 |- build        : used to build and install the library.
 |- cmake        : contains cmake modules.
 |- dependencies : to downaload all dependencies.
-|- doxygen      : doxygen config file and additional pages.
 |- examples     : tutorial examples on how to use ZenDNNL APIs.
 |- scripts      : suporting shell scripts.
-|- src          : contains library code.
-|   |- common : contains some high level utilities needed by the library.
-|   |- memory : implements tensor_t class.
-|   |- operator : implements all operator classes.
-|   |   |- common : implements base classes needed for the operators.
-|   |   |- sample_operator : demonstrates how to create an operator.
-|   |   |- matmul_operator : implements matrix multiplication with optional post-op.
-|   |   |- compare_operator : perform element-wise comparision of tensors.
+|- zendnnl      : contains library code.
+|   |   |- doxygen : doxygen config file and additional pages.
+|   |   |- gtests : GoogleTest files.
+|   |   |- src : contains library code.
+|   |   |   |- common : contains some high level utilities needed by the library.
+|   |   |   |- memory : implements tensor_t class.
+|   |   |   |- operator : implements all operator classes.
+|   |   |   |   |- common : implements base classes needed for the operators.
+|   |   |   |   |- sample_operator : demonstrates how to create an operator.
+|   |   |   |   |- matmul_operator : implements matrix multiplication with optional post-op.
+|   |   |   |   |- reorder_operator : copies data between different memory formats.
+|   |   |   |   |- compare_operator : perform element-wise comparision of tensors.
 ```
 ## 1.4. Third Party Libraries
 
-ZenDNNL depends on the following library.
- * [AOCL BLIS](https://github.com/amd/blis)
+ZenDNNL depends on the following libraries.
+ - [AOCL BLIS](https://github.com/amd/blis)
+ - [GoogleTest](https://github.com/google/googletest)
+
+
 
 ## 1.5. Supported OS
 
@@ -73,55 +79,102 @@ Refer to the [support matrix](https://www.amd.com/en/developer/zendnn.html#getti
 ## 2.1. Build Dependencies
 
 ZENDNNL needs the following tools to build
-1. CMake >= version 3.25.
-2. g++ >= 13.x toolchain.
-3. conda version >= 24.1.0.
+1. **CMake** >= version 3.25.
+2. **g++** >= 11.2.0 toolchain.
+3. **conda** >= 24.1.0.
 
-Gcc 13.x could be installed using scripts/zendnnl_install_gcc.sh. A conda virtual environment with CMake 3.25 can be created using scripts/zendnnl_conda_env_create.sh.
+Gcc 13.x could be installed using `scripts/zendnnl_install_gcc.sh`. A conda virtual environment with CMake 3.25 can be created using `scripts/zendnnl_conda_env_create.sh`.
 
 ZenDNNL additionally depends on the following packages
 1. AMD AOCL BLIS
 2. Googletest
 
-These packages could either be preinstalled and their location could be passed to ZenDNNL, or
-if they are not preinstalled, ZenDNNL can download and build them. These options are provided
-in cmake/ConfigOptions.cmake.
+These dependencies can either be pre-installed and their location could be passed to ZenDNNL, or downloaded and built by ZenDNNL. Configuration options are available in `cmake/ConfigOptions.cmake`.
 
 ## 2.2. Build and install
 
-1. Open cmake/ConfigOptions.cmake. If pre-installed AMD BLIS is to be used, then set
-   ZENDNNL_AMDBLIS_USE_LOCAL_REPO to ON and provide local path to ZENDNNL_AMDBLIS_DIR. If
-   ZenDNNL is required to download AMD BLIS then leave the settings as they are.
-2. To build googletest, open cmake/ConfigOptions.cmake and set ZENDNNL_DEPENDS_GTEST to ON.
-3. Activate conda environment. (scripts/zendnnl_conda_env_create.sh creates a conda
-   environment named zendnnltorch).
+### Option 1: Manual Build Steps
 
-### 2.2.1. Create a build directory 
+**Configure AMD BLIS and GoogleTest**
+  - Open `cmake/ConfigOptions.cmake`.
+  - To use a pre-installed AMD BLIS, set `ZENDNNL_AMDBLIS_USE_LOCAL_REPO` to `ON` and provide the local path to `ZENDNNL_AMDBLIS_DIR`.
+  - If ZenDNNL is required to download AMD BLIS then leave the settings as they are.
+  - To build GoogleTest, set `ZENDNNL_DEPENDS_GTEST` to `ON`.
+
+**Activate Conda Environment**
+  ```bash
+  source scripts/zendnnl_conda_env_create.sh
+  conda activate zendnnltorch
+  ```
+
+**Create a Build Directory**
+  ```bash
+  mkdir build && cd build
+  ```
+
+**Configure CMake**:
+  ```bash
+  cmake ../
+  ```
+
+**Build and Install ZenDNNL**
+  ```bash
+  cmake --build .
+  ```
+
+### Option 2: Using Build Scripts
+
+ZenDNNL also provides build script to automate the build process, including dependency management.
+
+#### Usage
+
+To see all available options for the build script, use the `--help` flag:
+
 ```bash
-mkdir build && cd build
-```
-### 2.2.2. To configure cmake
-```bash
-cmake ../
-```
-### 2.2.3. To build and install ZenDNNL
-```bash
-make install
+cd scripts
+source zendnnl_build.sh --help
 ```
 
-ZenDNNL is installed in build/install directory.
+#### Output
+
 ```
-ZenDNNL
+usage   : zendnnl-build <options>
+
+options :
+ --all      : build and install all targets.
+ --clean    : clean all targets.
+ --zendnnl  : build and install zendnnl lib.
+ --examples : build and install examples.
+ --doxygen  : build and install doxygen docs.
+ --no-deps  : don't rebuild (or clean) dependencies.
+
+examples :
+ build all targets including dependencies
+ source zendnnl_build.sh --all
+
+ build all targets if dependencies are already built
+ (will fail if dependencies are not built by previous build)
+ source zendnnl_build.sh --no-deps --all
+```
+
+ZenDNNL will be installed in the `build/install` directory.
+
+### Installation Directory Structure
+
+```
+ZenDNN
  |- build
      |- install
          |- doxygen  : contains doxygen documentation.
          |- examples : contains tutorial example executables.
-         |- include  : ZenDNNL include files.
-         |- lib      : ZenDNNL lib files.
+         |- gtestss  : contains gtests executables.
+         |- zendnnl  : contains zendnnl executables
+             |- include  : ZenDNNL include files.
+             |- lib      : ZenDNNL lib files.
 ```
-# 3. ZENDNNL : Tests
+# 3. ZENDNNL : Examples and Tests
 
-## 3.1. Unit Tests
+## 3.1. Examples
 
 Examples could be run by executing
 ```bash
@@ -134,9 +187,3 @@ GoogleTest could be run by executing
 ```bash
 ./gtests/gtests
 ```
-
-### known issues
-
-1. Running "make install" again rebuilds AMD BLIS. A workaround for this is to
-   delete everything inside build directory, configure cmake again with "cmake ../",
-   and then do "make install".
