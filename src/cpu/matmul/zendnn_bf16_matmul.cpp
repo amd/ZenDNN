@@ -105,6 +105,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     //Return unimplemented if BF16 algo set to 4(MATMUL_JIT_BF16)
     zendnnEnv zenEnvObj = readEnv();
     if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_BF16 ||
+        zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 ||
             (zenEnvObj.zenBF16GEMMalgo != zenBF16MatMulAlgoType::MATMUL_AOCL_BF16 &&
              (weights_md()->is_memory_const == false ||
               (weights_md()->is_inplace == false &&

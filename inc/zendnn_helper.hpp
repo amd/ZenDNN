@@ -96,7 +96,7 @@ enum zenMatMulAlgoType {
     MATMUL_BLOCKED_JIT_FP32 = 2,
     MATMUL_AOCL_FP32 = 3,
     MATMUL_JIT_FP32 = 4,
-    MATMUL_BLOCKED_AOCL_PAR_FP32 = 5,
+    MATMUL_GEMM_JIT_FP32 = 5,
 };
 
 enum zenBF16MatMulAlgoType {
@@ -106,10 +106,11 @@ enum zenBF16MatMulAlgoType {
     MATMUL_BLOCKED_JIT_BF16 = 2,
     MATMUL_AOCL_BF16 = 3,
     MATMUL_JIT_BF16 = 4,
-    MATMUL_BLOCKED_AOCL_PAR_BF16 = 5,
-    MATMUL_BLOCKED_JIT_PAR_BF16 = 6,
-    MATMUL_AOCL_PAR_BF16 = 7,
-    MATMUL_JIT_PAR_BF16 = 8,
+    MATMUL_GEMM_JIT_BF16 = 5,
+    MATMUL_BLOCKED_AOCL_PAR_BF16 = 6,
+    MATMUL_BLOCKED_JIT_PAR_BF16 = 7,
+    MATMUL_AOCL_PAR_BF16 = 8,
+    MATMUL_JIT_PAR_BF16 = 9,
 };
 
 enum zenINT8MatMulAlgoType {
@@ -207,12 +208,12 @@ class zendnnEnv {
         // 2. Blocked JIT: MatMul is redirected to a blocked JIT (BRGEMM) implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32)
         // 3. AOCL GEMM: MatMul is executed using AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_AOCL_FP32)
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_JIT_FP32)
-        // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_FP32)
+        // 5. GEMM_JIT: MatMul is redirected to a GEMM_JIT implementation. (zenGEMMalgo=zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32)
         zenGEMMalgo = zendnnGetMatMulAlgo("FP32");
         //TODO: Need to implement Decision tree for FP32:0
         zenGEMMalgo = zenGEMMalgo == zenMatMulAlgoType::MATMUL_DT_FP32 ?
                       zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 : zenGEMMalgo;
-        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_JIT_FP32 &&
+        if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 &&
                 zenGEMMalgo!=zenMatMulAlgoType::MATMUL_AUTO_FP32) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
@@ -226,13 +227,14 @@ class zendnnEnv {
         // 2. Blocked JIT: MatMul is redirected to a blocked JIT (BRGEMM) implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16)
         // 3. AOCL GEMM: MatMul is executed using AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_BF16)
         // 4. JIT: MatMul is redirected to a JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_BF16)
-        // 5. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
-        // 6. Blocked JIT - Parallel: MatMul is redirected to a parallel blocked JIT (BRGEMM) implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16)
-        // 7. (TODO)AOCL GEMM - Parallel: MatMul is executed using a parallel AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_PAR_BF16)
-        // 8. (TODO)JIT - Parallel: MatMul is redirected to a parallel JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16)
+        // 5. GEMM_JIT: MatMul is redirected to a GEMM JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16)
+        // 6. Blocked AOCL GEMM - Parallel: MatMul is executed using a parallel blocked approach with AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
+        // 7. Blocked JIT - Parallel: MatMul is redirected to a parallel blocked JIT (BRGEMM) implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16)
+        // 8. (TODO)AOCL GEMM - Parallel: MatMul is executed using a parallel AOCL GEMM. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_AOCL_PAR_BF16)
+        // 9. (TODO)JIT - Parallel: MatMul is redirected to a parallel JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16)
 
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
-        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16 &&
+        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 &&
                 zenBF16GEMMalgo!=zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
             zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
         }

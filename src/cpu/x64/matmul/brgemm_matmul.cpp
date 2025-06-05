@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -77,6 +77,14 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
     auto check_attr_zero_points
         = [&]() -> bool { return attr()->zero_points_.common(); };
 
+    zendnnEnv zenEnvObj = readEnv();
+    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
+    if (obj.is_ref_gemm_bf16 || zenEnvObj.zenGEMMalgo ==
+        zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 || zenEnvObj.zenBF16GEMMalgo
+        == zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16) {
+        return status::unimplemented;
+    }
+
     const bool problem_dt_correct = is_int8 || is_bf16 || is_f32;
     bool ok = mayiuse(isa) && problem_dt_correct
               && !has_runtime_dims_or_strides()
@@ -89,11 +97,6 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
               && check_attr_oscale() && check_attr_zero_points() && check_bias();
 
     if (!ok) {
-        return status::unimplemented;
-    }
-
-    zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    if (obj.is_ref_gemm_bf16) {
         return status::unimplemented;
     }
 
