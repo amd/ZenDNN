@@ -15,23 +15,23 @@ The **ZenDNNL User API layer** is a critical interface that connects high-level 
 
 ### Features
 
-#### 2.1. **Tensor Creation and Management**
+#### 2.1. Tensor Creation and Management
 - Accepts input and output buffers from the framework.
 - Wraps them into ZenDNNL-compatible tensor objects.
 - Handles metadata such as shape, data type (FP32, BF16, INT8), and memory layout (blocked and non blocked).
 - Ensures zero-copy or minimal-copy data handling to reduce overhead.
 
-#### 2.2. **Operator Registration and Dispatch**
+#### 2.2. Operator Registration and Dispatch
 - Maintains a registry of supported operators (e.g., MatMul, Fused MatMul, Reorder, etc.).
 - Maps framework-level operations to ZenDNNL core implementations.
 - Combines multiple operations into a single kernel to reduce memory bandwidth and improve cache locality.
 
-#### 2.3. **Precision Control**
+#### 2.3. Precision Control
 - Allows frameworks to specify the desired precision for inference:
   - **FP32**: Full precision for accuracy-sensitive tasks.
   - **BF16**: Balanced precision for performance and accuracy.
 
-#### 2.4. **Execution Context Management**
+#### 2.4. Execution Context Management
 - Initializes and manages execution contexts (e.g., constant buffers, post ops, etc. )
 - Provides hooks for profiling and logging.
 
@@ -183,20 +183,20 @@ ZenDNNL is engineered to extract maximum performance from **general-purpose CPUs
 
 ### Key Optimization Strategies
 
-#### 5.1 **Instruction Set Utilization**
+#### 5.1 Instruction Set Utilization
 ZenDNNL is optimized to leverage modern CPU instruction sets that enable vectorized and parallel computation:
 - **AVX2 (Advanced Vector Extensions 2):** Widely supported on modern x86 CPUs, enables 256-bit SIMD operations.
 - **AVX-512:** Offers 512-bit SIMD operations, allowing more data to be processed per instruction cycle. Ideal for FP32 and BF16 workloads.
 
 These instruction sets are detected at runtime, and ZenDNNL dynamically selects the best kernel path based on the available hardware.
 
-#### 5.2 **Multi-threading**
+#### 5.2 Multi-threading
 ZenDNNL supports parallel execution using:
 - **OpenMP:** A widely-used API for multi-threaded programming in C/C++.
 
 This allows ZenDNNL to scale across multiple CPU cores, improving throughput for batch inference and large models.
 
-#### 5.3 **Cache Optimization**
+#### 5.3 Cache Optimization
 ZenDNNL kernels are designed to:
 - Maximize data reuse within L1/L2/L3 caches.
 - Use blocking and tiling strategies to reduce cache misses.
@@ -235,16 +235,16 @@ Input Tensor (from Framework)
 
 ## Design Principles
 
-1. **Modularity**
+#### 1. Modularity
 - Each class is designed to be independent and reusable.
 - Operators can be swapped or extended without modifying the core tensor or context logic.
 
-2. **Hardware Abstraction**
+#### 2. Hardware Abstraction
 - Kernels abstract away hardware-specific details, allowing operators to remain platform-agnostic.
 
-3. **Extensibility**
+#### 3. Extensibility
 - New operators and kernels can be added with minimal changes to the existing framework, supporting rapid prototyping and deployment.
 
-4. **Performance Optimization**: Leverages the best available kernel for each scenario.
+#### 4. Performance Optimization: Leverages the best available kernel for each scenario.
 
-5. **User Transparency**: The complexity of backend selection and tensor conversion is hidden from the user, ensuring a clean and consistent interface.
+#### 5. User Transparency: The complexity of backend selection and tensor conversion is hidden from the user, ensuring a clean and consistent interface.

@@ -2,10 +2,10 @@
 
 The **ZenDNNL Operator** is a central architectural component in the ZenDNNL framework, designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
 
-<img src="../images/operator.png" alt="ZZenDNNL Operator" width="700"/>
+<img src="../images/operator.png" alt="ZenDNNL Operator" width="700"/>
 
 
-## 1. Kernel Registration [^note]
+## 1. Kernel Registration 
 
 The **Kernel Registration** module is responsible for maintaining a comprehensive registry of all available kernels—both **reference** and **optimized**. It serves as the metadata hub for kernel capabilities and availability.
 
@@ -15,7 +15,7 @@ The **Kernel Registration** module is responsible for maintaining a comprehensiv
 
 
 
-## 2. Kernel Dynamic Dispatch [^note]
+## 2. Kernel Dynamic Dispatch
 
 The **Dynamic Dispatch Engine** is the decision-making core of the factory. It intelligently selects the most appropriate kernel for a given operator execution based on a rich set of runtime parameters and heuristics.
 
@@ -38,7 +38,7 @@ Each kernel is designed to be modular and reusable, supporting a wide range of o
 
 
 
-## 4. Profiler [^note]
+## 4. Profiler
 
 The **Profiler** is an integral component that monitors kernel performance during runtime. It collects metrics such as execution time, memory usage, and cache efficiency.
 
@@ -80,7 +80,7 @@ The **ZenDNNL Kernel Factory** is architected to not only manage its own suite o
 
 ### Key Components in the Execution Flow
 
-#### 1. **ZenDNNL Kernel Factory**
+#### 1. ZenDNNL Kernel Factory
 This is the **central orchestration unit** responsible for managing kernel selection and dispatch. It evaluates the operator requirements, hardware capabilities, and quantization settings to determine the most suitable execution path.
 
 - **Native Kernels**: These are handcrafted, performance-tuned kernels developed specifically for ZenDNNL. They are optimized for various CPU architectures and support advanced features like fused operations and quantization-aware execution.
@@ -91,7 +91,7 @@ This is the **central orchestration unit** responsible for managing kernel selec
   - **LibXSMM** – Specialized in small matrix multiplications, often used in HPC and ML workloads. **Coming Soon:**
   
 
-#### 2. **Tensor Conversion Layer**
+#### 2. Tensor Conversion Layer
 Labeled in the diagram as **"ZenDNNL Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNNL’s internal tensor representation and the expected input format of third-party libraries.
 
 - **Responsibilities**:
@@ -101,7 +101,7 @@ Labeled in the diagram as **"ZenDNNL Tensor to Third Party Tensor"**, this layer
 
 This layer ensures **data integrity and performance continuity** across different execution environments.
 
-#### 3. **Third-Party Operator Execution**
+#### 3. Third-Party Operator Execution
 Once the tensor is transformed, the **actual computation is offloaded** to the selected third-party kernel. This process is **fully abstracted** from the user, maintaining a consistent API and operator interface.
 
 - The execution is optimized based on:
@@ -121,6 +121,4 @@ Consider a scenario where a fully connected (dense) layer is being executed duri
 4. The **AOCL kernel** is invoked to perform the matrix multiplication.
 5. The result is converted back into a ZenDNNL-compatible tensor and passed to the next operator in the graph.
 
-
-[^note]: Limited functionality available.
-
+##### note: Limited functionality available.

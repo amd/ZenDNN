@@ -14,6 +14,10 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+/**
+ * @example tensor_example.cpp
+ * This is a simple example demonstrating various ways to create zendnnl tensor.
+ */
 #include <memory>
 #include <iostream>
 #include <optional>

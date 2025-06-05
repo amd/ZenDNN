@@ -10,13 +10,13 @@ This section provides a high-level overview of matrix multiplication (`matmul`) 
 
 Let:
 
-- $A \in \mathbb{R}^{M \times K}$  
-- $B \in \mathbb{R}^{K \times N}$  
-- $\text{Bias} \in \mathbb{R}^{1 \times N}$ 
-- $\text{Activation}(x)$: optional activation function (e.g., ReLU, GELU)  
-- $\text{BinaryOp}(x, y)$: optional binary post-operation (e.g., element-wise add/mul with another matrix)  
-- $D \in \mathbb{R}^{M \times N}$: optional second operand for binary op  
-- $C \in \mathbb{R}^{M \times N}$: the result
+- \f$A \in \mathbb{R}^{M \times K}\f$  
+- \f$B \in \mathbb{R}^{K \times N}\f$  
+- \f$\text{Bias} \in \mathbb{R}^{1 \times N}\f$ 
+- \f$\text{Activation}(x)\f$: optional activation function (e.g., ReLU, GELU)  
+- \f$\text{BinaryOp}(x, y)\f$: optional binary post-operation (e.g., element-wise add/mul with another matrix)  
+- \f$D \in \mathbb{R}^{M \times N}\f$: optional second operand for binary op  
+- \f$C \in \mathbb{R}^{M \times N}\f$: the result
 
 
 
@@ -85,7 +85,7 @@ This table outlines the support for MatMul operations with various data types, b
 
 ## Examples
 
-### 1. `matmul_relu_f32_kernel_example`
+### 1. matmul_relu_f32_kernel_example
 
 This example performs matrix multiplication with `float32 (f32)` data types, applying a ReLU activation as a post-operation.
 
@@ -187,7 +187,7 @@ int matmul_relu_f32_kernel_example() {
 ```
 
 
-### 2. `matmul_mul_silu_mul_f32_kernel_example`
+### 2. matmul_mul_silu_mul_f32_kernel_example
 
 This example showcases an advanced operation combining matrix multiplication with a series of binary multiplication and SiLU operations.
 

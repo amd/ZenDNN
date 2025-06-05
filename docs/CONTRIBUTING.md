@@ -80,7 +80,7 @@ Within `new_operator`, add:
 
 ### 2.3 Step 3: File Structure and Responsibilities
 
-#### 2.3.1 `NewOp_operator.hpp`
+#### 2.3.1 NewOp_operator.hpp
 Declares `new_operator_t`, defines validation and kernel selection.
 
 ```cpp
@@ -129,7 +129,7 @@ using new_operator_t = zendnnl::ops::new_operator_t;
 #endif
 ```
 
-#### 2.3.3 `NewOp_context.hpp`
+#### 2.3.2 NewOp_context.hpp
 
 - Defines the context for the operator, including parameters and configurations.
 - Example:
@@ -163,11 +163,11 @@ public:
 #endif
 ```
 
-#### 2.3.4 `New_op_kernel_list.hpp`
+#### 2.3.3 New_op_kernel_list.hpp
 
 - Lists the kernels supported by the operator.
 
-#### 2.3.5 `New_op_operator.hpp`
+#### 2.3.4 New_op_operator.hpp
 
 - Defines the operator interface and integrates it with the framework.
 
