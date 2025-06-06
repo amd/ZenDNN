@@ -820,14 +820,16 @@ void free_aocl_po_memory_int8(
 
 void free_cached_memory(
     zendnn::zendnnEnv zenEnvObj,
-    int32_t *&comp_acc,
+    int32_t *comp_acc,
     int32_t wei_zp,
-    float *&new_scales
+    float *new_scales
 ) {
     bool cache_comp_acc = zenEnvObj.zenZpCompCache;
+    bool is_zp_comp_allocated = zenEnvObj.zenWeightCache !=
+                                zendnnWeightCacheType::WEIGHT_CACHE_AOT_RESIZED_INPLACE;
     bool cache_scale = zenEnvObj.zenStaticScaleCache;
 
-    if ((!cache_comp_acc || wei_zp) && comp_acc != NULL) {
+    if ((!cache_comp_acc || wei_zp) && comp_acc != NULL && is_zp_comp_allocated) {
         free(comp_acc);
     }
     if (!cache_scale && new_scales != NULL) {
@@ -879,6 +881,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     float *new_scale = NULL;
     // Acc for compensation
     int32_t *acc = NULL;
+    bool is_allocated = true;
     // Reordered weights
     int8_t *reorder_filter = NULL;
     bool reorder_status = false;
@@ -893,6 +896,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
         size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
                           zendnn_u8, 0, zendnn_s8);
         acc = (int32_t *)(filter + wei_size);
+        is_allocated = false;
     }
     else {
         cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
@@ -970,7 +974,7 @@ void zenMatMul_gemm_u8s8s32ofloat(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
+    free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
 void zenMatMul_gemm_s8s8s32ofloat(
     zendnn::zendnnEnv zenEnvObj,
@@ -1016,6 +1020,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     float *new_scale = NULL;
     // Acc for compensation
     int32_t *acc = NULL;
+    bool is_allocated = true;
     // Reordered weights
     int8_t *reorder_filter = NULL;
     bool reorder_status = false;
@@ -1030,6 +1035,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
         size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
                           zendnn_s8, 0, zendnn_s8);
         acc = (int32_t *)(filter + wei_size);
+        is_allocated = false;
     }
     else {
         cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
@@ -1107,7 +1113,7 @@ void zenMatMul_gemm_s8s8s32ofloat(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
+    free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
 void zenMatMul_gemm_s8s8s32oInt(
     zendnn::zendnnEnv zenEnvObj,
@@ -1153,6 +1159,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     float *new_scale = NULL;
     // Acc for compensation
     int32_t *acc = NULL;
+    bool is_allocated = true;
     // Reordered weights
     int8_t *reorder_filter = NULL;
     bool reorder_status = false;
@@ -1167,6 +1174,7 @@ void zenMatMul_gemm_s8s8s32oInt(
         size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
                           zendnn_s8, 0, zendnn_s8);
         acc = (int32_t *)(filter + wei_size);
+        is_allocated = false;
     }
     else {
         cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
@@ -1263,7 +1271,7 @@ void zenMatMul_gemm_s8s8s32oInt(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
+    free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
 
 void zenMatMul_gemm_u8s8s32oInt(
@@ -1311,6 +1319,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     float *new_scale = NULL;
     // Acc for compensation
     int32_t *acc = NULL;
+    bool is_allocated = true;
     // Reordered weights
     int8_t *reorder_filter = NULL;
     bool reorder_status = false;
@@ -1325,6 +1334,7 @@ void zenMatMul_gemm_u8s8s32oInt(
         size_t wei_size = zendnn_custom_op::zendnn_reorder_size(k, n, transpose_filter,
                           zendnn_u8, 0, zendnn_s8);
         acc = (int32_t *)(filter + wei_size);
+        is_allocated = false;
     }
     else {
         cacheZeroPointCompensation(zenEnvObj, key_obj, m, n, k, (char *)input, src_0,
@@ -1412,7 +1422,7 @@ void zenMatMul_gemm_u8s8s32oInt(
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
-    free_cached_memory(zenEnvObj, acc, zero_point_wei, new_scale);
+    free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
 
 //Temporary checks for post-ops and data type for AOCL
