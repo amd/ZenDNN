@@ -41,7 +41,7 @@ function parse_args() {
 		;;
 	    * )
 		echo "unknown command line option $1"
-		return
+		return 0
 	esac
     done
 
@@ -71,8 +71,8 @@ fi
 #------------------------------------------------------------------------------
 # sanity check
 
-export PYTORCH_CONDA_ENV="zendnnltorch"
-export PYTHON_VERSION=3.9
+export PYTORCH_CONDA_ENV="zendnnl_build"
+export PYTHON_VERSION=3.10
 
 echo -n "Checking if PYTORCH_CONDA_ENV is defined..."
 if [ ! -z "$PYTORCH_CONDA_ENV" ];
@@ -107,14 +107,14 @@ fi
 
 echo -n "Checking for conda virtual env $PYTORCH_CONDA_ENV..."
 #source ~/anaconda3/etc/profile.d/conda.sh
-# conda init bash
+conda init bash
 # # source ~/.bashrc
-# eval "$(conda shell.bash hook)"
-# if [ $? -ne 0 ]; then
-#     echo "(FAILED)"
-#     echo "=> conda bash initialization failed."
-#     return
-# fi
+eval "$(conda shell.bash hook)"
+if [ $? -ne 0 ]; then
+    echo "(FAILED)"
+    echo "=> conda bash initialization failed."
+    return
+fi
 
 # conda config --set auto_activate_base false
 conda activate $PYTORCH_CONDA_ENV
@@ -126,7 +126,7 @@ if [ $? -ne 0 ]; then
     conda config --set channel_priority strict
 
     conda install -y cmake bazel make ninja doxygen openblas
-    pip install torch==2.5.0 --index-url https://download.pytorch.org/whl/cpu
+    #pip install torch==2.5.0 --index-url https://download.pytorch.org/whl/cpu
     #pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
     echo "(DONE)"
