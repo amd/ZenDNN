@@ -1,13 +1,9 @@
-/** 
- * @defgroup examples Examples
- * @brief Code examples demonstrating usage.
- * @{
- */
+// /** @defgroup Examples
+// * @{
+// */
 
 /** @example tensor_example.cpp */
 /** @example compare_op_example.cpp */
 /** @example reorder_example.cpp */
 /** @example matmul_example.cpp */
-/** @example example_utils.cpp */
-
-/** @} */
+// /** @} */

@@ -14,10 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-/**
- * @example example_utils.cpp
- * These are some methods used in zendnnl examples.
- */
 #include "example_utils.hpp"
 
 namespace zendnnl {

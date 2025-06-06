@@ -14,10 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-/**
- * @example compare_op_example.cpp
- * This is a simple example demonstrating how to compare two tensor.
- */
 #include "compare_op_example.hpp"
 
 namespace zendnnl {

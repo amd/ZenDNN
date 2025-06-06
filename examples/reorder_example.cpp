@@ -14,10 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-/**
- * @example reorder_example.cpp
- * This is a simple example demonstrating how to use zendnnl for tensor reorder.
- */
 #include "reorder_example.hpp"
 
 namespace zendnnl {

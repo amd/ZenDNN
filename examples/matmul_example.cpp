@@ -14,10 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-/**
- * @example matmul_example.cpp
- * This is a simple example demonstrating how to use zendnnl for matrix mutliplication.
- */
 #include "matmul_example.hpp"
 
 namespace zendnnl {
