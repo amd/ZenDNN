@@ -116,15 +116,6 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &bias, tensor_t &output_tensor,
                                        uint32_t index, tensor_t &binary_tensor);
 
-/** @fn compare_tensor_2D
- *  @brief Function to compare two 2D tensor
- *
- * */
-// ToDO: Replace with comparator operator
-void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
-                       uint64_t m,
-                       uint64_t n, const float tol, bool &flag);
-
 /** @fn reorder_kernel_test
  *  @brief Function to Reorder tensor
  *
@@ -134,4 +125,14 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
  * */
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     bool inplace_reorder);
+
+/** @fn compare_tensor_2D
+ *  @brief Function to compare two 2D tensor
+ *
+ * */
+// ToDO: Replace with comparator operator
+void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
+                       uint64_t m,
+                       uint64_t n, const float tol, bool &flag);
+
 #endif

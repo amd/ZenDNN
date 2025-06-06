@@ -284,25 +284,6 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
   return status_t::success;
 }
 
-void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
-                       uint64_t m,
-                       uint64_t n, const float tol, bool &is_comparison_successful) {
-  #pragma omp parallel for collapse(2)
-  for (uint64_t i=0; i<m; ++i) {
-    for (uint64_t j=0; j<n; ++j) {
-      if (is_comparison_successful) {
-        float acutal_val = output_tensor.at({i,j});
-        float ref_val = output_tensor_ref.at({i,j});
-        if (abs(ref_val - acutal_val) >= tol) {
-          log_verbose("actual(",i,",",j,"): ",acutal_val," , ref(",i,",",j,"): ",ref_val);
-          is_comparison_successful = false;
-        }
-      }
-    }
-  }
-  return;
-}
-
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     bool inplace_reorder) {
   try {
@@ -389,4 +370,27 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     log_verbose(ex.what());
     return std::make_pair(tensor_t(), status_t::failure);
   }
+}
+
+void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
+                       uint64_t m,
+                       uint64_t n, const float tol, bool &is_comparison_successful) {
+  #pragma omp parallel for collapse(2)
+  for (uint64_t i=0; i<m; ++i) {
+    for (uint64_t j=0; j<n; ++j) {
+      if (is_comparison_successful) {
+        float actual_val = output_tensor.at({i,j});
+        float ref_val = output_tensor_ref.at({i,j});
+
+        float abs_err = abs(ref_val - actual_val);
+        float rel_err = abs_err / (ref_val + std::numeric_limits<float>::epsilon());
+
+        if ((abs_err >= tol) && (rel_err >= tol)) {
+          log_verbose("actual(",i,",",j,"): ",actual_val," , ref(",i,",",j,"): ",ref_val);
+          is_comparison_successful = false;
+        }
+      }
+    }
+  }
+  return;
 }

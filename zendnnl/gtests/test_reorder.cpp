@@ -129,7 +129,7 @@ TEST_P(TestReorder, BF16_F32) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,
+    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
                       is_test_successful);
   }
 

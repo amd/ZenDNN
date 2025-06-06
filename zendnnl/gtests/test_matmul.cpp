@@ -104,12 +104,8 @@ TEST_P(TestMatmul,F32) {
 TEST_P(TestMatmul, BF16_F32) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::bf16, 2.0, transB);
-  auto weights_ref        = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::bf16, 2.0, transA);
-  auto input_tensor_ref   = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -120,14 +116,14 @@ TEST_P(TestMatmul, BF16_F32) {
                             output_tensor,
                             po_index,
                             binary_tensor);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor_ref,
-                            weights_ref, bias,
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weights, bias,
                             output_tensor_ref, po_index, binary_tensor);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,
+    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
                       is_test_successful);
   }
 
@@ -140,26 +136,23 @@ TEST_P(TestMatmul, BF16_F32) {
  *  @brief Test to validate matmul BF16outputBF16 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, BF16_BF16) {
+  // TODO: Extend support for test cases with a wider range of values.
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::bf16, 2.0, transB);
-  auto weights_ref        = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::bf16, 2.0, transA);
-  auto input_tensor_ref   = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
-  auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
+  auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor,
                             po_index,
                             binary_tensor);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor_ref,
-                            weights_ref, bias,
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weights, bias,
                             output_tensor_ref, po_index, binary_tensor);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);

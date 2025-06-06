@@ -158,12 +158,12 @@ status_t matmul_operator_t::validate_forced_kernel() {
     auto wt_dtype     = weights->get_data_type();
     auto out_order   = output->get_order();
 
-    if ((in_dtype  != data_type_t::f32) ||
-        (out_dtype != data_type_t::f32) ||
-        (wt_dtype  != data_type_t::f32) ||
+    if ((!((in_dtype == data_type_t::f32) || (in_dtype  == data_type_t::bf16))) ||
+        (!((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16))) ||
+        (!((wt_dtype == data_type_t::f32) || (wt_dtype == data_type_t::bf16))) ||
         (out_order == "ba")) {
-      apilog_error("<", get_name(),
-                   "> forced reference kernel needs f32 tensors and non-transposed dst.");
+      log_error("<", get_name(),
+                "> forced reference kernel needs f32 or bf16 tensors and non-transposed dst.");
       return status_t::failure;
     }
   }
@@ -270,7 +270,7 @@ status_t matmul_operator_t::kernel_factory() {
   }
   else {
     if (forced_kernel == "reference") {
-      kernel = get_matmul_f32_ref_kernel();
+      kernel = get_matmul_ref_kernel();
     }
     else if (forced_kernel == "onednn") {
       //kernel = get_linear_onednn_kernel();

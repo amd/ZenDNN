@@ -16,7 +16,7 @@
 #ifndef _MATMUL_KERNEL_LIST_HPP_
 #define _MATMUL_KERNEL_LIST_HPP_
 
-#include "matmul_fp32_ref_kernel.hpp"
+#include "matmul_ref_kernel.hpp"
 #include "aocl_blis/matmul_fp32_avx512_kernel.hpp"
 #include "aocl_blis/matmul_bf16_avx512_kernel.hpp"
 //#include "matmul_onednn_kernel.hpp"

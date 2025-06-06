@@ -26,9 +26,11 @@ char **gtest_argv;
 const uint32_t po_size = 8; //Supported postop
 vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 
-//Matmul Tolerance Limit
+// Matmul Tolerance Limit
+// TODO: Make the tolerance value dynamic based on factors such
+// as tensor dimensions, data type, and value range.
 const float MATMUL_F32_TOL = 0.001;
-const float MATMUL_BF16_TOL = 0.1;
+const float MATMUL_BF16_TOL = 0.01;
 
 //number of testcases and random seed
 const uint32_t TEST_NUM = 100; //ToDo: make it command line argument
