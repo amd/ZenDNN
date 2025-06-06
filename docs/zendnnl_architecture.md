@@ -1,29 +1,29 @@
 
-# ZenDNNL Architecture
+# ZenDNN* Architecture
 ## Overview
-ZenDNNL is a high-performance CPU inference library designed to accelerate deep learning workloads. It provides optimized implementations for several key operations. The architecture is modular, extensible, and integrates seamlessly with popular deep learning frameworks. Its layered architecture ensures flexibility, extensibility, and high performance across a variety of hardware platforms and use cases.
+ZenDNN* is a high-performance CPU inference library designed to accelerate deep learning workloads. It provides optimized implementations for several key operations. The architecture is modular, extensible, and integrates seamlessly with popular deep learning frameworks. Its layered architecture ensures flexibility, extensibility, and high performance across a variety of hardware platforms and use cases.
 
 
-<img src="images/zendnnl_architecture.png" alt="ZenDNNL Architecture" width="500" height="600"/>
+<img src="images/zendnnl_architecture.png" alt="ZenDNN* Architecture" width="500" height="600"/>
 
 
 ## 1. Framework Layer
-This is where model developers define their neural networks using high-level APIs provided by frameworks like PyTorch, TensorFlow, or ONNX. These frameworks handle model construction, training, and inference logic. When a model is executed, the framework translates operations into a format that ZenDNNL can understand.
+This is where model developers define their neural networks using high-level APIs provided by frameworks like PyTorch, TensorFlow, or ONNX. These frameworks handle model construction, training, and inference logic. When a model is executed, the framework translates operations into a format that ZenDNN* can understand.
 
-## 2. ZenDNNL User APIs
-The **ZenDNNL User API layer** is a critical interface that connects high-level deep learning frameworks (like PyTorch or TensorFlow) with the optimized computational backend of ZenDNNL. The User API layer is designed to be **lightweight, extensible, and framework-agnostic**. It ensures that ZenDNNL can be easily integrated into various ecosystems without requiring deep changes in the framework internals. It also enables rapid experimentation and deployment of new operators and optimizations.
+## 2. ZenDNN* User APIs
+The **ZenDNN* User API layer** is a critical interface that connects high-level deep learning frameworks (like PyTorch or TensorFlow) with the optimized computational backend of ZenDNN*. The User API layer is designed to be **lightweight, extensible, and framework-agnostic**. It ensures that ZenDNN* can be easily integrated into various ecosystems without requiring deep changes in the framework internals. It also enables rapid experimentation and deployment of new operators and optimizations.
 
 ### Features
 
 #### 2.1. Tensor Creation and Management
 - Accepts input and output buffers from the framework.
-- Wraps them into ZenDNNL-compatible tensor objects.
+- Wraps them into ZenDNN*-compatible tensor objects.
 - Handles metadata such as shape, data type (FP32, BF16, INT8), and memory layout (blocked and non blocked).
 - Ensures zero-copy or minimal-copy data handling to reduce overhead.
 
 #### 2.2. Operator Registration and Dispatch
 - Maintains a registry of supported operators (e.g., MatMul, Fused MatMul, Reorder, etc.).
-- Maps framework-level operations to ZenDNNL core implementations.
+- Maps framework-level operations to ZenDNN* core implementations.
 - Combines multiple operations into a single kernel to reduce memory bandwidth and improve cache locality.
 
 #### 2.3. Precision Control
@@ -36,15 +36,15 @@ The **ZenDNNL User API layer** is a critical interface that connects high-level 
 - Provides hooks for profiling and logging.
 
 
-## 3. ZenDNNL Core
-The core is the computational heart of ZenDNNL. It includes:
+## 3. ZenDNN* Core
+The core is the computational heart of ZenDNN*. It includes:
 - **Tensor**: Manages data layout, memory, and shape transformations.
 - **Context**: Maintains constant model parameters, post op operation, runtime settings like threading and logging and profiling information.
 - **Operator**: Defines high-level operations like MatMul, Reorder, etc.
 - **Kernel**: Implements low-level, hardware-optimized routines for each operator.
 
 
-<img src="images/basic_concepts.png" alt="ZenDNNL Basic Modules" width="800"/>
+<img src="images/basic_concepts.png" alt="ZenDNN* Basic Modules" width="800"/>
 
 ## 3.1 Tensor
 A **Tensor** is a fundamental building block in deep learning libraries. It represents multi-dimensional arrays of data. In the context of CPU inference, tensors are used to store and manipulate data efficiently.
@@ -172,39 +172,39 @@ Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact
 
 
 ## 4. Low-Level Libraries
-ZenDNNL leverages several low-level libraries to provide foundational building blocks for performance-critical operations:
+ZenDNN* leverages several low-level libraries to provide foundational building blocks for performance-critical operations:
 - **AOCL (AMD Optimized CPU Libraries)**: Optimized BLAS, FFT, and RNG for AMD CPUs.
 - **FBGEMM**: Efficient low-precision (INT8, BF16) matrix multiplication.
 - **OneDNN**: Intel’s deep learning primitives for x86 CPUs.
 - **LibXSMM**: Specialized in small matrix multiplications (e.g., 64x64 or smaller).
 
 ## 5. Hardware Layer
-ZenDNNL is engineered to extract maximum performance from **general-purpose CPUs**, making it ideal for server-side inference, edge computing, and CPU-only environments. This layer is where all computations are ultimately executed, and its efficiency directly impacts the overall throughput and latency of deep learning models.
+ZenDNN* is engineered to extract maximum performance from **general-purpose CPUs**, making it ideal for server-side inference, edge computing, and CPU-only environments. This layer is where all computations are ultimately executed, and its efficiency directly impacts the overall throughput and latency of deep learning models.
 
 ### Key Optimization Strategies
 
 #### 5.1 Instruction Set Utilization
-ZenDNNL is optimized to leverage modern CPU instruction sets that enable vectorized and parallel computation:
+ZenDNN* is optimized to leverage modern CPU instruction sets that enable vectorized and parallel computation:
 - **AVX2 (Advanced Vector Extensions 2):** Widely supported on modern x86 CPUs, enables 256-bit SIMD operations.
 - **AVX-512:** Offers 512-bit SIMD operations, allowing more data to be processed per instruction cycle. Ideal for FP32 and BF16 workloads.
 
-These instruction sets are detected at runtime, and ZenDNNL dynamically selects the best kernel path based on the available hardware.
+These instruction sets are detected at runtime, and ZenDNN* dynamically selects the best kernel path based on the available hardware.
 
 #### 5.2 Multi-threading
-ZenDNNL supports parallel execution using:
+ZenDNN* supports parallel execution using:
 - **OpenMP:** A widely-used API for multi-threaded programming in C/C++.
 
-This allows ZenDNNL to scale across multiple CPU cores, improving throughput for batch inference and large models.
+This allows ZenDNN* to scale across multiple CPU cores, improving throughput for batch inference and large models.
 
 #### 5.3 Cache Optimization
-ZenDNNL kernels are designed to:
+ZenDNN* kernels are designed to:
 - Maximize data reuse within L1/L2/L3 caches.
 - Use blocking and tiling strategies to reduce cache misses.
 - Align memory access patterns with CPU prefetching behavior.
 
 
 ## Execution Flow
-Here's a simplified flow of how a tensor moves through the ZenDNNL stack:
+Here's a simplified flow of how a tensor moves through the ZenDNN* stack:
 
 1. **Input Tensor** is passed from the framework (e.g., PyTorch).
 2. The **User API** receives the tensor and determines the appropriate operator.
@@ -216,10 +216,10 @@ Here's a simplified flow of how a tensor moves through the ZenDNNL stack:
 ```
 Input Tensor (from Framework)
           ↓
-   ZenDNNL User API
+   ZenDNN* User API
 (Receives tensor, create context and operator)
           ↓
-      ZenDNNL Core
+      ZenDNN* Core
 (Processes tensor using operator & kernel)
           ↓
    Low-Level Libraries
@@ -245,6 +245,10 @@ Input Tensor (from Framework)
 #### 3. Extensibility
 - New operators and kernels can be added with minimal changes to the existing framework, supporting rapid prototyping and deployment.
 
-#### 4. Performance Optimization: Leverages the best available kernel for each scenario.
+#### 4. Performance Optimization
+- Leverages the best available kernel for each scenario.
 
-#### 5. User Transparency: The complexity of backend selection and tensor conversion is hidden from the user, ensuring a clean and consistent interface.
+#### 5. User Transparency
+- The complexity of backend selection and tensor conversion is hidden from the user, ensuring a clean and consistent interface.
+
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

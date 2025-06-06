@@ -158,4 +158,6 @@ The Compare Operator includes error checking to ensure that:
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors during the operation flow.
 
-These examples demonstrate the functionality of the Compare Operator, showcasing its ability to calculate metrics for element-wise comparison between tensors in the `zendnnl` library.
+These examples demonstrate the functionality of the Compare Operator, showcasing its ability to calculate metrics for element-wise comparison between tensors in the `ZenDNN*` library.
+
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

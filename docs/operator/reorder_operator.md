@@ -247,7 +247,6 @@ int reorder_inplace_bf16_example() {
 
 ```
 
-
 ## Common Variables
 
 - **tensor_factory_t**: Utility for creating tensors with specific shapes, types, and initial values.
@@ -256,18 +255,14 @@ int reorder_inplace_bf16_example() {
 - **status_t**, **exception_t**: Status and exception handling types.
 - **Logging utilities**: `testlog_info`, `testlog_error`.
 
-
-
 ## Error Handling
 
 Each example includes error checking where the operator creation and execution status is checked, and relevant logging is provided.
-
-
 
 ## Logger
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors, respectively, in the operation flow.
 
+These examples demonstrate the versatility and composability of reorder operations, showcasing the use of different data types and memory formats in the `ZenDNN*` library.
 
-
-These examples demonstrate the versatility and composability of reorder operations, showcasing the use of different data types and memory formats in the `zendnnl` library.
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

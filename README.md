@@ -1,41 +1,41 @@
 
 (Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
 
-# ZENDNN(L) : Accelerated Deep Learning Inference on AMD Zen Architecture
+# ZenDNN* : Accelerated Deep Learning Inference on AMD Zen Architecture
 
 <!-- toc -->
-- [About ZenDNN(L)](#1-about-zendnnl)
+- [About ZenDNN*](#1-about-ZenDNN*)
   - [Overview](#12-overview)
   - [Structure](#13-structure)
   - [Third Party Libraries](#14-third-party-libraries)
   - [Supported OS](#15-supported-os)
-- [ZenDNNL : Build and Install](#2-zendnnl-build-and-install)
+- [Build and Install](#2-build-and-install)
   - [Build Dependencies](#21-build-dependencies)
   - [Build and install](#22-build-and-install)
-- [ZenDNNL : Examples and Tests](#3-zendnnl-examples-tests)
+- [Examples and Tests](#3-examples-tests)
   - [Examples](#31-examples)
   - [GoogleTest](#32-googletest)
 <!-- tocstop -->
 
-# 1. About ZenDNN(L)
+# 1. About ZenDNN*
 
 ## 1.1. Overview
 
-ZenDNN(L) (ZenDNN Latest) is being designed as a re-architected and refactored ZenDNN. ZenDNN(L), like its predecessor ZenDNN is a performance primitive library for deep learning inference on AMD Zen architecture. In addition to features of ZenDNN, ZenDNN(L) is being designed to support the following additional features
+ZenDNN* is being designed as a re-architected and refactored ZenDNN. ZenDNN*, like its predecessor ZenDNN is a performance primitive library for deep learning inference on AMD Zen architecture. In addition to features of ZenDNN, ZenDNN* is being designed to support the following additional features
 
-1. Support for plug-and-play other primitive libraries like OneDNN, or other low level backends like BLAS libraries. For example, if a primitive is unimpemented in ZenDNNL, or more performant in OneDNN, the OneDNN primitive can be executed using OneDNN APIs, without getting into OneDNN code.
+1. Support for plug-and-play other primitive libraries like OneDNN, or other low level backends like BLAS libraries. For example, if a primitive is unimpemented in ZenDNN*, or more performant in OneDNN, the OneDNN primitive can be executed using OneDNN APIs, without getting into OneDNN code.
 2. Integrated profiling and performance analysis tools. These tools will help in both development and deployment.For example, these tools could be used for instrumented profiling of a primitive, analysing performance issues and optimizing the primitive. These tools could also be used in deployment, for example,  to analyse scaling behaviour of primitives in multi-instance deployment.
 
-## 1.2. ZenDNN(L) : Code Structure
+## 1.2. ZenDNN* : Code Structure
 
-ZenDNN(L) has the following top level directory structure
+ZenDNN* has the following top level directory structure
 
 ```
 ZenDNN
 |- build        : used to build and install the library.
 |- cmake        : contains cmake modules.
 |- dependencies : to downaload all dependencies.
-|- examples     : tutorial examples on how to use ZenDNNL APIs.
+|- examples     : tutorial examples on how to use ZenDNN* APIs.
 |- scripts      : suporting shell scripts.
 |- docs         : contains documentation files.
 |   |- doxygen  : doxygen config file and additional pages.
@@ -54,22 +54,22 @@ ZenDNN
 ```
 ## 1.3. Third Party Libraries
 
-ZenDNNL depends on the following libraries.
+ZenDNN* depends on the following libraries.
  - [AOCL BLIS](https://github.com/amd/blis)
  - [AOCL UTILS](https://github.com/amd/aocl-utils)
  - [GoogleTest](https://github.com/google/googletest)
 
-ZenDNN(L) downloads and builds these dependencies as a part of its build process. These dependencies are also forwarded to any downstream package, that is using ZenDNN(L) in its build. Thus a downstream package need not figure out ZenDNN(L) dependencies and build them.
+ZenDNN* downloads and builds these dependencies as a part of its build process. These dependencies are also forwarded to any downstream package, that is using ZenDNN* in its build. Thus a downstream package need not figure out ZenDNN* dependencies and build them.
 
 ## 1.5. Supported OS
 
 Please refer to the [support matrix](https://www.amd.com/en/developer/zendnn.html#getting-started) for the list of supported operating systems.
 
-# 2. ZENDNNL : Build and Install
+# 2. Build and Install
 
 ## 2.1. Build Dependencies
 
-ZENDNNL needs the following tools to build
+ZenDNN* needs the following tools to build
 
 1. **CMake** >= version 3.25.
 2. **g++** >= 11.2.0 toolchain.
@@ -78,10 +78,10 @@ Optionally a conda virtual environment (needs conda >= 24.1.0) with CMake 3.25 c
 
 ## 2.2. Build and install
 
-ZenDNN(L) build system is a CMake super-build that builds the following package components
+ZenDNN* build system is a CMake super-build that builds the following package components
 
 1. Third party libraries(TPL), hitherto referred as "dependencies".
-2. ZenDNNL library. This includes its gtests also.
+2. ZenDNN* library. This includes its gtests also.
 3. Library usage examples. These examples demonstrate how library APIs could be used.
 4. Doxygen documentation.
 
@@ -90,7 +90,7 @@ CMake build exposes the following component targets
 | Component         | CMake Target     | Depends On   |
 |-------------------|------------------|--------------|
 | Dependencies(TPL) | zendnnl-deps     | None         |
-| ZenDNNL Library   | zendnnl          | zendnnl-deps |
+| ZenDNN* Library   | zendnnl          | zendnnl-deps |
 | Examples          | zendnnl-examples | zendnnl      |
 | Doxygen Docs      | zendnnl-doxygen  | None         |
 
@@ -202,9 +202,9 @@ the usage
 
 This will display the usage and various options. The options are self-explainatory.
 
-ZenDNNL will be installed in the `build/install` directory.
+ZenDNN* will be installed in the `build/install` directory.
 
-### ZenDNNL Installation
+### ZenDNN* Installation
 
 By default installation folder is `CMAKE_BINARY_DIR/install`. If build folder is `ZenDNN/build` Then
 install folder will be `ZenDNN/build/install`. All dependencies, library, examples, tests and documentation
@@ -227,11 +227,11 @@ ZenDNN
 This installation also includes cmake packaging information in `install/zendnnl/lib/cmake`. Downstream
 packages can use this to find zendnnl using CMake FindPackage().
 
-# 3. ZENDNNL Examples and Tests
+# 3. ZenDNN* Examples and Tests
 
 ## 3.1. Examples
 
-ZenDNN(L) provides many examples that demonstrate how the library API could be used. Executables of these examples could be found in `install/examples/bin/` folder.
+ZenDNN* provides many examples that demonstrate how the library API could be used. Executables of these examples could be found in `install/examples/bin/` folder.
 
 ## 3.2. GTests
 
@@ -239,9 +239,9 @@ GTests are found in `install/gtests`, and could be executed as follows
 ```bash
 ./gtests/gtests
 ```
-# 4. Integrating ZenDNN(L) with Downstream Packages
+# 4. Integrating ZenDNN* with Downstream Packages
 
-Since ZenDNN(L) builds, installs and exports its dependencies also, it is necessary for the downstream to build and install ZenDNN(L), and then use its exported targets by using CMake FindPackage() command.
+Since ZenDNN* builds, installs and exports its dependencies also, it is necessary for the downstream to build and install ZenDNN*, and then use its exported targets by using CMake FindPackage() command.
 
 ```
 set(zendnnl_ROOT "${ZENDNNL_INSTALL_DIR}")
@@ -251,7 +251,7 @@ if(zendnnl_FOUND)
   message(STATUS "zendnnl forund at ${zendnnl_ROOT}")
 endif()
 ```
-where ZENDNNL_INSTALL_DIR is the ZenDNN(L) installation folder.
+where ZENDNNL_INSTALL_DIR is the ZenDNN* installation folder.
 
 ZenDNN(N) CMake package exports `zendnnl::zendnnl_archive (archive lib)` and `zendnnl::zendnnl(shared lib)`. These could be linked to any downstream target using
 
@@ -259,4 +259,7 @@ ZenDNN(N) CMake package exports `zendnnl::zendnnl_archive (archive lib)` and `ze
 target_link_libraries(<target> INTERFACE zendnnl::zendnnl_archive)
 ```
 
-Including ZenDNN(L) by other methods like add_subdirectory() or Fetch_Content() are not tested.
+Including ZenDNN* by other methods like add_subdirectory() or Fetch_Content() are not tested.
+
+## Footnotes
+ZenDNN* : ZenDNN is being designed as a re-architected and refactored ZenDNN.

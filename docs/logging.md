@@ -2,11 +2,11 @@
 
 ## Overview
 
-The logging system in ZenDNNL provides a flexible mechanism to monitor and debug application execution. It categorizes logs by modules and log levels, and its behavior can be controlled via environment variables. This document explains the available log modules and levels, along with how to use environment variables to control log output.
+The logging system in ZenDNN* provides a flexible mechanism to monitor and debug application execution. It categorizes logs by modules and log levels, and its behavior can be controlled via environment variables. This document explains the available log modules and levels, along with how to use environment variables to control log output.
 
-## Log Modules
+## 1. Log Modules
 
-Log modules represent different areas or components within ZenDNNL. Each module can have its own logging configuration. Some common log modules include:
+Log modules represent different areas or components within ZenDNN*. Each module can have its own logging configuration. Some common log modules include:
 
 - **common**: General logging for common operations.
 - **api**: Logging related to API calls and interfaces.
@@ -14,7 +14,7 @@ Log modules represent different areas or components within ZenDNNL. Each module 
 - **profile**: Metrics and performance-related logs.
 - **debug**: Detailed debugging information.
 
-## Log Levels
+## 2. Log Levels
 
 Log levels determine the severity of the messages:
 
@@ -26,9 +26,9 @@ Log levels determine the severity of the messages:
 
 The levels are typically numeric, where a higher number corresponds to increased verbosity. For example, if a module's log level is set to 4 (verbose), then all messages with a level of error, warning, info, and verbose will be printed.
 
-## Environment Variables for Log Control
+## 3. Environment Variables for Log Control
 
-ZenDNNL supports several environment variables to control logging behavior. These variables override default settings, allowing you to adjust verbosity at runtime without recompiling the code.
+ZenDNN* supports several environment variables to control logging behavior. These variables override default settings, allowing you to adjust verbosity at runtime without recompiling the code.
 
 - **ZENDNNL_<log_module>_LOG_LEVEL**:
   Sets the default log level for a specific module. For example, the following command sets the log level of a module (e.g., API, PROFILE) to verbose (4):
@@ -49,18 +49,20 @@ ZenDNNL supports several environment variables to control logging behavior. Thes
 
 These settings enable runtime control of logging behavior, which is essential in different environments such as development, testing, and production.
 
-### API Logs
+## 4. Enabling different logs
 
-ZenDNNL provides API-level logs to monitor interactions with the library's interfaces. These logs are enabled by setting the `ZENDNNL_API_LOG_LEVEL` environment variable.
+### 4.1. API Logs
 
-#### Enabling API Logs
+ZenDNN* provides API-level logs to monitor interactions with the library's interfaces. These logs are enabled by setting the `ZENDNNL_API_LOG_LEVEL` environment variable.
+
+#### 4.1.1. Enabling API Logs
 To enable API logs, set the log level for the `API` module to verbose (4):
 ```bash
 export ZENDNNL_API_LOG_LEVEL=4
 ```
 
-#### API Log Details
-When API logs are enabled, ZenDNNL outputs detailed information about API calls, including:
+#### 4.1.2. API Log Details
+When API logs are enabled, ZenDNN* outputs detailed information about API calls, including:
 - Function names and parameters.
 - Execution status (success or failure).
 - Any warnings or errors encountered during API calls.
@@ -73,18 +75,18 @@ When API logs are enabled, ZenDNNL outputs detailed information about API calls,
 [API    ][info   ][0.021139]:Operator create - matmul_bf16_operator
 ```
 
-### Test Logs
+### 4.2. Test Logs
 
-ZenDNNL provides test-level logs to monitor the execution of test cases and validation processes. These logs are enabled by setting the `ZENDNNL_TEST_LOG_LEVEL` environment variable.
+ZenDNN* provides test-level logs to monitor the execution of test cases and validation processes. These logs are enabled by setting the `ZENDNNL_TEST_LOG_LEVEL` environment variable.
 
-#### Enabling Test Logs
+#### 4.2.1. Enabling Test Logs
 To enable test logs, set the log level for the `TEST` module to verbose (4):
 ```bash
 export ZENDNNL_TEST_LOG_LEVEL=4
 ```
 
-#### Test Log Details
-When test logs are enabled, ZenDNNL outputs detailed information about test execution, including:
+#### 4.2.2 Test Log Details
+When test logs are enabled, ZenDNN* outputs detailed information about test execution, including:
 - Test case names and descriptions.
 - Validation results (e.g., successful or failed).
 - Any warnings or errors encountered during testing.
@@ -94,18 +96,18 @@ When test logs are enabled, ZenDNNL outputs detailed information about test exec
 [TEST   ][info   ][0.016712]:operator matmul_f32_operator execution successful.
 ```
 
-## Profile Logs
+### 4.3. Profile Logs
 
-ZenDNNL provides detailed profiling logs to monitor context creation time, kernel execution time and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` environment variable.
+ZenDNN* provides detailed profiling logs to monitor context creation time, kernel execution time and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` environment variable.
 
-### Enabling Profile Logs
+#### 4.3.1. Enabling Profile Logs
 To enable profiling logs, set the log level for the `PROFILE` module to verbose (4):
 ```bash
 export ZENDNNL_PROFILE_LOG_LEVEL=4
 ```
 
-### Profiling Log Details
-When profiling logs are enabled, ZenDNNL outputs detailed information about context creation and operator execution, including:
+#### 4.3.2. Profiling Log Details
+When profiling logs are enabled, ZenDNN* outputs detailed information about context creation and operator execution, including:
 - Operator name and type.
 - Operator context details.
 - Input and output tensor details (dimensions, data types, and layouts).
@@ -118,11 +120,11 @@ When profiling logs are enabled, ZenDNNL outputs detailed information about cont
 [PROF   ][info   ][0.017503]:Operator execute - matmul_f32,matmul_input[10,5]:f32:contiguous,weights[5,4]:f32:contiguous,bias[1,4]:f32:contiguous,matmul_output[10,4]:f32:contiguous,post-op:binary_mul:swish:binary_mul,time:0.00321ms
 ```
 
-## Debug Logs
+### 4.4. Debug Logs
 
-ZenDNNL provides detailed debug logs to output comprehensive information about internal operations, including intermediate states and execution flow. These logs are enabled by setting the `ZENDNNL_DEBUG_LOG_LEVEL` environment variable **and are only available when the library is built in debug mode**.
+ZenDNN* provides detailed debug logs to output comprehensive information about internal operations, including intermediate states and execution flow. These logs are enabled by setting the `ZENDNNL_DEBUG_LOG_LEVEL` environment variable **and are only available when the library is built in debug mode**.
 
-### Debug Mode Requirement
+#### 4.4.1. Debug Mode Requirement
 Debug logs are only available when the library is built in debug mode. To build the library in debug mode, ensure the following steps are followed:
 
 **Set Debug Build Type**:
@@ -131,13 +133,13 @@ In the `CMakeLists.txt` file, ensure the `CMAKE_BUILD_TYPE` is set to `Debug`:
 set(CMAKE_BUILD_TYPE Debug)
 ```
 
-### Enabling Debug Logs
+#### 4.4.2. Enabling Debug Logs
 To enable debug logs, set the log level for the `DEBUG` module to verbose (4):
 ```bash
 export ZENDNNL_DEBUG_LOG_LEVEL=4
 ```
 
-### Debug Log Details
+#### 4.4.3. Debug Log Details
 - Logs the file path and function name where the debug message is generated.
 - A brief description of the operation being performed.
 
@@ -147,14 +149,14 @@ export ZENDNNL_DEBUG_LOG_LEVEL=4
 [DEBUG  ][verbose][0.000681]:[ZenDNN/zendnnl/src/memory/tensor_options.cpp], [virtual std::size_t zendnnl::memory::tensor_option_t::hash()]: Generating tensor option hash
 ```
 
-## Explanation of Log Fields
+## 5. Explanation of Log Fields
 - **[MODULE]**: Indicates the log module (e.g., `COMMON`, `API`, `TEST`, `PROF`, `DEBUG`).
 - **[LEVEL]**: Log level (e.g., `error`, `warning`, `info`, `verbose`).
 - **[TIMESTAMP]**: Timestamp of the log entry, representing the time elapsed since the application started.
 - **Description**: A brief description of the operation being logged.
 - **Details**: Additional information specific to the log module.
 
-## Example Usage
+## 6. Example Usage
 
 Below is an example code snippet demonstrating how to log messages using different log modules and levels:
 
@@ -170,4 +172,6 @@ int main() {
 }
 ```
 
-By using the environment variable settings outlined in this document, you can achieve fine-grained control over the logging behavior in ZenDNNL, making it easier to troubleshoot and optimize your application.
+By using the environment variable settings outlined in this document, you can achieve fine-grained control over the logging behavior in ZenDNN*, making it easier to troubleshoot and optimize your application.
+
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

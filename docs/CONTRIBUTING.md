@@ -1,15 +1,15 @@
 
 # Adding New Operator
 
-This document serves as a comprehensive guide for developers looking to integrate a new operator into **ZenDNNL**, AMD’s CPU-optimized inference library. We use the `Sample Operator` as a reference template, demonstrating how to build and plug in a custom operator within the modular architecture of ZenDNNL.
+This document serves as a comprehensive guide for developers looking to integrate a new operator into **ZenDNN***, AMD’s CPU-optimized inference library. We use the `Sample Operator` as a reference template, demonstrating how to build and plug in a custom operator within the modular architecture of ZenDNN*.
 
 > **Audience**: This guide is intended for C++ developers familiar with deep learning libraries and AMD CPU architectures.
 
 
-## ZenDNNL Main Components
+## ZenDNN* Main Components
 
 ### Tensor
-A **Tensor** is a multi-dimensional data structure and a foundational element of computation in ZenDNNL.
+A **Tensor** is a multi-dimensional data structure and a foundational element of computation in ZenDNN*.
 
 **Components**:
 - **Metadata**: Dimensions, sizes, strides, data type.
@@ -46,7 +46,7 @@ A **Kernel** is a low-level function that executes the core logic of an operator
 
 ## 1. Overview
 
-The Sample Operator in ZenDNNL is a template for creating new operators. It includes the following components:
+The Sample Operator in ZenDNN* is a template for creating new operators. It includes the following components:
 
 - Operator interface (`sample_operator.hpp` and `sample_operator.cpp`)
 - Operator context (`sample_context.hpp` and `sample_context.cpp`)
@@ -231,7 +231,7 @@ TEST(NewOpTest, Execute) {
 }
 ```
 
-By following these steps and using the Sample Operator as a reference, you can successfully add and integrate a new operator into ZenDNNL.
+By following these steps and using the Sample Operator as a reference, you can successfully add and integrate a new operator into ZenDNN*.
 
 
 ## System Flow Recap
@@ -254,7 +254,9 @@ By following these steps and using the Sample Operator as a reference, you can s
 
 ## Summary
 
-By following this guide and leveraging the modular architecture of ZenDNNL, you can rapidly prototype and deploy new operators optimized for AMD CPUs. Whether your target is a new quantized convolution or a custom transformer layer, ZenDNNL’s flexible operator/kernel structure makes it possible.
+By following this guide and leveraging the modular architecture of ZenDNN*, you can rapidly prototype and deploy new operators optimized for AMD CPUs. Whether your target is a new quantized convolution or a custom transformer layer, ZenDNNL’s flexible operator/kernel structure makes it possible.
 
 > Be sure to benchmark and validate new kernels for correctness and performance on AMD hardware.
+
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.
 

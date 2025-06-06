@@ -1,8 +1,8 @@
-# ZenDNNL Operator
+# ZenDNN* Operator
 
-The **ZenDNNL Operator** is a central architectural component in the ZenDNNL framework, designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
+The **ZenDNN* Operator** is a central architectural component in the ZenDNN* framework, designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
 
-<img src="../images/operator.png" alt="ZenDNNL Operator" width="700"/>
+<img src="../images/operator.png" alt="ZenDNN* Operator" width="700"/>
 
 
 ## 1. Kernel Registration 
@@ -29,7 +29,7 @@ The **Dynamic Dispatch Engine** is the decision-making core of the factory. It i
 
 ## 3. Kernels
 
-Kernels are the **execution engines** of the ZenDNNL framework. They implement the actual computations defined by operators and are optimized for specific hardware and problem sizes.
+Kernels are the **execution engines** of the ZenDNN* framework. They implement the actual computations defined by operators and are optimized for specific hardware and problem sizes.
 
 - **Reference Kernels**: These are baseline implementations that prioritize correctness and portability. They serve as fallbacks when optimized kernels are unavailable or unsuitable.
 - **Optimized Kernels**: These are high-performance implementations tailored for specific ISAs and quantization schemes. They leverage advanced CPU features to maximize throughput and minimize latency.
@@ -56,7 +56,7 @@ At the foundation of the kernel factory are **low-level computational libraries*
 - **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications. **Coming Soon**
 - **LibXSMM**: Optimized for small matrix multiplications, often used in deep learning and HPC applications. **Coming Soon**
 
-These libraries are abstracted by the kernel factory, allowing ZenDNNL to remain hardware-agnostic while still benefiting from platform-specific optimizations.
+These libraries are abstracted by the kernel factory, allowing ZenDNN* to remain hardware-agnostic while still benefiting from platform-specific optimizations.
 
 
 
@@ -71,20 +71,20 @@ These libraries are abstracted by the kernel factory, allowing ZenDNNL to remain
 
 
 
-## Integration Workflow: ZenDNNL Kernel Factory and Third-Party Execution
+## Integration Workflow: ZenDNN* Kernel Factory and Third-Party Execution
 
-The **ZenDNNL Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNNL to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
+The **ZenDNN* Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNN* to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
 
-<img src="../images/kernel_factory.png" alt="ZenDNNL Kernel Factory" width="700"/>
+<img src="../images/kernel_factory.png" alt="ZenDNN* Kernel Factory" width="700"/>
 
 
 ### Key Components in the Execution Flow
 
-#### 1. ZenDNNL Kernel Factory
+#### 1. ZenDNN* Kernel Factory
 This is the **central orchestration unit** responsible for managing kernel selection and dispatch. It evaluates the operator requirements, hardware capabilities, and quantization settings to determine the most suitable execution path.
 
-- **Native Kernels**: These are handcrafted, performance-tuned kernels developed specifically for ZenDNNL. They are optimized for various CPU architectures and support advanced features like fused operations and quantization-aware execution.
-- **Third-Party Libraries**: When native kernels are unavailable or suboptimal for a given configuration, ZenDNNL can delegate execution to trusted external libraries, including:
+- **Native Kernels**: These are handcrafted, performance-tuned kernels developed specifically for ZenDNN*. They are optimized for various CPU architectures and support advanced features like fused operations and quantization-aware execution.
+- **Third-Party Libraries**: When native kernels are unavailable or suboptimal for a given configuration, ZenDNN* can delegate execution to trusted external libraries, including:
   - **AOCL** – AMD Optimized CPU Libraries for high-performance math routines.
   - **FBGEMM** – Facebook’s library for quantized matrix operations, ideal for inference. **Coming Soon:**
   - **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications. **Coming Soon:**
@@ -92,7 +92,7 @@ This is the **central orchestration unit** responsible for managing kernel selec
   
 
 #### 2. Tensor Conversion Layer
-Labeled in the diagram as **"ZenDNNL Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNNL’s internal tensor representation and the expected input format of third-party libraries.
+Labeled in the diagram as **"ZenDNN* Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNNL’s internal tensor representation and the expected input format of third-party libraries.
 
 - **Responsibilities**:
   - **Data Layout Transformation**: Converts tensors from ZenDNNL’s memory layout (e.g., NCHW, NHWC) to the format required by the target library.
@@ -109,16 +109,18 @@ Once the tensor is transformed, the **actual computation is offloaded** to the s
   - Quantization level (e.g., int8, bf16)
   - Operator type and tensor shape
 
-ZenDNNL handles the **dispatch, execution, and result retrieval**, ensuring that the output tensor is compatible with the rest of the inference pipeline.
+ZenDNN* handles the **dispatch, execution, and result retrieval**, ensuring that the output tensor is compatible with the rest of the inference pipeline.
 
 ### Practical Use Case: Fully Connected Layer Execution
 
 Consider a scenario where a fully connected (dense) layer is being executed during inference:
 
-1. The **ZenDNNL Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
+1. The **ZenDNN* Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
 2. It identifies **AOCL** as the optimal backend for this configuration due to its efficient int8 GEMM routines.
 3. The input tensor is passed through the **conversion layer**, which adapts its layout and quantization metadata to match AOCL's expectations.
 4. The **AOCL kernel** is invoked to perform the matrix multiplication.
-5. The result is converted back into a ZenDNNL-compatible tensor and passed to the next operator in the graph.
+5. The result is converted back into a ZenDNN*-compatible tensor and passed to the next operator in the graph.
 
 ##### note: Limited functionality available.
+
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

@@ -318,5 +318,6 @@ Utility functions such as `testlog_info` and `testlog_error` are used for loggin
 
 
 
-These examples demonstrate the versatility and composability of matrix multiplication operations, showcasing the use of different data types and post-processing operations in the computational graphs defined within the `zendnnl` library.
+These examples demonstrate the versatility and composability of matrix multiplication operations, showcasing the use of different data types and post-processing operations in the computational graphs defined within the `ZenDNN*` library.
 
+>ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.
