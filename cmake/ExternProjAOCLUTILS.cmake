@@ -36,6 +36,8 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
     CMAKE_ARGS ${AU_CMAKE_ARGS}
     INSTALL_COMMAND cmake --build . --config release --target install -j
+    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
+                     <INSTALL_DIR>/lib/libau_cpuid.a
     UPDATE_DISCONNECTED TRUE)
 
   list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_BINARY_DIR}/aoclutils")
@@ -46,6 +48,45 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
     ADDITIONAL_CLEAN_FILES "${AOCLUTILS_CLEAN_FILES}")
 
   list(APPEND ZENDNNL_DEPS "zendnnl-deps-aoclutils")
+
+  # !!!
+  # HACK to make zendnnl a sub-project using add_directory() !
+  # ZenDNNL packages the exported information of this dependency in its own
+  # package config file. However to use this information, ZenDNNL package
+  # need to be installed.
+  # when ZenDNNL is included as a sub-project using add_subdirectory it
+  # can not be installed before the super-project of which it is a sub-project
+  # is built. Thus super-project can not use its package information. This
+  # makes this hack of manually interfacing the libraries this dependency has
+  # built necessary.
+  # Since we do not know what kind of information and targets this package exports
+  # this kind of manual interface could be error-prone.
+  #
+  # UNCOMMENT the code below for manual interface.
+
+  # set(ZENDNNL_AOCLUTILS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/include")
+  # set(ZENDNNL_AOCLUTILS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/lib")
+
+  # file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
+  # add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
+  # set_target_properties(zendnnl_aoclutils_deps
+  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
+  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+
+  # list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aoclutils_deps")
+
+  # add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
+  # set_target_properties(zendnnl_aucpuid_deps
+  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
+  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+
+  # list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aucpuid_deps")
+  # list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
+
+  # !!!
+
 else()
   message(DEBUG "skipping building aocl-utils.")
 endif()

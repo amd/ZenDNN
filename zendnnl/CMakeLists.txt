@@ -34,7 +34,7 @@ message(DEBUG "ZENDNNL_LIBRARY_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
 
 # include zendnnl files
 include(ZenDnnlMacros)
-include(ZenDnnlOptions)
+include(ZenDnnlDependenciesInfo)
 
 # global cxx flags
 set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=1 ${CMAKE_CXX_FLAGS}")

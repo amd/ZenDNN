@@ -27,6 +27,7 @@ list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_SOURCE_DIR=${ZENDNNL_SOURCE_DIR}")
 list(APPEND ZL_CMAKE_ARGS "-DPROJECT_VERSION=${PROJECT_VERSION}")
 list(APPEND ZL_CMAKE_ARGS "-DCMAKE_MESSAGE_LOG_LEVEL=${CMAKE_MESSAGE_LOG_LEVEL}")
 list(APPEND ZL_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_BUILD_GTEST=${ZENDNNL_BUILD_GTEST}")
 list(APPEND ZL_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
 message(DEBUG "ZL_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
@@ -41,15 +42,48 @@ ExternalProject_ADD(zendnnl
   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}"
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
   INSTALL_COMMAND cmake --build . --target install -j
+  BUILD_BYPRODUCTS <INSTALL_DIR>/zendnnl/lib/libzendnnl_archive.a
   BUILD_ALWAYS TRUE
   CONFIGURE_HANDLED_BY_BUILD TRUE)
 
-  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_BINARY_DIR}/zendnnl")
-  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/zendnnl")
-  list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/gtests")
+list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_BINARY_DIR}/zendnnl")
+list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/zendnnl")
+list(APPEND ZENDNNL_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/gtests")
 
-  set_target_properties(zendnnl
-    PROPERTIES
-    ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
+set_target_properties(zendnnl
+  PROPERTIES
+  ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
 
-#  BUILD_COMMAND cmake --build . --target install -j
+# !!!
+# HACK to make zendnnl a sub-project using add_directory() !
+# ZenDNNL packages the exported information of this dependency in its own
+# package config file. However to use this information, ZenDNNL package
+# need to be installed.
+# when ZenDNNL is included as a sub-project using add_subdirectory it
+# can not be installed before the super-project of which it is a sub-project
+# is built. Thus super-project can not use its package information. This
+# makes this hack of manually interfacing the libraries this dependency has
+# built necessary.
+# Since we do not know what kind of information and targets this package exports
+# this kind of manual interface could be error-prone.
+#
+# UNCOMMENT the code below for manual interface.
+
+# set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
+# set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
+
+# file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
+# add_library(zendnnl_library STATIC IMPORTED)
+# set_target_properties(zendnnl_library
+#   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+#              INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+#              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
+#              LINK_LIBRARIES
+#              zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps
+#              INTERFACE_LINK_LIBRARIES
+#              zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps)
+
+# list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
+# list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
+
+# !!!

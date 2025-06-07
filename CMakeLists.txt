@@ -62,3 +62,26 @@ include(ExternProjZenDnnlExamples)
 # build doxygen docs
 add_subdirectory(docs/doxygen)
 
+# !!!
+# HACK to make zendnnl a sub-project using add_directory() !
+# ZenDNNL packages the exported information of this dependency in its own
+# package config file. However to use this information, ZenDNNL package
+# need to be installed.
+# when ZenDNNL is included as a sub-project using add_subdirectory it
+# can not be installed before the super-project of which it is a sub-project
+# is built. Thus super-project can not use its package information. This
+# makes this hack of manually interfacing the libraries necessary.
+# Since we do not know what kind of information and targets dependencies export,
+# this kind of manual interface could be error-prone.
+#
+# UNCOMMENT the code below for manual interface.
+
+# add_library(zendnnl_zendnnl_archive INTERFACE)
+# target_link_libraries(zendnnl_zendnnl_archive
+#   INTERFACE ${ZENDNNL_LINK_LIBS})
+# target_include_directories(zendnnl_zendnnl_archive
+#   INTERFACE ${ZENDNNL_INCLUDE_DIRECTORIES})
+
+# add_library(zendnnl::zendnnl_archive ALIAS zendnnl_zendnnl_archive)
+
+# !!!
