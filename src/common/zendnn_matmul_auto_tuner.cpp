@@ -258,7 +258,13 @@ int auto_compute_matmul_woq(
     //0: disable, 1: enable.
     unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
 
-    Key_matmul key_obj(transA, transB, m, k, n, lda, ldb, ldc,
+    //It is used to know the size of bin.
+    unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNN_AUTO_BIN_SIZE", 1);
+    if (autoBinSize == 0) {
+        autoBinSize = 1;
+    }
+
+    Key_matmul key_obj(transA, transB, m % autoBinSize, k, n, lda, ldb, ldc,
                        weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
@@ -454,9 +460,14 @@ int auto_compute_matmul_int8(
     //It is used to know if weights address should be enabled or not for map.
     //0: disable, 1: enable.
     unsigned int mapType = zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
+    //It is used to know the size of bin.
+    unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNN_AUTO_BIN_SIZE", 1);
+    if (autoBinSize == 0) {
+        autoBinSize = 1;
+    }
 
-    Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
-                       weights, zenEnvObj.omp_num_threads, true);
+    Key_matmul key_obj(transpose_input, transpose_weights, m % autoBinSize, k, n,
+                       lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
@@ -638,9 +649,14 @@ int auto_compute_matmul_bf16(
     bool is_weights_const,
     bool is_inplace
 ) {
+    //It is used to know the size of bin.
+    unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNN_AUTO_BIN_SIZE", 1);
+    if (autoBinSize == 0) {
+        autoBinSize = 1;
+    }
 
-    Key_matmul key_obj_auto(transpose_input, transpose_filter, M, K, N, lda, ldb,
-                            ldc, weights, zenEnvObj.omp_num_threads, true);
+    Key_matmul key_obj_auto(transpose_input, transpose_filter, M % autoBinSize, K,
+                            N, lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
@@ -842,8 +858,10 @@ int auto_compute_matmul_fp32(
             gettimeofday(&start_n, 0);
 #endif
 
-            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights,
+                           m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output,
+                           ldc,
                            is_weights_const, is_inplace);
 
             //Time end
@@ -869,8 +887,10 @@ int auto_compute_matmul_fp32(
         else {
             zenEnvObj.zenGEMMalgo = (std::get<0>(found_obj->second)%NUM_OF_ALGO) +1;
             std::get<0>(found_obj->second) += 1;
-            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights,
+                           m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output,
+                           ldc,
                            is_weights_const, is_inplace);
         }
     }
@@ -881,8 +901,10 @@ int auto_compute_matmul_fp32(
 
         //Get best algo for given layer from MAP
         zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
-        zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                       k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
+        zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights,
+                       m,
+                       k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output,
+                       ldc,
                        is_weights_const, is_inplace);
 
         //Writing Map in file.
@@ -910,7 +932,8 @@ int auto_compute_matmul_fp32(
         gettimeofday(&start_n, 0);
 #endif
 
-        zenMatMul_gemm(ctx, zenEnvObj, true, Layout,transpose_input, transpose_weights, m, k,
+        zenMatMul_gemm(ctx, zenEnvObj, true, Layout,transpose_input, transpose_weights,
+                       m, k,
                        n,
                        alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
                        is_weights_const, is_inplace);
@@ -972,8 +995,13 @@ int auto_compute_matmul(
 ) {
     unsigned int algo_type;
 
-    Key_matmul key_obj(transpose_input, transpose_weights, m, k, n, lda, ldb, ldc,
-                       weights, zenEnvObj.omp_num_threads, true);
+    //It is used to know the size of bin.
+    unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNN_AUTO_BIN_SIZE", 1);
+    if (autoBinSize == 0) {
+        autoBinSize = 1;
+    }
+    Key_matmul key_obj(transpose_input, transpose_weights, m % autoBinSize, k, n,
+                       lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //Persistent Map
     //{ 0: disable, 1: write, 2:read }
@@ -1014,8 +1042,10 @@ int auto_compute_matmul(
         if (matmul_kernel_map.find(key_obj) != matmul_kernel_map.end()) {
             zenEnvObj.zenGEMMalgo = matmul_kernel_map[key_obj];
 
-            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights,
+                           m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output,
+                           ldc,
                            is_weights_const, is_inplace);
 
         }
@@ -1023,8 +1053,10 @@ int auto_compute_matmul(
 
             zenEnvObj.zenGEMMalgo = zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
 
-            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights, m,
-                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output, ldc,
+            zenMatMul_gemm(ctx, zenEnvObj, true, Layout, transpose_input, transpose_weights,
+                           m,
+                           k, n, alpha, input, lda, weights, ldb, bias, po_ops, relu, gelu, beta, output,
+                           ldc,
                            is_weights_const, is_inplace);
 
         }
@@ -1032,7 +1064,8 @@ int auto_compute_matmul(
         return zenEnvObj.zenGEMMalgo;
     }
 
-    algo_type = auto_compute_matmul_fp32(ctx, zenEnvObj, &persistent_map_flag, key_obj,
+    algo_type = auto_compute_matmul_fp32(ctx, zenEnvObj, &persistent_map_flag,
+                                         key_obj,
                                          Layout, transpose_input, transpose_weights, m, k, n, alpha, input, lda, weights,
                                          ldb, bias, po_ops, relu, gelu, beta, output, ldc, is_weights_const, is_inplace);
     return algo_type;
