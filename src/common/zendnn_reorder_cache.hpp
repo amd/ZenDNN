@@ -88,7 +88,8 @@ void woqReorderAndCacheWeightsAocl(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 );
 
 void woqReorderAndCacheWeightsBrgemm(
@@ -107,7 +108,8 @@ void woqReorderAndCacheWeightsBrgemm(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 );
 
 void cacheStaticScales(

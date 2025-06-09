@@ -111,7 +111,7 @@ bool reorderAndCacheWeights(
             }
             else {
                 zendnnVerbose(ZENDNN_PROFLOG,
-                                "BLIS reorder weights WEIGHT_CACHE_INPLACE new memory");
+                              "BLIS reorder weights WEIGHT_CACHE_INPLACE new memory");
                 matmul_weight_cache.add(key_obj, reorder_weights);
             }
             map_mutex.unlock();
@@ -264,7 +264,7 @@ bool reorderAndCacheWeightsBrgemm(
             }
             else {
                 zendnnVerbose(ZENDNN_PROFLOG,
-                                "BRGEMM reorder weights WEIGHT_CACHE_INPLACE new memory");
+                              "BRGEMM reorder weights WEIGHT_CACHE_INPLACE new memory");
                 matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
             }
             map_mutex.unlock();
@@ -346,9 +346,11 @@ void woqReorderAndCacheWeightsAocl(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 ) {
-    // Weight caching
+    // Weight caching inplace support cannot be added since buffer size is
+    // always expanded.
     static zendnn::impl::lru_weight_cache_t<Key_matmul, T *> matmul_weight_cache;
     auto found_obj = matmul_weight_cache.find_key(key_obj);
 
@@ -380,7 +382,9 @@ void woqReorderAndCacheWeightsAocl(
         reorder_filter = (T *)zendnn_aligned_alloc(64, b_reorder_buf_siz_req);
         reorder_func(order, trans, 'B', wei_type, reorder_filter, k, n, ldb);
         free(wei_type);
-        if (is_weights_const) {
+        if (is_weights_const &&
+            (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE ||
+                weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)) {
             // Create new entry
             map_mutex.lock();
             matmul_weight_cache.add(key_obj, reorder_filter);
@@ -409,9 +413,11 @@ void woqReorderAndCacheWeightsBrgemm(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 ) {
-    //weight caching
+    // Weight caching inplace support cannot be added since buffer size is
+    // always expanded.
     static zendnn::impl::lru_weight_cache_t<Key_matmul, zendnn::memory>
     matmul_weight_cache;
     auto found_obj_reorder = matmul_weight_cache.find_key(key_obj_reorder);
@@ -432,7 +438,9 @@ void woqReorderAndCacheWeightsBrgemm(
         reordered_weights_memory = memory(matmul_prim_disc.weights_desc(), eng);
         reorder(user_weights_memory, reordered_weights_memory).execute(engine_stream,
                 user_weights_memory, reordered_weights_memory);
-        if (is_weights_const) {
+        if (is_weights_const &&
+                (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE ||
+                 weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)) {
             //Save in map
             map_mutex.lock();
             matmul_weight_cache.add(key_obj_reorder, reordered_weights_memory);
@@ -849,7 +857,8 @@ template void woqReorderAndCacheWeightsAocl<int16_t>(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 );
 
 template void woqReorderAndCacheWeightsAocl<float>(
@@ -871,5 +880,6 @@ template void woqReorderAndCacheWeightsAocl<float>(
     float *wei_scale,
     int scale_size,
     int group_size,
-    zendnn_data_type_t scale_dt
+    zendnn_data_type_t scale_dt,
+    int weight_cache_type
 );

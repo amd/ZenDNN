@@ -75,6 +75,7 @@ int ref_woq_bf16(
     zendnnVerbose(ZENDNN_PROFLOG,"aocl bf16 kernel");
 
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
@@ -100,8 +101,8 @@ int ref_woq_bf16(
                                            ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
                                            reorder_param2,
                                            aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
-                                           weights_type, wei_scale, scale_size, group_size, scale_dt
-                                          );
+                                           weights_type, wei_scale, scale_size, group_size, scale_dt,
+                                           weight_cache_type);
 
     aocl_post_op *post_ops = NULL;
     float dummy_scale = (float)1.0;
@@ -210,6 +211,7 @@ int ref_woq_f32(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
@@ -235,8 +237,8 @@ int ref_woq_f32(
                                          ldb, is_weights_const, order, trans, reorder_param0, reorder_param1,
                                          reorder_param2,
                                          aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
-                                         weights_type, wei_scale, scale_size, group_size, scale_dt
-                                        );
+                                         weights_type, wei_scale, scale_size, group_size, scale_dt,
+                                         weight_cache_type);
 
     aocl_post_op *post_ops = NULL;
     int postop_count = 0;
@@ -306,6 +308,7 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
     zendnn::engine eng(engine::kind::cpu, 0);
     zendnn::stream engine_stream(eng);
     zendnnVerbose(ZENDNN_PROFLOG,"JIT kernel woq");
+    int weight_cache_type = zenEnvObj.zenWeightCache;
 
     std::unordered_map<int, memory> net_args;
 
@@ -439,7 +442,7 @@ void zenMatMulPrimitiveIntComputeBF16(const impl::exec_ctx_t &ctx,
             key_obj, matmul_prim_disc, user_weights_memory,
             reordered_weights_memory, eng, engine_stream, matmul_weights_md,
             is_weights_const, weights, weights_type, K, N, wei_scale, scale_size,
-            group_size, scale_dt);
+            group_size, scale_dt, weight_cache_type);
     }
     else {
         wei_bf16 = (int16_t *)zendnn_aligned_alloc(64, sizeof(int16_t)*K*N);
@@ -501,6 +504,12 @@ int aocl_woq_bf16(
 ) {
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    int weight_cache_type = zenEnvObj.zenWeightCache;
+
+    // Not supporting weight cache inplace for WOQ
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
+        weight_cache_type = zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE;
+    }
     //TODO: Create cleaner key for weight caching map
     //Putting hardcoded values for now
     Key_matmul key_obj(transA, transB, M, K, N, lda, ldb, ldc, weights, thread_qty,
@@ -527,8 +536,9 @@ int aocl_woq_bf16(
                           reorder_weights, K, N,
                           ldb, is_weights_const, false, order, trans,
                           reorder_param0, reorder_param1, reorder_param2,
-                          aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32
-                                                        );
+                          aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32,
+                          weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_OUT_OF_PLACE
+                          ? zendnnWeightCacheType::WEIGHT_CACHE_DISABLE : weight_cache_type);
     if (!reorder_status) {
         mem_format_b = 'n';
         blocked_format = false;
