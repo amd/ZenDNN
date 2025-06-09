@@ -995,7 +995,10 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/docs/zendnnl_architecture.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/operator.md \
                          @PROJECT_SOURCE_DIR@/docs/operator/matmul_operator.md \
+                         @PROJECT_SOURCE_DIR@/docs/operator/reorder_operator.md \
+                         @PROJECT_SOURCE_DIR@/docs/operator/compare_operator.md \
                          @PROJECT_SOURCE_DIR@/docs/CONTRIBUTING.md \
+                         @PROJECT_SOURCE_DIR@/docs/logging.md \
                          @PROJECT_SOURCE_DIR@/examples/examples.dox \
                          @PROJECT_SOURCE_DIR@/docs/doxygen \
                          @PROJECT_SOURCE_DIR@/zendnnl/src \

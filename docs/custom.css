@@ -4,7 +4,7 @@
 }
 
 #side-nav {
-    width: 520px !important;
+    width: 530px !important;
 }
 
 #doc-content {
@@ -22,55 +22,3 @@
 #MSearchBox {
     margin-left: auto !important;
 }
-
-/*
-body {
-    font-family: Arial, sans-serif;
-    line-height: 1.6;
-    margin: 20px;
-    background-color: #f4f4f4;
-}
-
-h1, h2, h3, h4, h5, h6 {
-    color: #333;
-    margin-top: 20px;
-    margin-bottom: 10px;
-}
-
-p {
-    margin: 10px 0;
-}
-
-code {
-    background-color: #eaeaea;
-    padding: 2px 4px;
-    border-radius: 4px;
-    font-family: monospace;
-}
-
-pre {
-    background-color: #eaeaea;
-    padding: 10px;
-    border-radius: 4px;
-    overflow-x: auto;
-}
-
-.mathjax {
-    text-align: center;
-    margin: 20px 0;
-}
-
-ul, ol {
-    margin: 10px 0;
-    padding-left: 20px;
-}
-
-a {
-    color: #1a0dab;
-    text-decoration: none;
-}
-
-a:hover {
-    text-decoration: underline;
-}
-*/
