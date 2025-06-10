@@ -173,7 +173,7 @@ status_t aocl_blis_utils_t::aocl_post_op_memory_alloc(const
   //Allocate memory
   size_t max_post_ops = post_op_vec_.size();
 
-  if (max_post_ops) {
+  if (max_post_ops || is_bias) {
     int num_post_ops_1d_add     = is_bias ? 1 : 0;
     int num_post_ops_binary_add = 0;
     int num_post_ops_1d_mul     = 0;

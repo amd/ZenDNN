@@ -193,11 +193,13 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
     // Set binary tensor for binary postops
-    if (po_arr[index] == post_op_type_t::binary_add) {
-      matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
-    }
-    else if (po_arr[index] == post_op_type_t::binary_mul) {
-      matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+    if (index < po_size) {
+      if (po_arr[index] == post_op_type_t::binary_add) {
+        matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+      }
+      else if (po_arr[index] == post_op_type_t::binary_mul) {
+        matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+      }
     }
     status_t status = matmul_operator
                       .set_input("matmul_input", input_tensor)
@@ -249,12 +251,14 @@ void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
 
-    if (po_arr[index] == post_op_type_t::binary_add) {
-      matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
-    }
-    else if (po_arr[index] == post_op_type_t::binary_mul) {
-      // Set binary tensor for binary postops
-      matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+    if (index < po_size) {
+      if (po_arr[index] == post_op_type_t::binary_add) {
+        matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+      }
+      else if (po_arr[index] == post_op_type_t::binary_mul) {
+        // Set binary tensor for binary postops
+        matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+      }
     }
     status_t status = matmul_operator.set_input("matmul_input", input_tensor)
                       .set_output("matmul_output", output_tensor)
