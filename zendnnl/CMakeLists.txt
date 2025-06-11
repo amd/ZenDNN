@@ -55,5 +55,8 @@ add_subdirectory(src)
 # build gtests
 add_subdirectory(gtests)
 
+# install config file
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/config/zendnnl_user_config.json"
+  DESTINATION zendnnl/config)
 
 

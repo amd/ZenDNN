@@ -31,45 +31,20 @@
 #include <vector>
 
 #include "common/zendnnl_exceptions.hpp"
+#include "common/logging_support.hpp"
+#include "common/config_params.hpp"
 
 namespace zendnnl {
 namespace error_handling {
+using namespace zendnnl::common;
+
 namespace cn = std::chrono;
-
-/** @enum log_level_t
- *  @brief defines message levels from error to verbose.
- *
- *  A log with certain level enabled will print all the message at that level
- *  and below.
- */
-enum class log_level_t : uint32_t {
-  disabled = 0,    /*!< Log disabled, no messages go to the log */
-  error    = 1,    /*!< Log only error messages */
-  warning  = 2,    /*!< Log error and warning messages */
-  info     = 3,    /*!< Log error, warning and info messages */
-  verbose  = 4,    /*!< Log all messages */
-  log_level_count  /*!< Log level count */
-};
-
-/** @enum log_modules_t
- *  @brief defines different log modules.
- *
- * Messages not categorized into a log module will go to common log.
- */
-enum class log_module_t : uint32_t {
-  common = 0,       /*!< Common log */
-  api,              /*!< API log */
-  test,             /*!< Test log */
-  profile,          /*!< Profile log */
-  debug,            /*!< Debug log */
-  log_module_count  /*!< Log module count */
-};
 
 /** @class logger_t
  *  @brief A thread-safe logger class.
  *
- *  Logger is owned by @c zendnnl_global_block. Though this class is not a
- *  singleton, only one logger owned by @c zendnnl_global_block singleton
+ *  Logger is owned by @c zendnnl_global_block_t. Though this class is not a
+ *  singleton, only one logger owned by @c zendnnl_global_block_t singleton
  *  will be used for logging purposes.
  *
  *  The logger is thread-safe and serializes logging messages. However no
@@ -96,7 +71,7 @@ class logger_t {
    * @param level_  : log level to setup.
    * @return A reference to self.
    */
-  logger_t &set_log_level(log_module_t module_, log_level_t level_);
+  logger_t& set_log_level(log_module_t module_, log_level_t level_);
 
   /** @brief Get log module level
    * @param module_ : log module
@@ -109,12 +84,20 @@ class logger_t {
    * @param log_file_ : log file name.
    * @return A reference to self.
    */
-  logger_t &set_log_file(std::string log_file_);
+  logger_t& set_log_file(std::string log_file_);
 
   /** @brief Get log file
    * @return log file name
    */
   std::string get_log_file();
+
+  /** @brief Set logger configuration
+   *
+   *  Sets logger configuration as received by config manager.
+   * @param config_logger_ : config received by config manager.
+   * @return A reference to self.
+   */
+  logger_t& set_config(const config_logger_t& config_logger_);
 
   /** @brief log a message
    * @param log_module_ : log module the message should go
@@ -134,12 +117,6 @@ class logger_t {
   /** @brief recursive terminating function to log a message */
   void log_msg_r(log_module_t log_module_, log_level_t log_level_,
                  std::string &message_);
-
-  /** @brief convert from module enum to string */
-  std::string log_module_to_str(log_module_t module_);
-
-  /** @brief convert from level enum to string */
-  std::string log_level_to_str(log_level_t level_);
 
  private:
   std::string                   log_file;         /*!< Log file name */

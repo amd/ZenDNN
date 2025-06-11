@@ -43,5 +43,18 @@ macro(find_dependencies  _install_prefix)
       include_directories(${aocl-utils_ROOT}/include)
     endif()
   endif()
+
+  # find json
+  if(ZENDNNL_DEPENDS_JSON)
+    set(JSON_INSTALL_DIR "${_install_prefix}/deps/json")
+    set(nlohmann_json_ROOT "${JSON_INSTALL_DIR}")
+    set(nlohmann_json_DIR "${json_ROOT}/share/cmake/nlohmann_json")
+    find_package(nlohmann_json REQUIRED)
+    if(nlohmann_json_FOUND)
+      message(STATUS "Found JSON at ${nlohmann_json_ROOT}")
+      include_directories(${nlohmann_json_ROOT}/include)
+    endif()
+  endif()
+
 endmacro()
 

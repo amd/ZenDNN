@@ -15,12 +15,25 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+# sanity check
+curr_dir="$(pwd)"
+parent_dir="$(dirname "$curr_dir")"
+last_dir="$(basename $curr_dir)"
+
+if [ ${last_dir} != "scripts" ];then
+    echo "error: <${last_dir}> does not seem to be <scripts> folder."
+    return 1;
+fi
+
+# set the user log file
+zendnnl_build_dir="${parent_dir}/build/install/zendnnl"
+export ZENDNNL_CONFIG_FILE="${zendnnl_build_dir}/config/zendnnl_user_config.json"
 # sets log level of various logs
 # levels are disabled:0, error:1, warning:2, info:3, verbose:4
 
-export ZENDNNL_COMMON_LOG_LEVEL=4
-export ZENDNNL_API_LOG_LEVEL=4
-export ZENDNNL_TEST_LOG_LEVEL=4
-export ZENDNNL_PROFILE_LOG_LEVEL=4
-export ZENDNNL_DEBUG_LOG_LEVEL=4
+export ZENDNNL_COMMON_LOG_LEVEL=0
+export ZENDNNL_API_LOG_LEVEL=0
+export ZENDNNL_TEST_LOG_LEVEL=0
+export ZENDNNL_PROFILE_LOG_LEVEL=0
+export ZENDNNL_DEBUG_LOG_LEVEL=0
 

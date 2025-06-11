@@ -39,7 +39,8 @@ enum class status_t : int32_t {
   op_bad_io = -4, /*!< Bad input-output to operator */
   op_bad_forced_kernel = -5, /*!< Bad or inconsistant forced kernel */
   utils_bad_module_name = -6, /*!< Bad module name */
-  utils_bad_dynamic_module = -7 /*!< Bad dynamic module */
+  utils_bad_dynamic_module = -7, /*!< Bad dynamic module */
+  config_bad_json_file = -8 /*< bad json file */
 };
 
 } //error_handling

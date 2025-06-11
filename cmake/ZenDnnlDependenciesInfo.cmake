@@ -51,6 +51,13 @@ set(GTEST_GIT_REPO "https://github.com/google/googletest.git")
 set(GTEST_GIT_TAG "v1.17.0")
 option(GTEST_GIT_PROGRESS ON)
 
+# JSON repo information
+set(JSON_ROOT_DIR "${ZENDNNL_DEPS_DIR}/json"
+  CACHE PATH "json root dir")
+set(JSON_GIT_REPO "https://github.com/nlohmann/json.git")
+set(JSON_GIT_TAG "v3.12.0")
+option(JSON_GIT_PROGRESS ON)
+
 # oneDNN repo information
 set(ONEDNN_ROOT_DIR "${ZENDNNL_DEPS_DIR}/oneDNN"
   CACHE PATH "ONEDNN root dir")

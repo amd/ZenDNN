@@ -1,0 +1,19 @@
+{
+    "__description"  : "zendnnl user config file.",
+    "log_levels" : {
+        "__description" : [
+            "sets log levels of various logs.",
+            "acceptable values are as follows",
+            "disabled - print no messages",
+            "error    - print only error messages",
+            "warning  - print error and warning messages",
+            "info     - print error,warning and info messages",
+            "verbose  - print all messages"
+            ],
+        "common"  : "verbose",
+        "api"     : "info",
+        "test"    : "info",
+        "profile" : "disabled",
+        "debug"   : "disabled"
+    }
+}

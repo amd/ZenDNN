@@ -23,6 +23,7 @@ set(common_sources
   profiler.cpp
   hash_object.cpp
   platform_info.cpp
+  config_manager.cpp
   zendnnl_global_block.cpp)
 
 set(common_headers
@@ -30,10 +31,13 @@ set(common_headers
   data_types.hpp
   dynamic_module.hpp
   zendnnl_exceptions.hpp
+  logging_support.hpp
   logging.hpp
   profiler.hpp
   hash_object.hpp
   platform_info.hpp
+  config_params.hpp
+  config_manager.hpp
   zendnnl_global_block.hpp
   error_status.hpp
   hash_utils.hpp
@@ -43,13 +47,15 @@ target_sources(zendnnl_archive
   PRIVATE ${common_sources}
   PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${common_headers})
 target_link_libraries(zendnnl_archive
-  PUBLIC au::aoclutils au::au_cpuid)
+  PUBLIC au::aoclutils au::au_cpuid
+  PUBLIC nlohmann_json::nlohmann_json)
 
 target_sources(zendnnl
   PRIVATE ${common_sources}
   PUBLIC FILE_SET zendnnl_headers TYPE HEADERS FILES ${common_headers})
 target_link_libraries(zendnnl
-  PUBLIC au::aoclutils au::au_cpuid)
+  PUBLIC au::aoclutils au::au_cpuid
+  PUBLIC nlohmann_json::nlohmann_json)
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

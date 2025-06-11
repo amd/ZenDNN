@@ -18,6 +18,7 @@ include_guard(GLOBAL)
 if(ZENDNNL_BUILD_DEPS)
   include(ExternProjAMDBLIS)
   include(ExternProjAOCLUTILS)
+  include(ExternProjJSON)
   include(ExternProjGTEST)
 else()
   message(STATUS

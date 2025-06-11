@@ -25,10 +25,11 @@ std::mutex              zendnnl_global_block_t::instance_mutex;
 zendnnl_global_block_t* zendnnl_global_block_t::instance = nullptr;
 
 zendnnl_global_block_t::zendnnl_global_block_t()
-  :platform_info{}, logger{} {
+  :config_manager{}, platform_info{}, logger{} {
 
   platform_info.populate();
-  set_env_log_levels();
+  config_manager.config();
+  logger.set_config(config_manager.get_logger_config());
 }
 
 zendnnl_global_block_t* zendnnl_global_block_t::get() {
@@ -46,60 +47,16 @@ zendnnl_global_block_t* zendnnl_global_block_t::get() {
   return instance;
 }
 
+config_manager_t& zendnnl_global_block_t::get_config_manager() {
+  return config_manager;
+}
+
 platform_info_t& zendnnl_global_block_t::get_platform_info() {
   return platform_info;
 }
 
 logger_t& zendnnl_global_block_t::get_logger() {
   return logger;
-}
-
-void zendnnl_global_block_t::set_env_log_levels() {
-  {
-    char* log_level_str = std::getenv("ZENDNNL_COMMON_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        logger.set_log_level(log_module_t::common, log_level_t(log_level));
-    }
-  }
-
-  {
-    char* log_level_str = std::getenv("ZENDNNL_API_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        logger.set_log_level(log_module_t::api, log_level_t(log_level));
-    }
-  }
-
-  {
-    char* log_level_str = std::getenv("ZENDNNL_TEST_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        logger.set_log_level(log_module_t::test, log_level_t(log_level));
-    }
-  }
-
-  {
-    char* log_level_str = std::getenv("ZENDNNL_PROFILE_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        logger.set_log_level(log_module_t::profile, log_level_t(log_level));
-    }
-  }
-
-  {
-    char* log_level_str = std::getenv("ZENDNNL_DEBUG_LOG_LEVEL");
-    if (log_level_str) {
-      uint32_t log_level = std::stoi(log_level_str);
-      if (log_level < uint32_t(log_level_t::log_level_count))
-        logger.set_log_level(log_module_t::debug, log_level_t(log_level));
-    }
-  }
-
 }
 
 }//common

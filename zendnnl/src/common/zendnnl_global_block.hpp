@@ -24,6 +24,7 @@
 #include "common/zendnnl_exceptions.hpp"
 #include "common/platform_info.hpp"
 #include "common/logging.hpp"
+#include "common/config_manager.hpp"
 #include "common/profiler.hpp"
 
 namespace zendnnl {
@@ -62,6 +63,11 @@ public:
    **/
   static zendnnl_global_block_t* get();
 
+  /** @brief Get config manager
+   * @return A reference to config manager.
+   */
+  config_manager_t& get_config_manager();
+
   /** @brief Get platform info
    * @return A reference to platform info object.
    */
@@ -91,14 +97,10 @@ private:
    */
   zendnnl_global_block_t& operator=(const zendnnl_global_block_t&) = delete;
 
-  /** @brief set log levels based on env variables
-   *
-   */
-  void set_env_log_levels();
-
   static std::mutex              instance_mutex; /*!< mutex for thread safety */
   static zendnnl_global_block_t* instance; /*!< singleton instance pointer */
 
+  config_manager_t               config_manager;
   platform_info_t                platform_info; /*!< platform info */
   logger_t                       logger; /*!< logger */
 };

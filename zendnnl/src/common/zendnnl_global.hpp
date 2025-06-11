@@ -89,8 +89,16 @@ static inline zendnnl_global_block_t& zendnnl_global_block() {
  * @brief Get a reference to zendnnl platform information block
  * @return A reference to zendnnl platform information block.
  */
-static inline platform_info_t &zendnnl_platform_info() {
+static inline platform_info_t& zendnnl_platform_info() {
   return (zendnnl_global_block_t::get())->get_platform_info();
+}
+
+/** @fn zendnnl_config_manager()
+ * @brief Get a reference to zendnnl platform information block
+ * @return A reference to zendnnl platform information block.
+ */
+static inline config_manager_t& zendnnl_config_manager() {
+  return (zendnnl_global_block_t::get())->get_config_manager();
 }
 
 /** @fn get_relative_path

@@ -17,6 +17,8 @@
 
 namespace zendnnl {
 namespace error_handling {
+using namespace zendnnl::common;
+
 namespace cn = std::chrono;
 
 logger_t::logger_t()
@@ -66,6 +68,15 @@ std::string logger_t::get_log_file() {
   return log_file;
 }
 
+logger_t& logger_t::set_config(const config_logger_t& config_logger_) {
+
+  for (auto& [key, value] : config_logger_.log_level_map) {
+    log_level_map[key] = value;
+  }
+
+  return *this;
+}
+
 void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
                          std::string& message_) {
 
@@ -79,10 +90,10 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
   stream << std::fixed << std::setprecision(6) << sec;
 
   //get log module string
-  auto log_module_str = log_module_to_str(log_module_);
+  auto log_module_str = logger_support_t::log_module_to_str(log_module_);
 
   //get level string
-  auto log_level_str  = log_level_to_str(log_level_);
+  auto log_level_str  = logger_support_t::log_level_to_str(log_level_);
 
   //prepare message header
   std::string module_hdr = std::string("[") + log_module_str + std::string("]");
@@ -98,44 +109,6 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
     std::lock_guard<std::mutex> lk{log_mutex};
     log_ofstream << hdr << message_ << "\n";
   }
-}
-
-std::string logger_t::log_module_to_str(log_module_t module_) {
-  switch (module_) {
-  case log_module_t::common:
-    return "COMMON ";
-  case log_module_t::api:
-    return "API    ";
-  case log_module_t::test:
-    return "TEST   ";
-  case log_module_t::profile:
-    return "PROF   ";
-  case log_module_t::debug:
-    return "DEBUG  ";
-  default:
-    return "unknown";
-  }
-
-  return "unknown";
-}
-
-std::string logger_t::log_level_to_str(log_level_t level_) {
-  switch (level_) {
-  case log_level_t::disabled:
-    return "disabled";
-  case log_level_t::error:
-    return "error  ";
-  case log_level_t::warning:
-    return "warning";
-  case log_level_t::info:
-    return "info   ";
-  case log_level_t::verbose:
-    return "verbose";
-  default:
-    return "unknown";
-  }
-
-  return "unknown";
 }
 
 }//error_handling
