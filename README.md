@@ -89,11 +89,11 @@ The following points must be considered while installing AOCL-BLAS:
 Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
 2. Download BLIS
-   wget https://github.com/amd/blis/archive/refs/tags/AOCL-Mar2025-b2.tar.gz
+   wget https://github.com/amd/blis/archive/refs/tags/5.1.tar.gz
 3. Execute the following commands:
     ```bash
-    tar -xvf AOCL-Mar2025-b2.tar.gz
-    cd blis-AOCL-Mar2025-b2
+    tar -xvf 5.1.tar.gz
+    cd blis-5.1/
     make clean; make distclean; CC=gcc ./configure -a aocl_gemm --prefix=../amd-blis --enable-threading=openmp --enable-cblas amdzen; make -j install
     cd ../amd-blis/include
     mkdir LP64
@@ -101,7 +101,7 @@ Complete the following steps to setup the GCC compiled AOCL-BLAS library:
     cd ../lib/
     mkdir LP64
     cp libblis-mt.* LP64/
-    cd ../
+    cd ../../
 	```
 This will set up the environment for AOCL-BLAS path:
 ```bash
