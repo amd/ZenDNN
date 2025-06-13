@@ -197,6 +197,8 @@ class zendnnEnv {
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
+        std::cout << "ZenDNN is Running......" << std::endl;
+
         omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
         zen_num_threads = zendnn_getenv_int("ZEN_NUM_THREADS", 1);
 
