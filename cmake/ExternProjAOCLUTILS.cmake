@@ -29,7 +29,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   ExternalProject_ADD(zendnnl-deps-aoclutils
     SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
-    BINARY_DIR "${CMAKE_BINARY_DIR}/aoclutils"
+    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
     INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
     GIT_REPOSITORY ${AOCLUTILS_GIT_REPO}
     GIT_TAG ${AOCLUTILS_GIT_TAG}
@@ -40,7 +40,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
                      <INSTALL_DIR>/lib/libau_cpuid.a
     UPDATE_DISCONNECTED TRUE)
 
-  list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_BINARY_DIR}/aoclutils")
+  list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/aoclutils")
   list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/aoclutils")
 
   set_target_properties(zendnnl-deps-aoclutils
