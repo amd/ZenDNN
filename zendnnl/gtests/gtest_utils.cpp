@@ -342,7 +342,7 @@ tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
 
         // Output Tensor creation with seperate view for input tensor
         output_tensor = tensor_factory.blocked_tensor({rows, cols},
-                        data_type_t::bf16,
+                        dtype,
                         buffer_params);
         output_tensor.set_name("reorder_output");
       }
