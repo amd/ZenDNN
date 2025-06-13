@@ -63,6 +63,7 @@ include(BuildDependencies)
 # build zendnnl library
 include(ExternProjZENDNNL)
 include(ExternProjZenDnnlExamples)
+include(ExternProjZenDnnlBenchDNN)
 
 # build doxygen docs
 add_subdirectory(docs/doxygen)

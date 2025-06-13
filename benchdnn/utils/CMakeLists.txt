@@ -1,5 +1,5 @@
-# *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# /********************************************************************************
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -13,11 +13,10 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-include_guard(GLOBAL)
 
-set(ZENDNNL_BUILD_DEPS     ON CACHE BOOL "Build depedencies")
-set(ZENDNNL_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
-set(ZENDNNL_BUILD_GTEST    OFF CACHE BOOL "Build gtest")
-set(ZENDNNL_BUILD_DOXYGEN  OFF CACHE BOOL "Build doxygen docs")
-set(ZENDNNL_CODE_COVERAGE  OFF CACHE BOOL "Enable code coverage instrumentation")
-set(ZENDNNL_BUILD_BENCHDNN OFF CACHE BOOL "Build benchdnn")
+set(util_sources benchdnn_utils.cpp)
+
+add_library(benchdnn_utils STATIC ${util_sources})
+
+target_link_libraries(benchdnn_utils
+  zendnnl::zendnnl_archive)
