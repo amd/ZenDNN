@@ -71,12 +71,12 @@ For C++ interface binaries, any Linux based OS with GLIBC version later than 2.2
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
-* AOCL-BLAS v5.0.2 must be installed.
+* AOCL-BLAS v5.1 must be installed.
 
 
 # AOCL-BLAS Library Installation
 
-**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/AOCL-Mar2025-b2.tar.gz.
+**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/5.1.tar.gz
 
 Note: ZenDNN depends only on AOCL-BLAS and has no dependency on any other AOCL library.
 ## General Convention
