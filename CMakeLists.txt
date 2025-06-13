@@ -76,12 +76,16 @@ add_subdirectory(docs/doxygen)
 #
 # UNCOMMENT the code below for manual interface.
 
-# add_library(zendnnl_zendnnl_archive INTERFACE)
-# target_link_libraries(zendnnl_zendnnl_archive
-#   INTERFACE ${ZENDNNL_LINK_LIBS})
-# target_include_directories(zendnnl_zendnnl_archive
-#   INTERFACE ${ZENDNNL_INCLUDE_DIRECTORIES})
 
-# add_library(zendnnl::zendnnl_archive ALIAS zendnnl_zendnnl_archive)
+
+add_library(zendnnl_zendnnl_archive INTERFACE)
+add_dependencies(zendnnl_zendnnl_archive zendnnl_library)
+
+target_link_libraries(zendnnl_zendnnl_archive
+  INTERFACE ${ZENDNNL_LINK_LIBS})
+target_include_directories(zendnnl_zendnnl_archive
+  INTERFACE ${ZENDNNL_INCLUDE_DIRECTORIES})
+
+add_library(zendnnl::zendnnl_archive ALIAS zendnnl_zendnnl_archive)
 
 # !!!

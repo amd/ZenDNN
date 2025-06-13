@@ -69,21 +69,22 @@ set_target_properties(zendnnl
 #
 # UNCOMMENT the code below for manual interface.
 
-# set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
-# set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
+set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
+set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
 
-# file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
-# add_library(zendnnl_library STATIC IMPORTED)
-# set_target_properties(zendnnl_library
-#   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
-#              INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-#              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
-#              LINK_LIBRARIES
-#              zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps
-#              INTERFACE_LINK_LIBRARIES
-#              zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps)
+file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
+add_library(zendnnl_library STATIC IMPORTED)
+add_dependencies(zendnnl_library zendnnl)
+set_target_properties(zendnnl_library
+  PROPERTIES IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+             INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+             INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
+             LINK_LIBRARIES
+             zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps
+             INTERFACE_LINK_LIBRARIES
+             zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps)
 
-# list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
-# list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
+list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
+list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
 
 # !!!

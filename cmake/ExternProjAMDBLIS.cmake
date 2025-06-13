@@ -62,18 +62,19 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
   #
   # UNCOMMENT the code below for manual interface.
 
-  # set(ZENDNNL_AMDBLIS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis/include")
-  # set(ZENDNNL_AMDBLIS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis/lib")
+  set(ZENDNNL_AMDBLIS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis/include")
+  set(ZENDNNL_AMDBLIS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis/lib")
 
-  # file(MAKE_DIRECTORY ${ZENDNNL_AMDBLIS_INC_DIR})
-  # add_library(zendnnl_amdblis_deps STATIC IMPORTED GLOBAL)
-  # set_target_properties(zendnnl_amdblis_deps
-  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AMDBLIS_LIB_DIR}/libblis-mt.a"
-  #              INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
-  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}")
+  file(MAKE_DIRECTORY ${ZENDNNL_AMDBLIS_INC_DIR})
+  add_library(zendnnl_amdblis_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_amdblis_deps zendnnl-deps-amdblis)
+  set_target_properties(zendnnl_amdblis_deps
+    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AMDBLIS_LIB_DIR}/libblis-mt.a"
+               INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
+               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}")
 
-  # list(APPEND ZENDNNL_LINK_LIBS "zendnnl_amdblis_deps")
-  # list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AMDBLIS_INC_DIR})
+  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_amdblis_deps")
+  list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AMDBLIS_INC_DIR})
 
   # !!!
 else()

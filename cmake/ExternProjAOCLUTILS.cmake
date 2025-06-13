@@ -64,26 +64,27 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   #
   # UNCOMMENT the code below for manual interface.
 
-  # set(ZENDNNL_AOCLUTILS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/include")
-  # set(ZENDNNL_AOCLUTILS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/lib")
+  set(ZENDNNL_AOCLUTILS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/include")
+  set(ZENDNNL_AOCLUTILS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/lib")
 
-  # file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
-  # add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
-  # set_target_properties(zendnnl_aoclutils_deps
-  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
-  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
-  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+  file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
+  add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_aoclutils_deps zendnnl-deps-aoclutils)
+  set_target_properties(zendnnl_aoclutils_deps
+    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
+               INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  # list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aoclutils_deps")
+  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aoclutils_deps")
 
-  # add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
-  # set_target_properties(zendnnl_aucpuid_deps
-  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
-  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
-  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+  add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
+  set_target_properties(zendnnl_aucpuid_deps
+    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
+               INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  # list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aucpuid_deps")
-  # list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
+  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aucpuid_deps")
+  list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
 
   # !!!
 

@@ -26,7 +26,8 @@ include(ExternalProject)
 
 # !!!
 
-set(ZENDNNL_BUILD_DIR "${ZENDNNL_SOURCE_DIR}/build")
+set(ZENDNNL_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/ZenDNN")
+set(ZENDNNL_BUILD_DIR "${CMAKE_BINARY_DIR}/third_party/ZenDNN")
 set(ZENDNNL_INSTALL_DIR "${ZENDNNL_BUILD_DIR}/install")
 
 # try to find pre-built package
