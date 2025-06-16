@@ -63,6 +63,7 @@ TEST_P(TestMatmul,F32) {
                            data_type_t::f32, 2.0, transB);
   auto input_tensor      = tensor_factory.uniform_dist_tensor({m, k},
                            data_type_t::f32, 2.0, transA);
+  // TODO: Use enum to handle postop checks.
   auto binary_tensor     = po_index == 6 || po_index == 7 ? tensor_factory.uniform_dist_tensor({m, n},
                            data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({m, n}, data_type_t::f32);

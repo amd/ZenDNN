@@ -62,9 +62,9 @@ TEST_P(TestReorder,F32) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k}, data_type_t::f32,
                       2.0);
-  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
-                       data_type_t::f32,
-                       2.0);
+  // TODO: Use enum to handle postop checks.
+  auto binary_tensor     = po_index == 6 || po_index == 7 ? tensor_factory.uniform_dist_tensor({m, n},
+                           data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
                      binary_tensor);
@@ -90,9 +90,8 @@ TEST_P(TestReorder, BF16_F32) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k},
                       data_type_t::bf16, 2.0);
-  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
-                       data_type_t::f32,
-                       2.0);
+  auto binary_tensor     = po_index == 6 || po_index == 7 ? tensor_factory.uniform_dist_tensor({m, n},
+                           data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
                      binary_tensor);
@@ -119,9 +118,8 @@ TEST_P(TestReorder, BF16_BF16) {
                  2.0);
   auto input_tensor = tensor_factory.uniform_dist_tensor({m, k},
                       data_type_t::bf16, 2.0);
-  auto binary_tensor = tensor_factory.uniform_dist_tensor({m, k},
-                       data_type_t::f32,
-                       2.0);
+  auto binary_tensor     = po_index == 6 || po_index == 7 ? tensor_factory.uniform_dist_tensor({m, n},
+                           data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor_ref = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   matmul_kernel_test(input_tensor, weights, bias, output_tensor_ref, po_index,
                      binary_tensor);
