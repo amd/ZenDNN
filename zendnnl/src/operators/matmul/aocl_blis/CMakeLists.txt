@@ -14,40 +14,42 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-# set(matmul_operator_sources
-#   matmul_context.cpp
-#   matmul_operator.cpp
-#   matmul_fp32_avx512_kernel.cpp
-#   matmul_bf16_avx512_kernel.cpp
-#   matmul_onednn_kernel.cpp)
-add_subdirectory(aocl_blis)
+set(aocl_blis_matmul_operator_sources
+  matmul_fp32_avx512_kernel.cpp
+  matmul_bf16_avx512_kernel.cpp
+  matmul_aocl_blis_utils.cpp)
 
-set(matmul_operator_sources
-  matmul_context.cpp
-  matmul_operator.cpp
-  matmul_fp32_ref_kernel.cpp)
+set(aocl_blis_matmul_operator_public_headers
+  matmul_aocl_blis_utils.hpp)
 
-set(matmul_operator_public_headers
-  matmul_context.hpp
-  matmul_operator.hpp)
-
-set(matmul_operator_private_headers
-  matmul_kernel_list.hpp
-  matmul_fp32_ref_kernel.hpp)
+set(aocl_blis_matmul_operator_private_headers
+  matmul_fp32_avx512_kernel.hpp
+  matmul_bf16_avx512_kernel.hpp
+  matmul_aocl_blis_utils.hpp)
 
 target_sources(zendnnl_archive
-  PRIVATE ${matmul_operator_sources}
+  PRIVATE ${aocl_blis_matmul_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${matmul_operator_private_headers}
+          TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
   PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${matmul_operator_public_headers})
+          TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
+target_link_options(zendnnl_archive
+  PUBLIC "-fopenmp")
+target_link_libraries(zendnnl_archive
+  PUBLIC OpenMP::OpenMP_CXX
+  PUBLIC amdblis::amdblis_archive)
 
 target_sources(zendnnl
-  PRIVATE ${matmul_operator_sources}
+  PRIVATE ${aocl_blis_matmul_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${matmul_operator_private_headers}
+          TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
   PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${matmul_operator_public_headers})
+          TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
+target_link_options(zendnnl
+  PUBLIC "-fopenmp")
+target_link_libraries(zendnnl
+  PUBLIC OpenMP::OpenMP_CXX
+  PUBLIC amdblis::amdblis)
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
@@ -55,16 +57,16 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-list(APPEND matmul_operator_public_headers_list
-  ${matmul_operator_public_headers})
+list(APPEND aocl_blis_matmul_operator_public_headers_list
+  ${aocl_blis_matmul_operator_public_headers})
 create_header_file(${zendnnl_inc_file}
   ${inc_subdir}
-  "${matmul_operator_public_headers_list}")
+  "${aocl_blis_matmul_operator_public_headers_list}")
 # add_custom_target(append_matmul_operator_headers ALL
 #   COMMAND ${CMAKE_COMMAND}
 #   -DINC_FILE_NAME=${zendnnl_inc_file}
 #   -DINC_SUBDIR=${inc_subdir}
-#   -DINC_FILE_LIST="${matmul_operator_public_headers}"
+#   -DINC_FILE_LIST="${aocl_blis_matmul_operator_public_headers}"
 #   -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
 #   BYPRODUCTS ${include_file})
 

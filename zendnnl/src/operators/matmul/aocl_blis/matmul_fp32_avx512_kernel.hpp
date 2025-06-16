@@ -23,7 +23,7 @@
 #include <cstdlib>
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
-#include "matmul_context.hpp"
+#include "operators/matmul/matmul_context.hpp"
 
 #include "blis.h"
 

@@ -22,7 +22,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_context.hpp"
-#include "operators/matmul/matmul_aocl_blis_utils.hpp"
+#include "operators/matmul/aocl_blis/matmul_aocl_blis_utils.hpp"
 
 namespace zendnnl {
 namespace ops {
