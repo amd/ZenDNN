@@ -2,7 +2,7 @@
 
 ## Overview
 
-This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication(Matmul) requires data in a specalized memory layout known as blocked memory format. The reorder operator efficiently transfer data from contigious memory layout to optimized blocked format based on backend.
+This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specalized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contigious memory layout to optimized blocked format based on backend.
 
 Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_example` and `reorder_inplace_bf16_example`.
 
@@ -11,10 +11,10 @@ Practical examples from `reorder_example.cpp` demonstrate these configurations, 
 Let:
 
 - \f$B \in \mathbb{R}^{K \times N}\f$
-- \f$\text{Backend}(x)\f$: Backend for reorder computation (e.g., AOCL, OneDNN)
-- \f$\text{Data type}\f$: Supported datatypes for reorder (e.g., FP32, BF16)
+- \f$\text{Backend}(x)\f$: Backend for reorder computation (Example: AOCL, OneDNN)
+- \f$\text{Data type}\f$: Supported datatypes for reorder (Example: FP32, BF16)
 
-## Step-by-Step Operation
+## Steps to Perform Reorder Operation
 
 1. **Backend Algo selection**:
    - Specify the backend algorithm for reordering using `set_algo_format()`.
@@ -24,14 +24,14 @@ Let:
 
 3. **Output Tensor creation**:
     - Out-of-Place : Tensor creation with reordered size and blocked layout.
-    - In-Place : Tensor creation with same view(memory) as Input tensor and blocked layout.
+    - In-Place : Tensor creation with same view (memory) as Input tensor and blocked layout.
 
 4. **Reorder Execution**:
     - Converts memory from contigious to blocked format.
 
 # Reorder Support Table
 
-This table outlines the support for Reorder operations with various data types, backend and memory storage type.
+This table outlines the support for Reorder operations with various data types, backend, and memory storage type.
 
 | Input Data Type | Output Data Type | Backend | Memory Storage type    |
 |-----------------|------------------|---------|------------------------|
@@ -42,7 +42,7 @@ This table outlines the support for Reorder operations with various data types, 
 
 ### 1. reorder_outofplace_f32_kernel_example
 
-This example performs reorder with `float32 (f32)` data type, with `AOCL` backend.
+This example performs reorder with `float32 (f32)` data type using `AOCL` backend.
 
 **Key Components**
 
@@ -143,7 +143,7 @@ int reorder_outofplace_f32_kernel_example() {
 ```
 ### 2. reorder_inplace_bf16_example
 
-This example performs reorder with `bfloat16 (bf16)` data type, with `AOCL` backend.
+This example performs reorder with `bfloat16 (bf16)` data type using `AOCL` backend.
 
 **Key Components**
 

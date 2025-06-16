@@ -1,11 +1,11 @@
 # ZenDNN* Operator
 
-The **ZenDNN* Operator** is a central architectural component in the ZenDNN* framework, designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
+The **ZenDNN*** **Operator** is a central architectural component in the ZenDNN* framework designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
 
 <img src="../images/operator.png" alt="ZenDNN* Operator" width="700"/>
 
 
-## 1. Kernel Registration 
+## 1. Kernel Registration[^1]
 
 The **Kernel Registration** module is responsible for maintaining a comprehensive registry of all available kernels—both **reference** and **optimized**. It serves as the metadata hub for kernel capabilities and availability.
 
@@ -15,19 +15,19 @@ The **Kernel Registration** module is responsible for maintaining a comprehensiv
 
 
 
-## 2. Kernel Dynamic Dispatch
+## 2. Kernel Dynamic Dispatch[^1]
 
 The **Dynamic Dispatch Engine** is the decision-making core of the factory. It intelligently selects the most appropriate kernel for a given operator execution based on a rich set of runtime parameters and heuristics.
 
-- **Machine ISA Awareness**: The dispatcher evaluates the underlying CPU's instruction set architecture (ISA)—such as AVX2, AVX512, or SSE—and selects kernels optimized for those instructions.
-- **Quantization Compatibility**: It ensures that the selected kernel supports the quantization format of the input, output, and weight tensors (e.g., int8, bf16, float32).
+- **Machine ISA Awareness**: The dispatcher evaluates the underlying CPU's instruction set architecture (ISA) such as AVX2, AVX512, or SSE, and selects kernels optimized for those instructions.
+- **Quantization Compatibility**: It ensures that the selected kernel supports the quantization format of the input, output, and weight tensors (Example: int8, bf16, float32).
 - **Auto-Tuning and Profiling**: Leveraging historical performance data and runtime profiling, the dispatcher uses heuristics to choose the fastest kernel for the current workload.
 - **Algorithm and Library Selection**: The dispatcher can choose between different algorithmic strategies or delegate execution to specialized low-level libraries.
 - **User Preferences**: Advanced users can override default behavior by specifying preferred kernels or dispatch policies.
 
 
 
-## 3. Kernels
+## 3. Kernels[^1]
 
 Kernels are the **execution engines** of the ZenDNN* framework. They implement the actual computations defined by operators and are optimized for specific hardware and problem sizes.
 
@@ -38,7 +38,7 @@ Each kernel is designed to be modular and reusable, supporting a wide range of o
 
 
 
-## 4. Profiler
+## 4. Profiler[^1]
 
 The **Profiler** is an integral component that monitors kernel performance during runtime. It collects metrics such as execution time, memory usage, and cache efficiency.
 
@@ -47,9 +47,9 @@ The **Profiler** is an integral component that monitors kernel performance durin
 
 
 
-## 5. Low-Level Libraries
+## 5. Low-Level Libraries[^1]
 
-At the foundation of the kernel factory are **low-level computational libraries** that provide highly optimized routines for matrix operations and other primitives.
+The foundation of the kernel factory are **low-level computational libraries** that provide highly optimized routines for matrix operations and other primitives.
 
 - **AOCL (AMD Optimized CPU Libraries)**: Offers high-performance math routines for AMD CPUs.
 - **FBGEMM (Facebook GEMM)**: Specializes in quantized matrix multiplication, widely used in inference workloads. **Coming Soon**
@@ -65,7 +65,7 @@ These libraries are abstracted by the kernel factory, allowing ZenDNN* to remain
 1. **Input Tensor Creation**: Raw data is encapsulated in tensors, including metadata like shape, stride, and quantization parameters.
 2. **Context Initialization**: Operator-specific parameters such as weights, biases, and post-ops are bundled into a context object.
 3. **Operator Execution**: The operator invokes the kernel factory to select and execute the most suitable kernel.
-4. **Kernel Invocation**: The selected kernel performs the computation, leveraging ISA-specific instructions and quantization-aware logic.
+4. **Kernel Invocation**: The selected kernel performs computation using ISA-specific instructions and quantization-aware logic.
 5. **Output Tensor Generation**: Results are stored in output tensors, ready for the next stage in the computation graph.
 
 
@@ -73,7 +73,7 @@ These libraries are abstracted by the kernel factory, allowing ZenDNN* to remain
 
 ## Integration Workflow: ZenDNN* Kernel Factory and Third-Party Execution
 
-The **ZenDNN* Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNN* to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
+The **ZenDNN*** **Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNN* to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
 
 <img src="../images/kernel_factory.png" alt="ZenDNN* Kernel Factory" width="700"/>
 
@@ -92,10 +92,10 @@ This is the **central orchestration unit** responsible for managing kernel selec
   
 
 #### 2. Tensor Conversion Layer
-Labeled in the diagram as **"ZenDNN* Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNNL’s internal tensor representation and the expected input format of third-party libraries.
+Labeled in the diagram as **"ZenDNN*** **Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNN*’s internal tensor representation and the expected input format of third-party libraries.
 
 - **Responsibilities**:
-  - **Data Layout Transformation**: Converts tensors from ZenDNNL’s memory layout (e.g., NCHW, NHWC) to the format required by the target library.
+  - **Data Layout Transformation**: Converts tensors from ZenDNN*’s memory layout (Example: NCHW, NHWC) to the format required by the target library.
   - **Quantization Metadata Mapping**: Ensures that scale factors, zero points, and data types are correctly translated.
   - **Memory Alignment and Buffer Management**: Allocates and aligns memory buffers to meet the performance and correctness requirements of the third-party backend.
 
@@ -106,7 +106,7 @@ Once the tensor is transformed, the **actual computation is offloaded** to the s
 
 - The execution is optimized based on:
   - Instruction Set Architecture (ISA)
-  - Quantization level (e.g., int8, bf16)
+  - Quantization level (Example: int8, bf16)
   - Operator type and tensor shape
 
 ZenDNN* handles the **dispatch, execution, and result retrieval**, ensuring that the output tensor is compatible with the rest of the inference pipeline.
@@ -115,12 +115,12 @@ ZenDNN* handles the **dispatch, execution, and result retrieval**, ensuring that
 
 Consider a scenario where a fully connected (dense) layer is being executed during inference:
 
-1. The **ZenDNN* Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
+1. The **ZenDNN*** **Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
 2. It identifies **AOCL** as the optimal backend for this configuration due to its efficient int8 GEMM routines.
 3. The input tensor is passed through the **conversion layer**, which adapts its layout and quantization metadata to match AOCL's expectations.
 4. The **AOCL kernel** is invoked to perform the matrix multiplication.
 5. The result is converted back into a ZenDNN*-compatible tensor and passed to the next operator in the graph.
 
-##### note: Limited functionality available.
+[^1]: Limited functionality available.
 
 >ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

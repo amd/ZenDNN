@@ -40,7 +40,7 @@ The comparison operation calculates the following metrics:
    \text{min\_deviation} = \min(|A_{ij} - B_{ij}|)
    $$
 
-## Step-by-Step Operation
+## Steps to Perform Compare Operation
 
 1. **Input Tensors**:
    - Two tensors, $A$ and $B$, with the same dimensions are provided as input.
@@ -158,6 +158,6 @@ The Compare Operator includes error checking to ensure that:
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors during the operation flow.
 
-These examples demonstrate the functionality of the Compare Operator, showcasing its ability to calculate metrics for element-wise comparison between tensors in the `ZenDNN*` library.
+These examples demonstrate the functionality of the Compare operator, showcasing its ability to calculate metrics for element-wise comparison between tensors in the `ZenDNN*` library.
 
 >ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

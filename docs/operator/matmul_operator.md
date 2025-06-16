@@ -13,8 +13,8 @@ Let:
 - \f$A \in \mathbb{R}^{M \times K}\f$  
 - \f$B \in \mathbb{R}^{K \times N}\f$  
 - \f$\text{Bias} \in \mathbb{R}^{1 \times N}\f$ 
-- \f$\text{Activation}(x)\f$: optional activation function (e.g., ReLU, GELU)  
-- \f$\text{BinaryOp}(x, y)\f$: optional binary post-operation (e.g., element-wise add/mul with another matrix)  
+- \f$\text{Activation}(x)\f$: optional activation function (Example: ReLU, GELU)  
+- \f$\text{BinaryOp}(x, y)\f$: optional binary post-operation (Example: element-wise add/mul with another matrix)  
 - \f$D \in \mathbb{R}^{M \times N}\f$: optional second operand for binary op  
 - \f$C \in \mathbb{R}^{M \times N}\f$: the result
 
@@ -27,7 +27,7 @@ C = \text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D)
 $$
 
 
-## Step-by-Step Operation
+## Steps to Perform MatMul Operation
 
 1. **Matrix Multiplication**:
    $$

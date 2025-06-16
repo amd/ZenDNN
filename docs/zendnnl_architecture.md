@@ -22,7 +22,7 @@ The **ZenDNN* User API layer** is a critical interface that connects high-level 
 - Ensures zero-copy or minimal-copy data handling to reduce overhead.
 
 #### 2.2. Operator Registration and Dispatch
-- Maintains a registry of supported operators (e.g., MatMul, Fused MatMul, Reorder, etc.).
+- Maintains a registry of supported operators (Example: MatMul, Fused MatMul, Reorder, etc.).
 - Maps framework-level operations to ZenDNN* core implementations.
 - Combines multiple operations into a single kernel to reduce memory bandwidth and improve cache locality.
 
@@ -32,7 +32,7 @@ The **ZenDNN* User API layer** is a critical interface that connects high-level 
   - **BF16**: Balanced precision for performance and accuracy.
 
 #### 2.4. Execution Context Management
-- Initializes and manages execution contexts (e.g., constant buffers, post ops, etc. )
+- Initializes and manages execution contexts (Example: constant buffers, post ops, etc. )
 - Provides hooks for profiling and logging.
 
 
@@ -51,10 +51,10 @@ A **Tensor** is a fundamental building block in deep learning libraries. It repr
 
 ### Key Components of a Tensor:
 1. **Tensor Metadata**:
-   - **Dimensions**: Specifies the shape of the tensor (e.g., 2x3 matrix).
+   - **Dimensions**: Specifies the shape of the tensor (Example: 2x3 matrix).
    - **Sizes**: Indicates the size of each dimension.
    - **Stride**: Defines the step size to move from one element to the next in memory.
-   - **Data Type**: Specifies the type of data stored (e.g., float32, int8).
+   - **Data Type**: Specifies the type of data stored (Example: float32, int8).
 
 2. **Tensor Quantization Data**:
    - **Scale**: A factor used to map the tensor values to a quantized range.
@@ -69,7 +69,7 @@ A **Tensor** is a fundamental building block in deep learning libraries. It repr
 - **Output Data**: The final output of the neural network is stored in tensors.
 
 ## 3.2 Context
-The **Context** of an operator encompasses all the necessary information required to perform computations. Given an operator its parameter tensors (for example weight and bias), and any other parameters (for example element-wise post-ops, or embedding bag algorithm like add, mean, or max), needed to implement operator computation are called operator context of the operator.
+The **Context** of an operator encompasses all the necessary information required to perform computations. Given an operator its parameter tensors (for example: weight and bias), and any other parameter (for example: element-wise post-ops, or embedding bag algorithm like add, mean, or max), needed to implement operator computation are called operator context of the operator.
 
 ### Key Components of Context:
 1. **Parameter Tensors**:
@@ -77,7 +77,7 @@ The **Context** of an operator encompasses all the necessary information require
    - **Bias**: Represents the bias values added to the weighted sum.
 
 2. **Additional Parameters**:
-   - **Element-wise Post-ops**: Operations applied element-wise after the main computation (e.g., activation functions).
+   - **Element-wise Post-ops**: Operations applied element-wise after the main computation (Example: activation functions).
    - **Embedding Bag Algorithm**: Algorithms like add, mean, or max used in embedding layers.
 
 ### Use Cases:
@@ -85,7 +85,7 @@ The **Context** of an operator encompasses all the necessary information require
 - **Optimization**: Context helps in optimizing the computation by providing relevant parameters.
 
 ## 3.3 Operator
-An **Operator** is a function or a set of functions that perform computations on tensors. An operator in a computational graph is a node that takes input tensors performs some computations on them and produces output tensors. An operator can implement some simple computation on input tensors (add, concat...), computations involving other tensors acting as operator parameters (matrix multiplication with weight and bias as operator parameters), or a complex subgraph (attention layer in LLMs).
+An **Operator** is a function or a set of functions that perform computations on tensors. An operator in a computational graph is a node that takes input tensors, performs some computations on them, and produces output tensors. An operator can implement a simple computation on input tensors (add, concat...), computations involving other tensors acting as operator parameters (matrix multiplication with weight and bias as operator parameters), or a complex subgraph (attention layer in LLMs).
 
 ### Key Components of an Operator:
 1. **Simple Computations**:
@@ -120,7 +120,7 @@ Reorder operation changes the memory layout of a tensor to improve data locality
 - **Performance Optimization**: Enhances cache utilization and reduces memory access latency.
 
 #### 3.4.3 Embedding Bag
-Embedding Bag operation is used to look up embeddings for a set of indices and combine them using a specified reduction algorithm (e.g., sum, mean, max).
+Embedding Bag operation is used to look up embeddings for a set of indices and combine them using a specified reduction algorithm (Example: sum, mean, max).
 
 ##### Key Components:
 1. **Embedding Lookup**: Retrieves embeddings for given indices.
@@ -135,16 +135,16 @@ A **Kernel** is an implementation of an operator. Kernels ensure efficient execu
 
 ### Key Components of a Kernel:
 1. **Machine ISA**:
-   - **Instruction Set Architecture**: Kernels are optimized for specific ISAs (e.g., AVX, SSE).
+   - **Instruction Set Architecture**: Kernels are optimized for specific ISAs (Example: AVX, SSE).
 
 2. **Problem Size**:
    - **Small vs. Large**: Kernels are tailored to handle different problem sizes efficiently.
 
 3. **Backend and Quantization Level**:
-   - **Backend**: Specifies the computational backend (e.g., CPU, GPU).
+   - **Backend**: Specifies the computational backend (Example: CPU, GPU).
    - **Quantization Level**: Indicates the level of quantization applied to the data.
 
-### Use Cases:
+### Use Cases
 - **Performance Optimization**: Kernels ensure that operators run efficiently on the target hardware.
 - **Scalability**: Kernels allow operators to scale across different problem sizes and hardware configurations.
 
@@ -155,16 +155,16 @@ Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact
 ### Data Flow Overview
 
 1. **Input Tensor Creation**:
-   - The inference process begins with the creation of input tensors that hold the raw data (e.g., images, text embeddings).
+   - The inference process begins with the creation of input tensors that hold the raw data (Example: images, text embeddings).
 
 2. **Context Initialization**:
-   - A context is initialized with parameters such as weights, biases, and configuration settings (e.g., activation functions, quantization details).
+   - A context is initialized with parameters such as weights, biases, and configuration settings (Example: activation functions, quantization details).
 
 3. **Operator Execution**:
    - The operator receives the input tensor and context. It validates the inputs and selects the appropriate kernel based on the data type, hardware, and problem size.
 
 4. **Kernel Invocation**:
-   - The selected kernel performs the actual computation, leveraging hardware-specific optimizations (e.g., AVX512 instructions on Intel CPUs).
+   - The selected kernel performs the actual computation, leveraging hardware-specific optimizations (Example: AVX512 instructions on Intel CPUs).
 
 5. **Output Tensor Generation**:
    - The result of the kernel execution is stored in an output tensor, which can be passed to the next operator in the computation graph.
@@ -176,7 +176,7 @@ ZenDNN* leverages several low-level libraries to provide foundational building b
 - **AOCL (AMD Optimized CPU Libraries)**: Optimized BLAS, FFT, and RNG for AMD CPUs.
 - **FBGEMM**: Efficient low-precision (INT8, BF16) matrix multiplication.
 - **OneDNN**: Intel’s deep learning primitives for x86 CPUs.
-- **LibXSMM**: Specialized in small matrix multiplications (e.g., 64x64 or smaller).
+- **LibXSMM**: Specialized in small matrix multiplications (Example: 64x64 or smaller).
 
 ## 5. Hardware Layer
 ZenDNN* is engineered to extract maximum performance from **general-purpose CPUs**, making it ideal for server-side inference, edge computing, and CPU-only environments. This layer is where all computations are ultimately executed, and its efficiency directly impacts the overall throughput and latency of deep learning models.
@@ -206,10 +206,10 @@ ZenDNN* kernels are designed to:
 ## Execution Flow
 Here's a simplified flow of how a tensor moves through the ZenDNN* stack:
 
-1. **Input Tensor** is passed from the framework (e.g., PyTorch).
+1. **Input Tensor** is passed from the framework (Example: PyTorch).
 2. The **User API** receives the tensor and determines the appropriate operator.
 3. The **Core** processes the tensor using the selected operator and kernel.
-4. The **Kernel** invokes routines from **Low-Level Libraries** (e.g., AOCL, OneDNN).
+4. The **Kernel** invokes routines from **Low-Level Libraries** (Example: AOCL, OneDNN).
 5. Computation is executed on the **CPU**.
 6. The **Output Tensor** is returned back to the framework.
 

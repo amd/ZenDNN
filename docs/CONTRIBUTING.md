@@ -55,10 +55,10 @@ The Sample Operator in ZenDNN* is a template for creating new operators. It incl
 
 This guide will help you replicate the structure and functionality of the Sample Operator to create your own custom operator.
 
-## 2. Step-by-Step: Adding a New Operator
+## 2. Steps to Add a New Operator
 
 ### 2.1 Step 1: Create Folder
-Navigate to the `zendnnl/src/operators` directory and create a folder for your new operator:
+Navigate to the `zendnnl/src/operators` directory, and create a folder for your new operator:
 
 ```bash
 mkdir src/operators/new_operator
@@ -231,7 +231,7 @@ TEST(NewOpTest, Execute) {
 }
 ```
 
-By following these steps and using the Sample Operator as a reference, you can successfully add and integrate a new operator into ZenDNN*.
+Following these steps and using the Sample Operator as a reference, you can successfully add and integrate a new operator into ZenDNN*.
 
 
 ## System Flow Recap
@@ -254,7 +254,7 @@ By following these steps and using the Sample Operator as a reference, you can s
 
 ## Summary
 
-By following this guide and leveraging the modular architecture of ZenDNN*, you can rapidly prototype and deploy new operators optimized for AMD CPUs. Whether your target is a new quantized convolution or a custom transformer layer, ZenDNNL’s flexible operator/kernel structure makes it possible.
+Following this guide and leveraging the modular architecture of ZenDNN*, you can rapidly prototype and deploy new operators optimized for AMD CPUs. Whether your target is a new quantized convolution or a custom transformer layer, ZenDNN*’s flexible operator/kernel structure makes it possible.
 
 > Be sure to benchmark and validate new kernels for correctness and performance on AMD hardware.
 
