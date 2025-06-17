@@ -1,5 +1,7 @@
 
-# Compare Operator Support and Examples
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
+# Compare Operator
 
 ## Overview
 

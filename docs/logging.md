@@ -1,3 +1,6 @@
+
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # Logging Support and Control
 
 ## Overview

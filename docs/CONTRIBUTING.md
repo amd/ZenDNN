@@ -1,4 +1,6 @@
 
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # Adding New Operator
 
 This document serves as a comprehensive guide for developers looking to integrate a new operator into **ZenDNN***, AMD’s CPU-optimized inference library. We use the `Sample Operator` as a reference template, demonstrating how to build and plug in a custom operator within the modular architecture of ZenDNN*.

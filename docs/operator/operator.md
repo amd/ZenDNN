@@ -1,6 +1,9 @@
+
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # ZenDNN* Operator
 
-The **ZenDNN*** **Operator** is a central architectural component in the ZenDNN* framework designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
+The **ZenDNN\* Operator** is a central architectural component in the ZenDNN* framework designed to manage the lifecycle and execution of computational kernels. It plays a pivotal role in ensuring that deep learning operators are executed with maximum efficiency, adaptability, and hardware awareness.
 
 <img src="../images/operator.png" alt="ZenDNN* Operator" width="700"/>
 
@@ -73,7 +76,7 @@ These libraries are abstracted by the kernel factory, allowing ZenDNN* to remain
 
 ## Integration Workflow: ZenDNN* Kernel Factory and Third-Party Execution
 
-The **ZenDNN*** **Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNN* to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
+The **ZenDNN\* Kernel Factory** is architected to not only manage its own suite of native, highly optimized kernels but also to **seamlessly interface with third-party libraries**. This hybrid design empowers ZenDNN* to combine the benefits of in-house performance tuning with the robustness and maturity of external computational libraries. The result is a flexible, extensible, and high-performance inference engine that adapts to diverse hardware and software environments.
 
 <img src="../images/kernel_factory.png" alt="ZenDNN* Kernel Factory" width="700"/>
 
@@ -92,7 +95,7 @@ This is the **central orchestration unit** responsible for managing kernel selec
   
 
 #### 2. Tensor Conversion Layer
-Labeled in the diagram as **"ZenDNN*** **Tensor to Third Party Tensor"**, this layer acts as a **compatibility bridge** between ZenDNN*’s internal tensor representation and the expected input format of third-party libraries.
+Labeled in the diagram as **ZenDNN\* Tensor to Third Party Tensor**, this layer acts as a **compatibility bridge** between ZenDNN*’s internal tensor representation and the expected input format of third-party libraries.
 
 - **Responsibilities**:
   - **Data Layout Transformation**: Converts tensors from ZenDNN*’s memory layout (Example: NCHW, NHWC) to the format required by the target library.
@@ -115,7 +118,7 @@ ZenDNN* handles the **dispatch, execution, and result retrieval**, ensuring that
 
 Consider a scenario where a fully connected (dense) layer is being executed during inference:
 
-1. The **ZenDNN*** **Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
+1. The **ZenDNN\* Kernel Factory** evaluates the operator and determines that the input tensor is quantized (int8) and the target CPU supports AVX512.
 2. It identifies **AOCL** as the optimal backend for this configuration due to its efficient int8 GEMM routines.
 3. The input tensor is passed through the **conversion layer**, which adapts its layout and quantization metadata to match AOCL's expectations.
 4. The **AOCL kernel** is invoked to perform the matrix multiplication.

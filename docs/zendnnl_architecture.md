@@ -1,5 +1,8 @@
 
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # ZenDNN* Architecture
+
 ## Overview
 ZenDNN* is a high-performance CPU inference library designed to accelerate deep learning workloads. It provides optimized implementations for several key operations. The architecture is modular, extensible, and integrates seamlessly with popular deep learning frameworks. Its layered architecture ensures flexibility, extensibility, and high performance across a variety of hardware platforms and use cases.
 
