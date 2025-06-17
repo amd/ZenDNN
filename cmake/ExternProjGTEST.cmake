@@ -18,6 +18,7 @@ include_guard(GLOBAL)
 include(ZenDnnlOptions)
 
 if(ZENDNNL_BUILD_GTEST)
+  message(STATUS "Building zendnnl gtests")
   list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
   message(DEBUG "GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")

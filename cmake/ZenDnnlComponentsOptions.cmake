@@ -19,4 +19,4 @@ set(ZENDNNL_BUILD_DEPS     ON CACHE BOOL "Build depedencies")
 set(ZENDNNL_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
 set(ZENDNNL_BUILD_GTEST    OFF CACHE BOOL "Build gtest")
 set(ZENDNNL_BUILD_DOXYGEN  OFF CACHE BOOL "Build doxygen docs")
-
+set(ZENDNNL_CODE_COVERAGE  OFF CACHE BOOL "Enable code coverage instrumentation")

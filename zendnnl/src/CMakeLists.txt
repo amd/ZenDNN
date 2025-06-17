@@ -61,6 +61,11 @@ add_subdirectory(operators)
 
 epilog_header_file(${zendnnl_inc_file})
 
+if(ZENDNNL_CODE_COVERAGE)
+  target_compile_options(zendnnl_archive PRIVATE --coverage -O0 -g)
+  target_link_options(zendnnl_archive PRIVATE --coverage)
+endif()
+
 # install zendnnl and create package config files
 install(TARGETS zendnnl_archive zendnnl EXPORT zendnnl_targets
   DESTINATION zendnnl/lib

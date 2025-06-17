@@ -44,6 +44,11 @@ if(ZENDNNL_BUILD_GTEST)
     GTest::gtest
     GTest::gtest_main)
 
+  if(ZENDNNL_CODE_COVERAGE)
+    target_compile_options(gtests PRIVATE --coverage -O0 -g)
+    target_link_options(gtests PRIVATE --coverage)
+  endif()
+
   install(TARGETS gtests
     DESTINATION gtests)
 else()

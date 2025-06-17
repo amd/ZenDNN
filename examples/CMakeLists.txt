@@ -72,7 +72,10 @@ target_link_libraries(examples
   OpenMP::OpenMP_CXX
   zendnnl::zendnnl_archive)
 
+if(ZENDNNL_CODE_COVERAGE)
+  target_compile_options(examples PRIVATE --coverage -O0 -g)
+  target_link_options(examples PRIVATE --coverage)
+endif()
+
 #  amdblis::amdblis_archive
 install(TARGETS examples)
-
-
