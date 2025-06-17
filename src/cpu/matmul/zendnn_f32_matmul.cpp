@@ -78,15 +78,17 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
 
     zendnnEnv zenEnvObj = readEnv();
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
-    // Based on heuristics for Smaller Dimensions M(<=128), N and K (i.e <= 512)
-    // control is redirected to BRGEMM.
-    // TODO: Generate more heuristics for M,N,K for smaller dimensions to make
-    // the check generalized
+
+
 
     // Batch MatMul with BLOCKED_JIT is JIT.
-    if (ndims() > 2 &&
-            (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 ||
-             zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32)) {
+    if (ndims() > 3) {
+        return status::unimplemented;
+    }
+    if (ndims() == 3 &&
+            (zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 ||
+             zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
+             zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32)) {
         return status::unimplemented;
     }
 
@@ -96,7 +98,7 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
              (weights_md()->is_memory_const == false ||
               weights_md()->is_inplace == false &&
               zenEnvObj.zenWeightCache >= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE))) &&
-            weights_md()->data_type == f32) {
+            weights_md()->data_type == f32 && ndims() == 2) {
         return status::unimplemented;
     }
 
@@ -346,6 +348,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                                 alg_kind::eltwise_gelu_erf : 0;
 
     unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
+
+
 
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;

@@ -25,6 +25,7 @@
 #include "common/verbose.hpp"
 #include <cstddef>
 #include <exception>
+#include "common/zendnn_private.hpp"
 #define ZENDNN_EMBED_BAG_THRDS 16
 #define CCD_NUM_THREADS 8
 
@@ -35,49 +36,6 @@ so number of s4 elements are 8*/
     #include "fbgemm/FbgemmEmbedding.h"
 #endif
 namespace zendnn {
-
-inline int64_t divup(int64_t x, int64_t y) {
-    return (x + y - 1) / y;
-}
-
-template <class F>
-inline void zendnn_parallel_for(
-    const int64_t begin,
-    const int64_t end,
-    const int64_t grain_size,
-    const F &f) {
-    if (begin >= end) {
-        return;
-    }
-    std::atomic_flag err_flag = ATOMIC_FLAG_INIT;
-    std::exception_ptr eptr;
-    // choose number of tasks based on grain size and number of threads
-    int64_t num_threads = omp_in_parallel() ? 1 : omp_get_max_threads();
-    if (grain_size > 0) {
-        num_threads = std::min(num_threads, divup((end - begin), grain_size));
-    }
-
-    #pragma omp parallel num_threads(num_threads)
-    {
-        int64_t num_threads = omp_get_num_threads();
-        int64_t tid = omp_get_thread_num();
-        int64_t chunk_size = divup((end - begin), num_threads);
-        int64_t begin_tid = begin + tid * chunk_size;
-        if (begin_tid < end) {
-            try {
-                f(begin_tid, std::min(end, chunk_size + begin_tid));
-            }
-            catch (...) {
-                if (!err_flag.test_and_set()) {
-                    eptr = std::current_exception();
-                }
-            }
-        }
-    }
-    if (eptr) {
-        std::rethrow_exception(eptr);
-    }
-}
 
 void zendnn_embedding_bag_kernel(
     const memory &z_input, const memory &z_indices, const memory &z_offsets,
