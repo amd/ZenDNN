@@ -22,13 +22,15 @@ include(ExternalProject)
 # point ZENDNNL_SOURCE_DIR to top level ZenDNN folder.This should be absolute path.
 # UNCOMMENT to make the script work
 
-# set(ZENDNNL_SOURCE_DIR "<Top level ZenDNN folder>")
+set(ZENDNNL_SOURCE_DIR "${PROJECT_SOURCE_DIR}/dependencies/ZenDNN")
 
 # !!!
 
-set(ZENDNNL_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/ZenDNN")
-set(ZENDNNL_BUILD_DIR "${CMAKE_BINARY_DIR}/third_party/ZenDNN")
+set(ZENDNNL_BUILD_DIR "${ZENDNNL_SOURCE_DIR}/build")
 set(ZENDNNL_INSTALL_DIR "${ZENDNNL_BUILD_DIR}/install")
+
+# find required packages
+find_package(OpenMP REQUIRED)
 
 # try to find pre-built package
 set(zendnnl_ROOT "${ZENDNNL_INSTALL_DIR}/zendnnl")
@@ -90,12 +92,15 @@ else()
 
   file(MAKE_DIRECTORY ${ZENDNNL_AMDBLIS_INC_DIR})
   add_library(zendnnl_amdblis_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_amdblis_deps fwk_zendnnl)
   set_target_properties(zendnnl_amdblis_deps
     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AMDBLIS_LIB_DIR}/libblis-mt.a"
                INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}")
 
-  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_amdblis_deps")
+  add_library(amdblis::amdblis_archive ALIAS zendnnl_amdblis_deps)
+
+  list(APPEND ZENDNNL_LINK_LIBS "amdblis::amdblis_archive")
   list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AMDBLIS_INC_DIR})
 
   # aocl utils
@@ -104,21 +109,25 @@ else()
 
   file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
   add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
   set_target_properties(zendnnl_aoclutils_deps
     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
                INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aoclutils_deps")
+  add_library(au::aoclutils ALIAS zendnnl_aoclutils_deps)
+  list(APPEND ZENDNNL_LINK_LIBS "au::aoclutils")
 
 
   add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)
   set_target_properties(zendnnl_aucpuid_deps
     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
                INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aucpuid_deps")
+  add_library(au::au_cpuid ALIAS zendnnl_aucpuid_deps)
+  list(APPEND ZENDNNL_LINK_LIBS "au::au_cpuid")
   list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
 
   # zendnnl
@@ -127,27 +136,25 @@ else()
 
   file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
   add_library(zendnnl_library STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_library fwk_zendnnl)
   set_target_properties(zendnnl_library
     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
                INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
-               LINK_LIBRARIES
-               zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps
-               INTERFACE_LINK_LIBRARIES
-               zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps)
+               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
+
+  target_link_libraries(zendnnl_library
+    INTERFACE ${CMAKE_DL_LIBS}
+    INTERFACE OpenMP::OpenMP_CXX
+    INTERFACE au::au_cpuid
+    INTERFACE au::aoclutils
+    INTERFACE amdblis::amdblis_archive)
+
+  target_link_options(zendnnl_library INTERFACE "-fopenmp")
+
+  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
 
   list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
   list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
-
-  # create library target
-  add_library(zendnnl_zendnnl_archive INTERFACE)
-  add_dependencies(zendnnl_zendnnl_archive fwk_zendnnl)
-  target_link_libraries(zendnnl_zendnnl_archive
-    INTERFACE ${ZENDNNL_LINK_LIBS})
-  target_include_directories(zendnnl_zendnnl_archive
-    INTERFACE ${ZENDNNL_INCLUDE_DIRECTORIES})
-
-  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_zendnnl_archive)
 
   # !!!
 

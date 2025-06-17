@@ -75,15 +75,18 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
                INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aoclutils_deps")
+  add_library(au::aoclutils ALIAS zendnnl_aoclutils_deps)
+  list(APPEND ZENDNNL_LINK_LIBS "au::aoclutils")
 
   add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
+  add_dependencies(zendnnl_aucpuid_deps zendnnl-deps-aoclutils)
   set_target_properties(zendnnl_aucpuid_deps
     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
                INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  list(APPEND ZENDNNL_LINK_LIBS "zendnnl_aucpuid_deps")
+  add_library(au::au_cpuid ALIAS zendnnl_aucpuid_deps)
+  list(APPEND ZENDNNL_LINK_LIBS "au::au_cpuid")
   list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
 
   # !!!

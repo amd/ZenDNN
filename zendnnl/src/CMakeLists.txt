@@ -33,6 +33,7 @@ target_include_directories(zendnnl_archive
   PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
   INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 target_link_libraries(zendnnl_archive
+  PUBLIC OpenMP::OpenMP_CXX
   PUBLIC ${CMAKE_DL_LIBS})
 
 add_library(zendnnl SHARED)
@@ -48,6 +49,7 @@ target_include_directories(zendnnl
   PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
   INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 target_link_libraries(zendnnl
+  PUBLIC OpenMP::OpenMP_CXX
   PUBLIC ${CMAKE_DL_LIBS})
 
 # create top level include file

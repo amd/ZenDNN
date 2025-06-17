@@ -16,7 +16,7 @@
 include_guard(GLOBAL)
 
 set(ZENDNNL_BUILD_DEPS     ON CACHE BOOL "Build depedencies")
-set(ZENDNNL_BUILD_EXAMPLES ON CACHE BOOL "Build examples")
-set(ZENDNNL_BUILD_GTEST    ON CACHE BOOL "Build gtest")
-set(ZENDNNL_BUILD_DOXYGEN  ON CACHE BOOL "Build doxygen docs")
+set(ZENDNNL_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
+set(ZENDNNL_BUILD_GTEST    OFF CACHE BOOL "Build gtest")
+set(ZENDNNL_BUILD_DOXYGEN  OFF CACHE BOOL "Build doxygen docs")
 

@@ -17,6 +17,8 @@ include_guard(GLOBAL)
 
 include(ZenDnnlOptions)
 
+find_package(OpenMP REQUIRED)
+
 message(STATUS "building zendnnl library")
 
 set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
@@ -73,16 +75,26 @@ set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
 set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
 
 file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
-add_library(zendnnl_library STATIC IMPORTED)
-add_dependencies(zendnnl_library zendnnl)
+add_library(zendnnl_library STATIC IMPORTED GLOBAL)
+add_dependencies(zendnnl_library
+  zendnnl zendnnl-deps-amdblis zendnnl-deps-aoclutils)
+
 set_target_properties(zendnnl_library
-  PROPERTIES IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
-             INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-             INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AMDBLIS_INC_DIR}"
-             LINK_LIBRARIES
-             zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps
-             INTERFACE_LINK_LIBRARIES
-             zendnnl_aoclutils_deps;zendnnl_aucpuid_deps;zendnnl_amdblis_deps)
+  PROPERTIES
+  IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+  INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
+
+target_link_libraries(zendnnl_library
+  INTERFACE ${CMAKE_DL_LIBS}
+  INTERFACE OpenMP::OpenMP_CXX
+  INTERFACE au::au_cpuid
+  INTERFACE au::aoclutils
+  INTERFACE amdblis::amdblis_archive)
+
+target_link_options(zendnnl_library INTERFACE "-fopenmp")
+
+add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
 
 list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
 list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
