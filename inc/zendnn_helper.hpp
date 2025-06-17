@@ -178,6 +178,7 @@ class zendnnEnv {
     uint    omp_num_threads;
     uint    zen_num_threads;
     uint    zenGEMMalgo;
+    uint    zenBMMalgo;
     uint    zenBF16GEMMalgo;
     uint    zenINT8GEMMalgo;
     uint    zenConvAlgo;
@@ -219,6 +220,12 @@ class zendnnEnv {
         if (zenGEMMalgo>zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 &&
                 zenGEMMalgo!=zenMatMulAlgoType::MATMUL_AUTO_FP32) {
             zenGEMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
+        }
+        zenBMMalgo = zendnn_getenv_int("ZENDNN_BMM_ALGO",
+                                       zenMatMulAlgoType::MATMUL_JIT_FP32);
+        if (zenBMMalgo>zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 &&
+                zenBMMalgo<zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
+            zenBMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
 
         // ZENDNN_MATMUL_ALGO=BF16: This environment variable is used to enable specific BF16 MATMUL algorithms.
@@ -287,7 +294,8 @@ class zendnnEnv {
         auto_skip_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_SKIP_ITER", 0);
 
         //Number of iterations to run for creating map for each layer.
-        auto_evaluate_iteration = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 0);
+        auto_evaluate_iteration =
+            zendnn::zendnn_getenv_int("ZENDNN_MATMUL_EVALUATE_ITER", 0);
 
         // Enable/Disable cache for MatMul
         zenEnableCache = (bool)zendnn_getenv_int("ZENDNN_ENABLE_CACHE", 1);

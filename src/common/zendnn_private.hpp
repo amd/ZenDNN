@@ -219,7 +219,50 @@ struct hash<Key_conv> {
     }
 };
 }
+namespace zendnn {
+inline int64_t divup(int64_t x, int64_t y) {
+    return (x + y - 1) / y;
+}
 
+template <class F>
+inline void zendnn_parallel_for(
+    const int64_t begin,
+    const int64_t end,
+    const int64_t grain_size,
+    const F &f) {
+    if (begin >= end) {
+        return;
+    }
+    std::atomic_flag err_flag = ATOMIC_FLAG_INIT;
+    std::exception_ptr eptr;
+    // choose number of tasks based on grain size and number of threads
+    int64_t num_threads = omp_in_parallel() ? 1 : omp_get_max_threads();
+    if (grain_size > 0) {
+        num_threads = std::min(num_threads, divup((end - begin), grain_size));
+    }
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        int64_t num_threads = omp_get_num_threads();
+        int64_t tid = omp_get_thread_num();
+        int64_t chunk_size = divup((end - begin), num_threads);
+        int64_t begin_tid = begin + tid * chunk_size;
+        if (begin_tid < end) {
+            try {
+                f(begin_tid, std::min(end, chunk_size + begin_tid));
+            }
+            catch (...) {
+                if (!err_flag.test_and_set()) {
+                    eptr = std::current_exception();
+                }
+            }
+        }
+    }
+    if (eptr) {
+        std::rethrow_exception(eptr);
+    }
+}
+}
 template<typename T>
 aocl_post_op *create_aocl_post_ops(const impl::exec_ctx_t &ctx,
                                    const impl::post_ops_t &po,
@@ -628,26 +671,19 @@ extern "C"
         bool Layout,
         bool TransA,
         bool TransB,
-        int *M_Array,
-        int *N_Array,
-        int *K_Array,
-        const float *alpha_Array,
-        const float **A_Array,
-        int *lda_Array,
-        const float **B_Array,
-        int *ldb_Array,
-        const float *beta_Array,
-        float **C_Array,
-        int *ldc_Array,
-        int group_count,
-        int *group_size,
-        const float **Add_Array,
-        int *add_shape = NULL,
-        float mul_node = 1.0f,
+        int M,
+        int N,
+        int K,
+        const float alpha,
+        const float *input,
+        int lda,
+        const float *filter,
+        int ldb,
+        const float beta,
+        float *output,
+        int ldc,
         int batch_size = 1,
-        const float **bias = NULL,
-        const bool relu = 0,
-        const int gelu = 0
+        const float *bias = NULL
     );
 
     void zenMatMul_gemm_wrapper(
