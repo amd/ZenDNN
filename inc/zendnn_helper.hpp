@@ -321,13 +321,13 @@ class zendnnEnv {
     // Setting algo to favour LLMs
     static int zenMatMulDefaultAlgo(const std::string &name) {
         if (name == "FP32") {
-            return zenMatMulAlgoType::MATMUL_JIT_FP32;
+            return zenMatMulAlgoType::MATMUL_DT_FP32;
         }
         else if (name == "BF16") {
-            return zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
+            return zenBF16MatMulAlgoType::MATMUL_DT_BF16;
         }
         else if (name == "INT8") {
-            return zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
+            return zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
         }
         else {
             return -1;
