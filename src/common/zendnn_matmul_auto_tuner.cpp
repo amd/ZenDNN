@@ -343,7 +343,7 @@ int auto_compute_matmul_woq(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+    else if (std::get<0>(found_obj->second) == zenEnvObj.auto_evaluate_iteration +
              zenEnvObj.auto_skip_iteration) {
 
         //Get best algo for given layer from MAP
@@ -546,7 +546,7 @@ int auto_compute_matmul_int8(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+    else if (std::get<0>(found_obj->second) == zenEnvObj.auto_evaluate_iteration +
              zenEnvObj.auto_skip_iteration) {
 
         //Get best algo for given layer from MAP
@@ -735,7 +735,7 @@ int auto_compute_matmul_bf16(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+    else if (std::get<0>(found_obj->second) == zenEnvObj.auto_evaluate_iteration +
              zenEnvObj.auto_skip_iteration) {
         //Get best algo for given layer from MAP
         zenEnvObj.zenBF16GEMMalgo = matmul_kernel_map[key_obj_auto];
@@ -896,7 +896,7 @@ int auto_compute_matmul_fp32(
     }
     //Read Value from map.
     //Runs after skip iterations and evaluation iterations are done.
-    else if (std::get<0>(found_obj->second) > zenEnvObj.auto_evaluate_iteration +
+    else if (std::get<0>(found_obj->second) == zenEnvObj.auto_evaluate_iteration +
              zenEnvObj.auto_skip_iteration) {
 
         //Get best algo for given layer from MAP
