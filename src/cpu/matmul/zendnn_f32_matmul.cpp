@@ -304,37 +304,24 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     bool is_weights_const = pd()->weights_md()->is_memory_const;
     bool is_inplace = pd()->weights_md()->is_inplace;
 
-    const auto &dst_bd = dst_d.blocking_desc();
-    const auto &src_strides = &src_d.blocking_desc().strides[dst_d.ndims() - 2];
-    const auto &weights_strides = &weights_d.blocking_desc().strides[dst_d.ndims() -
-                                                2];
     // In case of normal matrices, the stride of the last dimension will always be 1,
     // as the elements are contiguous. However in case of transposed matrix, the
     // stride of the last dimension will be greater than 1.
-    const char *transA
-        = src_strides[1] == 1 ? "N" : "T";
-    const char *transB
-        = weights_strides[1] == 1 ? "N" : "T";
+
+    const char transA = helper.transA();
+    const char transB = helper.transB();
+    const dim_t lda = helper.lda();
+    const dim_t ldb = helper.ldb();
+    const dim_t ldc = helper.ldc();
 
     const dim_t M_s32 = (dim_t)M;
     const dim_t N_s32 = (dim_t)N;
     const dim_t K_s32 = (dim_t)K;
 
-    const dim_t lda = (dim_t)src_strides[*transA == 'N' ? 0 : 1];
-    const dim_t ldb = (dim_t)weights_strides[*transB == 'N' ? 0 : 1];
-    const dim_t ldc = (dim_t)dst_bd.strides[dst_d.ndims() - 2];
-
     float alpha = params.get_gemm_alpha(scales);
     const float beta = params.gemm_beta_;
     //TODO(aakar): Modify f32_matmul API to include Layout
     const bool Layout = true; // CblasRowMajor
-
-    //const dim_t batch = batched ? dst_d.dims()[dst_d.ndims() - 3] : 1;
-    const dim_t input_batch = batched ? src_d.dims()[dst_d.ndims() - 3] : 1;
-    const dim_t weights_batch = batched ? weights_d.dims()[dst_d.ndims() - 3] : 1;
-    const auto src_batch_stride = src_d.blocking_desc().strides[0];
-    const auto weights_batch_stride = weights_d.blocking_desc().strides[0];
-    const auto dst_batch_stride = dst_d.blocking_desc().strides[0];
 
     zendnnInfo(ZENDNN_CORELOG, "zendnn_f32_matmul_t::execute_ref");
     zendnnVerbose(ZENDNN_CORELOG, "M: ",M, " N: ",N, " K: ", K,
@@ -396,10 +383,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         int group_size = woq_scale_mask & (1 << (ndims - 2)) ? group_dims[0] : K;
         data_type_t woq_scales_type = pd()->attr()->woqScales_.data_type_;
         matmul_woq_wrapper(ctx, zenEnvObj, zendnn_f32, weights_type, zendnn_f32,
-                           zendnn_f32,
-                           Layout,
-                           strcmp(transA, "N"),
-                           strcmp(transB, "N"),
+                           zendnn_f32, Layout,
+                           transA == 'T', transB == 'T',
                            M, K, N, alpha, (char *)src, lda, (char *)weights, ldb,
                            bias == NULL ? NULL :(char *)bias,
                            pd()->attr()->post_ops_, has_eltwise_relu,
@@ -409,7 +394,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     }
     else if (ndims == 3) {
         //3D MatMul
-        zenMatMul(ctx, zenEnvObj, Layout, strcmp(transA, "N"),strcmp(transB, "N"),
+        zenMatMul(ctx, zenEnvObj, Layout, transA == 'T', transB == 'T',
                   batch, input_offsets,
                   weight_offsets, dst_offsets,M, K, N, alpha, (float *)src, lda,
                   (float *)weights, ldb, (float *)bias, pd()->attr()->post_ops_, has_eltwise_relu,
@@ -418,8 +403,7 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
     }
     else {
         //2D MatMul
-        zenMatMulWithBias(ctx, zenEnvObj, Layout, strcmp(transA, "N"), strcmp(transB,
-                          "N"),
+        zenMatMulWithBias(ctx, zenEnvObj, Layout, transA == 'T', transB == 'T',
                           batch, input_offsets, weight_offsets, dst_offsets, M, K, N, alpha, (float *)src,
                           lda, (float *)weights, ldb,
                           (float *)bias, pd()->attr()->post_ops_, beta, (float *)dst, ldc,

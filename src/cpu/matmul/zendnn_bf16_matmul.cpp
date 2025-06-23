@@ -102,11 +102,14 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
                   | primitive_attr_t::skip_mask_t::post_ops)
               && set_default_formats()
               && gemm_based::check_gemm_compatible_formats(*this);
-    //Return unimplemented if BF16 algo set to 4(MATMUL_JIT_BF16)
+
+    //Return unimplemented if BF16 algo set to 4(MATMUL_JIT_BF16) or 5(GEMM_JIT_BF16)
+    //Return unimplemented for non-const weights with BLOCKED_JIT or DT_BF16
     zendnnEnv zenEnvObj = readEnv();
     if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_BF16 ||
-        zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 ||
-            (zenEnvObj.zenBF16GEMMalgo != zenBF16MatMulAlgoType::MATMUL_AOCL_BF16 &&
+            zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 ||
+            ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16 ||
+              zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) &&
              (weights_md()->is_memory_const == false ||
               (weights_md()->is_inplace == false &&
                zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
@@ -115,8 +118,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     }
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    bool check_algo_desc = obj.is_brgemm || ((obj.is_ref_gemm_bf16 ||
-                           !weights_md()->is_memory_const) &&
+    bool check_algo_desc = obj.is_brgemm || (obj.is_ref_gemm_bf16 &&
                            weights_md()->data_type == bf16);
     if (check_algo_desc) {
         return status::unimplemented;

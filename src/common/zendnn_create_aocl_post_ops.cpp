@@ -184,6 +184,9 @@ aocl_post_op *create_aocl_post_ops(const exec_ctx_t &ctx,
                 if (scale != NULL && scale[0] != 1.0) {
                     mem_count[1]++;
                 }
+                else {
+                    postop_count -= 1; //Since sum post-op is not applied.
+                }
                 break;
             default:
                 break;
@@ -365,9 +368,6 @@ aocl_post_op *create_aocl_post_ops(const exec_ctx_t &ctx,
 
                     (post_ops->matrix_add + add_index)->matrix = (T *)sum_buff;
                     add_index++;
-                }
-                else {
-                    postop_count-=1; //Since sum post-op is not applied.
                 }
             }
         }
