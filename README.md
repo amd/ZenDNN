@@ -43,8 +43,8 @@ The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenD
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.18 (Plugin), and PyTorch v2.7 (Plugin).
-* Python v3.9-v3.12 has been used to generate the TensorFlow v2.18 (Plugin) wheel files (*.whl).
+* ZenDNN library is integrated with TensorFlow v2.19 (Plugin), and PyTorch v2.7 (Plugin).
+* Python v3.9-v3.12 has been used to generate the TensorFlow v2.19 (Plugin) wheel files (*.whl).
 * Python v3.9-v3.13 has been used to generate the PyTorch v2.7 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
@@ -76,7 +76,7 @@ The following prerequisites must be met for this release of ZenDNN:
 
 # AOCL-BLAS Library Installation
 
-**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/5.1.tar.gz
+**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/AOCL-Jun2025-b2.tar.gz
 
 Note: ZenDNN depends only on AOCL-BLAS and has no dependency on any other AOCL library.
 ## General Convention
@@ -89,11 +89,11 @@ The following points must be considered while installing AOCL-BLAS:
 Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
 2. Download BLIS
-   wget https://github.com/amd/blis/archive/refs/tags/5.1.tar.gz
+   wget https://github.com/amd/blis/archive/refs/tags/AOCL-Jun2025-b2.tar.gz
 3. Execute the following commands:
     ```bash
-    tar -xvf 5.1.tar.gz
-    cd blis-5.1/
+    tar -xvf AOCL-Jun2025-b2.tar.gz
+    cd blis-AOCL-Jun2025-b2/
     make clean; make distclean; CC=gcc ./configure -a aocl_gemm --prefix=../amd-blis --enable-threading=openmp --enable-cblas amdzen; make -j install
     cd ../amd-blis/include
     mkdir LP64
@@ -173,7 +173,7 @@ ZenDNN has the following runtime dependencies:
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python v3.9-v3.12 for TensorFlow v2.18(Plugin)
+* Python v3.9-v3.12 for TensorFlow v2.19(Plugin)
 * Python v3.9-v3.13 for PyTorch v2.7 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
