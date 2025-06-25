@@ -26,7 +26,7 @@ void config_manager_t::config() {
   set_default_config();
 
   //if config file is given set config as per config file
-  char* config_file_str = std::getenv("ZENDNNL_CONFIG_FILE");
+  char *config_file_str = std::getenv("ZENDNNL_CONFIG_FILE");
 
   if (config_file_str) {
     if (parse(config_file_str) == status_t::success) {
@@ -39,7 +39,7 @@ void config_manager_t::config() {
   set_env_config();
 }
 
-const config_logger_t& config_manager_t::get_logger_config() const {
+const config_logger_t &config_manager_t::get_logger_config() const {
   return config_logger;
 }
 
@@ -47,8 +47,9 @@ status_t config_manager_t::parse(std::string file_name_) {
 
   std::ifstream json_file(file_name_);
 
-  if (! json_file.is_open())
+  if (! json_file.is_open()) {
     return status_t::config_bad_json_file;
+  }
 
   config_json = json::parse(json_file);
 
@@ -73,7 +74,7 @@ status_t config_manager_t::set_default_logger_config() {
   config_logger.log_level_map.clear();
   uint32_t module_count = uint32_t(log_module_t::log_module_count);
   for (uint32_t i = 0; i < module_count; ++i) {
-    config_logger.log_level_map[log_module_t(i)] = log_level_t::disabled;
+    config_logger.log_level_map[log_module_t(i)] = log_level_t::warning;
   }
 
   return status_t::success;
@@ -82,43 +83,54 @@ status_t config_manager_t::set_default_logger_config() {
 status_t config_manager_t::set_user_logger_config() {
   //check for log_levels key
   auto logger_json = config_json["log_levels"];
-  if (logger_json.empty())
+  if (logger_json.empty()) {
     return status_t::failure;
+  }
 
   //get log levels of each log
   auto common_level_json = logger_json["common"];
   if (! common_level_json.empty()) {
     auto log_level_str = common_level_json.template get<std::string>();
-    config_logger.log_level_map[log_module_t::common]
-      = logger_support_t::str_to_log_level(log_level_str);
+    if (! log_level_str.empty()) {
+      config_logger.log_level_map[log_module_t::common]
+        = logger_support_t::str_to_log_level(log_level_str);
+    }
   }
 
   auto api_level_json = logger_json["api"];
   if (! api_level_json.empty()) {
     auto log_level_str = api_level_json.template get<std::string>();
-    config_logger.log_level_map[log_module_t::api]
-      = logger_support_t::str_to_log_level(log_level_str);
+    if (! log_level_str.empty()) {
+      config_logger.log_level_map[log_module_t::api]
+        = logger_support_t::str_to_log_level(log_level_str);
+    }
   }
 
   auto test_level_json = logger_json["test"];
   if (! test_level_json.empty()) {
     auto log_level_str = test_level_json.template get<std::string>();
-    config_logger.log_level_map[log_module_t::test]
-      = logger_support_t::str_to_log_level(log_level_str);
+    if (! log_level_str.empty()) {
+      config_logger.log_level_map[log_module_t::test]
+        = logger_support_t::str_to_log_level(log_level_str);
+    }
   }
 
   auto profile_level_json = logger_json["profile"];
   if (! profile_level_json.empty()) {
     auto log_level_str = profile_level_json.template get<std::string>();
-    config_logger.log_level_map[log_module_t::profile]
-      = logger_support_t::str_to_log_level(log_level_str);
+    if (! log_level_str.empty()) {
+      config_logger.log_level_map[log_module_t::profile]
+        = logger_support_t::str_to_log_level(log_level_str);
+    }
   }
 
   auto debug_level_json = logger_json["debug"];
   if (! debug_level_json.empty()) {
     auto log_level_str = debug_level_json.template get<std::string>();
-    config_logger.log_level_map[log_module_t::debug]
-      = logger_support_t::str_to_log_level(log_level_str);
+    if (! log_level_str.empty()) {
+      config_logger.log_level_map[log_module_t::debug]
+        = logger_support_t::str_to_log_level(log_level_str);
+    }
   }
 
   return status_t::success;
@@ -126,7 +138,7 @@ status_t config_manager_t::set_user_logger_config() {
 
 status_t config_manager_t::set_env_logger_config() {
   {
-    char* log_level_str = std::getenv("ZENDNNL_COMMON_LOG_LEVEL");
+    char *log_level_str = std::getenv("ZENDNNL_COMMON_LOG_LEVEL");
     if (log_level_str) {
       uint32_t log_level = std::stoi(log_level_str);
       if (log_level < uint32_t(log_level_t::log_level_count))
@@ -136,7 +148,7 @@ status_t config_manager_t::set_env_logger_config() {
   }
 
   {
-    char* log_level_str = std::getenv("ZENDNNL_API_LOG_LEVEL");
+    char *log_level_str = std::getenv("ZENDNNL_API_LOG_LEVEL");
     if (log_level_str) {
       uint32_t log_level = std::stoi(log_level_str);
       if (log_level < uint32_t(log_level_t::log_level_count))
@@ -146,7 +158,7 @@ status_t config_manager_t::set_env_logger_config() {
   }
 
   {
-    char* log_level_str = std::getenv("ZENDNNL_TEST_LOG_LEVEL");
+    char *log_level_str = std::getenv("ZENDNNL_TEST_LOG_LEVEL");
     if (log_level_str) {
       uint32_t log_level = std::stoi(log_level_str);
       if (log_level < uint32_t(log_level_t::log_level_count))
@@ -156,7 +168,7 @@ status_t config_manager_t::set_env_logger_config() {
   }
 
   {
-    char* log_level_str = std::getenv("ZENDNNL_PROFILE_LOG_LEVEL");
+    char *log_level_str = std::getenv("ZENDNNL_PROFILE_LOG_LEVEL");
     if (log_level_str) {
       uint32_t log_level = std::stoi(log_level_str);
       if (log_level < uint32_t(log_level_t::log_level_count))
@@ -166,7 +178,7 @@ status_t config_manager_t::set_env_logger_config() {
   }
 
   {
-    char* log_level_str = std::getenv("ZENDNNL_DEBUG_LOG_LEVEL");
+    char *log_level_str = std::getenv("ZENDNNL_DEBUG_LOG_LEVEL");
     if (log_level_str) {
       uint32_t log_level = std::stoi(log_level_str);
       if (log_level < uint32_t(log_level_t::log_level_count))

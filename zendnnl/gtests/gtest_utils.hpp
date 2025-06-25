@@ -85,9 +85,10 @@ class tensor_factory_t {
                           StorageParam param);
 };
 
+bool is_binary_postop(const std::string post_op);
+
 //Supported Postops declaration
-extern std::vector<post_op_type_t> po_arr;
-extern std::unordered_map<std::string, int> po_map;
+extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
 
 /** @fn matmul_kernel_test
  *  @brief Compute Matmul Operation using AOCL kernel.
@@ -95,10 +96,11 @@ extern std::unordered_map<std::string, int> po_map;
  *  This function computes fused matmul that uses the Matmul Operator fused
  *  with randomly selected postop (supported by library) with AOCL kernel.
  *
+ *  @return matmul status
  * */
-void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                        tensor_t &bias, tensor_t &output_tensor, uint32_t index,
-                        tensor_t &binary_tensor);
+status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
+                            tensor_t &bias, tensor_t &output_tensor, uint32_t index,
+                            tensor_t &binary_tensor);
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -107,10 +109,12 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
  *  with randomly selected postop (supported by library) with Reference kernel
  *  that only supports F32 datatype.
  *
+ *  @return matmul status
  * */
-void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                                   tensor_t &bias, tensor_t &output_tensor,
-                                   uint32_t index, tensor_t &binary_tensor);
+status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
+                                       tensor_t &weights,
+                                       tensor_t &bias, tensor_t &output_tensor,
+                                       uint32_t index, tensor_t &binary_tensor);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor
@@ -125,8 +129,9 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
  *  @brief Function to Reorder tensor
  *
  *  This function reorders the tensor either by Inplace or OutofPlace.
- *  @return Reorderd tensor
+ *  @return Reordered tensor and reorder status
  *
  * */
-tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder);
+std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
+    bool inplace_reorder);
 #endif

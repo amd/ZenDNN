@@ -28,6 +28,7 @@ status_t reorder_context_t::validate() {
 
   // TODO: Add support for OneDNN backend
   if (!(get_algo_format() == "aocl")) {
+    apilog_error("Unsupported algo format: " + get_algo_format());
     return status_t::failure;
   }
 
@@ -55,7 +56,7 @@ data_type_t reorder_context_t::get_source_dtype() const {
 std::string reorder_context_t::context_info() {
   std::stringstream ss;
   auto algo_format = get_algo_format();
-
+  ss << "reorder,";
   if (algo_format.empty()) {
     ss << "";
   }

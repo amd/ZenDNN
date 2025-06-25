@@ -25,6 +25,10 @@ MatmulType::MatmulType() {
   po_index = rand() % (po_size + 1);
 }
 
+bool is_binary_postop(const std::string post_op) {
+  return post_op == "binary_add" || post_op == "binary_mul";
+}
+
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
                                        data_type dtype_) {
 
@@ -157,14 +161,14 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
   return btensor;
 }
 
-void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                        tensor_t &bias, tensor_t &output_tensor,
-                        uint32_t index, tensor_t &binary_tensor) {
+status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
+                            tensor_t &bias, tensor_t &output_tensor,
+                            uint32_t index, tensor_t &binary_tensor) {
   try {
     // default postop relu
-    post_op_t post_op = post_op_t{po_arr[0]};
+    post_op_t post_op = post_op_t{po_arr[0].second};
     // postop update according to the index
-    if (index != po_size && index != 0) post_op = post_op_t{po_arr[index]};
+    if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
     weights.set_name("weights");
     bias.set_name("bias");
 
@@ -186,18 +190,18 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                            .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
-      exit(0);
+      log_error("operator ", matmul_operator.get_name(), " creation failed.");
+      return status_t::failure;
     }
 
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
     // Set binary tensor for binary postops
     if (index < po_size) {
-      if (po_arr[index] == post_op_type_t::binary_add) {
+      if (po_arr[index].second == post_op_type_t::binary_add) {
         matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
       }
-      else if (po_arr[index] == post_op_type_t::binary_mul) {
+      else if (po_arr[index].second == post_op_type_t::binary_mul) {
         matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
       }
     }
@@ -208,22 +212,25 @@ void matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 
     if (status != status_t::success) {
       log_info("operator ", matmul_operator.get_name(), " execution failed.");
-      exit(0);
+      return status_t::failure;
     }
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());
+    return status_t::failure;
   }
+  return status_t::success;
 }
 
-void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                                   tensor_t &bias, tensor_t &output_tensor,
-                                   uint32_t index, tensor_t &binary_tensor) {
+status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
+                                       tensor_t &weights,
+                                       tensor_t &bias, tensor_t &output_tensor,
+                                       uint32_t index, tensor_t &binary_tensor) {
   try {
     // Default postop relu
-    post_op_t post_op = post_op_t{po_arr[0]};
+    post_op_t post_op = post_op_t{po_arr[0].second};
     // postop update according to the index
-    if (index != po_size && index != 0) post_op = post_op_t{po_arr[index]};
+    if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
     weights.set_name("weights");
     bias.set_name("bias");
 
@@ -245,17 +252,17 @@ void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                            .create();
 
     if (! matmul_operator.check()) {
-      log_error(" operator ", matmul_operator.get_name(), " creation failed.");
-      exit(0);
+      log_error("operator ", matmul_operator.get_name(), " creation failed.");
+      return status_t::failure;
     }
     input_tensor.set_name("matmul_input");
     output_tensor.set_name("matmul_output");
 
     if (index < po_size) {
-      if (po_arr[index] == post_op_type_t::binary_add) {
+      if (po_arr[index].second == post_op_type_t::binary_add) {
         matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
       }
-      else if (po_arr[index] == post_op_type_t::binary_mul) {
+      else if (po_arr[index].second == post_op_type_t::binary_mul) {
         // Set binary tensor for binary postops
         matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
       }
@@ -267,27 +274,28 @@ void matmul_forced_ref_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 
     if (status != status_t::success) {
       log_info("operator ", matmul_operator.get_name(), " execution failed.");
-      exit(0);
+      return status_t::failure;
     }
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());
+    return status_t::failure;
   }
-  return;
+  return status_t::success;
 }
 
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
-                       uint64_t n, const float tol, bool &flag) {
+                       uint64_t n, const float tol, bool &is_comparison_successful) {
   #pragma omp parallel for collapse(2)
   for (uint64_t i=0; i<m; ++i) {
     for (uint64_t j=0; j<n; ++j) {
-      if (!flag) {
+      if (is_comparison_successful) {
         float acutal_val = output_tensor.at({i,j});
         float ref_val = output_tensor_ref.at({i,j});
         if (abs(ref_val - acutal_val) >= tol) {
           log_verbose("actual(",i,",",j,"): ",acutal_val," , ref(",i,",",j,"): ",ref_val);
-          flag = true;
+          is_comparison_successful = false;
         }
       }
     }
@@ -295,7 +303,8 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
   return;
 }
 
-tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
+std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
+    bool inplace_reorder) {
   try {
     tensor_factory_t tensor_factory;
     status_t status;
@@ -315,8 +324,8 @@ tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
                             .set_input("reorder_input", input_tensor);
 
     if (! reorder_operator.check()) {
-      log_error(" operator ", reorder_operator.get_name(), " creation failed.");
-      exit(0);
+      log_error("operator ", reorder_operator.get_name(), " creation failed.");
+      return std::make_pair(tensor_t(), status_t::failure);
     }
 
     // Compute the reorder size
@@ -334,7 +343,7 @@ tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
       // InPlace reorder works when reorder size is equal to input buffer size.
       if (reorder_size != input_buffer_size) {
         log_info("Inplace reorder is not possible for given input");
-        return input_tensor;
+        return std::make_pair(input_tensor, status_t::failure);
       }
       else {
         // Assign input_tensor to buffer_params as a tensor_t variant
@@ -374,10 +383,10 @@ tensor_t reorder_kernel_test(tensor_t &input_tensor, bool inplace_reorder) {
       log_info("operator ", reorder_operator.get_name(), " execution successful.");
     }
 
-    return output_tensor;
+    return std::make_pair(output_tensor, status_t::success);
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());
-    return tensor_t();
+    return std::make_pair(tensor_t(), status_t::failure);
   }
 }

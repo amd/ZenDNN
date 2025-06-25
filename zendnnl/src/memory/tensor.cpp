@@ -455,6 +455,7 @@ std::string tensor_t::tensor_info() {
   std::stringstream ss;
   auto layout = get_layout();
   auto dtype  = get_data_type();
+  auto order  = get_order();
 
   ss << get_name() << "[";
   uint32_t dim = get_dim();
@@ -468,7 +469,7 @@ std::string tensor_t::tensor_info() {
     }
   }
   ss << "]:"
-     << dtype_info(dtype) << ":";
+     << dtype_info(dtype) << ":" << order << ":";
 
   switch (layout) {
   case tensor_layout_t::contiguous:

@@ -32,13 +32,13 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
         auto add_tensor_obj = inputs.find(op.binary_add_params.tensor_name);
         auto tensor_size = add_tensor_obj->second.get_size();
         if (add_tensor_obj == inputs.end()) {
-          log_error("Invalid post-op: ",
-                    op.binary_add_params.tensor_name, " buffer not passed.");
+          apilog_error("Invalid post-op: ",
+                       op.binary_add_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
         if (add_tensor_obj->second.get_order() == "ba") {
-          log_error("Invalid post-op: ",
-                    op.binary_add_params.tensor_name, " transposed buffer not supported.");
+          apilog_error("Invalid post-op: ",
+                       op.binary_add_params.tensor_name, " transposed buffer not supported.");
           return status_t::failure;
         }
         /** todo: support 1d add scale*/
@@ -51,8 +51,8 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
           continue;
         }
         else {
-          log_error(add_tensor_obj->second.get_name(),
-                    " Invalid post-op: size mismatch for binary_add post op.");
+          apilog_error(add_tensor_obj->second.get_name(),
+                       " Invalid post-op: size mismatch for binary_add post op.");
           return status_t::failure;
         }
       }
@@ -60,13 +60,13 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
         auto mul_tensor_obj = inputs.find(op.binary_mul_params.tensor_name);
         auto tensor_size = mul_tensor_obj->second.get_size();
         if (mul_tensor_obj == inputs.end()) {
-          log_error("Invalid post-op: ",
-                    op.binary_mul_params.tensor_name, " buffer not passed.");
+          apilog_error("Invalid post-op: ",
+                       op.binary_mul_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
         if (mul_tensor_obj->second.get_order() == "ba") {
-          log_error("Invalid post-op: ",
-                    op.binary_mul_params.tensor_name, " transposed buffer not supported.");
+          apilog_error("Invalid post-op: ",
+                       op.binary_mul_params.tensor_name, " transposed buffer not supported.");
           return status_t::failure;
         }
         if (tensor_size.size() == 1 && tensor_size[0] == output_size.at(1) &&
@@ -78,8 +78,8 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
           continue;
         }
         else {
-          log_error(mul_tensor_obj->second.get_name(),
-                    " Invalid post-op: size mismatch for binary_mul post op.");
+          apilog_error(mul_tensor_obj->second.get_name(),
+                       " Invalid post-op: size mismatch for binary_mul post op.");
           return status_t::failure;
         }
       }
@@ -102,6 +102,7 @@ status_t matmul_operator_t::validate() {
   auto weights_size = weights->get_size();
 
   if (!input || !output) {
+    apilog_error("Invalid input or output tensor.");
     return status_t::failure;
   }
 
@@ -110,23 +111,27 @@ status_t matmul_operator_t::validate() {
   auto out_order   = output->get_order();
 
   if (out_order == "ba") {
-    log_error("<", get_name(), "> kernel needs non-transposed output tensors.");
+    apilog_error("<", get_name(), "> kernel needs non-transposed output tensors.");
     return status_t::failure;
   }
 
   if ((input_size.size() != 2) || (output_size.size() != 2)) {
+    apilog_error("Input or output size is not valid");
     return status_t::failure;
   }
 
   if (input_size.at(0) != output_size.at(0)) {
+    apilog_error("Input and output size mismatch at dim - 0");
     return status_t::failure;
   }
 
   if (input_size.at(1) != weights_size.at(0)) {
+    apilog_error("Dimension mismatch with input and weights");
     return status_t::failure;
   }
 
   if (weights_size.at(1) != output_size.at(1)) {
+    apilog_error("Dimension mismatch with weights and output");
     return status_t::failure;
   }
 
@@ -157,13 +162,14 @@ status_t matmul_operator_t::validate_forced_kernel() {
         (out_dtype != data_type_t::f32) ||
         (wt_dtype  != data_type_t::f32) ||
         (out_order == "ba")) {
-      log_error("<", get_name(),
-                "> forced reference kernel needs f32 tensors and non-transposed dst.");
+      apilog_error("<", get_name(),
+                   "> forced reference kernel needs f32 tensors and non-transposed dst.");
       return status_t::failure;
     }
   }
   else {
-    log_error("<", get_name(), "> ", forced_kernel, " kernel can not be forced.");
+    apilog_error("<", get_name(), "> ", forced_kernel,
+                 " kernel can not be forced.");
     return status_t::failure;
   }
   return status_t::success;
@@ -202,17 +208,22 @@ std::string matmul_operator_t::operator_info() {
   auto bias          = context.get_param("bias");
   auto post_op_count = context.get_post_op_count();
 
-  ss <<input.tensor_info()<<","<<weights.tensor_info() <<",";
+  ss << "matmul," << get_name() << "," << input.tensor_info()
+     << "," << weights.tensor_info() << ",";
 
   if (bias) {
     ss <<bias.value().tensor_info()<<",";
   }
 
-  ss <<output.tensor_info() <<","<<"post-op";
+  ss <<output.tensor_info();
 
-  for (uint32_t i = 0; i < post_op_count; ++i) {
-    post_op_t zen_po = context.get_post_op(i);
-    ss << ":" <<zen_po.post_op_info(zen_po);
+  if (post_op_count) {
+    ss << ",post-op";
+
+    for (uint32_t i = 0; i < post_op_count; ++i) {
+      post_op_t zen_po = context.get_post_op(i);
+      ss << ":" <<zen_po.post_op_info(zen_po);
+    }
   }
 
   return ss.str();
@@ -252,9 +263,8 @@ status_t matmul_operator_t::kernel_factory() {
               output_dtype == data_type_t::bf16)) {
       kernel = get_matmul_bf16_avx512_kernel();
     }
-
     else {
-      log_error("<", name, "> kernel unimplemented.");
+      apilog_error("<", name, "> kernel unimplemented.");
       return status_t::unimplemented;
     }
   }
@@ -264,12 +274,12 @@ status_t matmul_operator_t::kernel_factory() {
     }
     else if (forced_kernel == "onednn") {
       //kernel = get_linear_onednn_kernel();
-      log_error("<", name, "> kernel unimplemented using onednn");
+      apilog_error("<", name, "> kernel unimplemented using onednn");
       return status_t::unimplemented;
     }
     else {
-      log_error("<", name, "> kernel unimplemented using forced kernel ",
-                forced_kernel);
+      apilog_error("<", name, "> kernel unimplemented using forced kernel ",
+                   forced_kernel);
       return status_t::unimplemented;
     }
   }

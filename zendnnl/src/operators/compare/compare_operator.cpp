@@ -45,7 +45,7 @@ status_t compare_operator_t::validate() {
   if ((expec_size.size() != test_size.size()) ||
       (test_size.size()  != diff_size.size()) ||
       (expec_size.size() != diff_size.size())) {
-    log_error("<", get_name(), "> tensors are of same shape.");
+    apilog_error("<", get_name(), "> tensors are of same shape.");
     return status_t::failure;
   }
 
@@ -65,7 +65,7 @@ status_t compare_operator_t::validate() {
   if ((expec_layout != tensor_layout_t::contiguous) ||
       (test_layout  != tensor_layout_t::contiguous) ||
       (diff_layout  != tensor_layout_t::contiguous)) {
-    log_error("<", get_name(), "> compare kernel needs contiguous tensors.");
+    apilog_error("<", get_name(), "> compare kernel needs contiguous tensors.");
     return status_t::failure;
   }
 

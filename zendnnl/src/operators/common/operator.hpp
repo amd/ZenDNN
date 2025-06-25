@@ -358,24 +358,24 @@ OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
 template<typename OP_T, typename OP_CONTEXT_T>
 status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
-  apilog_info("Operator execute - ",name,",",operator_info());
+  apilog_info("Operator execute - ",operator_info());
 
   try {
     // check if pre_processing is successful
     if (status != status_t::success) {
-      log_error("<", name, "> bad object");
+      apilog_error("<", name, "> bad object");
       return status;
     }
 
     //sanity check on io
     if (validate() != status_t::success) {
-      log_error("<", name, "> bad input or output");
+      apilog_error("<", name, "> bad input or output");
       return status_t::op_bad_io;
     }
 
     //sanity chck forced kernel
     if (validate_forced_kernel() != status_t::success) {
-      log_error("<", name, "> bad or inconsistent forced kernel");
+      apilog_error("<", name, "> bad or inconsistent forced kernel");
       return status_t::op_bad_forced_kernel;
     }
 
@@ -393,14 +393,14 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
 
     //execute kernel
     if (kernel->execute(context, inputs, outputs) != status_t::success) {
-      log_error("<", name, "> kernel execution failed");
+      apilog_error("<", name, "> kernel execution failed");
       return status_t::failure;
     }
 
     //stop the timer
     obj.tbp_stop();
 
-    profilelog_info("Operator execute - ",name,",",operator_info(),
+    profilelog_info("Operator execute - ",operator_info(),
                     ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
 
     //cleanup
@@ -527,7 +527,7 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::load_kernel(std::string symbol_) {
   try {
     create_kernel_handle_type create_kernel_handle =
       reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(
-          symbol_));
+            symbol_));
 
     if (! create_kernel_handle) {
       EXCEPTION_WITH_LOC("dynamic symbol load returned null.");

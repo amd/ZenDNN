@@ -30,6 +30,7 @@ status_t reorder_operator_t::validate() {
   auto output       = get_output("reorder_output");
 
   if (!input || !output) {
+    apilog_error("Invalid input or output tensor.");
     return status_t::failure;
   }
 
@@ -40,29 +41,33 @@ status_t reorder_operator_t::validate() {
     size_t input_buffer_size = input->get_buffer_sz_bytes();
 
     if (reorder_size != input_buffer_size) {
-      log_error("Inplace reorder doesn't work for given matrix");
+      apilog_error("Reorder size mismatch, Inplace reorder doesn't work for given matrix");
       return status_t::failure;
     }
     else {
-      log_info("Inplace reorder works for given matrix");
+      apilog_info("Inplace reorder works for given matrix");
     }
   }
 
   if ((input_size.size() != 2) || (output_size.size() != 2)) {
+    apilog_error("Input or output size is not valid");
     return status_t::failure;
   }
 
   if (input_size.at(0) != output_size.at(0)) {
+    apilog_error("Input and output size mismatch at dim - 0");
     return status_t::failure;
   }
 
   if (input_size.at(1) != output_size.at(1)) {
+    apilog_error("Input and output size mismatch at dim - 1");
     return status_t::failure;
   }
 
   auto source_dtype  = context.get_source_dtype();
   if ((input->get_data_type() == data_type_t::s8) &&
       (!((source_dtype == data_type_t::s8) || (source_dtype == data_type_t::u8)))) {
+    apilog_error("Source data type mismatch for s8");
     return status_t::failure;
   }
 
@@ -74,8 +79,9 @@ std::string reorder_operator_t::operator_info() {
   auto input   = get_input("reorder_input").value();
   auto output  = get_output("reorder_output").value();
 
-  ss <<input.tensor_info()<<","<<output.tensor_info()<<","
-     <<context.context_info();
+  ss << "reorder," << get_name() << "," << input.tensor_info()
+     << "," << output.tensor_info() << ","
+     << context.context_info();
 
   return ss.str();
 }
@@ -87,7 +93,7 @@ status_t reorder_operator_t::kernel_factory() {
     kernel = get_reorder_aocl_kernel();
   }
   else if (algo_format == "onednn") {
-    log_error("onednn kernel is not supported");
+    apilog_error("onednn kernel is not supported");
     return status_t::unimplemented;
   }
   else {
@@ -147,8 +153,11 @@ size_t reorder_operator_t::get_reorder_size() {
                      reorder_param1, reorder_param2);
     }
   }
+  else if (algo_format == "onednn") {
+    apilog_error("onednn reorder is not supported");
+  }
   else {
-    log_error("onednn reorder is not supported");
+    apilog_error("Unsupported algorithm format for reorder");
   }
   return reorder_size;
 }

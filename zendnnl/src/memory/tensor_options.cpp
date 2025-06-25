@@ -26,7 +26,7 @@ tensor_option_t::tensor_option_t():
   size{}, stride_size{}, stride{}, base{},
   nelem{0}, strided_nelem{0}, base_offset{0},
   data_type{data_type_t::f32}, layout{tensor_layout_t::contiguous},
-  is_const{false}, order{} {
+  is_const{false}, order{"ab"} {
 }
 
 void tensor_option_t::reset() {
@@ -49,8 +49,9 @@ void tensor_option_t::reset() {
 std::size_t tensor_option_t::hash() {
   LOG_DEBUG_INFO("Generating tensor option hash");
 
-  if(hash_key)
+  if (hash_key) {
     return hash_key;
+  }
 
   hash_key = hash_combine(hash_key, size);
   hash_key = hash_combine(hash_key, stride_size);

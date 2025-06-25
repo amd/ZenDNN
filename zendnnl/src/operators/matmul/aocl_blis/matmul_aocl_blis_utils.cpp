@@ -448,9 +448,6 @@ void aocl_blis_utils_t::free_post_op() {
     return;
   }
 
-  if (aocl_blis_po_ptr->sum) {
-    free(aocl_blis_po_ptr->sum);
-  }
   if (aocl_blis_po_ptr->bias) {
     free(aocl_blis_po_ptr->bias);
   }
@@ -487,6 +484,9 @@ void aocl_blis_utils_t::free_post_op() {
       }
       count_matrix_mul_1d++;
     }
+  }
+  if (aocl_blis_po_ptr->sum) {
+    free(aocl_blis_po_ptr->sum);
   }
   if (aocl_blis_po_ptr->eltwise) {
     free(aocl_blis_po_ptr->eltwise);

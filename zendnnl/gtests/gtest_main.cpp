@@ -24,8 +24,7 @@ int gtest_argc;
 char **gtest_argv;
 
 const uint32_t po_size = 8; //Supported postop
-vector<post_op_type_t> po_arr;
-unordered_map<std::string, int> po_map;
+vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 
 //Matmul Tolerance Limit
 const float MATMUL_F32_TOL = 0.001;
@@ -41,21 +40,15 @@ std::vector<MatmulType> matmul_test{};
 int main(int argc, char **argv) {
   //ToDO: Write a Command-line parser to avoid hardcodings in cmd arguments
   //Supported Postop
-  po_arr = { post_op_type_t::relu, post_op_type_t::gelu_tanh,
-             post_op_type_t::gelu_erf, post_op_type_t::sigmoid,
-             post_op_type_t::swish, post_op_type_t::tanh,
-             post_op_type_t::binary_add, post_op_type_t::binary_mul
-           };
-
-  //Postop string to index
-  po_map["relu"]=0;
-  po_map["gelu_tanh"]=1;
-  po_map["gelu_erf"]=2;
-  po_map["sigmoid"]=3;
-  po_map["swish"]=4;
-  po_map["tanh"]=5;
-  po_map["binary_add"]=6;
-  po_map["binary_mul"]=7;
+  po_arr = { {"relu", post_op_type_t::relu},
+    {"gelu_tanh", post_op_type_t::gelu_tanh},
+    {"gelu_erf", post_op_type_t::gelu_erf},
+    {"sigmoid", post_op_type_t::sigmoid},
+    {"swish", post_op_type_t::swish},
+    {"tanh", post_op_type_t::tanh},
+    {"binary_add", post_op_type_t::binary_add},
+    {"binary_mul", post_op_type_t::binary_mul}
+  };
 
   // If Seed is provided as command line argument
   if (argc==3) {
@@ -67,12 +60,12 @@ int main(int argc, char **argv) {
     }
   }
   srand(seed);
-  std::cout<<"Value "<<seed<<" is used as seed. ";
+  std::cout<<"Value "<<seed<<" is used as seed. \n";
 
   //Creating Random parameters for Matmul
   matmul_test.resize(TEST_NUM);
 
-  testing :: InitGoogleTest(&argc, argv);
+  ::testing :: InitGoogleTest(&argc, argv);
   gtest_argc = argc;
   gtest_argv = argv;
   return RUN_ALL_TESTS();

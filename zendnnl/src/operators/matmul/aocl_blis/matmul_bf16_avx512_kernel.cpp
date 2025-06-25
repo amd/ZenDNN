@@ -89,10 +89,6 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                                (int16_t *)output_raw_handle, ldc,
                                aocl_blis_po_ptr);
   }
-  else {
-    log_error("Unsupported output data type");
-    return status_t::failure;
-  }
 
   return status_t::success;
 }

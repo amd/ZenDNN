@@ -247,11 +247,13 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
 
   if (validate() != status_t::success) {
     status = status_t::failure;
+    apilog_error("Context validation failed");
     return static_cast<OP_CONTEXT_T &>(*this);
   }
 
   if (preprocess() != status_t::success) {
     status = status_t::failure;
+    apilog_error("Context preprocessing failed");
     return static_cast<OP_CONTEXT_T &>(*this);
   }
 
@@ -259,9 +261,9 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   hash();
 
 //stop the timer
-obj.tbp_stop();
+  obj.tbp_stop();
 
-profilelog_info("Operator context - ",context_info(),
+  profilelog_info("Operator context - ",context_info(),
                   ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
 
   return static_cast<OP_CONTEXT_T &>(*this);

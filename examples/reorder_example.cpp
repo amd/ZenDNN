@@ -191,7 +191,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_example() {
 
     // Reorder operator creation with name, context and input.
     auto reorder_operator = reorder_operator_t()
-                            .set_name("ouofplace_reorder_f32_operator")
+                            .set_name("outofplace_reorder_f32_operator")
                             .set_context(reorder_context)
                             .create()
                             .set_input("reorder_input", weight_tensor);
@@ -337,7 +337,6 @@ int reorder_inplace_bf16_example() {
     size_t reorder_size         = reorder_operator.get_reorder_size();
     // Extract the input buffer size
     size_t input_buffer_size    = input_tensor.get_buffer_sz_bytes();
-    // tensor_t output_tensor;
 
     // Inplace reorder takes place when reorder buffer size is same as input buffer size
     if (reorder_size == input_buffer_size) {

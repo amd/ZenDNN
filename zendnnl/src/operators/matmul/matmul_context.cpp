@@ -28,17 +28,20 @@ status_t matmul_context_t::validate() {
   auto bias    = get_param("bias");
 
   if (!weights) {
+    apilog_error("Weights parameter is null");
     return status_t::failure;
   }
 
   auto weights_size = weights->get_size();
   if (weights_size.size() != 2) {
+    apilog_error("Weights size is not valid");
     return status_t::failure;
   }
 
   if (bias) {
     auto bias_size = bias->get_size();
     if (weights_size.at(1) != bias_size.at(0)) {
+      apilog_error("Bias size mismatch with weights");
       return status_t::failure;
     }
   }
@@ -59,18 +62,19 @@ std::string matmul_context_t::context_info() {
   auto bias    = get_param("bias");
 
   auto post_op_count = get_post_op_count();
-
-  ss <<weights.tensor_info()<<",";
+  ss << "matmul," << weights.tensor_info() << ",";
 
   if (bias) {
-    ss <<bias.value().tensor_info()<<",";
+    ss <<bias.value().tensor_info();
   }
 
-  ss <<"post-op";
+  if (post_op_count) {
+    ss <<",post-op";
 
-  for (uint32_t i = 0; i < post_op_count; ++i) {
-    post_op_t zen_po = get_post_op(i);
-    ss << ":" << zen_po.post_op_info(zen_po);
+    for (uint32_t i = 0; i < post_op_count; ++i) {
+      post_op_t zen_po = get_post_op(i);
+      ss << ":" << zen_po.post_op_info(zen_po);
+    }
   }
 
   return ss.str();

@@ -31,6 +31,7 @@ status_t compare_context_t::validate() {
   }
 
   if (get_tolerance() < 0) {
+    apilog_error("Tolerance cannot be negative.");
     return status_t::failure;
   }
   return status_t::success;
