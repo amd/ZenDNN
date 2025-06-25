@@ -118,6 +118,11 @@ void zenMatMul_gemm_blocked(
                             beta,
                             output, ldc,
                             post_ops);
+
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
+        reorder_filter != NULL) {
+        free(reorder_filter);
+    }
     // Free memory for postops.
     clear_post_ops_memory(post_ops, alpha, eltwise_index);
 }

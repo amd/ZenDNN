@@ -273,7 +273,8 @@ bool reorderAndCacheWeightsBrgemm(
             zendnnVerbose(ZENDNN_PROFLOG,"Read cached BRGEMM weights WEIGHT_CACHE_INPLACE");
             zendnn::memory dummy_mem;
             reordered_weights_memory = matmul_weight_cache.get(key_obj_reorder);
-            if (weight_disc.get_size() == user_weights_memory.get_desc().get_size()) {
+            if (weight_disc.get_size() == user_weights_memory.get_desc().get_size()
+                && is_inplace) {
                 reordered_weights_memory = user_weights_memory;
             }
         }

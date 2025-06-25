@@ -152,7 +152,10 @@ void zenMatMul_gemm_bf16bf16f32of32(
                               output, ldc,
                               post_ops);
 
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
+        reorder_filter != NULL) {
+        free(reorder_filter);
+    }
     // Free memory for postops.
     if (post_ops != NULL) {
         if (bias != NULL) {
@@ -388,7 +391,10 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                output, ldc,
                                post_ops);
 
-
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
+        reorder_filter != NULL) {
+        free(reorder_filter);
+    }
     // Free memory for postops.
     if (post_ops != NULL) {
         if (bias != NULL) {

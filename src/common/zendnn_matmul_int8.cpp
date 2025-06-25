@@ -519,7 +519,8 @@ aocl_post_op *create_aocl_post_ops_int8(
     float do_sum,
     T *sum_buffer,
     float *dummy_scale,
-    int8_t *dummy_zp
+    int8_t *dummy_zp,
+    int zp_dt = zendnn_s8
 ) {
     aocl_post_op *post_ops = NULL;
     // By default, scale postop is always enabled.
@@ -647,6 +648,8 @@ aocl_post_op *create_aocl_post_ops_int8(
             (post_ops->sum + scale_index)->zero_point = (int8_t *)dummy_zp;
             (post_ops->sum + scale_index)->scale_factor_len = dq_scale_size;
             (post_ops->sum + scale_index)->zero_point_len = 1;
+            (post_ops->sum + scale_index)->sf_stor_type = AOCL_GEMM_F32;
+            (post_ops->sum + scale_index)->zp_stor_type = AOCL_GEMM_INT8;
             scale_index++;
         }
         //Add bias post-op
@@ -793,6 +796,8 @@ aocl_post_op *create_aocl_post_ops_int8(
             (post_ops->sum + scale_index)->zero_point = (int8_t *)zero_point_dst;
             (post_ops->sum + scale_index)->scale_factor_len = dst_scale_size;
             (post_ops->sum + scale_index)->zero_point_len = 1;
+            (post_ops->sum + scale_index)->sf_stor_type = AOCL_GEMM_F32;
+            (post_ops->sum + scale_index)->zp_stor_type = getAOCLstoreType((zendnn_data_type_t)zp_dt);
             scale_index++;
         }
         post_ops->seq_length = po.len() + postop_count;
@@ -984,6 +989,10 @@ void zenMatMul_gemm_u8s8s32ofloat(
                               ldc, post_ops);
     }
     // Free memory for postops.
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE && reorder_filter != NULL) {
+        free(reorder_filter);
+    }
+    // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
@@ -1123,6 +1132,10 @@ void zenMatMul_gemm_s8s8s32ofloat(
                               ldc, post_ops);
     }
     // Free memory for postops.
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE && reorder_filter != NULL) {
+        free(reorder_filter);
+    }
+    // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
     free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
@@ -1246,15 +1259,14 @@ void zenMatMul_gemm_s8s8s32oInt(
                              ldb, mem_format_b, beta, (int8_t *)output,
                              ldc, post_ops);
     }
-    // TODO: Currently not supported for s8 input
-    /*
     else if(dst_type == zendnn_u8) {
     //Create post_ops
     // If zp_wei exists then can't apply 1d compensation.
     post_ops = create_aocl_post_ops_int8<int8_t>(ctx, po_ops, n,
                bias, bias_type,
                new_scale, wei_scale_size, dst_scale, dst_scale_size,
-               acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t*)output, &dummy_scale, &dummy_zp);
+               acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t*)output,
+               &dummy_scale, &dummy_zp, zendnn_u8);
 
     aocl_gemm_s8s8s32ou8(order, transA, transB, m,
                          n,
@@ -1263,7 +1275,6 @@ void zenMatMul_gemm_s8s8s32oInt(
                          ldb, mem_format_b, beta, (uint8_t*)output,
                          ldc, post_ops);
     }
-    */
     else if (dst_type == zendnn_s32) {
         //Create post_ops
         // If zp_wei exists then can't apply 1d compensation.
@@ -1279,6 +1290,10 @@ void zenMatMul_gemm_s8s8s32oInt(
                               lda, mem_format_a, blocked_format ? reorder_filter : filter,
                               ldb, mem_format_b, beta, (int32_t *)output,
                               ldc, post_ops);
+    }
+    // Free memory for postops.
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE && reorder_filter != NULL) {
+        free(reorder_filter);
     }
     // Free memory for postops.
     free_aocl_po_memory_int8(post_ops);
@@ -1409,7 +1424,7 @@ void zenMatMul_gemm_u8s8s32oInt(
                    bias, bias_type,
                    new_scale, wei_scale_size, dst_scale, dst_scale_size,
                    acc, !zero_point_wei, &zero_point_dst, do_sum, (int8_t *)output, &dummy_scale,
-                   &dummy_zp);
+                   &dummy_zp, zendnn_u8);
         zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_u8s8s32ou8");
         aocl_gemm_u8s8s32ou8(order, transA, transB, m,
                              n, k, alpha, input,
@@ -1432,6 +1447,9 @@ void zenMatMul_gemm_u8s8s32oInt(
                               ldc, post_ops);
     }
     // Free memory for postops.
+    if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE && reorder_filter != NULL) {
+        free(reorder_filter);
+    }
     free_aocl_po_memory_int8(post_ops);
     free_cached_memory(zenEnvObj, is_allocated ? acc : NULL, zero_point_wei, new_scale);
 }
@@ -1539,7 +1557,7 @@ int matmul_int8_wrapper(
             zenINT8MatMulAlgoType::MATMUL_BLOCKED_AOCL_INT8) {
         int8_t zero_point_dst_8 = (int8_t)zero_point_dst;
         if (src_type == zendnn_s8) {
-            if (dst_type == zendnn_s8 || dst_type == zendnn_s32) {
+            if (dst_type == zendnn_s8 || dst_type == zendnn_u8 || dst_type == zendnn_s32) {
                 zenMatMul_gemm_s8s8s32oInt(zenEnvObj, ctx, thread_qty, Layout, transA, transB,
                                            M, K, N, alpha, (const int8_t *)src, lda, (const int8_t *)weights, ldb,
                                            (char *)bias, bias_type, po_ops, beta, (char *)dst, ldc, dst_type,
