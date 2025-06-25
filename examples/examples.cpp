@@ -17,6 +17,7 @@
 #include "tensor_example.hpp"
 #include "sample_example.hpp"
 #include "matmul_example.hpp"
+#include "batchmatmul_example.hpp"
 #include "reorder_example.hpp"
 #include "compare_op_example.hpp"
 #include "embedding_bag_example.hpp"
@@ -53,6 +54,18 @@ int main() {
   matmul_mul_silu_mul_f32_kernel_example();
   matmul_silu_mul_bf16_kernel_example();
   matmul_strided_f32_kernel_example();
+
+  /** BatchMatMul operator functionality examples.
+   *  Demonstrates fused post-ops, different data types computation,
+   */
+  batch_matmul_relu_f32_kernel_example();
+  batch_matmul_wei2d_relu_f32_kernel_example();
+  batch_matmul_inp2d_relu_f32_kernel_example();
+  batch_matmul_relu_bf16_kernel_example();
+  batch_matmul_relu_forced_ref_kernel_example();
+  batch_matmul_mul_silu_mul_f32_kernel_example();
+  batch_matmul_silu_mul_bf16_kernel_example();
+  batchmatmul_broadcast_example();
 
   /** Reorder operator functionality examples.
    *  Demonstrates reordering memory from contiguous to blocked format,

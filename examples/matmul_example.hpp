@@ -95,13 +95,14 @@ int matmul_strided_f32_kernel_example();
 int matmul_relu_forced_ref_kernel_example();
 
 /** @fn matmul_broadcast_example
- *  @brief Demonstrates matmul+relu fused operator reference kernel enforced by user.
+ *  @brief Demonstrates matmul+relu fused operator with broadcast.
  *
  *  matmul operator implements matrix multiplication on 2D tensors but weight is
  *  1D tensor and already is broadcasted . This operator can be fused with
  *  various post_ops.
  *
- *  This example demonstrates how an operator kernel can be forced by the user.
+ *  This example demonstrates how matmul operator is created for user-broadcasted
+ *  weight tensor and its execution.
  */
 int matmul_broadcast_example();
 

@@ -39,6 +39,9 @@ int seed = time(NULL);
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
 
+/** @brief matmul_test Data Structure(vector of structures) to hold random BatchMatmul Parameters */
+std::vector<BatchMatmulType> batchmatmul_test{};
+
 int main(int argc, char **argv) {
   //ToDO: Write a Command-line parser to avoid hardcodings in cmd arguments
   //Supported Postop
@@ -66,6 +69,8 @@ int main(int argc, char **argv) {
 
   //Creating Random parameters for Matmul
   matmul_test.resize(TEST_NUM);
+  //Creating Random parameters for BatchMatmul
+  batchmatmul_test.resize(TEST_NUM);
 
   ::testing :: InitGoogleTest(&argc, argv);
   gtest_argc = argc;

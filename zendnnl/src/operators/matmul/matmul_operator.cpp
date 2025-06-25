@@ -50,6 +50,16 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
                                              tensor_size[1] == output_size.at(1))) {
           continue;
         }
+        /** BMM postop check, Work only for 1D, 2D add tensor*/
+        //** Todo: support 3D add tensor*/
+        else if (tensor_size.size() == 1 && output_size.size()==3 &&
+                 tensor_size[0] == output_size.at(2) && op.binary_add_params.scale == 1.0) {
+          continue;
+        }
+        else if (tensor_size.size() == 2 && output_size.size()==3 &&
+                 (tensor_size[0] == output_size.at(1) && tensor_size[1] == output_size.at(2))) {
+          continue;
+        }
         else {
           apilog_error(add_tensor_obj->second.get_name(),
                        " Invalid post-op: size mismatch for binary_add post op.");
@@ -75,6 +85,16 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
         }
         else if (tensor_size.size() == 2 && (tensor_size[0] == output_size.at(0) &&
                                              tensor_size[1] == output_size.at(1))) {
+          continue;
+        }
+        /** BMM postop check, Work only for 1D, 2D mul tensor*/
+        //** Todo: support 3D add tensor*/
+        else if (tensor_size.size() == 1 && output_size.size()==3 &&
+                 tensor_size[0] == output_size.at(2) && op.binary_mul_params.scale == 1.0) {
+          continue;
+        }
+        else if (tensor_size.size() == 2 && output_size.size()==3 &&
+                 (tensor_size[0] == output_size.at(1) && tensor_size[1] == output_size.at(2))) {
           continue;
         }
         else {
@@ -117,22 +137,48 @@ status_t matmul_operator_t::validate() {
     return status_t::failure;
   }
 
-  if ((input_size.size() != 2) || (output_size.size() != 2)) {
-    apilog_error("Input or output size is not valid");
+  bool is_mm_sizes = (input_size.size() == 2 && weights_size.size() == 2 &&
+                      output_size.size() == 2);
+  bool is_bmm_sizes = (((input_size.size() == 3 && (weights_size.size() == 2 ||
+                         weights_size.size() == 3)) ||
+                        ((input_size.size() == 2 || input_size.size() == 3) &&
+                         weights_size.size() == 3)) && output_size.size() == 3);
+
+  //Input and Output Size Check
+  if (!is_mm_sizes && !is_bmm_sizes) {
+    apilog_error("input, weight or output size is not valid");
     return status_t::failure;
   }
 
-  if (input_size.at(0) != output_size.at(0)) {
-    apilog_error("Input and output size mismatch at dim - 0");
+  //Input and Output Dimension Check
+  if (input_size.size()==3 && input_size.at(0) != output_size.at(0)) {
+    apilog_error("Input and output size mismatch at dim - 0 for batchMatmul");
     return status_t::failure;
   }
 
-  if (input_size.at(1) != weights_size.at(0)) {
+
+  if (input_size.at(input_size.size()-2) != output_size.at(
+        output_size.size()-2)) {
+    apilog_error("Input and output size mismatch at output dim - ",
+                 output_size.size()-2," for matmul/batchMatmul");
+    return status_t::failure;
+  }
+
+  //Input and Weight Dimension check
+  if (input_size.at(input_size.size()-1) != weights_size.at(
+        weights_size.size()-2)) {
     apilog_error("Dimension mismatch with input and weights");
     return status_t::failure;
   }
 
-  if (weights_size.at(1) != output_size.at(1)) {
+  //Weight and Output Dimension Check
+  if (weights_size.size()==3 && weights_size.at(0) != output_size.at(0)) {
+    apilog_error("weights and output size mismatch at dim - 0 for batchMatmul");
+    return status_t::failure;
+  }
+
+  if (weights_size.at(weights_size.size()-1) != output_size.at(
+        output_size.size()-1)) {
     apilog_error("Dimension mismatch with weights and output");
     return status_t::failure;
   }
@@ -287,6 +333,7 @@ std::string matmul_operator_t::op_execute_info() {
 
 status_t matmul_operator_t::kernel_factory() {
   LOG_DEBUG_INFO("<", get_name(), "> Executing kernel factory matmul_operator_t");
+  auto weight_tensor  = context.get_param("weights").value();
   auto weight_dtype   = context.get_param("weights")->get_data_type();
   auto input_dtype    = get_input("matmul_input")->get_data_type();
   auto output_dtype   = get_output("matmul_output")->get_data_type();
@@ -294,6 +341,12 @@ status_t matmul_operator_t::kernel_factory() {
   //get forced kernel if any
   if (forced_kernel.empty() || forced_kernel == "aocl_blis_blocked" ||
       forced_kernel == "aocl_blis") {
+    /**TODO: check Use of blocked BMM weights with new AOCL BMM API */
+    if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_blis_blocked") {
+      apilog_error("<", name, "> kernel unimplemented using aocl_blis_blocked.");
+      return status_t::unimplemented;
+    }
+
     /**TODO: move the preprocess to specific kernel */
     if (preprocess() != status_t::success) {
       return status_t::failure;

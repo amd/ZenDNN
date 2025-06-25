@@ -102,26 +102,42 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   void *output                 = output_tensor.get_raw_handle_unsafe();
   void *weights                = weight_tensor.get_raw_handle_unsafe();
 
-  const int M                  = input_tensor.get_size(0);
-  const int K                  = input_tensor.get_size(1);
-  const int N                  = output_tensor.get_size(1);
-
-  bool is_trans_src            = input_tensor.get_order() == "ba";
-  bool is_trans_weights        = weight_tensor.get_order() == "ba";
+  auto input_dim               = input_tensor.get_dim();
+  auto weight_dim              = weight_tensor.get_dim();
+  auto output_dim              = output_tensor.get_dim();
 
   auto input_dtype             = input_tensor.get_data_type();
   auto weight_dtype            = weight_tensor.get_data_type();
   auto output_dtype            = output_tensor.get_data_type();
 
-  const int   lda              = is_trans_src ? input_tensor.get_stride(
-                                   1) : input_tensor.get_stride(0);
-  const int   ldb              = is_trans_weights ? weight_tensor.get_stride(
-                                   1) : weight_tensor.get_stride(0);
-  const int   ldc              = output_tensor.get_stride(0);
+  bool is_transpose_src        = (input_dim == 2)  ? (input_tensor.get_order() ==
+                                 "ba") : (input_tensor.get_order() == "acb");
+  bool is_transpose_weights    = (weight_dim == 2) ? (weight_tensor.get_order() ==
+                                 "ba") : (weight_tensor.get_order() == "acb");
+
+  const int batch_size         = (output_dim==3) ? output_tensor.get_size(
+                                   output_dim-3) : 1;
+  const int M                  = output_tensor.get_size(output_dim-2);
+  const int K                  = input_tensor.get_size(input_dim-1);
+  const int N                  = output_tensor.get_size(output_dim-1);
+
+  const int   lda              = is_transpose_src ?
+                                 input_tensor.get_stride(input_dim-1) :
+                                 input_tensor.get_stride(input_dim-2);
+  const int   ldb              = is_transpose_weights ?
+                                 weight_tensor.get_stride(weight_dim-1):
+                                 weight_tensor.get_stride(weight_dim-2);
+  const int   ldc              = output_tensor.get_stride(output_dim-2);
+
+  unsigned int offset_src      = (input_dim == 3) ? input_tensor.get_stride(
+                                   input_dim-3) : 0;
+  unsigned int offset_wei      = (weight_dim == 3) ? weight_tensor.get_stride(
+                                   weight_dim-3) : 0;
+  unsigned int offset_out      = (output_dim == 3) ? M*N : 0;
 
   // Interim accumaltion buffer with float type
   float *output_buff_f32       = (float *)aligned_alloc(64,
-                                 M * N * sizeof(float));
+                                 batch_size * M * N * sizeof(float));
 
   auto optional_bias_tensor        = context_.get_param("bias");
   [[maybe_unused]] void *bias      = nullptr;
@@ -132,46 +148,53 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
     bias_dtype                 = bias_tensor.get_data_type();
   }
 
-  for (auto i = 0; i < M; ++i) {
-    for (auto j = 0; j < N; ++j) {
-      float sum = 0.0f;
-      size_t op_idx = i*ldc + j;
-      for (auto k = 0; k < K; ++k) {
-        size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
-        size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
-        if (input_dtype == data_type_t::f32) {
-          if (weight_dtype == data_type_t::f32) {
-            sum += ((float *)input)[ip_idx] * ((float *)weights)[wt_idx];
+  #pragma omp parallel for num_threads(batch_size)
+  for (auto bs = 0; bs < batch_size; ++bs) {
+    for (auto i = 0; i < M; ++i) {
+      for (auto j = 0; j < N; ++j) {
+        float sum = 0.0f;
+        size_t op_idx = bs*offset_out + i*ldc + j;
+        for (auto k = 0; k < K; ++k) {
+          size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j*ldb + k) :
+                          (bs * offset_wei + k*ldb + j);
+          size_t ip_idx = is_transpose_src ? (bs * offset_src + k*lda + i) :
+                          (bs * offset_src + i*lda + k);
+          if (input_dtype == data_type_t::f32) {
+            if (weight_dtype == data_type_t::f32) {
+              sum += ((float *)input)[ip_idx] * ((float *)weights)[wt_idx];
+            }
+            else {
+              sum += ((float *)input)[ip_idx] * bf16_to_float(((int16_t *)
+                     weights)[wt_idx]);
+            }
           }
           else {
-            sum += ((float *)input)[ip_idx] * bf16_to_float(((int16_t *)weights)[wt_idx]);
+            if (weight_dtype == data_type_t::f32) {
+              sum += bf16_to_float(((int16_t *)input)[ip_idx]) * ((
+                       float *)weights)[wt_idx];
+            }
+            else {
+              sum += bf16_to_float(((int16_t *)input)[ip_idx]) * bf16_to_float(((
+                       int16_t *)weights)[wt_idx]);
+            }
           }
         }
-        else {
-          if (weight_dtype == data_type_t::f32) {
-            sum += bf16_to_float(((int16_t *)input)[ip_idx]) * ((float *)weights)[wt_idx];
-          }
-          else {
-            sum += bf16_to_float(((int16_t *)input)[ip_idx]) * bf16_to_float(((
-                     int16_t *)weights)[wt_idx]);
-          }
+        if (alpha != 1.0f) {
+          sum *= alpha;
         }
-      }
-      if (alpha != 1.0f) {
-        sum *= alpha;
-      }
-      if (beta) {
-        sum += output_dtype == data_type_t::bf16 ? bf16_to_float(((
-                 int16_t *)output)[op_idx]) * beta : ((float *)output)[op_idx] * beta;
-      }
+        if (beta) {
+          sum += output_dtype == data_type_t::bf16 ? bf16_to_float(((
+                   int16_t *)output)[op_idx]) * beta : ((float *)output)[op_idx] * beta;
+        }
 
-      output_buff_f32[op_idx] = sum;
-      if (optional_bias_tensor) {
-        if (bias_dtype == data_type_t::f32) {
-          output_buff_f32[op_idx] += ((float *)bias)[j];
-        }
-        else if (bias_dtype == data_type_t::bf16) {
-          output_buff_f32[op_idx] += bf16_to_float(((int16_t *)bias)[j]);
+        output_buff_f32[op_idx] = sum;
+        if (optional_bias_tensor) {
+          if (bias_dtype == data_type_t::f32) {
+            output_buff_f32[op_idx] += ((float *)bias)[j];
+          }
+          else if (bias_dtype == data_type_t::bf16) {
+            output_buff_f32[op_idx] += bf16_to_float(((int16_t *)bias)[j]);
+          }
         }
       }
     }

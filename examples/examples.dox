@@ -6,4 +6,5 @@
 /** @example compare_op_example.cpp */
 /** @example reorder_example.cpp */
 /** @example matmul_example.cpp */
+/** @example batchmatmul_example.cpp */
 // /** @} */

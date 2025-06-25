@@ -49,7 +49,7 @@ std::vector<uint32_t> generate_offsets(size_t batch_size) {
 }
 
 std::vector<uint32_t> indices = generate_random_indices(INDICES_SIZE);
-std::vector<uint32_t> offsets = generate_offsets(BATCH_SIZE);
+std::vector<uint32_t> offsets = generate_offsets(EMB_BATCH_SIZE);
 
 int embedding_bag_f32_kernel_example() {
 
@@ -88,18 +88,18 @@ int embedding_bag_f32_kernel_example() {
                           data_type_t::s32,
                           indices, "indices");
 
-    auto offsets_tensor = tensor_factory.non_uniform_tensor({BATCH_SIZE},
+    auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
                           data_type_t::s32,
                           offsets, "offsets");
 
-    auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, EMB_DIM},
+    auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
                          data_type_t::f32, "output");
 
     status = embedding_bag_operator
              .set_input("indices", indices_tensor)
              .set_input("offsets", offsets_tensor)
              .set_output("output", output_tensor)
-             .execute();    
+             .execute();
 
     if (status == status_t::success) {
       testlog_info("<",embedding_bag_operator.get_name(),">",
@@ -157,11 +157,11 @@ int embedding_bag_f32_forced_ref_kernel_example() {
                           data_type_t::s32,
                           indices, "indices");
 
-    auto offsets_tensor = tensor_factory.non_uniform_tensor({BATCH_SIZE},
+    auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
                           data_type_t::s32,
                           offsets, "offsets");
 
-    auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, EMB_DIM},
+    auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
                          data_type_t::f32, "output");
 
     status = embedding_bag_operator

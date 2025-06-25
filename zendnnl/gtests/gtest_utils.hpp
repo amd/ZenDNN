@@ -31,6 +31,8 @@
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 1000
+#define BATCH_START 1
+#define BATCH_END 256
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
@@ -53,6 +55,13 @@ struct MatmulType {
   MatmulType();
 };
 
+/** @brief BatchMatmul Op Parameters Structure */
+struct BatchMatmulType {
+  uint64_t batch_size;
+  MatmulType mat{};
+  BatchMatmulType();
+};
+
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
@@ -61,6 +70,7 @@ extern const uint32_t TEST_NUM;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern std::vector<MatmulType> matmul_test;
+extern std::vector<BatchMatmulType> batchmatmul_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -137,5 +147,14 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
                        uint64_t n, const float tol, bool &flag);
+
+/** @fn compare_tensor_3D
+ *  @brief Function to compare two 3D tensor
+ *
+ * */
+// ToDO: Replace with comparator operator
+void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
+                       uint64_t batch_size, uint64_t m, uint64_t n,
+                       const float tol, bool &flag);
 
 #endif

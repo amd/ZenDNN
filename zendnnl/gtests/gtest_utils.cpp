@@ -32,6 +32,10 @@ MatmulType::MatmulType() {
   beta     = dist(gen);
 }
 
+BatchMatmulType::BatchMatmulType() {
+  batch_size = BATCH_START + rand() % BATCH_END;
+}
+
 bool is_binary_postop(const std::string post_op) {
   return post_op == "binary_add" || post_op == "binary_mul";
 }
@@ -67,8 +71,15 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
                   .set_size(size_)
                   .set_data_type(dtype_)
                   .set_storage();
-  if (trans) {
-    udtensor.set_order("ba");
+
+  auto tensor_dim = udtensor.get_dim();
+  if (trans && tensor_dim >=2) {
+    std::string tag;
+    for (size_t i=0; i<tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    udtensor.set_order(tag);
   }
   udtensor.create();
 
@@ -399,6 +410,32 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
         if ((abs_err >= tol) && (rel_err >= tol)) {
           log_verbose("actual(",i,",",j,"): ",actual_val," , ref(",i,",",j,"): ",ref_val);
           is_comparison_successful = false;
+        }
+      }
+    }
+  }
+  return;
+}
+
+void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
+                       uint64_t batch_size, uint64_t m, uint64_t n,
+                       const float tol, bool &is_comparison_successful) {
+  #pragma omp parallel for collapse(3)
+  for (uint64_t bs=0; bs<batch_size; ++bs) {
+    for (uint64_t i=0; i<m; ++i) {
+      for (uint64_t j=0; j<n; ++j) {
+        if (is_comparison_successful) {
+          float actual_val = output_tensor.at({bs,i,j});
+          float ref_val = output_tensor_ref.at({bs,i,j});
+
+          float abs_err = abs(ref_val - actual_val);
+          float rel_err = abs_err / (ref_val + std::numeric_limits<float>::epsilon());
+
+          if ((abs_err >= tol) && (rel_err >= tol)) {
+            log_verbose("actual(",bs,",",i,",",j,"): ",actual_val," , ref(",bs,",",i,",",j,
+                        "): ",ref_val, ", abs_err: ", abs_err, " , rel_err: ", rel_err, " ,tol: ",tol);
+            is_comparison_successful = false;
+          }
         }
       }
     }

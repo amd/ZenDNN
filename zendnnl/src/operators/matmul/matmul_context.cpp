@@ -58,19 +58,18 @@ status_t matmul_context_t::validate() {
   }
 
   auto weights_size = weights->get_size();
-  if (weights_size.size() != 2) {
+  if (weights_size.size() != 2 && weights_size.size() != 3) {
     apilog_error("Weights size is not valid");
     return status_t::failure;
   }
 
   if (bias) {
     auto bias_size = bias->get_size();
-    if (weights_size.at(1) != bias_size.at(0)) {
+    if (weights_size.at(weights_size.size()-1) != bias_size.at(0)) {
       apilog_error("Bias size mismatch with weights");
       return status_t::failure;
     }
   }
-
   return status_t::success;
 }
 

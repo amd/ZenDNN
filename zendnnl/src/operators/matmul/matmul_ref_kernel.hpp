@@ -21,6 +21,7 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <omp.h>
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
 #include "matmul_context.hpp"

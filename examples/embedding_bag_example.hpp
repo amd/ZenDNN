@@ -24,7 +24,7 @@
 
 #define  EMB_ROW 100
 #define  EMB_DIM 256
-#define  BATCH_SIZE 10
+#define  EMB_BATCH_SIZE 10
 #define  INDICES_SIZE 20
 
 namespace zendnnl {

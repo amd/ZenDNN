@@ -30,7 +30,8 @@ if(ZENDNNL_BUILD_GTEST)
     gtest_main.cpp
     gtest_utils.cpp
     test_matmul.cpp
-    test_reorder.cpp)
+    test_reorder.cpp
+    test_batchmatmul.cpp)
 
   set(gtests_headers
     gtest_utils.hpp)
