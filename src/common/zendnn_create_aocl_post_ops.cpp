@@ -149,18 +149,20 @@ aocl_post_op *create_aocl_post_ops(const exec_ctx_t &ctx,
             (post_ops->sum + scale_index)->zero_point = NULL;
 
             (post_ops->sum + scale_index)->scale_factor = malloc(sizeof(float));
-            (post_ops->sum + scale_index)->zero_point = malloc(sizeof(int16_t));
+            (post_ops->sum + scale_index)->zero_point = malloc(sizeof(float));
 
             //SCALE
             float *temp_dscale_ptr = (float *)(post_ops->sum + scale_index)->scale_factor;
-            int16_t *temp_dzero_point_ptr = (int16_t *)(post_ops->sum +
+            float *temp_dzero_point_ptr = (float *)(post_ops->sum +
                                             scale_index)->zero_point;
             temp_dscale_ptr[0] = (float)(scale[0]);
 
-            temp_dzero_point_ptr[0] = (int16_t)0;
+            temp_dzero_point_ptr[0] = (float)0.0;
 
             (post_ops->sum + scale_index)->scale_factor_len = 1;
             (post_ops->sum + scale_index)->zero_point_len = 1;
+            (post_ops->sum + scale_index)->sf_stor_type = AOCL_GEMM_F32;
+            (post_ops->sum + scale_index)->zp_stor_type = AOCL_GEMM_F32;
             scale_index++;
         }
         //Get count of eltwise and binary post-ops

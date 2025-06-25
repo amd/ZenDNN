@@ -172,8 +172,10 @@ int ref_woq_bf16(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const) {
-        free(reorder_weights);
+    if (!is_weights_const || weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE ||
+        weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
+        if (reorder_weights != NULL)
+            free(reorder_weights);
     }
     return 0;
 }
@@ -285,8 +287,10 @@ int ref_woq_f32(
         free(post_ops->seq_vector);
         free(post_ops);
     }
-    if (!is_weights_const) {
-        free(reorder_weights);
+    if (!is_weights_const || weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE ||
+        weight_cache_type > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
+        if (reorder_weights != NULL)
+            free(reorder_weights);
     }
     return 0;
 }
@@ -684,8 +688,11 @@ int aocl_woq_bf16(
         free(post_ops->pre_ops);
         free(post_ops);
     }
-    if (!is_weights_const && reorder_weights != NULL) {
-        free(reorder_weights);
+    // Free reorder_weights buffer if anything other than WEIGHT_CACHE_OUT_OF_PLACE
+    if (!is_weights_const || weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE ||
+        weight_cache_type >= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE) {
+        if (reorder_weights != NULL)
+            free(reorder_weights);
     }
     return 0;
 }
