@@ -25,37 +25,37 @@ namespace zendnn {
 
 
 // Constants for polynomial approximation of erf
-#define lpgemm_erf_c0 0x1.20dd7890d27e1cec99fce48c29cp0
-#define lpgemm_erf_c1 -0x1.ab4bed70f238422edeeba9c558p-16
-#define lpgemm_erf_c2 -0x1.80a1bd5878e0b0689c5ff4fcdd4p-2
-#define lpgemm_erf_c3 -0x1.07cb4cde6a7d9528c8a732990e4p-8
-#define lpgemm_erf_c4 0x1.092cba598f96f00ddc5854cf7cp-3
-#define lpgemm_erf_c5 -0x1.51f0ce4ac87c55f11f685864714p-5
-#define lpgemm_erf_c6 0x1.4101f320bf8bc4d41c228faaa6cp-5
-#define lpgemm_erf_c7 -0x1.2300882a7d1b712726997de80ep-4
-#define lpgemm_erf_c8 0x1.d45745fff0e4b6d0604a9ab6284p-5
-#define lpgemm_erf_c9 -0x1.9eb1491956e31ded96176d7c8acp-6
-#define lpgemm_erf_c10 0x1.b9183fc75d326b9044bc63c9694p-8
-#define lpgemm_erf_c11 -0x1.10e8f8c89ad8645e7d769cd596cp-10
-#define lpgemm_erf_c12 0x1.224ffc80cc19957a48ecedad6c8p-14
-#define lpgemm_erf_c13 0x1.12a30f42c71308321e7e7cb0174p-18
-#define lpgemm_erf_c14 -0x1.155445e2e006723066d72d22ddcp-20
-#define lpgemm_erf_c15 0x1.c6a4181da4ef76f22bd39bb5dcp-25
+#define lpgemm_erf_c0 1.1283793786592402
+#define lpgemm_erf_c1 -2.5468861568875563e-05
+#define lpgemm_erf_c2 -0.3756169877289898
+#define lpgemm_erf_c3 -0.004025179163741976
+#define lpgemm_erf_c4 0.12947984300439994
+#define lpgemm_erf_c5 -0.0412525204794885
+#define lpgemm_erf_c6 0.03918550001070417
+#define lpgemm_erf_c7 -0.07104542913277255
+#define lpgemm_erf_c8 0.05717052146749476
+#define lpgemm_erf_c9 -0.025310822854733135
+#define lpgemm_erf_c10 0.0067305713376882076
+#define lpgemm_erf_c11 -0.0010410692067591445
+#define lpgemm_erf_c12 6.921588102382636e-05
+#define lpgemm_erf_c13 4.092409485758739e-06
+#define lpgemm_erf_c14 -1.033131746125426e-06
+#define lpgemm_erf_c15 5.2927177513236435e-08
 
 // Polynomial coefficients for exp approximation
-#define lpgemm_exp_c0 0x1.0000014439a91p0
-#define lpgemm_exp_c1 0x1.62e43170e3344p-1
-#define lpgemm_exp_c2 0x1.ebf906bc4c115p-3
-#define lpgemm_exp_c3 0x1.c6ae2bb88c0c8p-5
-#define lpgemm_exp_c4 0x1.3d1079db4ef69p-7
-#define lpgemm_exp_c5 0x1.5f8905cb0cc4ep-10
+#define lpgemm_exp_c0 1.0000000754895704
+#define lpgemm_exp_c1 0.6931472254087585
+#define lpgemm_exp_c2 0.2402210737432219
+#define lpgemm_exp_c3 0.05550297297702539
+#define lpgemm_exp_c4 0.009676036358193323
+#define lpgemm_exp_c5 0.001341000536524434
 
 // Constants for exp function
-#define TBL_LN2 0x1.71547652b82fep+0
-#define EXPF_HUGE 0x1.8p+23
-#define EXPF_MIN -88.0f
-#define EXPF_MAX 88.0f
-#define sign -2147483648
+#define TBL_LN2 1.4426950408889634
+#define EXPF_HUGE 12582912.0
+#define EXPF_MIN -136.0
+#define EXPF_MAX 136.0
+#define sign -142929835592.0
 
 void transpose_matrix(float *input, float *output, int N, int K) {
 

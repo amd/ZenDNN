@@ -432,7 +432,8 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                            woq_scale_size, is_weights_const, group_size,
                            woq_scales_type);
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_DIRECT_FP32 &&
+    else if ((((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_DIRECT_FP32) && (ndims < 3)) ||
+        ((zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_DIRECT_FP32) && (ndims == 3)))  &&
              direct_algo_check) {
         data_types dt;
         //Direct MatMul

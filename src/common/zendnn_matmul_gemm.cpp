@@ -503,56 +503,62 @@ void run_aocl_batch_gemm(
     char order,
     char transa,
     char transb,
-    int batch_size,
+    const int batch_size_,
     int group_count,
-    const int M,
-    const int N,
-    const int K,
+    const int M_,
+    const int N_,
+    const int K_,
     const float alpha,
     const float beta,
     const float **src,
     const float **weight,
     float **dst,
-    const int lda,
-    const int ldb,
-    const int ldc,
+    const int lda_,
+    const int ldb_,
+    const int ldc_,
     const float *bias,
     const impl::post_ops_t &po_ops
 ) {
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
+    aocl_post_op *post_ops = NULL;
+    float dummy_scale = 1.0f;
+    dim_t eltwise_index = 0;
+    create_post_ops_fp32(post_ops, ctx, po_ops, bias, alpha, N_, thread_qty,
+                            eltwise_index, dummy_scale);
+    char mem_format_a = 'n';
+    char mem_format_b = 'n';
+    const dim_t batch_size = batch_size_;
+    const dim_t M = M_;
+    const dim_t N = N_;
+    const dim_t K = K_;
+    const dim_t lda = lda_;
+    const dim_t ldb = ldb_;
+    const dim_t ldc = ldc_;
 
-    for (int group_idx = 0; group_idx < group_count; ++group_idx) {
-        int binary_idx =  po_ops.find(impl::primitive_kind::binary);
-        aocl_post_op *post_ops = nullptr;
-        float dummy_scale = 1.0f;
-        dim_t eltwise_index;
-        create_post_ops_fp32(post_ops, ctx, po_ops, bias, alpha, N, thread_qty,
-                             eltwise_index, dummy_scale);
+    zendnnVerbose(ZENDNN_PROFLOG,
+                    "Using AOCL GEMM API: aocl_batch_gemm_f32f32f32of32");
+    aocl_batch_gemm_f32f32f32of32(&order,
+                                &transa,
+                                &transb,
+                                &M,
+                                &N,
+                                &K,
+                                &alpha,
+                                src,
+                                &lda,
+                                weight,
+                                &ldb,
+                                &beta,
+                                dst,
+                                &ldc,
+                                group_count,
+                                &batch_size,
+                                &mem_format_a,
+                                &mem_format_b,
+                                &post_ops);
 
-        zendnnVerbose(ZENDNN_PROFLOG,
-                      "Using AOCL GEMM API: aocl_batch_gemm_f32f32f32of32");
-        //TODO: Uncomment after AOCL update API.
-        // aocl_batch_gemm_f32f32f32of32(order,
-        //                             transa,
-        //                             transb,
-        //                             batch_size,
-        //                             M,
-        //                             N,
-        //                             K,
-        //                             alpha,
-        //                             src,
-        //                             lda,
-        //                             'n',
-        //                             weight,
-        //                             ldb,
-        //                             'n',
-        //                             beta,
-        //                             dst,
-        //                             ldc,
-        //                             post_ops);
-        // Free memory for postops.
-        clear_post_ops_memory(post_ops, alpha, eltwise_index);
-    }
+    //Free memory for postops.
+    clear_post_ops_memory(post_ops, alpha, eltwise_index);
 }
 
 void zenMatMul(
@@ -590,11 +596,20 @@ void zenMatMul(
         return;
     }
     //TO-DO: Need to update this comment after bug fix from AOCL team
-    if (false) {
-        // run_aocl_batch_gemm(ctx, zenEnvObj, Layout ? 'r' : 'c',
-        //                     transpose_input ? 't' : 'n', transpose_filter ? 't' : 'n',
-        //                     batch_size, group_count, no_of_images, no_of_filters, no_of_channels, alpha, beta,
-        //                     A_Array.data(), B_Array.data(), C_Array.data(), lda, ldb, ldc, bias, po_ops);
+    if (zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_AOCL_FP32) {
+        std::vector<const float *> A_Array(batch_size);
+        std::vector<const float *> B_Array(batch_size);
+        std::vector<float *> C_Array(batch_size);
+
+        for (int i=0; i<batch_size; ++i) {
+            A_Array[i] = input + input_offsets[i];
+            B_Array[i] = filter + weights_offsets[i];
+            C_Array[i] = output + dst_offsets[i];
+        }
+        run_aocl_batch_gemm(ctx, zenEnvObj, Layout ? 'r' : 'c',
+                            transpose_input ? 't' : 'n', transpose_filter ? 't' : 'n',
+                            batch_size, 1, no_of_images, no_of_filters, no_of_channels, alpha, beta,
+                            A_Array.data(), B_Array.data(), C_Array.data(), lda, ldb, ldc, bias, po_ops);
     }
     else {
         zenBatchMatMul(ctx, po_ops, Layout, transpose_input, transpose_filter,
@@ -605,7 +620,6 @@ void zenMatMul(
                        batch_size,
                        bias);
     }
-
 }
 
 void zenMatMulWithBias(
@@ -844,8 +858,7 @@ void zenBatchMatMulSplitV2(const impl::exec_ctx_t &ctx,
     int src_d = source_d.dims()[source_d.ndims() - 3];
     uint offset_src = TransA ? lda * K : M * lda;
     uint offset_wei = TransB ? ldb * N : K * ldb;
-    if (thread_qty == 1  ||
-            (zenEnvObj.zenBMMalgo == zenMatMulAlgoType::MATMUL_AOCL_FP32)) {
+    if (thread_qty == 1) {
         zendnnVerbose(ZENDNN_PROFLOG, "Running Single threaded BMM");
         for (int j=0; j<batch_size; j++) {
             aocl_gemm_f32f32f32of32(Layout? 'r' : 'c',
