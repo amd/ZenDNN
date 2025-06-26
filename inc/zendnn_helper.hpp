@@ -224,7 +224,7 @@ class zendnnEnv {
         }
         zenBMMalgo = zendnn_getenv_int("ZENDNN_BMM_ALGO",
                                        zenMatMulAlgoType::MATMUL_JIT_FP32);
-        if (zenBMMalgo>zenMatMulAlgoType::MATMUL_DIRECT_FP32 &&
+        if (zenBMMalgo>zenMatMulAlgoType::MATMUL_DIRECT_FP32 ||
                 zenBMMalgo<zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
             zenBMMalgo = zenMatMulAlgoType::MATMUL_JIT_FP32;
         }
