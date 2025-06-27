@@ -749,6 +749,16 @@ enum class ActivationPostOp {
     SILU
 };
 
+struct data_types{
+    zendnn_data_type_t src_dt, wei_dt, bia_dt, dst_dt;
+    //default values
+    data_types(zendnn_data_type_t src = zendnn_f32,
+               zendnn_data_type_t wei = zendnn_f32,
+               zendnn_data_type_t bia = zendnn_f32,
+               zendnn_data_type_t dst = zendnn_f32)
+        : src_dt(src), wei_dt(wei), bia_dt(bia), dst_dt(dst) {}
+};
+
 class zendnn_custom_op {
 
   public:
@@ -873,8 +883,8 @@ class zendnn_custom_op {
                                            const std::vector<int> &group_size_array);
 
     static void zendnn_matmul_direct_fp32(const void *src, const void *weight,
-                                          void *dst, void *bias, float alpha, float beta,
-                                          int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc,
+                                          void *dst, const void *bias,  float alpha, float beta,
+                                          int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc, data_types dt,
                                           ActivationPostOp post_op,
                                           int Batch_A=1, int Batch_B=1);
 
