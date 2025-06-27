@@ -13,9 +13,9 @@ Practical examples from `reorder_example.cpp` demonstrate these configurations, 
 
 Let:
 
-- \f$B \in \mathbb{R}^{K \times N}\f$
-- \f$\text{Backend}(x)\f$: Backend for reorder computation (Example: AOCL, OneDNN)
-- \f$\text{Data type}\f$: Supported datatypes for reorder (Example: FP32, BF16)
+- \( B \in \mathbb{R}^{K \times N} \)
+- \( \text{Backend}(x) \): Backend used for reorder computation (e.g., AOCL, OneDNN)
+- \( \text{Data type} \): Supported data types for reorder (e.g., FP32, BF16)
 
 ## Steps to Perform Reorder Operation
 

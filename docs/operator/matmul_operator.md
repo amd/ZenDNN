@@ -8,19 +8,17 @@
 This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32 and BF16 data types, bias addition, and a range of post-operations including activations (ReLU, Sigmoid, Tanh, GELU, SiLU) and binary ops (Add, Mul, Mul+Add). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example` and `matmul_mul_silu_mul_f32_kernel_example`, which performs FP32 matmul with activation and binary post-op.
 
 
-## General MatMul Operation
+# General MatMul Operation
 
 Let:
 
-- \f$A \in \mathbb{R}^{M \times K}\f$  
-- \f$B \in \mathbb{R}^{K \times N}\f$  
-- \f$\text{Bias} \in \mathbb{R}^{1 \times N}\f$ 
-- \f$\text{Activation}(x)\f$: optional activation function (Example: ReLU, GELU)  
-- \f$\text{BinaryOp}(x, y)\f$: optional binary post-operation (Example: element-wise add/mul with another matrix)  
-- \f$D \in \mathbb{R}^{M \times N}\f$: optional second operand for binary op  
-- \f$C \in \mathbb{R}^{M \times N}\f$: the result
-
-
+- \( A \in \mathbb{R}^{M \times K} \)
+- \( B \in \mathbb{R}^{K \times N} \)
+- \( \text{Bias} \in \mathbb{R}^{1 \times N} \)
+- \( \text{Activation}(x) \): optional activation function (Example: ReLU, GELU)
+- \( \text{BinaryOp}(x, y) \): optional binary post-operation (Example: element-wise add/mul with another matrix)
+- \( D \in \mathbb{R}^{M \times N} \): optional second operand for binary op
+- \( C \in \mathbb{R}^{M \times N} \): the result
 
 The computation can be expressed as:
 
@@ -28,35 +26,32 @@ $$
 C = \text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D)
 $$
 
-
 ## Steps to Perform MatMul Operation
 
-1. **Matrix Multiplication**:
+1. **Matrix Multiplication**:  
    $$
    Z = A \times B
    $$
 
-2. **Bias Addition (if present)**:
+2. **Bias Addition (if present)**:  
    $$
    Z = Z + \text{Bias}
    $$
 
-3. **Activation Function (if present)**:
+3. **Activation Function (if present)**:  
    $$
    Z = \text{Activation}(Z)
    $$
 
-4. **Binary Post-Op (if present)**:
+4. **Binary Post-Op (if present)**:  
    $$
    Z = \text{BinaryOp}(Z, D)
    $$
 
-5. **Store Result**:
+5. **Store Result**:  
    $$
    C = Z
    $$
-
-
 
 ## Example with ReLU and Add Post-Op
 
@@ -69,19 +64,31 @@ $$
 
 
 
-# MatMul Support Table
+# MatMul Operation Support Overview
 
-This table outlines the support for MatMul operations with various data types, bias, and post-operations.
+This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
 
-| Src Data Type | Weight Data Type | Output Data Type | Bias | Activation | Binary Post-Op |
-|---------------|------------------|------------------|------|------------|----------------|
-| FP32          | FP32             | FP32             | Yes  | ReLU       | Add            |
-| BF16          | BF16             | FP32, BF16       | Yes  | Sigmoid    | Mul            |
-|               |                  |                  |      | Tanh       | Mul+Add        |
-|               |                  |                  |      | GELU (erf) |                |
-|               |                  |                  |      | GELU (tanh)|                |
-|               |                  |                  |      | SiLU       |                |
-|               |                  |                  |      | SiLU+Mul   |                |
+- **Bias Handling**: Bias is typically applied **per channel**, meaning a unique bias value is added to each output feature or channel. This is common in neural network layers to allow each output unit to learn an independent offset.
+
+- **Binary Post-Operations**: These are additional element-wise operations applied after the MatMul and optional activation. They are supported in two forms:
+  - **Per-channel**: For example, adding a vector to each column of the output matrix.
+  - **Full matrix (element-wise) additions**: For example, adding a matrix of the same shape as the output.
+
+- **Activation Functions**: A variety of activation functions can be applied after the MatMul and bias steps, including ReLU, Sigmoid, Tanh, GELU (both erf and tanh variants), and SiLU. These functions introduce non-linearity into the model, which is essential for learning complex patterns.
+
+- **Flexible Composition**: Any combination or sequence of activation functions and binary post-operations can be applied, allowing for highly customizable and expressive computation pipelines.
+
+## Supported Configurations
+
+| Src<br>Data Type | Weight<br>Data Type | Output<br>Data Type | Bias | Activation     | Binary<br>Post-Op |
+|------------------|---------------------|----------------------|------|----------------|--------------------|
+| FP32             | FP32                | FP32                 | Yes  | ReLU           | Add                |
+| BF16             | BF16                | FP32, BF16           | Yes  | Sigmoid        | Mul                |
+|                  |                     |                      |      | Tanh           |                    |
+|                  |                     |                      |      | GELU (erf)     |                    |
+|                  |                     |                      |      | GELU (tanh)    |                    |
+|                  |                     |                      |      | SiLU           |                    |
+
 
 
 
@@ -93,14 +100,14 @@ This example performs matrix multiplication with `float32 (f32)` data types, app
 
 **Key Components**
 
-- **Weights and Bias Initialization**  
-  - Weights: Uniform tensor with dimensions `{MATMUL_K, MATMUL_N}`  
+- **Weights and Bias Initialization** 
+  - Weights: Uniform tensor with dimensions `{MATMUL_K, MATMUL_N}`
   - Bias: Uniform tensor with dimensions `{MATMUL_N}`
 
-- **Post-Operation**  
+- **Post-Operation**
   - Applies the ReLU operation on the result.
 
-- **Execution**  
+- **Execution**
   - Performs the matrix multiplication, sets the input and output tensors, and executes the operator.
 
 
