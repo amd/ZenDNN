@@ -47,15 +47,8 @@ using dt = memory::data_type;
 
 #define PERF    0
 #define INPUT_FILE 0
+#define ENABLE_BF16 1
 
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <random>
-
-#include <iostream>
-#include <cmath>
-#include <vector>
 
 void compare_float_arrays(const float *arr1, const float *arr2, int size,
                           float tolerance = 1e-3f) {
@@ -84,18 +77,21 @@ float checksum(const std::vector<float> &mat) {
     return sum;
 }
 
-
 void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
                        int argc, char **argv, int M=1, int N=1, int K=1) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
     int batch_size=10;
-    float *dst1, *dst2, *dst3;
+#if ENABLE_BF16
+    int16_t *dst1, *dst2, *src, *weight, *bias;
+#else
+    float *dst1, *dst2, *src, *weight, *bias;
+#endif
 #if INPUT_FILE
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <input_file.txt>\n";
         return;
     }
-    
+
     int m_array[10]= {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
 
     for (int m_count=0; m_count<4; m_count++) {
@@ -158,13 +154,16 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
             auto src_md = memory::desc(src_dims, dt::f32, tag::abc);
             auto weights_md = memory::desc(weights_dims, dt::f32, tag::abc);
             auto bias_md = memory::desc(bias_dims, dt::f32, tag::abc);
+#if ENABLE_BF16
+            auto dst_md = memory::desc(dst_dims, dt::bf16, tag::abc);
+#else
             auto dst_md = memory::desc(dst_dims, dt::f32, tag::abc);
+#endif
             auto src_mem = memory(src_md, eng);
             auto weights_mem = memory(weights_md, eng);
             auto bias_mem = memory(bias_md, eng);
             auto dst_mem1 = memory(dst_md, eng);
             auto dst_mem2 = memory(dst_md, eng);
-            auto dst_mem3 = memory(dst_md, eng);
 
 #if PERF
             {
@@ -208,12 +207,31 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
                 write_to_zendnn_memory(src_data.data(), src_mem);
                 write_to_zendnn_memory(weights_data.data(), weights_mem);
                 write_to_zendnn_memory(bias_data.data(), bias_mem);
-                //write_to_zendnn_memory(dst_data.data(), dst_mem1);
-                //write_to_zendnn_memory(dst_data.data(), dst_mem2);
-                //write_to_zendnn_memory(dst_data.data(), dst_mem3);
 #endif
+#if ENABLE_BF16
+                //Create bf16 memory desc
+                auto src_md_bf = memory::desc(src_dims, dt::bf16, tag::abc);
+                auto weights_md_bf = memory::desc(weights_dims, dt::bf16, tag::abc);
+                auto bias_md_bf = memory::desc(bias_dims, dt::bf16, tag::abc);
+
+                //Create bf16 memory
+                auto src_bf_mem = memory(src_md_bf, eng);
+                auto weights_bf_mem = memory(weights_md_bf, eng);
+                auto bias_bf_mem = memory(bias_md_bf, eng);
+
+                //reorder the f32 to bf16 and execute
+                reorder(src_mem, src_bf_mem).execute(engine_stream,src_mem,src_bf_mem);
+                reorder(weights_mem, weights_bf_mem).execute(engine_stream,weights_mem,
+                        weights_bf_mem);
+                reorder(bias_mem, bias_bf_mem).execute(engine_stream, bias_mem, bias_bf_mem);
+#endif
+
                 // Create operation descriptor
+#if ENABLE_BF16
+                auto matmul_d = matmul::desc(src_md_bf, weights_md_bf, bias_md_bf, dst_md);
+#else
                 auto matmul_d = matmul::desc(src_md, weights_md, bias_md, dst_md);
+#endif
                 // Create primitive post-ops (ReLU).
                 const float scale = 1.0f;
                 const float alpha = 0.f;
@@ -228,9 +246,15 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
                 auto matmul_prim = matmul(matmul_pd);
                 // Primitive arguments.
                 std::unordered_map<int, memory> matmul_args;
+#if ENABLE_BF16
+                matmul_args.insert({ZENDNN_ARG_SRC, src_bf_mem});
+                matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_bf_mem});
+                matmul_args.insert({ZENDNN_ARG_BIAS, bias_bf_mem});
+#else
                 matmul_args.insert({ZENDNN_ARG_SRC, src_mem});
                 matmul_args.insert({ZENDNN_ARG_WEIGHTS, weights_mem});
                 matmul_args.insert({ZENDNN_ARG_BIAS, bias_mem});
+#endif
                 matmul_args.insert({ZENDNN_ARG_DST, dst_mem1});
                 // Primitive execution: matrix multiplication with ReLU.
                 matmul_prim.execute(engine_stream, matmul_args);
@@ -244,23 +268,32 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
                                (end_ms - start_ms).count();
             //std::cout<<"ZenDNN Kernel *****************Time is "<<duration_ms<< "ms\n";
             std::cout<<duration_ms<< "ms, \n";
+#if ENABLE_BF16
+            dst1 = static_cast<int16_t *>(dst_mem1.get_data_handle());
+            data_types dt(zendnn_bf16, zendnn_bf16, zendnn_bf16, zendnn_bf16);
+            src = static_cast<int16_t *>(src_bf_mem.get_data_handle());
+            weight = static_cast<int16_t *>(weights_bf_mem.get_data_handle());
+            dst2 = static_cast<int16_t *>(dst_mem2.get_data_handle());
+            bias = static_cast<int16_t *>(bias_bf_mem.get_data_handle());
+#else
             dst1 = static_cast<float *>(dst_mem1.get_data_handle());
-
+            data_types dt;
+            src = static_cast<float *>(src_mem.get_data_handle());
+            weight = static_cast<float *>(weights_mem.get_data_handle());
+            dst2 = static_cast<float *>(dst_mem2.get_data_handle());
+            bias = static_cast<float *>(bias_mem.get_data_handle());
+#endif
             //Second Kernel
             start_ms = std::chrono::high_resolution_clock::now();
 #if PERF
             for (int loop=0; loop<loop_count; loop++) {
 #endif
                 //auto dst_mem1 = memory(dst_md, eng);
-                float *src = static_cast<float *>(src_mem.get_data_handle());
-                float *weight = static_cast<float *>(weights_mem.get_data_handle());
-                dst2 = static_cast<float *>(dst_mem2.get_data_handle());
-                float *bias = static_cast<float *>(bias_mem.get_data_handle());
+
 
                 zendnn_custom_op::zendnn_matmul_direct_fp32(src, weight, dst2, bias, 1, 0, M, N,
                         K,
-                        false, false, K, N, N, ActivationPostOp::NONE, batch_size, batch_size);
-                //std::cout<<"\n\nGoing in ALGO 1\n\n";
+                        false, false, K, N, N, dt, ActivationPostOp::NONE, batch_size, batch_size);
 #if PERF
             }
 #endif
@@ -276,9 +309,20 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
             //std::cout<<"cache Blocking and Register Kernel *****************Time is "<<duration_ms<< "ms\n\n";
             std::cout<<duration_ms<< "ms \n\n";
 
+#if ENABLE_BF16
+            auto dst_md_f32 = memory::desc(dst_dims, dt::f32, tag::abc);
+            auto dst_mem1_f32 = memory(dst_md_f32, eng);
+            auto dst_mem2_f32 = memory(dst_md_f32, eng);
+            reorder(dst_mem1, dst_mem1_f32).execute(engine_stream,dst_mem1,dst_mem1_f32);
+            reorder(dst_mem2, dst_mem2_f32).execute(engine_stream,dst_mem2,dst_mem2_f32);
+#endif
 #if !PERF
+#if ENABLE_BF16
+            compare_float_arrays(static_cast<float *>(dst_mem1_f32.get_data_handle()),
+                                 static_cast<float *>(dst_mem2_f32.get_data_handle()), M *N);
+#else
             compare_float_arrays(dst1, dst2, batch_size * M *N);
-
+#endif
 #endif
 
 #if PERF
@@ -333,7 +377,7 @@ int main(int argc, char **argv) {
             std::cout<<"\nM="<<M<<", N="<<N<<", K="<<K<<std::endl;
             matmul_example_2D(eng, engine_stream, argc, argv, M, N, K);
 #else
-            matmul_example_2D(eng, engine_stream, argc, argv);
+    matmul_example_2D(eng, engine_stream, argc, argv);
 #endif
 #if !INPUT_FILE
         }

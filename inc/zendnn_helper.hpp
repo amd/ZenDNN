@@ -108,10 +108,11 @@ enum zenBF16MatMulAlgoType {
     MATMUL_AOCL_BF16 = 3,
     MATMUL_JIT_BF16 = 4,
     MATMUL_GEMM_JIT_BF16 = 5,
-    MATMUL_BLOCKED_AOCL_PAR_BF16 = 6,
-    MATMUL_BLOCKED_JIT_PAR_BF16 = 7,
-    MATMUL_AOCL_PAR_BF16 = 8,
-    MATMUL_JIT_PAR_BF16 = 9,
+    MATMUL_DIRECT_BF16 = 6,
+    MATMUL_BLOCKED_AOCL_PAR_BF16 = 7,
+    MATMUL_BLOCKED_JIT_PAR_BF16 = 8,
+    MATMUL_AOCL_PAR_BF16 = 9,
+    MATMUL_JIT_PAR_BF16 = 10,
 };
 
 enum zenINT8MatMulAlgoType {
@@ -245,7 +246,7 @@ class zendnnEnv {
         // 9. (TODO)JIT - Parallel: MatMul is redirected to a parallel JIT implementation. (zenBF16GEMMalgo=zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16)
 
         zenBF16GEMMalgo = zendnnGetMatMulAlgo("BF16");
-        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 &&
+        if (zenBF16GEMMalgo>zenBF16MatMulAlgoType::MATMUL_DIRECT_BF16 &&
                 zenBF16GEMMalgo!=zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
             zenBF16GEMMalgo = zenBF16MatMulAlgoType::MATMUL_JIT_BF16;
         }

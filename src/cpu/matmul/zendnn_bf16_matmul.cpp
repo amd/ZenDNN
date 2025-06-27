@@ -239,6 +239,7 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
 
     int elementwise_index =  pd()->attr()->post_ops_.find(primitive_kind::eltwise);
     int has_binary_index = pd()->attr()->post_ops_.find(primitive_kind::binary);
+    bool has_binary = pd()->attr()->post_ops_.find(primitive_kind::binary) >= 0;
     bool has_eltwise_relu = elementwise_index>=0 ?
                             pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                             alg_kind::eltwise_relu : 0;
@@ -252,6 +253,38 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                 pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg ==
                                 alg_kind::eltwise_gelu_erf : 0;
     unsigned int geluType = has_eltwise_gelu?1:(has_eltwise_gelu_erf?2:0);
+
+    bool direct_algo_check = false;
+    ActivationPostOp activation_post_op = ActivationPostOp::NONE;
+    if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DIRECT_BF16) {
+        alg_kind_t eltwise_alg = elementwise_index == 0 ?
+                                 pd()->attr()->post_ops_.entry_[elementwise_index].eltwise.alg : alg_kind::undef;
+        direct_algo_check = pd()->attr()->post_ops_.len() <= 1 &&
+                            elementwise_index <= 0 && !has_binary;
+        if (direct_algo_check) {
+            switch (eltwise_alg) {
+            case alg_kind::eltwise_relu:
+                activation_post_op = ActivationPostOp::RELU;
+                break;
+            case alg_kind::eltwise_logistic:
+                activation_post_op = ActivationPostOp::SIGMOID;
+                break;
+            case alg_kind::eltwise_tanh:
+                activation_post_op = ActivationPostOp::TANH;
+                break;
+            case alg_kind::eltwise_gelu_tanh:
+                activation_post_op = ActivationPostOp::GELU_TANH;
+                break;
+            case alg_kind::eltwise_gelu_erf :
+                activation_post_op = ActivationPostOp::GELU_ERF;
+                break;
+            case alg_kind::eltwise_swish:
+                activation_post_op = ActivationPostOp::SILU;
+                break;
+            }
+        }
+    }
+
     bool auto_tuner = false;
 #if ZENDNN_ENABLE
     alpha = pd()->attr()->output_scales_.mask_ == 0 ? scales[0] : 1.0;
@@ -297,6 +330,18 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
                                is_weights_const, group_size, woq_scales_type);
         }
         return status::success;
+    }
+    else if ((zenEnvObj.zenBF16GEMMalgo ==
+              zenBF16MatMulAlgoType::MATMUL_DIRECT_BF16) &&
+             direct_algo_check) {
+        data_types dt(pd()->src_md()->data_type, pd()->weights_md()->data_type,
+                      pd()->weights_md(1)->data_type, dst_type);
+        //Direct MatMul
+        zendnn_custom_op::zendnn_matmul_direct_fp32(src, weights,
+                dst, bias, output_scales[0], beta, M, N, K,
+                transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1, lda, ldb, ldc, dt,
+                activation_post_op,
+                1, 1);
     }
     else if (zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) {
         auto_tuner = true;
