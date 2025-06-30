@@ -57,7 +57,8 @@ set(examples_sources
   sample_example.cpp
   matmul_example.cpp
   compare_op_example.cpp
-  reorder_example.cpp)
+  reorder_example.cpp
+  embedding_bag_example.cpp)
 
 set(example_headers
   example_utils.hpp
@@ -65,7 +66,8 @@ set(example_headers
   sample_example.hpp
   matmul_example.hpp
   compare_op_example.hpp
-  reorder_example.hpp)
+  reorder_example.hpp
+  embedding_bag_example.hpp)
 
 add_executable(examples ${examples_sources})
 target_link_libraries(examples

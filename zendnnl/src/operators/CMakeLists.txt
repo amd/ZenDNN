@@ -18,6 +18,7 @@ add_subdirectory(sample)
 add_subdirectory(matmul)
 add_subdirectory(compare)
 add_subdirectory(reorder)
+add_subdirectory(embag)
 #add_subdirectory(dlsample)
-#add_subdirectory(embag)
+
 

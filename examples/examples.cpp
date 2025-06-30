@@ -17,8 +17,9 @@
 #include "tensor_example.hpp"
 #include "sample_example.hpp"
 #include "matmul_example.hpp"
-#include "compare_op_example.hpp"
 #include "reorder_example.hpp"
+#include "compare_op_example.hpp"
+#include "embedding_bag_example.hpp"
 
 #define  OK          (0)
 #define  NOT_OK      (1)
@@ -68,6 +69,12 @@ int main() {
    */
   compare_op_example();
   compare_ref_and_aocl_matmul_kernel_example();
+
+  /** Embedding Bag operator functionality examples.
+   *  Demonstrates embedding bag operator usage for efficient lookup of embeddings.
+   */
+  embedding_bag_f32_kernel_example();
+  embedding_bag_f32_forced_ref_kernel_example();
 
   /** Sample functionality examples.
    *

@@ -54,6 +54,11 @@ class tensor_factory_t {
                                     const std::vector<index_type> stride_, data_type dtype_, float val_,
                                     std::string tensor_name_="broadcasted uniform");
 
+  /** @brief non-uniform tensor */
+  tensor_t non_uniform_tensor(const std::vector<index_type> size_,
+                              data_type dtype_,
+                              std::vector<uint32_t> val_, std::string tensor_name_="non_uniform");
+
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_, float range_,

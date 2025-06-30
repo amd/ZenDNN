@@ -14,34 +14,35 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-add_subdirectory(native_kernels)
-
 set(embag_operator_sources
-  embag_context.cpp
-  embag_operator.cpp
-  embag_ref_kernel.cpp)
-
-set(embag_operator_public_headers
-  embag_context.hpp
-  embag_operator.hpp)
+  embag_avx2_kernels.cpp
+  embag_avx512_kernels.cpp)
 
 set(embag_operator_private_headers
-  embag_kernel_list.hpp
-  embag_ref_kernel.hpp)
+  embag_avx2_kernels.hpp
+  embag_avx512_kernels.hpp
+  embag_avx512_fp32_bf16_utils.hpp
+  embag_avx512_fp32_bf16_utils.hpp)
 
 target_sources(zendnnl_archive
   PRIVATE ${embag_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${embag_operator_public_headers})
+          TYPE HEADERS FILES ${embag_operator_private_headers})
+
+target_link_options(zendnnl_archive
+  PUBLIC "-fopenmp")
+target_link_libraries(zendnnl_archive
+  PUBLIC OpenMP::OpenMP_CXX)
 
 target_sources(zendnnl
   PRIVATE ${embag_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${embag_operator_public_headers})
+          TYPE HEADERS FILES ${embag_operator_private_headers})
+
+target_link_options(zendnnl
+  PUBLIC "-fopenmp")
+target_link_libraries(zendnnl
+  PUBLIC OpenMP::OpenMP_CXX)
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
@@ -49,26 +50,8 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-list(APPEND embag_operator_public_headers_list
-  ${embag_operator_public_headers})
-create_header_file(${zendnnl_inc_file}
-  ${inc_subdir}
-  "${embag_operator_public_headers_list}")
-
-# add_library(embag_avx512_kernels MODULE
-#   embag_avx512_kernels.cpp)
-# target_compile_options(embag_avx512_kernels
-#   PRIVATE "-mavx512f")
-# target_link_libraries(embag_avx512_kernels
-#   PRIVATE OpenMP::OpenMP_CXX)
-
-# install(TARGETS embag_avx512_kernels DESTINATION lib)
-
-# add_library(embag_avx2_kernels MODULE
-#   embag_avx2_kernels.cpp)
-# target_compile_options(embag_avx2_kernels
-#   PRIVATE "-mavx2")
-# target_link_libraries(embag_avx2_kernels
-#   PRIVATE OpenMP::OpenMP_CXX)
-
-# install(TARGETS embag_avx2_kernels DESTINATION lib)
+# list(APPEND embag_operator_public_headers_list
+#   ${embag_operator_public_headers})
+# create_header_file(${zendnnl_inc_file}
+#   ${inc_subdir}
+#   "${embag_operator_public_headers_list}")

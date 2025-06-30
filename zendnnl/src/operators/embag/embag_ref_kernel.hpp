@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _EMBAG_AVX2_KERNELS_HPP_
-#define _EMBAG_AVX2_KERNELS_HPP_
+#ifndef _EMBAG_FP32_REF_KERNEL_HPP_
+#define _EMBAG_FP32_REF_KERNEL_HPP_
 
 #include <iostream>
 #include <memory>
-#include "operator_kernel.hpp"
-#include "error_handling.hpp"
+#include "common/zendnnl_global.hpp"
+#include "operators/common/operator_kernel.hpp"
 #include "embag_context.hpp"
 
 namespace zendnnl {
@@ -27,29 +27,17 @@ namespace ops {
 
 using namespace zendnnl::error_handling;
 
-class embag_f32_avx2_kernel_t final : public op_kernel_t<embag_context_t> {
-public:
-  ~embag_f32_avx2_kernel_t() = default;
+class embag_ref_kernel_t final : public op_kernel_t<embag_context_t> {
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
-};
-
-class embag_bf16_avx2_kernel_t final : public op_kernel_t<embag_context_t> {
-public:
-  ~embag_bf16_avx2_kernel_t() = default;
-
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
 };
 
 extern "C" {
-  std::shared_ptr<embag_f32_avx2_kernel_t> get_embag_f32_avx2_kernel();
-  std::shared_ptr<embag_bf16_avx2_kernel_t> get_embag_bf16_avx2_kernel();
+  std::shared_ptr<embag_ref_kernel_t> get_embag_ref_kernel();
 }
-
 
 } //namespace ops
 } //namespace zendnnl

@@ -173,6 +173,37 @@ tensor_t tensor_factory_t::broadcast_uniform_tensor(const
   return utensor;
 }
 
+tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type> size_,
+    data_type dtype_, std::vector<uint32_t> val_,
+    std::string tensor_name_) {
+
+  auto utensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
+
+  if (! utensor.check()) {
+    log_warning("tensor creation of ", utensor.get_name(), " failed.");
+  }
+  else {
+    auto  buf_nelem  = utensor.get_nelem();
+    void *buf_vptr   = utensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::s32) {
+      uint32_t *buf_ptr = static_cast<uint32_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = val_[i];
+      }
+    }
+    else {
+      log_warning("tensor ", utensor.get_name(), " unsupported data type.");
+    }
+  }
+  return utensor;
+}
+
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     size_,
     data_type dtype_, float range_,
