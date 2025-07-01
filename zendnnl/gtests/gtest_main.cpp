@@ -25,8 +25,9 @@ vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 // Matmul Tolerance Limit
 // TODO: Make the tolerance value dynamic based on factors such
 // as tensor dimensions, data type, and value range.
-const float MATMUL_F32_TOL = 0.01;
+const float MATMUL_F32_TOL  = 0.01;
 const float MATMUL_BF16_TOL = 0.01;
+const float REORDER_TOL     = 0.0001;
 
 // Test tolerance constants
 const float EMBAG_F32_TOL = 0.001;
@@ -40,8 +41,11 @@ std::string cmd_post_op {};
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
 
-/** @brief matmul_test Data Structure(vector of structures) to hold random BatchMatmul Parameters */
+/** @brief batchmatmul_test Data Structure(vector of structures) to hold random BatchMatmul Parameters */
 std::vector<BatchMatmulType> batchmatmul_test{};
+
+/** @brief reorder_test Data Structure(vector of structures) to hold random Reorder Parameters */
+std::vector<ReorderType> reorder_test{};
 
 /** @brief embag_test Data Structure(vector of structures) to hold random Embedding Bag Parameters */
 std::vector<EmbagType> embag_test{};
@@ -64,11 +68,13 @@ int main(int argc, char **argv) {
   srand(seed);
   std::cout<<"Value "<<seed<<" is used as seed. \n";
 
-  //Creating Random parameters for Matmul
+  // Creating Random parameters for Matmul
   matmul_test.resize(test_num);
-  //Creating Random parameters for BatchMatmul
+  // Creating Random parameters for BatchMatmul
   batchmatmul_test.resize(test_num);
-  //Creating Random parameters for Embedding Bag
+  // Creating Random parameters for Reorder
+  reorder_test.resize(test_num);
+  // Creating Random parameters for Embedding Bag
   embag_test.resize(test_num);
 
   ::testing :: InitGoogleTest(&argc, argv);

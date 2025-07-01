@@ -69,6 +69,13 @@ struct BatchMatmulType {
   BatchMatmulType();
 };
 
+struct ReorderType {
+  bool inplace_reorder;
+  data_type_t source_dtype;
+  MatmulType mat{};
+  ReorderType();
+};
+
 /** @brief Embag Op Parameters Structure */
 struct EmbagType {
   uint64_t num_embeddings;
@@ -90,10 +97,12 @@ extern int seed;
 extern std::string cmd_post_op;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
+extern const float REORDER_TOL;
 extern const float EMBAG_F32_TOL;
 extern const float EMBAG_BF16_TOL;
 extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
+extern std::vector<ReorderType> reorder_test;
 extern std::vector<EmbagType> embag_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
@@ -108,9 +117,10 @@ class tensor_factory_t {
   tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_);
 
   /** @brief uniformly distributed tensor */
-  tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
-                               data_type dtype_,
-                               float range_, bool trans = false);
+  tensor_t uniform_dist_tensor(const std::vector<index_type>
+                               size_,
+                               data_type dtype_, float val,
+                               bool trans = false);
 
   /** @brief uniformly distributed strided tensor */
   tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
@@ -123,7 +133,11 @@ class tensor_factory_t {
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          StorageParam param);
+                          float val);
+
+  /** @brief copy tensor */
+  tensor_t copy_tensor(const std::vector<index_type> size_, data_type dtype_,
+                       StorageParam param, bool trans, bool is_blocked);
 
   /** @brief Generate random indices tensor with optional padding index */
   tensor_t random_indices_tensor(const std::vector<index_type> size_,
@@ -192,12 +206,13 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
 /** @fn reorder_kernel_test
  *  @brief Function to Reorder tensor
  *
- *  This function reorders the tensor either by Inplace or OutofPlace.
- *  @return Reordered tensor and reorder status
+ *  This function reorders/unreorder the tensor either by Inplace or OutofPlace.
+ *  @return Updated tensor and status
  *
  * */
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
-    bool inplace_reorder, void **reorder_weights);
+    bool inplace_reorder, void **reorder_weights,
+    data_type_t source_dtype = data_type_t::f32);
 
 /** @fn embag_kernel_test
  *  @brief Test function for embag kernel
@@ -234,11 +249,14 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor
  *
+ *  This function compares two 2D tensors element by element and checks if they are
+ *  within a specified tolerance (Either Absolute or relative).
+ *  @return void
  * */
 // ToDO: Replace with comparator operator
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
-                       uint64_t n, const float tol, bool &flag);
+                       uint64_t n, const float tol, bool &is_comparison_successful);
 
 /** @fn compare_tensor_3D
  *  @brief Function to compare two 3D tensor

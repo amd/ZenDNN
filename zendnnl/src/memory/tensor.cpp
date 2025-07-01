@@ -134,10 +134,11 @@ tensor_t::index_type tensor_t::get_stride(uint32_t index_) const {
   return option.stride.at(index_);
 }
 
-tensor_t&  tensor_t::set_quant_scale(const tensor_t& quant_scale_) {
+tensor_t  &tensor_t::set_quant_scale(const tensor_t &quant_scale_) {
   //return if tensor is created
-  if (status == status_t::success)
+  if (status == status_t::success) {
     return (*this);
+  }
 
   //check if quant is iniatilized
   if (! quant) {
@@ -152,10 +153,11 @@ tensor_t&  tensor_t::set_quant_scale(const tensor_t& quant_scale_) {
   return (*this);
 }
 
-tensor_t&  tensor_t::set_quant_zero_point(const tensor_t& quant_zero_) {
+tensor_t  &tensor_t::set_quant_zero_point(const tensor_t &quant_zero_) {
   //return if tensor is created
-  if (status == status_t::success)
+  if (status == status_t::success) {
     return (*this);
+  }
 
   //check if quant is iniatilized
   if (! quant) {
@@ -171,8 +173,9 @@ tensor_t&  tensor_t::set_quant_zero_point(const tensor_t& quant_zero_) {
 }
 
 bool tensor_t::is_quantized() const {
-  if (quant)
+  if (quant) {
     return true;
+  }
 
   return false;
 }
@@ -227,7 +230,8 @@ tensor_t::index_vec_type tensor_t::get_quant_scale_block_size() const {
   return quant->scale_block_size;
 }
 
-uint64_t tensor_t::compute_quant_scale_offset(const index_vec_type& index_) const {
+uint64_t tensor_t::compute_quant_scale_offset(const index_vec_type &index_)
+const {
 
   //sanity check
   if (! quant) {
@@ -236,7 +240,7 @@ uint64_t tensor_t::compute_quant_scale_offset(const index_vec_type& index_) cons
   }
 
   //compute the block index to which the element belongs
-  const index_vec_type& scale_block_size = quant->scale_block_size;
+  const index_vec_type &scale_block_size = quant->scale_block_size;
   index_vec_type  scale_index(scale_block_size.size(),0);
 
   for (uint32_t i = 0; i < scale_block_size.size(); ++i) {
@@ -244,7 +248,7 @@ uint64_t tensor_t::compute_quant_scale_offset(const index_vec_type& index_) cons
   }
 
   //compute offset
-  const index_vec_type& scale_stride = quant->scale_stride;
+  const index_vec_type &scale_stride = quant->scale_stride;
 
   uint64_t offset = 0;
   for (int i = scale_index.size() -1; i >= 0; i--) {
@@ -264,7 +268,7 @@ data_type_t tensor_t::get_quant_scale_data_type() const {
   return quant->scale_data_type;
 }
 
-const void* tensor_t::get_quant_scale_raw_handle_const() const {
+const void *tensor_t::get_quant_scale_raw_handle_const() const {
 
   if (! quant) {
     apilog_error(name, " invoked a quantization api on non-quantized tensor.");
@@ -274,7 +278,8 @@ const void* tensor_t::get_quant_scale_raw_handle_const() const {
   return (const void *)(quant->scales->get_raw_handle());
 }
 
-const void* tensor_t::get_quant_scale_raw_handle_const(const index_vec_type& index_) const {
+const void *tensor_t::get_quant_scale_raw_handle_const(const index_vec_type
+    &index_) const {
   if (! quant) {
     apilog_error(name, " invoked a quantization api on non-quantized tensor.");
     return nullptr;
@@ -283,31 +288,36 @@ const void* tensor_t::get_quant_scale_raw_handle_const(const index_vec_type& ind
   auto     scale_offset  =  compute_quant_scale_offset(index_);
   scale_offset          *= size_of(quant->scale_data_type);
 
-  return (const void *)((uint8_t*)quant->scales->get_raw_handle() + scale_offset);
+  return (const void *)((uint8_t *)quant->scales->get_raw_handle() +
+                        scale_offset);
 }
 
 tensor_t::index_vec_type tensor_t::get_quant_zero_size() const {
-  if (quant)
+  if (quant) {
     return quant->zero_size;
+  }
 
   return {};
 }
 
 tensor_t::index_vec_type tensor_t::get_quant_zero_stride() const {
-  if (quant)
+  if (quant) {
     return quant->zero_stride;
+  }
 
   return {};
 }
 
 tensor_t::index_vec_type tensor_t::get_quant_zero_block_size() const {
-  if (quant)
+  if (quant) {
     return quant->zero_block_size;
+  }
 
   return {};
 }
 
-uint64_t tensor_t::compute_quant_zero_offset(const index_vec_type& index_) const {
+uint64_t tensor_t::compute_quant_zero_offset(const index_vec_type &index_)
+const {
 
   //sanity check
   if (! quant) {
@@ -316,7 +326,7 @@ uint64_t tensor_t::compute_quant_zero_offset(const index_vec_type& index_) const
   }
 
   //compute the block index to which the element belongs
-  const index_vec_type& zero_block_size = quant->zero_block_size;
+  const index_vec_type &zero_block_size = quant->zero_block_size;
   index_vec_type  zero_index(zero_block_size.size(),0);
 
   for (uint32_t i = 0; i < zero_block_size.size(); ++i) {
@@ -324,7 +334,7 @@ uint64_t tensor_t::compute_quant_zero_offset(const index_vec_type& index_) const
   }
 
   //compute offset
-  const index_vec_type& zero_stride = quant->zero_stride;
+  const index_vec_type &zero_stride = quant->zero_stride;
 
   uint64_t offset = 0;
   for (int i = zero_index.size() -1; i >= 0; i--) {
@@ -335,20 +345,23 @@ uint64_t tensor_t::compute_quant_zero_offset(const index_vec_type& index_) const
 }
 
 data_type_t tensor_t::get_quant_zero_data_type() const {
-  if (quant)
+  if (quant) {
     return quant->zero_data_type;
+  }
 
   return data_type_t::none;
 }
 
-const void* tensor_t::get_quant_zero_raw_handle_const() const {
-  if (quant)
+const void *tensor_t::get_quant_zero_raw_handle_const() const {
+  if (quant) {
     return (const void *)(quant->zeros->get_raw_handle());
+  }
 
   return nullptr;
 }
 
-const void* tensor_t::get_quant_zero_raw_handle_const(const index_vec_type& index_) const {
+const void *tensor_t::get_quant_zero_raw_handle_const(const index_vec_type
+    &index_) const {
   if (! quant) {
     apilog_error(name, " invoked a quantization api on non-quantized tensor.");
     return nullptr;
@@ -357,7 +370,7 @@ const void* tensor_t::get_quant_zero_raw_handle_const(const index_vec_type& inde
   auto     zero_offset  =  compute_quant_zero_offset(index_);
   zero_offset          *= size_of(quant->zero_data_type);
 
-  return (const void *)((uint8_t*)quant->zeros->get_raw_handle() + zero_offset);
+  return (const void *)((uint8_t *)quant->zeros->get_raw_handle() + zero_offset);
 }
 
 tensor_t &tensor_t::set_data_type(data_type_t data_type_) {
@@ -424,7 +437,7 @@ std::string  tensor_t::get_name() const {
   return name;
 };
 
-uint64_t tensor_t::compute_offset(const index_vec_type& index_) const {
+uint64_t tensor_t::compute_offset(const index_vec_type &index_) const {
   LOG_DEBUG_INFO("Computing offset corresponding to the index");
   uint64_t offset = 0;
   for (int i = index_.size() -1; i >= 0; i--) {
@@ -436,7 +449,8 @@ uint64_t tensor_t::compute_offset(const index_vec_type& index_) const {
   return (offset % option.aligned_nelem);
 }
 
-float tensor_t::at(const index_vec_type& index_) const {
+// TODO: Update the return type to accept different types
+float tensor_t::at(const index_vec_type &index_) const {
   LOG_DEBUG_INFO("Getting tensor element");
 
   //check if a tensor is blocked or oblique
@@ -460,6 +474,12 @@ float tensor_t::at(const index_vec_type& index_) const {
     }
     case data_type_t::bf16 : {
       using cpptype   = prec_traits<data_type_t::bf16>::type;
+      const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+      return float(handle[offset]);
+      break;
+    }
+    case data_type_t::s8 : {
+      using cpptype   = prec_traits<data_type_t::s8>::type;
       const cpptype *handle = static_cast<const cpptype *>(raw_handle);
       return float(handle[offset]);
       break;
@@ -656,8 +676,9 @@ void tensor_t::reset() {
   option.reset();
   storage.reset();
 
-  if (quant)
+  if (quant) {
     quant->reset();
+  }
 
   allocate = false;
   storage  = std::make_shared<tensor_storage_t>();
@@ -697,6 +718,15 @@ std::string tensor_t::tensor_info() {
   }
   ss << "]:"
      << dtype_info(dtype) << ":" << order << ":";
+
+  if (is_quantized()) {
+    ss << "scale(" << dtype_info(get_quant_scale_data_type()) << ":"
+       << vec_to_string(get_quant_scale_size()) << "):";
+    if (get_quant_subtype() == quant_subtype_t::asymmetric) {
+      ss << "zp(" << dtype_info(get_quant_zero_data_type()) << ":"
+         << vec_to_string(get_quant_zero_size()) << "):";
+    }
+  }
 
   // switch (layout) {
   // case tensor_layout_t::contiguous:
@@ -926,7 +956,7 @@ void tensor_t::set_default_base() {
   option.base_offset = 0;
 }
 
-status_t tensor_t::index_sanity_check(const index_vec_type& index_) const {
+status_t tensor_t::index_sanity_check(const index_vec_type &index_) const {
 
   LOG_DEBUG_INFO("Index sanity check");
 
@@ -1036,7 +1066,8 @@ status_t tensor_t::validate_meta_info() {
 }
 
 tensor_t::index_vec_type
-tensor_t::compute_quant_block_size(const tensor_t::index_vec_type& quant_size_) {
+tensor_t::compute_quant_block_size(const tensor_t::index_vec_type
+                                   &quant_size_) {
 
   index_vec_type block_size{};
   //validate dim and compute block size
@@ -1061,7 +1092,7 @@ tensor_t::compute_quant_block_size(const tensor_t::index_vec_type& quant_size_) 
 }
 
 tensor_t::index_vec_type
-tensor_t::compute_quant_stride(const tensor_t::index_vec_type& size_) {
+tensor_t::compute_quant_stride(const tensor_t::index_vec_type &size_) {
   //get default order size
   auto default_order_size = permute_axes_order(size_, true);
 
@@ -1079,8 +1110,9 @@ tensor_t::compute_quant_stride(const tensor_t::index_vec_type& size_) {
 
   //make strides zero for broadcast axes
   for (uint32_t i = 0; i < option.stride.size(); ++i) {
-    if (option.stride[i] == 0)
+    if (option.stride[i] == 0) {
       permuted_stride[i] = 0;
+    }
   }
 
   return permuted_stride;
@@ -1090,8 +1122,9 @@ status_t tensor_t::validate_quant_scale() {
 
   //compute scale block size
   quant->scale_block_size = compute_quant_block_size(quant->scale_size);
-  if ((quant->scale_block_size).empty())
+  if ((quant->scale_block_size).empty()) {
     return status_t::memory_bad_quant;
+  }
 
   //compute scale stride
   quant->scale_stride = compute_quant_stride(quant->scale_size);
@@ -1109,18 +1142,19 @@ status_t tensor_t::validate_quant_zero() {
 
   //compute zero block size
   quant->zero_block_size = compute_quant_block_size(quant->zero_size);
-  if ((quant->zero_block_size).empty())
+  if ((quant->zero_block_size).empty()) {
     return status_t::memory_bad_quant;
+  }
 
   //compute zero stride
   quant->zero_stride = compute_quant_stride(quant->zero_size);
 
   //check zero data type
   if (quant->zero_data_type != data_type_t::s32 &&
-    quant->zero_data_type != data_type_t::s8 &&
-    quant->zero_data_type != data_type_t::u8) {
-  apilog_error(name, " unsupported zero data type.");
-  return status_t::memory_bad_quant;
+      quant->zero_data_type != data_type_t::s8 &&
+      quant->zero_data_type != data_type_t::u8) {
+    apilog_error(name, " unsupported zero data type.");
+    return status_t::memory_bad_quant;
   }
   return status_t::success;
 }
@@ -1128,14 +1162,16 @@ status_t tensor_t::validate_quant_zero() {
 status_t tensor_t::validate_quant_info() {
 
   //if tensor is not quantized return success
-  if (! quant)
+  if (! quant) {
     return status_t::success;
+  }
 
   quant->type = quant_type_t::uniform;
 
   if (quant->scales != nullptr) {
-    if (validate_quant_scale() != status_t::success)
+    if (validate_quant_scale() != status_t::success) {
       return status_t::memory_bad_quant;
+    }
 
     quant->subtype = quant_subtype_t::symmetric;
   }
@@ -1145,8 +1181,9 @@ status_t tensor_t::validate_quant_info() {
   }
 
   if (quant->zeros != nullptr) {
-    if (validate_quant_zero() != status_t::success)
+    if (validate_quant_zero() != status_t::success) {
       return status_t::memory_bad_quant;
+    }
 
     quant->subtype = quant_subtype_t::asymmetric;
   }

@@ -296,7 +296,7 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
 }
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
-    data_type dtype_, StorageParam param, std::string tensor_name_,
+    data_type dtype_, float range_, std::string tensor_name_,
     tensor_t scale, tensor_t zp) {
 
   auto btensor = tensor_t()
@@ -312,22 +312,82 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     btensor.set_quant_zero_point(zp);
   }
 
-  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
-    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
-    btensor.set_storage(reorder_buff, reorder_size);
-  }
-  else if (std::holds_alternative<tensor_t>(param)) {
-    tensor_t input_tensor = std::get<tensor_t>(param);
-    btensor.set_storage(input_tensor);
-  }
-
-  btensor.create();
+  btensor.set_storage().create();
 
   if (! btensor.check()) {
     log_warning("tensor creation of ", btensor.get_name(), " failed.");
   }
+  else {
+    std::mt19937 gen(100);
+    std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
 
+    auto  buf_nelem  = btensor.get_nelem();
+    void *buf_vptr   = btensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return dist(gen);});
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
+    }
+    else {
+      log_warning("tensor ", btensor.get_name(), " unsupported data type.");
+    }
+  }
   return btensor;
+}
+
+tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
+                                       data_type dtype_, StorageParam param, bool trans,
+                                       bool is_blocked, std::string tensor_name_,
+                                       tensor_t scale, tensor_t zp) {
+
+  auto ctensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_);
+
+  auto tensor_dim = ctensor.get_dim();
+  if (trans && tensor_dim >=2) {
+    std::string tag;
+    for (size_t i=0; i<tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    ctensor.set_order(tag);
+  }
+
+  if (scale.get_nelem() != 0) {
+    ctensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    ctensor.set_quant_zero_point(zp);
+  }
+
+  if (is_blocked) {
+    ctensor.set_layout(tensor_layout_t::blocked);
+  }
+
+  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
+    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
+    ctensor.set_storage(reorder_buff, reorder_size);
+  }
+  else if (std::holds_alternative<tensor_t>(param)) {
+    tensor_t input_tensor = std::get<tensor_t>(param);
+    ctensor.set_storage(input_tensor);
+  }
+  ctensor.create();
+
+  if (! ctensor.check()) {
+    log_warning("tensor creation of ", ctensor.get_name(), " failed.");
+  }
+  return ctensor;
 }
 
 void tensor_functions_t::tensor_pretty_print(const tensor_t &tensor_) {

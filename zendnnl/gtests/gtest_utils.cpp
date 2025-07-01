@@ -70,6 +70,11 @@ BatchMatmulType::BatchMatmulType() {
   batch_size = BATCH_START + rand() % BATCH_END;
 }
 
+ReorderType::ReorderType() {
+  inplace_reorder = rand() % 2;
+  source_dtype    = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+}
+
 bool is_binary_postop(const std::string post_op) {
   return post_op == "binary_add" || post_op == "binary_mul";
 }
@@ -97,14 +102,12 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     size_,
-    data_type dtype_,
-    float range_,
+    data_type dtype_, float val,
     bool trans) {
   auto udtensor = tensor_t()
                   .set_name("uniform distributed tensor")
                   .set_size(size_)
-                  .set_data_type(dtype_)
-                  .set_storage();
+                  .set_data_type(dtype_);
 
   auto tensor_dim = udtensor.get_dim();
   if (trans && tensor_dim >=2) {
@@ -115,14 +118,16 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
     udtensor.set_order(tag);
   }
-  udtensor.create();
+
+  udtensor.set_storage().create();
 
   if (! udtensor.check()) {
     log_warning("tensor creation of ", udtensor.get_name(), " failed.");
   }
   else {
     std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dist2(-1.0*range_, 1.0*range_);
+    std::uniform_real_distribution<float> dist2(-1.0 * val, 1.0 * val);
+
     auto  buf_nelem  = udtensor.get_nelem();
     void *buf_vptr   = udtensor.get_raw_handle_unsafe();
 
@@ -133,6 +138,10 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     else if (dtype_ == data_type::bf16) {
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist2(gen));});
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist2(gen));});
     }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
@@ -229,30 +238,85 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     data_type dtype_,
-    StorageParam param) {
+    float val) {
 
   auto btensor = tensor_t()
                  .set_name("blocked tensor")
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_layout(tensor_layout_t::blocked);
-
-  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
-    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
-    btensor.set_storage(reorder_buff, reorder_size);
-  }
-  else if (std::holds_alternative<tensor_t>(param)) {
-    tensor_t input_tensor = std::get<tensor_t>(param);
-    btensor.set_storage(input_tensor);
-  }
-
-  btensor.create();
+                 .set_layout(tensor_layout_t::blocked)
+                 .set_storage()
+                 .create();
 
   if (! btensor.check()) {
     log_warning("tensor creation of ", btensor.get_name(), " failed.");
   }
+  else {
+    std::mt19937 gen(100);
+    std::uniform_real_distribution<float> dist(-1.0 * val, 1.0 * val);
+
+    auto  buf_nelem  = btensor.get_nelem();
+    void *buf_vptr   = btensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return dist(gen);});
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
+    }
+    else {
+      log_warning("tensor ", btensor.get_name(), " unsupported data type.");
+    }
+  }
 
   return btensor;
+}
+
+tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
+                                       data_type dtype_, StorageParam param,
+                                       bool trans, bool is_blocked) {
+  auto ctensor = tensor_t()
+                 .set_size(size_)
+                 .set_data_type(dtype_);
+
+  auto tensor_dim = ctensor.get_dim();
+  if (trans && tensor_dim >=2) {
+    std::string tag;
+    for (size_t i=0; i<tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    ctensor.set_order(tag);
+  }
+
+  if (is_blocked) {
+    ctensor.set_name("blocked tensor");
+    ctensor.set_layout(tensor_layout_t::blocked);
+  }
+  else {
+    ctensor.set_name("uniform distributed tensor");
+  }
+
+  if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
+    auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);
+    ctensor.set_storage(reorder_buff, reorder_size);
+  }
+  else if (std::holds_alternative<tensor_t>(param)) {
+    tensor_t input_tensor = std::get<tensor_t>(param);
+    ctensor.set_storage(input_tensor);
+  }
+  ctensor.create();
+
+  if (! ctensor.check()) {
+    log_warning("tensor creation of ", ctensor.get_name(), " failed.");
+  }
+  return ctensor;
 }
 
 // Extended tensor factory implementations
@@ -617,93 +681,167 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
 }
 
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
-    bool inplace_reorder, void **reorder_weights) {
+    bool inplace_reorder, void **weights, data_type_t source_dtype) {
   try {
     tensor_factory_t tensor_factory;
     status_t status;
 
     input_tensor.set_name("reorder_input");
+    data_type_t dtype           = input_tensor.get_data_type();
 
     // Reorder context creation with backend aocl.
     auto reorder_context = reorder_context_t()
-                           .set_algo_format("aocl")
-                           .create();
+                           .set_algo_format("aocl");
 
-    // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
-                            .set_name("reorder_operator")
-                            .set_context(reorder_context)
-                            .create()
-                            .set_input("reorder_input", input_tensor);
-
-    if (! reorder_operator.check()) {
-      log_error("operator ", reorder_operator.get_name(), " creation failed.");
-      return std::make_pair(tensor_t(), status_t::failure);
+    // Set Input source dtype if the weights dtype is s8
+    if ((dtype == data_type_t::s8) && (source_dtype == data_type_t::s8 ||
+                                       source_dtype == data_type_t::u8)) {
+      reorder_context.set_source_dtype(source_dtype);
     }
-
-    // Compute the reorder size
-    size_t reorder_size         = reorder_operator.get_reorder_size();
-    // Extract the input buffer size
-    size_t input_buffer_size    = input_tensor.get_buffer_sz_bytes();
-    data_type_t dtype           = input_tensor.get_data_type();
+    reorder_context.create();
 
     uint64_t rows               = input_tensor.get_size(0);
     uint64_t cols               = input_tensor.get_size(1);
     tensor_t output_tensor;
 
-    // InPlace reorder
-    if (inplace_reorder) {
-      // InPlace reorder works when reorder size is equal to input buffer size.
-      if (reorder_size != input_buffer_size) {
-        log_info("Inplace reorder is not possible for given input");
+    bool memory_reorder         = (!(input_tensor.get_layout() | uint8_t(
+                                       tensor_layout_t::contiguous)) ||
+                                   (input_tensor.get_layout() & uint8_t(tensor_layout_t::aligned)));
+    bool memory_unreorder       = (input_tensor.get_layout() & uint8_t(
+                                     tensor_layout_t::blocked));
+    bool trans                  = (input_tensor.get_order() == "ba") ? true : false;
+
+    if (memory_reorder) {
+      // Reorder operator creation with name, context and input.
+      auto reorder_operator = reorder_operator_t()
+                              .set_name("reorder_operator")
+                              .set_context(reorder_context)
+                              .create()
+                              .set_input("reorder_input", input_tensor);
+
+      if (! reorder_operator.check()) {
+        log_error("operator ", reorder_operator.get_name(), " creation failed.");
+        return std::make_pair(tensor_t(), status_t::failure);
+      }
+
+      // Compute the reorder size
+      size_t reorder_size         = reorder_operator.get_reorder_size();
+      // Extract the input buffer size
+      size_t input_buffer_size    = input_tensor.get_buffer_sz_bytes();
+
+      if (inplace_reorder) {
+        // InPlace reorder works when reorder size is equal to input buffer size.
+        if (reorder_size != input_buffer_size) {
+          log_info("Inplace reorder is not possible for given input");
+          return std::make_pair(input_tensor, status_t::unimplemented);
+        }
+        else {
+          // Assign input_tensor to buffer_params as a tensor_t variant
+          StorageParam buffer_params = input_tensor;
+
+          // Output Tensor creation with separate view for input tensor
+          output_tensor = tensor_factory.copy_tensor({rows, cols},
+                          dtype,
+                          buffer_params, trans, true);
+          output_tensor.set_name("reorder_output");
+        }
+      }
+      else {
+        // create a buffer with reorderd size
+        size_t alignment = 64;
+        reorder_size = get_aligned_size(alignment, reorder_size);
+        *weights = aligned_alloc(alignment, reorder_size);
+
+        if (*weights == nullptr) {
+          log_info("weights can not have align allocation");
+          return std::make_pair(input_tensor, status_t::failure);
+        }
+
+        // Create a Pair of storage params [reorder size and reorder weights] and
+        // use it in tensor creation
+        StorageParam buffer_params = std::make_pair(reorder_size, *weights);
+
+        // Create output tensor with blocked layout.
+        output_tensor = tensor_factory.copy_tensor({rows, cols},
+                        dtype,
+                        buffer_params, trans, true);
+        output_tensor.set_name("reorder_output");
+      }
+      // Reorder operator execution.
+      status = reorder_operator
+               .set_output("reorder_output", output_tensor)
+               .execute();
+
+      if (status != status_t::success) {
+        log_info("operator ", reorder_operator.get_name(), " execution failed.");
         return std::make_pair(input_tensor, status_t::failure);
       }
       else {
-        // Assign input_tensor to buffer_params as a tensor_t variant
+        log_info("operator ", reorder_operator.get_name(), " execution successful.");
+        return std::make_pair(output_tensor, status_t::success);
+      }
+    }
+    else {
+      // reorder operator creation with name, context and input.
+      auto reorder_operator = reorder_operator_t()
+                              .set_name("reorder_operator")
+                              .set_context(reorder_context)
+                              .create()
+                              .set_input("reorder_input", input_tensor);
+
+      if (! reorder_operator.check()) {
+        log_error("operator ", reorder_operator.get_name(), " creation failed.");
+        return std::make_pair(tensor_t(), status_t::failure);
+      }
+
+      // Inplace reorder
+      if (inplace_reorder) {
         StorageParam buffer_params = input_tensor;
 
-        // Output Tensor creation with seperate view for input tensor
-        output_tensor = tensor_factory.blocked_tensor({rows, cols},
+        output_tensor = tensor_factory.copy_tensor({rows, cols},
                         dtype,
-                        buffer_params);
+                        buffer_params, trans, false);
         output_tensor.set_name("reorder_output");
       }
-    }
-    else {
-      // create a buffer with reorderd size
-      size_t alignment = 64;
-      reorder_size = get_aligned_size(alignment, reorder_size);
-      *reorder_weights = (float *) aligned_alloc(alignment, reorder_size);
-      if (*reorder_weights == nullptr) {
-        log_info("reorder_weights  can not have align allocation");
-        return std::make_pair(input_tensor, status_t::failure);
+      else if (memory_unreorder) {
+        // Compute the output buffer size for reorder
+        auto reorder_size = reorder_operator.get_reorder_size();
+
+        // create a buffer with reorderd size
+        size_t alignment = 64;
+        reorder_size = get_aligned_size(alignment, reorder_size);
+        *weights = aligned_alloc(alignment, reorder_size);
+
+        if (*weights == nullptr) {
+          log_info("weights can not have align allocation");
+          return std::make_pair(input_tensor, status_t::failure);
+        }
+
+        // Create a Pair of storage params [reorder size and reorder weights] and
+        // use it in tensor creation
+        StorageParam buffer_params = std::make_pair(reorder_size, *weights);
+
+        // Create output tensor with contiguous layout.
+        output_tensor = tensor_factory.copy_tensor({rows, cols},
+                        dtype,
+                        buffer_params, trans, false);
+        output_tensor.set_name("reorder_output");
       }
 
-      // Create a Pair of storage params [reorder size and reorder weights] and
-      // use it in tensor creation
-      StorageParam buffer_params = std::make_pair(reorder_size, *reorder_weights);
+      // Reorder operator execution.
+      status = reorder_operator
+               .set_output("reorder_output", output_tensor)
+               .execute();
 
-      // Create output tensor with blocked layout.
-      output_tensor = tensor_factory.blocked_tensor({rows, cols},
-                      dtype,
-                      buffer_params);
-      output_tensor.set_name("reorder_output");
-
+      if (status != status_t::success) {
+        log_info("operator ", reorder_operator.get_name(), " execution failed.");
+        return std::make_pair(input_tensor, status_t::failure);
+      }
+      else {
+        log_info("operator ", reorder_operator.get_name(), " execution successful.");
+        return std::make_pair(output_tensor, status_t::success);
+      }
     }
-
-    // Reorder operator execution.
-    status = reorder_operator
-             .set_output("reorder_output", output_tensor)
-             .execute();
-
-    if (status != status_t::success) {
-      log_info("operator ", reorder_operator.get_name(), " execution failed.");
-    }
-    else {
-      log_info("operator ", reorder_operator.get_name(), " execution successful.");
-    }
-
-    return std::make_pair(output_tensor, status_t::success);
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());

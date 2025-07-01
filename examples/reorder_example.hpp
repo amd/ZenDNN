@@ -32,7 +32,7 @@
 namespace zendnnl {
 namespace examples {
 
-/** @fn reorder_outofplace_f32_kernel_example
+/** @fn reorder_outofplace_f32_kernel_contiguous_blocked_example
  *  @brief Demonstrates reorder operator on f32 input.
  *
  *  Reorder operator converts contiguous format to blocked format based on
@@ -41,9 +41,9 @@ namespace examples {
  *  This example demonstrates reorder operator creation and execution of one
  *  of its f32 kernel.
  */
- int reorder_outofplace_f32_kernel_example();
+int reorder_outofplace_f32_kernel_contiguous_blocked_example();
 
-/** @fn reorder_outofplace_s8_kernel_example
+/** @fn reorder_outofplace_s8_kernel_contiguous_blocked_example
  *  @brief Demonstrates reorder operator on s8 input.
  *
  *  Reorder operator converts contiguous format to blocked format based on
@@ -52,9 +52,9 @@ namespace examples {
  *  This example demonstrates reorder operator creation and execution of one
  *  of its s8 kernel.
  */
- int reorder_outofplace_s8_kernel_example();
+int reorder_outofplace_s8_kernel_contiguous_blocked_example();
 
-/** @fn reorder_outofplace_matmul_relu_f32_kernel_example
+/** @fn reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example
  *  @brief Demonstrates matmul+relu operator with reordered weights on f32 weights.
  *
  *  matmul operator implements matrix multiplication on 2D tensors with reordered
@@ -66,9 +66,9 @@ namespace examples {
  *  This example demonstrates matmul and reorder operator creation and
  *  execution of one of its f32 kernel.
  */
- int reorder_outofplace_matmul_relu_f32_kernel_example();
+int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example();
 
-/** @fn reorder_inplace_bf16_kernel_example
+/** @fn reorder_inplace_bf16_kernel_contiguous_blocked_example
  *  @brief Demonstrates reorder operator on bf16 input.
  *
  *  Reorder operator converts contiguous format to blocked format based on
@@ -78,9 +78,9 @@ namespace examples {
  *  This example demonstrates reorder operator creation and execution of one
  *  of its bf16 kernel.
  */
- int reorder_inplace_bf16_kernel_example();
+int reorder_inplace_bf16_kernel_contiguous_blocked_example();
 
-/** @fn reorder_inplace_matmul_relu_bf16_kernel_example
+/** @fn reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example
 *  @brief Demonstrates matmul+relu operator with reordered weights on bf16 weights.
 *
 *  matmul operator implements matrix multiplication on 2D tensors with reordered
@@ -92,7 +92,41 @@ namespace examples {
 *  This example demonstrates matmul and reorder(Inplace) operator creation and
 *  execution of one of its bf16 kernel.
 */
-int reorder_inplace_matmul_relu_bf16_kernel_example();
+int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example();
+
+/** @fn reorder_outofplace_bf16_kernel_blocked_contiguous_example
+ *  @brief Demonstrates reorder operator on bf16 input.
+ *
+ *  Reorder operator converts blocked format to contiguous format based on
+ *  different backends.
+ *
+ *  This example demonstrates reorder operator creation and execution of one
+ *  of its bf16 kernel.
+ */
+int reorder_outofplace_bf16_kernel_blocked_contiguous_example();
+
+/** @fn reorder_inplace_s8_kernel_blocked_contiguous_example
+*  @brief Demonstrates reorder operator on s8 input.
+*
+*  Reorder operator converts blocked format to contiguous format based on
+*  different backends.
+*
+*  This example demonstrates reorder operator creation and execution of one
+*  of its s8 kernel.
+*/
+int reorder_inplace_s8_kernel_blocked_contiguous_example();
+
+/** @fn reorder_unreorder_outofplace_bf16_kernel_example
+ *  @brief Demonstrates reorder/unreorder operator on bf16 input.
+ *
+ *  Reorder operator converts contiguous format to blocked format based on
+ *  different backends & data is converted back from blocked format to contiguous
+ *  format.
+ *
+ *  This example demonstrates reorder/unreorder operator creation and execution of one
+ *  of its bf16 kernel.
+ */
+int reorder_unreorder_outofplace_bf16_kernel_example();
 
 } //examples
 } //zendnnl

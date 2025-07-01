@@ -46,7 +46,6 @@ set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
 cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
-# append header files to top level include file
 list(APPEND reorder_operator_public_headers_list ${reorder_operator_public_headers})
 create_header_file(${zendnnl_inc_file}
   ${inc_subdir}

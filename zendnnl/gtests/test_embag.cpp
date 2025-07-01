@@ -144,7 +144,7 @@ TEST_P(TestEmbag, F32_BF16) {
  */
 TEST_P(TestEmbag, BF16_F32) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
-                           data_type_t::bf16, 2.0);
+                           data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
                            num_embeddings);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
@@ -184,7 +184,7 @@ TEST_P(TestEmbag, BF16_F32) {
  */
 TEST_P(TestEmbag, BF16_BF16) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
-                           data_type_t::bf16, 2.0);
+                           data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
                            num_embeddings);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;

@@ -73,14 +73,17 @@ int main() {
   batchmatmul_broadcast_example();
 
   /** Reorder operator functionality examples.
-   *  Demonstrates reordering memory from contiguous to blocked format,
+   *  Demonstrates reordering memory from contiguous to blocked format and vice versa,
    *  inplace reorder functionalities of Reorder operator.
    */
-  reorder_outofplace_f32_kernel_example();
-  reorder_outofplace_s8_kernel_example();
-  reorder_outofplace_matmul_relu_f32_kernel_example();
-  reorder_inplace_bf16_kernel_example();
-  reorder_inplace_matmul_relu_bf16_kernel_example();
+  reorder_outofplace_f32_kernel_contiguous_blocked_example();
+  reorder_outofplace_s8_kernel_contiguous_blocked_example();
+  reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example();
+  reorder_inplace_bf16_kernel_contiguous_blocked_example();
+  reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example();
+  reorder_outofplace_bf16_kernel_blocked_contiguous_example();
+  reorder_inplace_s8_kernel_blocked_contiguous_example();
+  reorder_unreorder_outofplace_bf16_kernel_example();
 
   /** Compare operator functionality examples.
    *  Demonstrates compare operator usage for comparison of tensors.

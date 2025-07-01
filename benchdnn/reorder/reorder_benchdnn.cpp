@@ -80,9 +80,9 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
         StorageParam buffer_params = input_tensor;
 
         // Create output tensor with a separate view but same memory as input
-        auto output_tensor = tensor_factory.blocked_tensor({cfg.rows, cfg.cols},
+        auto output_tensor = tensor_factory.copy_tensor({cfg.rows, cfg.cols},
                              cfg.dt,
-                             buffer_params,
+                             buffer_params, false, true,
                              "reorder_output");
 
         // In-place Reorder operator execution.
@@ -114,9 +114,9 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
       StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
 
       // Create output tensor with blocked layout.
-      auto output_tensor = tensor_factory.blocked_tensor({cfg.rows, cfg.cols},
+      auto output_tensor = tensor_factory.copy_tensor({cfg.rows, cfg.cols},
                            cfg.dt,
-                           buffer_params,
+                           buffer_params, false, true,
                            "reorder_output");
       // Reorder operator execution.
       status = reorder_operator
@@ -179,9 +179,9 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
 
         auto start_other = std::chrono::high_resolution_clock::now();
         // Blocked Tensor creation with seperate view for input tensor.
-        auto output_tensor = tensor_factory.blocked_tensor({cfg.rows, cfg.cols},
+        auto output_tensor = tensor_factory.copy_tensor({cfg.rows, cfg.cols},
                              cfg.dt,
-                             buffer_params,
+                             buffer_params, false, true,
                              "reorder_output");
         auto end_other = std::chrono::high_resolution_clock::now();
         elapsed_time = (std::chrono::duration<double, std::milli>
@@ -221,9 +221,9 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
       StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
 
       // Create output tensor with blocked layout.
-      auto output_tensor = tensor_factory.blocked_tensor({cfg.rows, cfg.cols},
+      auto output_tensor = tensor_factory.copy_tensor({cfg.rows, cfg.cols},
                            cfg.dt,
-                           buffer_params,
+                           buffer_params, false, true,
                            "reorder_output");
       auto end_other = std::chrono::high_resolution_clock::now();
       elapsed_time = (std::chrono::duration<double, std::milli>

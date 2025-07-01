@@ -62,6 +62,10 @@ std::string reorder_context_t::context_info() {
   }
   else {
     ss << "algo_format:" << algo_format;
+    auto src_type = dtype_info(get_source_dtype());
+    if (src_type == "s8" || src_type =="u8") {
+      ss << ",source_dtype:" << src_type;
+    }
   }
 
   return ss.str();

@@ -17,9 +17,9 @@
 #include "reorder_kernel_list.hpp"
 
 #if defined(ZENDNNL_DEPENDS_AOCLDLP)
-#include "aocl_dlp.h"
+  #include "aocl_dlp.h"
 #else
-#include "blis.h"
+  #include "blis.h"
 #endif
 
 namespace zendnnl {
@@ -41,16 +41,32 @@ status_t reorder_operator_t::validate() {
   auto input_size  = input->get_size();
   auto output_size = output->get_size();
 
-  if (input->get_raw_handle_unsafe() == output->get_raw_handle_unsafe()) {
-    size_t input_buffer_size = input->get_buffer_sz_bytes();
+  bool memory_reorder         = ((!(input->get_layout() | uint8_t(
+                                      tensor_layout_t::contiguous)) ||
+                                  (input->get_layout() & uint8_t(tensor_layout_t::aligned))) &&
+                                 (output->get_layout() & uint8_t(tensor_layout_t::blocked)));
 
-    if (reorder_size != input_buffer_size) {
-      apilog_error("Reorder size mismatch, Inplace reorder doesn't work for given matrix: reorder_size=",
-                   reorder_size, " input_buffer_size=", input_buffer_size);
-      return status_t::failure;
-    }
-    else {
-      apilog_info("Inplace reorder works for given matrix");
+  bool memory_unreorder       = ((input->get_layout() & uint8_t(
+                                    tensor_layout_t::blocked)) &&
+                                 !(output->get_layout() | uint8_t(tensor_layout_t::contiguous)));
+
+  if (!(memory_reorder || memory_unreorder)) {
+    apilog_error("Mismatch in layout is observed for conversion");
+    return status_t::failure;
+  }
+
+  if (memory_reorder) {
+    if (input->get_raw_handle_unsafe() == output->get_raw_handle_unsafe()) {
+      size_t input_buffer_size = input->get_buffer_sz_bytes();
+
+      if (reorder_size != input_buffer_size) {
+        apilog_error("Reorder size mismatch, Inplace reorder doesn't work for given matrix: reorder_size=",
+                     reorder_size, " input_buffer_size=", input_buffer_size);
+        return status_t::failure;
+      }
+      else {
+        apilog_info("Inplace reorder works for given matrix");
+      }
     }
   }
 
@@ -74,7 +90,8 @@ status_t reorder_operator_t::validate() {
   auto source_dtype  = context.get_source_dtype();
   if ((input->get_data_type() == data_type_t::s8) &&
       (!((source_dtype == data_type_t::s8) || (source_dtype == data_type_t::u8)))) {
-    apilog_error("Source data type mismatch for s8: source_dtype=", dtype_info(source_dtype));
+    apilog_error("Source data type mismatch for s8: source_dtype=",
+                 dtype_info(source_dtype));
     return status_t::failure;
   }
 

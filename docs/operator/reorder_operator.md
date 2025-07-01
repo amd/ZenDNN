@@ -5,11 +5,11 @@
 
 ## Overview
 
-This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specialized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contiguous memory format to optimized blocked format based on backend.
+This section provides a high-level overview of reorder operations with support for FP32, BF16, S8 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specialized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contiguous memory format to optimized blocked format and viceversa based on backend.
 
 **Important:** By default, the reorder operator expects the input tensor to have a shape of [K x N]. However, if the tensor is going to be transposed before being consumed by a downstream operator like matmul, then the reorder must be applied to the transposed version of the tensor i.e `N x K`. Otherwise the expected input dimension remains `K x N`.
 
-Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_example` and `reorder_inplace_bf16_kernel_example`.
+Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_contiguous_blocked_example`, `reorder_inplace_bf16_kernel_contiguous_blocked_example` and `reorder_inplace_s8_kernel_blocked_contiguous_example`.
 
 ## General Reorder Operation
 
@@ -17,35 +17,44 @@ Let:
 
 - *B* ∈ ℝᴷˣᴺ : Input matrix
 - *Backend(x)* : Backend used for reorder computation (Example: AOCL, OneDNN)
-- *Data type* : Supported data types for reorder (Example: FP32, BF16)
+- *Data type* : Supported data types for reorder (Example: FP32, BF16, S8)
 
 ## Steps to Perform Reorder Operation
 
 1. **Backend Algo selection**:
    - Specify the backend algorithm for reordering using `.set_algo_format()`.
 
-2. **Reorder size computation**:
+2. **Source type selection(S8 Reorder)**:
+   - Specify the source type for S8 reorder operations using `.set_source_type()`.
+
+3. **Reorder size computation**:
    - Invoke `.get_reorder_size()` to determine the required memory size for reordered tensor based on the selected backend algorithm.
 
-3. **Output Tensor creation**:
+4. **Output Tensor creation**:
     - Out-of-Place : Allocate new memory and create a tensor with blocked layout.
     - In-Place : Allocate a tensor with the same memory view as the input tensor and create it with a blocked layout.
 
-4. **Reorder Execution**:
-    - Converts memory from contiguous to blocked format.
+5. **Reorder Execution**:
+    - Converts memory from contiguous to blocked format or blocked to contiguous format.
 
 # Reorder Support Table
 
 This table outlines the support for Reorder operations with various data types, backend, and memory storage type.
 
-| Input<br>Data Type | Output<br>Data Type | Backend | Memory Storage type    |
-|--------------------|---------------------|---------|------------------------|
-| FP32               | FP32                | AOCL    | Out-of-Place, In-Place |
-| BF16               | BF16                | AOCL    | Out-of-Place, In-Place |
+| Input<br>Data Type |      Input layout     | Output<br>Data Type | Output layout | Backend | Memory Storage type    |
+|--------------------|-----------------------|---------------------|---------------|---------|------------------------|
+| FP32               |  Contiguous, Strided  | FP32                |    Blocked    | AOCL    | Out-of-Place, In-Place |
+| BF16               |  Contiguous, Strided  | BF16                |    Blocked    | AOCL    | Out-of-Place, In-Place |
+| S8                 |  Contiguous, Strided  | S8                  |    Blocked    | AOCL    | Out-of-Place, In-Place |
+| FP32               |        Blocked        | FP32                |   Contiguous  | AOCL    | Out-of-Place, In-Place |
+| BF16               |        Blocked        | BF16                |   Contiguous  | AOCL    | Out-of-Place, In-Place |
+| S8                 |        Blocked        | S8                  |   Contiguous  | AOCL    | Out-of-Place, In-Place |
+
+**Note:** Reorder operations with S8 data type are dependent on source matrix data type of matmul operation with AOCL backend. (Supported Source matrix data types: `S8`, `U8`)
 
 ## Examples
 
-### 1. reorder_outofplace_f32_kernel_example
+### 1. reorder_outofplace_f32_kernel_contiguous_blocked_example
 
 This example performs reorder with `float32 (f32)` data type using `AOCL` backend.
 
@@ -58,7 +67,7 @@ This example performs reorder with `float32 (f32)` data type using `AOCL` backen
   - Performs the reorder, sets the input tensor, backend, and executes the operator with Out-of-Place memory.
 
 ```cpp
-int reorder_outofplace_f32_kernel_example() {
+int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
   try {
     // Status variable to track success or failure of operations
     status_t status;
@@ -104,19 +113,27 @@ int reorder_outofplace_f32_kernel_example() {
     size_t reorder_size = reorder_operator.get_reorder_size();
 
     // Create new memory using aligned alloc with reorderd size
+    size_t alignment = 64;
+    reorder_size = get_aligned_size(alignment, reorder_size);
     void *reorder_weights = aligned_alloc(64, reorder_size);
+
+    // Check if reorder_weights has been allocated successfully
+    if (reorder_weights == nullptr) {
+      testlog_error("reorder_weights can not have align allocation.");
+      return NOT_OK;
+    }
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation
     StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
 
     // Create output tensor with dimensions [K, N], data type float32,
-    // layout blocked, buffer parama [reorder size, reorder weights]
+    // buffer params [reorder size, reorder weights], trans, isblocked
     // and named "reorder_output".
-    auto output_tensor = tensor_factory.blocked_tensor({ROWS, COLS},
-                                                       data_type_t::f32,
-                                                       buffer_params,
-                                                       "reorder_output");
+    auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
+                                                    data_type_t::f32,
+                                                    buffer_params, false,
+                                                    true, "reorder_output");
 
     // Set output tensors and execute the reorder operator
     status = reorder_operator
@@ -145,7 +162,7 @@ int reorder_outofplace_f32_kernel_example() {
 }
 ```
 
-### 2. reorder_inplace_bf16_kernel_example
+### 2. reorder_inplace_bf16_kernel_contiguous_blocked_example
 
 This example performs reorder with `bfloat16 (bf16)` data type using `AOCL` backend.
 
@@ -158,7 +175,7 @@ This example performs reorder with `bfloat16 (bf16)` data type using `AOCL` back
   - Performs the reorder, sets the input tensor, backend, and executes the operator with In-Place memory.
 
 ```cpp
-int reorder_inplace_bf16_kernel_example() {
+int reorder_inplace_bf16_kernel_contiguous_blocked_example() {
   try {
     // Status variable to track success or failure of operations
     status_t status;
@@ -213,12 +230,12 @@ int reorder_inplace_bf16_kernel_example() {
       StorageParam buffer_params = input_tensor;
 
       // Create output tensor with dimensions [K, N], data type bfloat16,
-      // layout blocked, buffer params [reorder size, reorder weights]
+      // buffer params [reorder size, reorder weights], trans, isblocked
       // and named "reorder_output".
-      auto output_tensor = tensor_factory.blocked_tensor({ROWS, COLS},
-                                                         data_type_t::bf16,
-                                                         buffer_params,
-                                                         "reorder_output");
+      auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
+                                                      data_type_t::bf16,
+                                                      buffer_params, false,
+                                                      true, "reorder_output");
 
       // Set output tensors and execute the reorder operator
       status = reorder_operator
@@ -236,6 +253,106 @@ int reorder_inplace_bf16_kernel_example() {
     else {
       // Inplace reorder is not possible as there is mismatch in the size.
       testlog_error("Inplace reorder is not possible for given input");
+      return NOT_OK;
+    }
+  } catch (const exception_t& ex) {
+    // Catch and print any exceptions that occur during execution
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  // Return success status
+  return OK;
+}
+```
+
+### 3. reorder_inplace_s8_kernel_blocked_contiguous_example
+
+This example performs reorder with `signed int8 (s8)` data type using `AOCL` backend.
+
+**Key Components**
+
+- **Weights and Initialization**
+  - Weights: Uniform tensor with dimensions `{ROWS, COLS}`
+
+- **Execution**
+  - Performs the reorder, sets the input tensor, backend, source_dtype, and executes the operator with In-Place memory.
+
+```cpp
+int reorder_inplace_s8_kernel_blocked_contiguous_example() {
+  try {
+    // Status variable to track success or failure of operations
+    status_t status;
+
+    // Factory object to create tensors with specified properties
+    tensor_factory_t tensor_factory;
+
+    // Create scale and zero point tensors for quantization
+    auto src_scale  = tensor_factory.uniform_tensor({1,MATMUL_K},
+                      data_type_t::f32,
+                      0.25, "src_scale_tensor");
+
+    auto src_zero_points  = tensor_factory.uniform_tensor({1,1},
+                            data_type_t::s8,
+                            126, "zero tensor");
+
+    // Create a tensor with dimensions [K, N], data type s8, layout
+    // blocked initialized with random values of range [-5.0, 5.0],
+    // named "reorder_input", scales and zero points.
+    auto input_tensor = tensor_factory.blocked_tensor({ROWS, COLS},
+                                                      data_type_t::s8,
+                                                      5.0f, "reorder_input", 
+                                                      src_scale, src_zero_points);
+
+    // Create a reorder context by backend algo and source type
+    // This context encapsulates all parameters required for the reorder operation
+    auto reorder_context = reorder_context_t()
+      .set_algo_format("aocl")
+      .set_source_type(data_type_t::s8)
+      .create();
+
+    // Check if the context was created successfully
+    if (!(reorder_context.check())) {
+      testlog_error("context creation failed");
+      return NOT_OK;
+    }
+
+    // Create a reorder operator using the defined context and set input
+    // tensor, This operator will execute the reorder operation
+    auto reorder_operator = reorder_operator_t()
+      .set_name("inplace_reorder_s8_operator")  // Assign a name to the operator
+      .set_context(reorder_context)      // Attach the context
+      .create()
+      .set_input("reorder_input", input_tensor);
+
+    // Check if the operator was created successfully
+    if (!reorder_operator.check()) {
+      testlog_error(" operator ", reorder_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    // Assign input_tensor to buffer_params as a tensor_t variant
+    StorageParam buffer_params = input_tensor;
+
+    // Create output tensor with dimensions [K, N], data type int8,
+    // buffer params [reorder size, reorder weights], trans, isblocked
+    // named "reorder_output", scale and zero point.
+    auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
+                                                    data_type_t::s8,
+                                                    buffer_params, false,
+                                                    false, "reorder_output", src_scale,
+                                                    src_zero_points);
+
+    // Set output tensors and execute the reorder operator
+    status = reorder_operator
+      .set_output("reorder_output", output_tensor)
+      .execute();
+
+    // Log the result of the execution
+    if (status == status_t::success) {
+      testlog_info("<", reorder_operator.get_name(), ">", " operator execution successful.");
+    } else {
+      testlog_error("<", reorder_operator.get_name(), ">", " operator execution failed.");
       return NOT_OK;
     }
   } catch (const exception_t& ex) {
