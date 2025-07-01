@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <vector>
+#include <cmath>
 #include <utility>
 #include <tuple>
 #include "zendnn_private.hpp"
@@ -264,7 +265,7 @@ int auto_compute_matmul_woq(
         autoBinSize = 1;
     }
 
-    Key_matmul key_obj(transA, transB, m % autoBinSize, k, n, lda, ldb, ldc,
+    Key_matmul key_obj(transA, transB, std::ceil(static_cast<float>(m) / static_cast<float>(autoBinSize)), k, n, lda, ldb, ldc,
                        weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
@@ -466,7 +467,7 @@ int auto_compute_matmul_int8(
         autoBinSize = 1;
     }
 
-    Key_matmul key_obj(transpose_input, transpose_weights, m % autoBinSize, k, n,
+    Key_matmul key_obj(transpose_input, transpose_weights, std::ceil(static_cast<float>(m) / static_cast<float>(autoBinSize)), k, n,
                        lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
@@ -655,7 +656,7 @@ int auto_compute_matmul_bf16(
         autoBinSize = 1;
     }
 
-    Key_matmul key_obj_auto(transpose_input, transpose_filter, M % autoBinSize, K,
+    Key_matmul key_obj_auto(transpose_input, transpose_filter, std::ceil(static_cast<float>(M) / static_cast<float>(autoBinSize)), K,
                             N, lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //This condition makes sure that address
@@ -1000,7 +1001,7 @@ int auto_compute_matmul(
     if (autoBinSize == 0) {
         autoBinSize = 1;
     }
-    Key_matmul key_obj(transpose_input, transpose_weights, m % autoBinSize, k, n,
+    Key_matmul key_obj(transpose_input, transpose_weights, std::ceil(static_cast<float>(m) / static_cast<float>(autoBinSize)), k, n,
                        lda, ldb, ldc, weights, zenEnvObj.omp_num_threads, true);
 
     //Persistent Map
