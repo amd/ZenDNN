@@ -101,12 +101,9 @@ Complete the following steps to setup the GCC compiled AOCL-BLAS library:
     cd ../lib/
     mkdir LP64
     cp libblis-mt.* LP64/
-    cd ../../
+    cd ../
+    export ZENDNN_BLIS_PATH=$(pwd)
 	```
-This will set up the environment for AOCL-BLAS path:
-```bash
-export ZENDNN_BLIS_PATH=$(pwd)
-```
 For example:
 ```bash
 export ZENDNN_BLIS_PATH=/home/<user-id>/my_work/amd-blis
