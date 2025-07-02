@@ -20,6 +20,7 @@
 #include <iostream>
 #include <zendnn.h>
 #include <cassert>
+#include <mutex>
 #include <algorithm>
 #ifdef _WIN32
     #include <Windows.h>
@@ -200,7 +201,15 @@ class zendnnEnv {
   private:
     //initializing ZenDNNEnv values.
     zendnnEnv() {
-        std::cout << "ZenDNN is Running......" << std::endl;
+
+        {
+            static std::mutex print_mutex;
+            std::lock_guard<std::mutex> lock(print_mutex);
+            std::cout << std::endl
+                  << "ZenDNN Info: Execution has entered the ZenDNN library. "
+                  "Optimized deep learning kernels are now active for high-performance inference on AMD CPUs."
+                  << std::endl << std::endl;
+        }
 
         omp_num_threads = zendnn_getenv_int("OMP_NUM_THREADS", 1);
         zen_num_threads = zendnn_getenv_int("ZEN_NUM_THREADS", 1);
