@@ -882,9 +882,9 @@ class zendnn_custom_op {
                                            int group_count,
                                            const std::vector<int> &group_size_array);
 
-    static void zendnn_matmul_direct_fp32(const void *src, const void *weight,
+    static void zendnn_matmul_direct(const void *src, const void *weight,
                                           void *dst, const void *bias,  float alpha, float beta,
-                                          int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc, data_types dt,
+                                          int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc, bool weight_const, data_types dt,
                                           ActivationPostOp post_op,
                                           int Batch_A=1, int Batch_B=1);
 
