@@ -47,7 +47,7 @@ using dt = memory::data_type;
 
 #define PERF    0
 #define INPUT_FILE 0
-#define ENABLE_BF16 1
+#define ENABLE_BF16 0
 
 
 void compare_float_arrays(const float *arr1, const float *arr2, int size,
@@ -80,7 +80,7 @@ float checksum(const std::vector<float> &mat) {
 void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
                        int argc, char **argv, int M=1, int N=1, int K=1) {
     zendnnInfo(ZENDNN_TESTLOG, "zendnn_matmul_test: matmul_example_2D starts");
-    int batch_size=10;
+    int batch_size=1;
 #if ENABLE_BF16
     int16_t *dst1, *dst2, *src, *weight, *bias;
 #else
@@ -290,10 +290,9 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream,
 #endif
                 //auto dst_mem1 = memory(dst_md, eng);
 
-
-                zendnn_custom_op::zendnn_matmul_direct_fp32(src, weight, dst2, bias, 1, 0, M, N,
+                zendnn_custom_op::zendnn_matmul_direct(src, weight, dst2, bias, 1, 0, M, N,
                         K,
-                        false, false, K, N, N, dt, ActivationPostOp::NONE, batch_size, batch_size);
+                        false, false, K, N, N, true, dt, ActivationPostOp::NONE, batch_size, batch_size);
 #if PERF
             }
 #endif

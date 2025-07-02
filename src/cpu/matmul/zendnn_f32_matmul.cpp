@@ -437,9 +437,9 @@ status_t zendnn_f32_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
              direct_algo_check) {
         data_types dt;
         //Direct MatMul
-        zendnn_custom_op::zendnn_matmul_direct_fp32((float *)src, (float *)weights,
+        zendnn_custom_op::zendnn_matmul_direct((float *)src, (float *)weights,
                 (float *)dst, (float *)bias, alpha, beta, M, N, K,
-                transA == 'T', transB == 'T', lda, ldb, ldc, dt, activation_post_op,
+                transA == 'T', transB == 'T', lda, ldb, ldc, is_weights_const, dt, activation_post_op,
                 input_batch, weights_batch);
     }
     else if (ndims == 3) {

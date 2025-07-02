@@ -337,9 +337,9 @@ status_t zendnn_bf16_matmul_t<dst_type>::execute_ref(
         data_types dt(pd()->src_md()->data_type, pd()->weights_md()->data_type,
                       pd()->weights_md(1)->data_type, dst_type);
         //Direct MatMul
-        zendnn_custom_op::zendnn_matmul_direct_fp32(src, weights,
+        zendnn_custom_op::zendnn_matmul_direct(src, weights,
                 dst, bias, output_scales[0], beta, M, N, K,
-                transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1, lda, ldb, ldc, dt,
+                transA == 'N'? 0 : 1, transB == 'N' ? 0 : 1, lda, ldb, ldc, is_weights_const, dt,
                 activation_post_op,
                 1, 1);
     }

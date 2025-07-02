@@ -22,8 +22,8 @@
 #include "common/zendnn_lru_cache.hpp"
 #include <stdio.h>
 #include <omp.h>
-#include "zendnn_matmul_direct_fp32.hpp"
-
+#include "zendnn_matmul_direct.hpp"
+#include "common/zendnn_reorder_cache.hpp"
 
 #ifndef ZENDNN_USE_AOCL_BLIS_API
     #include <cblas.h>
@@ -75,10 +75,11 @@ float *get_transposed_weight_if_needed(float *weight, int K, int N,
     int zenWeightCache = zendnn_getenv_int("ZENDNN_WEIGHT_CACHING", 1);
 
     static zendnn::impl::lru_weight_cache_t<float *, float *> matmul_weight_cache;
-    float *weightCache = (float *)malloc(K * N * sizeof(float));
+    float *weightCache = NULL;
     auto found_obj = matmul_weight_cache.find_key(weight);
 
     if (!found_obj || zenWeightCache == 0) {
+        weightCache = (float *)malloc(K * N * sizeof(float));
         std::lock_guard<std::mutex> lock(map_mutex);
         transpose_matrix(weight, weightCache, N, K);
         matmul_weight_cache.add(weight, weightCache);
@@ -158,12 +159,12 @@ size_t zendnn_custom_op::matmul_direct_select_kernel(int M, int N, int K) {
 
 void execute_aocl_gemm(char order, char transa, char transb,
                        int Batch_A, int Batch_B, int M, int N, int K, float alpha, float beta,
-                       const void *src, const void *weight, void *dst, float *bias, data_types dt,
+                       const void *src, const void *weight, void *dst, float *bias, bool weight_const, data_types dt,
                        char mem_format_a, char mem_format_b, const int lda, const int ldb,
                        const int ldc, int thread_qty,
                        ActivationPostOp activation_post_op = ActivationPostOp::NONE) {
     // Create aocl_post_op
-    aocl_post_op post_op = {};
+    aocl_post_op *post_op = NULL;
 
     int postop_count = alpha != 1 ? 1 : 0;
     if (bias != nullptr) {
@@ -172,56 +173,67 @@ void execute_aocl_gemm(char order, char transa, char transb,
     if (activation_post_op != ActivationPostOp::NONE) {
         ++postop_count;
     }
-
-    post_op.seq_length = postop_count;
-    AOCL_POST_OP_TYPE seq_vector[postop_count];
-    post_op.bias = nullptr;
-    post_op.eltwise = nullptr;
+    post_op = (aocl_post_op *) malloc(sizeof(aocl_post_op));
+    if (post_op == NULL) {
+        return;
+    }
+    if(postop_count > 0){
+        post_op->seq_vector = (AOCL_POST_OP_TYPE *) malloc(postop_count *
+                               sizeof(AOCL_POST_OP_TYPE));
+        post_op->seq_length = postop_count;
+    }else {
+        post_op->seq_vector = NULL;
+        post_op->seq_length = 0;
+    }
+    post_op->eltwise = NULL;
+    post_op->bias = NULL;
+    post_op->sum = NULL;
+    post_op->matrix_add = NULL;
+    post_op->matrix_mul = NULL;
 
     int post_op_index = 0;
     float *bias_ = nullptr;
     if (dt.src_dt == zendnn_bf16) {
-        if (bias != NULL) {
+        if (bias != nullptr) {
             // Add bias postop
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::BIAS;
-            post_op.bias = new aocl_post_op_bias{bias, dt.bia_dt == zendnn_bf16 ? AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16 : AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32 };
-            if (post_op.bias == NULL) {
-                std::free(seq_vector);
-                return;
-            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::BIAS;
+            post_op->bias = (aocl_post_op_bias*)malloc(sizeof(aocl_post_op_bias));
+            (post_op->bias)->bias = bias;
+            post_op->bias->stor_type = dt.bia_dt == zendnn_bf16 ? AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16 : AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
         }
         //Scale post-op
         if (alpha != 1.0) {
-            post_op.sum = (aocl_post_op_sum *) malloc(sizeof(
+            post_op->sum = (aocl_post_op_sum *) malloc(sizeof(
                               aocl_post_op_sum));
 
-            if (post_op.sum == NULL) {
-                if (post_op.bias != NULL) {
-                    delete post_op.bias;
+            if (post_op->sum == NULL) {
+                if (post_op->bias != NULL) {
+                    free(post_op->bias);
                 }
-                std::free(post_op.seq_vector);
+                std::free(post_op->seq_vector);
+                free(post_op);
                 return;
             }
-            seq_vector[post_op_index++] = SCALE;
-            (post_op.sum)->is_power_of_2 = FALSE;
-            (post_op.sum)->scale_factor = NULL;
-            (post_op.sum)->buff = NULL;
-            (post_op.sum)->zero_point = NULL;
+            post_op->seq_vector[post_op_index++] = SCALE;
+            (post_op->sum)->is_power_of_2 = FALSE;
+            (post_op->sum)->scale_factor = NULL;
+            (post_op->sum)->buff = NULL;
+            (post_op->sum)->zero_point = NULL;
 
-            (post_op.sum)->scale_factor = malloc(sizeof(float));
-            (post_op.sum)->zero_point = malloc(sizeof(float));
+            (post_op->sum)->scale_factor = malloc(sizeof(float));
+            (post_op->sum)->zero_point = malloc(sizeof(float));
 
             //SCALE
-            float *temp_dscale_ptr = (float *)(post_op.sum)->scale_factor;
-            float *temp_dzero_point_ptr = (float *)(post_op.sum)->zero_point;
+            float *temp_dscale_ptr = (float *)(post_op->sum)->scale_factor;
+            float *temp_dzero_point_ptr = (float *)(post_op->sum)->zero_point;
             temp_dscale_ptr[0] = (float)(alpha);
 
             temp_dzero_point_ptr[0] = (float)0;
 
-            (post_op.sum)->scale_factor_len = 1;
-            (post_op.sum)->zero_point_len = 1;
-            (post_op.sum)->sf_stor_type = AOCL_GEMM_F32;
-            (post_op.sum)->zp_stor_type = AOCL_GEMM_F32;
+            (post_op->sum)->scale_factor_len = 1;
+            (post_op->sum)->zero_point_len = 1;
+            (post_op->sum)->sf_stor_type = AOCL_GEMM_F32;
+            (post_op->sum)->zp_stor_type = AOCL_GEMM_F32;
         }
     }
     else {
@@ -234,71 +246,120 @@ void execute_aocl_gemm(char order, char transa, char transb,
                     bias_[i] = alpha * bias[i];
                 }
             }
-            post_op.bias = new aocl_post_op_bias{ (alpha != 1.0f) ? bias_ : bias, AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32 };
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::BIAS;
+            post_op->bias = (aocl_post_op_bias*)malloc(sizeof(aocl_post_op_bias));
+            if (post_op->bias == NULL) {
+                if (bias_ != nullptr) delete[] bias_;
+                free(post_op->seq_vector);
+                free(post_op);
+                return;
+            }
+            (post_op->bias)->bias = (alpha != 1.0f) ? bias_ : bias;
+            (post_op->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::BIAS;
         }
     }
     if (activation_post_op != ActivationPostOp::NONE) {
+        post_op->eltwise = (aocl_post_op_eltwise*)malloc(sizeof(aocl_post_op_eltwise));
         switch (activation_post_op) {
         case ActivationPostOp::RELU:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::RELU}};
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::RELU}};
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         case ActivationPostOp::SIGMOID:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::SIGMOID}};
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::SIGMOID}};
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         case ActivationPostOp::TANH:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::TANH}};
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::TANH}};
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         case ActivationPostOp::GELU_TANH:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::GELU_TANH}};
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::GELU_TANH}};
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         case ActivationPostOp::GELU_ERF:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::GELU_ERF}};
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {nullptr, nullptr, AOCL_ELT_ALGO_TYPE::GELU_ERF}};
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         case ActivationPostOp::SILU:
-            post_op.eltwise = new aocl_post_op_eltwise{false, nullptr, 0, {malloc(sizeof(float)), nullptr, AOCL_ELT_ALGO_TYPE::SWISH}};
-            *((float *)(post_op.eltwise->algo.alpha)) = 1.0f;
-            seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
+            if (post_op->eltwise != NULL) {
+                *post_op->eltwise = {false, nullptr, 0, {malloc(sizeof(float)), nullptr, AOCL_ELT_ALGO_TYPE::SWISH}};
+                if ((post_op->eltwise)->algo.alpha != nullptr)
+                    *((float *)((post_op->eltwise)->algo.alpha)) = 1.0f;
+            }
+            post_op->seq_vector[post_op_index++] = AOCL_POST_OP_TYPE::ELTWISE;
             break;
         }
     }
-
-    post_op.seq_vector = seq_vector;
-
     if (Batch_A == 1 && Batch_B == 1) {
         zendnnInfo(ZENDNN_CORELOG,
                    "Running single AOCL GEMM kernel");
+        Key_matmul key_obj(transa == 't'? true: false, transb == 't' ? true: false, M, K, N, lda, ldb, ldc,
+                            weight, thread_qty, false);
+        const char reorder_param0 = 'B';
+        const dim_t reorder_param1 = K;
+        const dim_t reorder_param2 = N;
+        int block_wei = zendnn::zendnn_getenv_int("ZENDNN_MATMUL_DIRECT_CACHING",1);
         if (dt.src_dt == zendnn_f32) {
-            // Use float32 kernel
+            // Blocked BLIS API for matmul
+            float *reorder_weight = NULL;
+            if (block_wei == 1 && weight_const) {
+                mem_format_b = 'r';
+                bool status = reorderAndCacheWeights<float>(key_obj, (float *)weight, reorder_weight, K,
+                            N, ldb, 1/*weight const*/, 0/*inplace*/, order, transb, reorder_param0,
+                            reorder_param1, reorder_param2,
+                            aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                            1/*out-of-place caching*/);
+                if (status == false) {
+                    mem_format_b = 'n';
+                    block_wei = 0;
+                }
+            }
+            zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_f32f32f32of32");
             aocl_gemm_f32f32f32of32(order, transa, transb, M, N, K, alpha,
                                     (float *)src, lda, mem_format_a,
-                                    (float *)weight, ldb, mem_format_b,
-                                    beta, (float *)dst, ldc, &post_op);
+                                    (block_wei == 1 && weight_const) ? reorder_weight : (float *)weight, ldb, mem_format_b,
+                                    beta, (float *)dst, ldc, post_op);
         }
         else if (dt.src_dt == zendnn_bf16) {
+            // Blocked BLIS API for matmul
+            int16_t *reorder_weight = NULL;
+            if (block_wei == 1 && weight_const) {
+                mem_format_b = 'r';
+                bool status = reorderAndCacheWeights<int16_t>(key_obj, (int16_t *)weight, reorder_weight, K,
+                            N, ldb, 1/*weight const*/, 0/*inplace*/, order, transb, reorder_param0,
+                            reorder_param1, reorder_param2,
+                            aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
+                            1/*out-of-place caching*/);
+                if (status == false) {
+                    mem_format_b = 'n';
+                    block_wei = 0;
+                }
+            }
             if (dt.dst_dt == zendnn_bf16) {
-                // Use bf16->bf16 kernel
+                zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32obf16");
                 aocl_gemm_bf16bf16f32obf16(order, transa, transb, M, N, K, 1.0,
                                            (int16_t *)src, lda, mem_format_a,
-                                           (int16_t *)weight, ldb, mem_format_b,
-                                           beta, (int16_t *)dst, ldc, &post_op);
+                                           (block_wei == 1 && weight_const) ? reorder_weight : (int16_t *)weight, ldb, mem_format_b,
+                                           beta, (int16_t *)dst, ldc, post_op);
             }
             else {
-                // Use bf16->f32 kernel
+                zendnnVerbose(ZENDNN_PROFLOG,"Using AOCL GEMM API: aocl_gemm_bf16bf16f32of32");
                 aocl_gemm_bf16bf16f32of32(order, transa, transb, M, N, K, 1.0,
                                           (int16_t *)src, lda, mem_format_a,
-                                          (int16_t *)weight, ldb, mem_format_b,
-                                          beta, (float *)dst, ldc, &post_op);
+                                          (block_wei == 1 && weight_const) ? reorder_weight : (int16_t *)weight, ldb, mem_format_b,
+                                          beta, (float *)dst, ldc, post_op);
             }
-        }
-        else {
-            zendnnInfo(ZENDNN_PROFLOG, "Unsupported data type combination for AOCL GEMM.");
-            return;
         }
     }
     else if (Batch_A > 1 || Batch_B > 1) {
@@ -315,26 +376,24 @@ void execute_aocl_gemm(char order, char transa, char transb,
                                             Batch_A == 1 ? (float *)src : (float *)src + i * offset_src, lda, mem_format_a,
                                             Batch_B == 1 ? (float *)weight : (float *)weight + i * offset_wei, ldb,
                                             mem_format_b,
-                                            beta, (float *)dst + i * M * ldc, ldc, &post_op);
+                                            beta, (float *)dst + i * M * ldc, ldc, post_op);
                 }
                 else if (dt.src_dt == zendnn_bf16) {
                     if (dt.dst_dt == zendnn_bf16) {
-                        // Use bf16->bf16 kernel
                         aocl_gemm_bf16bf16f32obf16(order, transa, transb, M, N, K, 1.0,
                                                    Batch_A == 1 ? (int16_t *)src : (int16_t *)src + i * offset_src, lda,
                                                    mem_format_a,
                                                    Batch_B == 1 ? (int16_t *)weight : (int16_t *)weight + i * offset_wei, ldb,
                                                    mem_format_b,
-                                                   beta, (int16_t *)dst + i * M * ldc, ldc, &post_op);
+                                                   beta, (int16_t *)dst + i * M * ldc, ldc, post_op);
                     }
                     else {
-                        // Use bf16->f32 kernel
                         aocl_gemm_bf16bf16f32of32(order, transa, transb, M, N, K, 1.0,
                                                   Batch_A == 1 ? (int16_t *)src : (int16_t *)src + i * offset_src, lda,
                                                   mem_format_a,
                                                   Batch_B == 1 ? (int16_t *)weight : (int16_t *)weight + i * offset_wei, ldb,
                                                   mem_format_b,
-                                                  beta, (float *)dst + i * M * ldc, ldc, &post_op);
+                                                  beta, (float *)dst + i * M * ldc, ldc, post_op);
                     }
                 }
             }
@@ -344,31 +403,28 @@ void execute_aocl_gemm(char order, char transa, char transb,
             #pragma omp parallel for num_threads(thread_qty)
             for (int i = 0; i < batch_size; ++i) {
                 if (dt.src_dt == zendnn_f32) {
-                    // Use float32 kernel
                     aocl_gemm_f32f32f32of32(order, transa, transb, M, N, K, alpha,
                                             Batch_A == 1 ? (float *)src : (float *)src + i * offset_src, lda, mem_format_a,
                                             Batch_B == 1 ? (float *)weight : (float *)weight + i * offset_wei, ldb,
                                             mem_format_b,
-                                            beta, (float *)dst + i * M * ldc, ldc, &post_op);
+                                            beta, (float *)dst + i * M * ldc, ldc, post_op);
                 }
                 else if (dt.src_dt == zendnn_bf16) {
                     if (dt.dst_dt == zendnn_bf16) {
-                        // Use bf16->bf16 kernel
                         aocl_gemm_bf16bf16f32obf16(order, transa, transb, M, N, K, 1.0,
                                                    Batch_A == 1 ? (int16_t *)src : (int16_t *)src + i * offset_src, lda,
                                                    mem_format_a,
                                                    Batch_B == 1 ? (int16_t *)weight : (int16_t *)weight + i * offset_wei, ldb,
                                                    mem_format_b,
-                                                   beta, (int16_t *)dst + i * M * ldc, ldc, &post_op);
+                                                   beta, (int16_t *)dst + i * M * ldc, ldc, post_op);
                     }
                     else {
-                        // Use bf16->f32 kernel
                         aocl_gemm_bf16bf16f32of32(order, transa, transb, M, N, K, 1.0,
                                                   Batch_A == 1 ? (int16_t *)src : (int16_t *)src + i * offset_src, lda,
                                                   mem_format_a,
                                                   Batch_B == 1 ? (int16_t *)weight : (int16_t *)weight + i * offset_wei, ldb,
                                                   mem_format_b,
-                                                  beta, (float *)dst + i * M * ldc, ldc, &post_op);
+                                                  beta, (float *)dst + i * M * ldc, ldc, post_op);
                     }
                 }
             }
@@ -380,25 +436,32 @@ void execute_aocl_gemm(char order, char transa, char transb,
     }
     // Clean-up allocated memory
     if (bias_ != nullptr) {
-        delete bias_;
+        delete[] bias_;
     }
     if (dt.src_dt == zendnn_bf16) {
-        if (post_op.sum != nullptr) {
-            if ((post_op.sum)->scale_factor != nullptr) {
-                free((post_op.sum)->scale_factor);
+        if (post_op && post_op->sum != nullptr) {
+            if ((post_op->sum)->scale_factor != nullptr) {
+                free((post_op->sum)->scale_factor);
             }
-            if ((post_op.sum)->zero_point != nullptr) {
-                free((post_op.sum)->zero_point);
+            if ((post_op->sum)->zero_point != nullptr) {
+                free((post_op->sum)->zero_point);
             }
-            free(post_op.sum);
+            free(post_op->sum);
         }
     }
-    if (post_op.bias != nullptr) {
-        delete post_op.bias;
+    if (post_op && post_op->bias != nullptr) {
+        free(post_op->bias);
     }
     if (activation_post_op != ActivationPostOp::NONE &&
-            post_op.eltwise != nullptr) {
-        delete post_op.eltwise;
+        post_op && post_op->eltwise != nullptr) {
+        if (post_op->eltwise->algo.alpha != nullptr && activation_post_op == ActivationPostOp::SILU) {
+            free(post_op->eltwise->algo.alpha);
+        }
+        free(post_op->eltwise);
+    }
+    if (post_op != NULL) {
+        free(post_op->seq_vector);
+        free(post_op);
     }
 }
 std::string getActivationPostOpName(ActivationPostOp post_op) {
@@ -421,11 +484,18 @@ std::string getActivationPostOpName(ActivationPostOp post_op) {
         return "UNKNOWN";
     }
 }
-void zendnn_custom_op::zendnn_matmul_direct_fp32(const void *src,
+std::string getDataTypeName(zendnn_data_type_t dt) {
+    switch (dt) {
+        case zendnn_f32: return "f32";
+        case zendnn_bf16: return "bf16";
+        default: return "unknown";
+    }
+}
+void zendnn_custom_op::zendnn_matmul_direct(const void *src,
         const void *weight, void *dst,
         const void *bias, float alpha, float beta,
         int M, int N, int K, bool transA, bool transB, int lda, int ldb, int ldc,
-        data_types dt,
+        bool weight_const, data_types dt,
         ActivationPostOp post_op, int Batch_A, int Batch_B) {
 
 //Input validation
@@ -445,15 +515,14 @@ void zendnn_custom_op::zendnn_matmul_direct_fp32(const void *src,
     configure_tile_size(tile_algo, MR, NR);
 
     bool check_ld = (transA) || (transB) || (ldc > N) ||
-                    (transB ? ldb > K : ldb > N)  ||
-                    (lda > K) || (thread_qty > 1) || (Batch_A != Batch_B) ||
+                    (ldb > N)  || (lda > K) || (thread_qty > 1) || (Batch_A != Batch_B) ||
                     (dt.src_dt == zendnn_bf16);
 
     auto start_ms = std::chrono::high_resolution_clock::now();
     if (check_ld) {
         execute_aocl_gemm('r', transA ? 't' : 'n', transB ? 't' : 'n', Batch_A, Batch_B,
                           M, N, K, alpha, beta, src, weight, dst,
-                          (float *)bias, dt,
+                          (float *)bias, weight_const, dt,
                           'n', 'n', lda, ldb, ldc, thread_qty, post_op);
     }
     else {
@@ -482,9 +551,9 @@ void zendnn_custom_op::zendnn_matmul_direct_fp32(const void *src,
                     transB, post_op, Batch_A);
         }
         else if (algo_type == 5) {
-            execute_aocl_gemm('r', transA ? 't' : 'n', transB ? 't' : 'n', Batch_A, Batch_B,
+            execute_aocl_gemm('r', 'n', 'n', Batch_A, Batch_B,
                               M, N, K, alpha, beta, src, weight, dst,
-                              (float *)bias, dt,
+                              (float *)bias, weight_const, dt,
                               'n', 'n', lda, ldb, ldc, thread_qty, post_op);
         }
         else if (algo_type == 6) {
@@ -508,7 +577,7 @@ void zendnn_custom_op::zendnn_matmul_direct_fp32(const void *src,
 
     zendnnVerbose(ZENDNN_PROFLOG,
                   "zenDirectMatMul, Layout=CblasRowMajor group_count=1 group_size[0]=",
-                  std::max(Batch_A, Batch_B),
+                  std::max(Batch_A, Batch_B), " src_dt=", getDataTypeName(dt.src_dt), " wei_dt=", getDataTypeName(dt.wei_dt), " bia_dt=", bias != nullptr ? getDataTypeName(dt.bia_dt) : "null", " dst_dt=", getDataTypeName(dt.dst_dt),
                   " M_Array[0]=", M, " N_Array[0]=", N,
                   " K_Array[0]=", K, " alpha_Array[0]=", alpha,
                   " beta_Array[0]=", beta, " lda=", lda, " ldb=", ldb, " ldc=", ldc,
@@ -547,9 +616,9 @@ void zendnn_custom_op::zendnn_batched_matmul_fp32(const std::vector<float *>
                 std::cerr << "Null pointer detected at index " << idx << std::endl;
                 return;
             }
-            zendnn_matmul_direct_fp32(src_batch[idx], weight_batch[idx],
+            zendnn_matmul_direct(src_batch[idx], weight_batch[idx],
                                       dst_batch[idx], bias_batch[idx],
-                                      alpha, beta, M, N, K, false, transB, K, N, N, dt, post_op, 1);
+                                      alpha, beta, M, N, K, false, transB, K, N, N, true, dt, post_op, 1);
             idx++;
         }
     }
