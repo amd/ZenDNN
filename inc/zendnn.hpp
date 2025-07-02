@@ -762,6 +762,10 @@ struct data_types{
 class zendnn_custom_op {
 
   public:
+
+// Checks if the embedding bag operation is supported for the given data types and dimension
+    static bool isEmbeddingBagSupported(zendnn_data_type_t src_dt, unsigned int eb_dimension);
+
 //Embedding bag op API
     static void zendnn_embedding_bag(const memory &z_input,
                                      const memory &z_indices,

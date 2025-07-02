@@ -886,6 +886,31 @@ void zendnn_custom_op::zendnn_grp_embedding(std::vector <memory> &z_input,
     }
 
 }
+
+bool zendnn_custom_op::isEmbeddingBagSupported(zendnn_data_type_t src_dt, unsigned int embedding_dim) {
+    // Check if eb_dimension is one of the supported optimal path
+    switch (embedding_dim) {
+        case 16:
+        case 32:
+        case 64:
+        case 128:
+        case 256:
+        case 512:
+            break;
+        default:
+            return false;
+    }
+bool isbf16enable=false;
+
+#if AVX512_BF16_EN
+   isbf16enable=true;
+#endif
+
+    if (!isbf16enable && src_dt == zendnn_data_type_t::zendnn_bf16)
+        return false;
+
+    return true;
+}
 }//ZenDNN
 
 
