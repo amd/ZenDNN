@@ -20,17 +20,20 @@ set(AMDBLIS_LIB_ROOT "${AMDBLIS_INSTALL_DIR}/lib")
 find_library(AMDBLIS_LIB
   NAMES libblis-mt.so libblis.so
   PATHS ${AMDBLIS_LIB_ROOT}
+  NO_DEFAULT_PATH
   PATH_SUFFIXES LP64 amdzen)
 
 find_library(AMDBLIS_ARCHIVE_LIB
   NAMES libblis-mt.a libblis.a
   PATHS ${AMDBLIS_LIB_ROOT}
+  NO_DEFAULT_PATH
   PATH_SUFFIXES LP64 amdzen)
 
 set(AMDBLIS_INCLUDE_ROOT "${AMDBLIS_INSTALL_DIR}/include")
 find_path(AMDBLIS_INCLUDE_DIR
   NAMES blis.h blis.hh cblas.h cblas.hh
   PATHS ${AMDBLIS_INCLUDE_ROOT}
+  NO_DEFAULT_PATH
   PATH_SUFFIXES LP64 amdzen blis)
 
 include(FindPackageHandleStandardArgs)
