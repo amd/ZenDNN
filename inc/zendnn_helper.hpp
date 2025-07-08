@@ -205,7 +205,7 @@ class zendnnEnv {
         {
             static std::mutex print_mutex;
             std::lock_guard<std::mutex> lock(print_mutex);
-            std::cout << std::endl
+            std::cerr << std::endl
                   << "ZenDNN Info: Execution has entered the ZenDNN library. "
                   "Optimized deep learning kernels are now active for high-performance inference on AMD CPUs."
                   << std::endl << std::endl;
