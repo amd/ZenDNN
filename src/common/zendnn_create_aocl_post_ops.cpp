@@ -154,7 +154,7 @@ aocl_post_op *create_aocl_post_ops(const exec_ctx_t &ctx,
             //SCALE
             float *temp_dscale_ptr = (float *)(post_ops->sum + scale_index)->scale_factor;
             float *temp_dzero_point_ptr = (float *)(post_ops->sum +
-                                            scale_index)->zero_point;
+                                                    scale_index)->zero_point;
             temp_dscale_ptr[0] = (float)(scale[0]);
 
             temp_dzero_point_ptr[0] = (float)0.0;
@@ -452,6 +452,7 @@ void create_post_ops_fp32(aocl_post_op *&post_ops, const exec_ctx_t &ctx,
             post_ops->seq_vector[post_op_i++] = BIAS;
             post_ops->bias = (aocl_post_op_bias *) malloc(sizeof(
                                  aocl_post_op_bias));
+            (post_ops->bias)->stor_type = AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32;
 
             (post_ops->bias)->bias = (alpha!=1.0f) ? bias_ : (float *)bias;
         }
