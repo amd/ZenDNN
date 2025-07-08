@@ -299,7 +299,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_example() {
   return OK;
 }
 
-int reorder_inplace_bf16_example() {
+int reorder_inplace_bf16_kernel_example() {
   testlog_info("Inplace reorder operator bf16 kernel example");
   try {
     tensor_factory_t tensor_factory;

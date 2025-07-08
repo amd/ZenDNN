@@ -17,8 +17,8 @@ This document provides an overview of the Compare Operator, its functionality, a
 
 Let:
 
-- \( A \in \mathbb{R}^{M \times N} \): First tensor  
-- \( B \in \mathbb{R}^{M \times N} \): Second tensor
+- $ A \in \mathbb{R}^{M \times N} $: First tensor  
+- $ B \in \mathbb{R}^{M \times N} $: Second tensor
 
 
 The comparison operation calculates the following metrics:

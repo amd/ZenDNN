@@ -35,7 +35,7 @@ namespace examples {
 /** @fn reorder_outofplace_f32_kernel_example
  *  @brief Demonstrates reorder operator on f32 input.
  *
- *  Reorder operator converts contigious format to blocked format based on
+ *  Reorder operator converts contiguous format to blocked format based on
  *  different backends.
  *
  *  This example demonstrates reorder operator creation and execution of one
@@ -46,7 +46,7 @@ namespace examples {
 /** @fn reorder_outofplace_s8_kernel_example
  *  @brief Demonstrates reorder operator on s8 input.
  *
- *  Reorder operator converts contigious format to blocked format based on
+ *  Reorder operator converts contiguous format to blocked format based on
  *  different backends.
  *
  *  This example demonstrates reorder operator creation and execution of one
@@ -68,17 +68,17 @@ namespace examples {
  */
  int reorder_outofplace_matmul_relu_f32_kernel_example();
 
-/** @fn reorder_inplace_bf16_example
+/** @fn reorder_inplace_bf16_kernel_example
  *  @brief Demonstrates reorder operator on bf16 input.
  *
- *  Reorder operator converts contigious format to blocked format based on
+ *  Reorder operator converts contiguous format to blocked format based on
  *  different backend.
  *  This API does Inplace reordering.
  *
  *  This example demonstrates reorder operator creation and execution of one
  *  of its bf16 kernel.
  */
- int reorder_inplace_bf16_example();
+ int reorder_inplace_bf16_kernel_example();
 
 /** @fn reorder_inplace_matmul_relu_bf16_kernel_example
 *  @brief Demonstrates matmul+relu operator with reordered weights on bf16 weights.

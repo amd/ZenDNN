@@ -51,13 +51,13 @@ int main() {
   matmul_strided_f32_kernel_example();
 
   /** Reorder operator functionality examples.
-   *  Demonstrates reordering to blocked format,
+   *  Demonstrates reordering memory from contiguous to blocked format,
    *  inplace reorder functionalities of Reorder operator.
    */
   reorder_outofplace_f32_kernel_example();
   reorder_outofplace_s8_kernel_example();
   reorder_outofplace_matmul_relu_f32_kernel_example();
-  reorder_inplace_bf16_example();
+  reorder_inplace_bf16_kernel_example();
   reorder_inplace_matmul_relu_bf16_kernel_example();
 
   /** Compare operator functionality examples.

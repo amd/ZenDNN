@@ -5,41 +5,43 @@
 
 ## Overview
 
-This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specalized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contigious memory layout to optimized blocked format based on backend.
+This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specalized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contiguous memory format to optimized blocked format based on backend.
 
-Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_example` and `reorder_inplace_bf16_example`.
+**Important:** By default, the reorder operator expects the input tensor to have a shape of [K x N]. However, if the tensor is going to be transposed before being consumed by a downstream operator like matmul, then the reorder must be applied to the transposed version of the tensor i.e N x K. Otherwise the expected input dimension remains K x N.
+
+Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_example` and `reorder_inplace_bf16_kernel_example`.
 
 ## General Reorder Operation
 
 Let:
 
-- \( B \in \mathbb{R}^{K \times N} \)
-- \( \text{Backend}(x) \): Backend used for reorder computation (e.g., AOCL, OneDNN)
-- \( \text{Data type} \): Supported data types for reorder (e.g., FP32, BF16)
+- $ B \in \mathbb{R}^{K \times N} $: Input matrix
+- $ \text{Backend}(x) $: Backend used for reorder computation (Example: AOCL, OneDNN)
+- $ \text{Data type} $: Supported data types for reorder (Example: FP32, BF16)
 
 ## Steps to Perform Reorder Operation
 
 1. **Backend Algo selection**:
-   - Specify the backend algorithm for reordering using `set_algo_format()`.
+   - Specify the backend algorithm for reordering using `.set_algo_format()`.
 
 2. **Reorder size computation**:
-   - Compute the reorderd size using `get_reorder_size()`.
+   - Invoke `.get_reorder_size()` to determine the required memory size for reordered tensor based on the selected backend algorithm.
 
 3. **Output Tensor creation**:
-    - Out-of-Place : Tensor creation with reordered size and blocked layout.
-    - In-Place : Tensor creation with same view (memory) as Input tensor and blocked layout.
+    - Out-of-Place : Allocate new memory and create a tensor with blocked layout.
+    - In-Place : Allocate a tensor with the same memory view as the input tensor and create it with a blocked layout.
 
 4. **Reorder Execution**:
-    - Converts memory from contigious to blocked format.
+    - Converts memory from contiguous to blocked format.
 
 # Reorder Support Table
 
 This table outlines the support for Reorder operations with various data types, backend, and memory storage type.
 
-| Input Data Type | Output Data Type | Backend | Memory Storage type    |
-|-----------------|------------------|---------|------------------------|
-| FP32            | FP32             | AOCL    | Out-of-Place, In-Place |
-| BF16            | BF16             | AOCL    | Out-of-Place, In-Place |
+| Input<br>Data Type | Output<br>Data Type | Backend | Memory Storage type    |
+|--------------------|---------------------|---------|------------------------|
+| FP32               | FP32                | AOCL    | Out-of-Place, In-Place |
+| BF16               | BF16                | AOCL    | Out-of-Place, In-Place |
 
 ## Examples
 
@@ -56,7 +58,6 @@ This example performs reorder with `float32 (f32)` data type using `AOCL` backen
   - Performs the reorder, sets the input tensor, backend, and executes the operator with Out-of-Place memory.
 
 ```cpp
-
 int reorder_outofplace_f32_kernel_example() {
   try {
     // Status variable to track success or failure of operations
@@ -66,7 +67,7 @@ int reorder_outofplace_f32_kernel_example() {
     tensor_factory_t tensor_factory;
 
     // Create a tensor with dimensions [K, N], data type float32, layout
-    // contigious initialized with uniform values of 1.0, and named
+    // contiguous initialized with uniform values of 1.0, and named
     // "reorder_input"
     auto input_tensor = tensor_factory.uniform_tensor({ROWS, COLS},
                                                       data_type_t::f32,
@@ -142,9 +143,9 @@ int reorder_outofplace_f32_kernel_example() {
   // Return success status
   return OK;
 }
-
 ```
-### 2. reorder_inplace_bf16_example
+
+### 2. reorder_inplace_bf16_kernel_example
 
 This example performs reorder with `bfloat16 (bf16)` data type using `AOCL` backend.
 
@@ -157,8 +158,7 @@ This example performs reorder with `bfloat16 (bf16)` data type using `AOCL` back
   - Performs the reorder, sets the input tensor, backend, and executes the operator with In-Place memory.
 
 ```cpp
-
-int reorder_inplace_bf16_example() {
+int reorder_inplace_bf16_kernel_example() {
   try {
     // Status variable to track success or failure of operations
     status_t status;
@@ -167,7 +167,7 @@ int reorder_inplace_bf16_example() {
     tensor_factory_t tensor_factory;
 
     // Create a tensor with dimensions [K, N], data type bfloat16, layout
-    // contigious initialized with uniform values of 1.0, and named
+    // contiguous initialized with uniform values of 1.0, and named
     // "reorder_input"
     auto input_tensor = tensor_factory.uniform_tensor({ROWS, COLS},
                                                       data_type_t::bf16,
@@ -247,8 +247,17 @@ int reorder_inplace_bf16_example() {
   // Return success status
   return OK;
 }
-
 ```
+
+## Parameter Naming Convention
+**Important:** The string identifiers used in .set_input() and .set_output() are fixed and must not be changed. These names are internally mapped and executed by the operator implementation.
+
+Required Identifers:
+
+- .set_input("reorder_input", ...) → must use "reorder_input"
+- .set_output("reorder_output", ...) → must use "reorder_output"
+
+Changing these names will result in incorrect behavior or operator failure.
 
 ## Common Variables
 

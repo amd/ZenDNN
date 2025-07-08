@@ -5,20 +5,22 @@
 
 ## Overview
 
-This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32 and BF16 data types, bias addition, and a range of post-operations including activations (ReLU, Sigmoid, Tanh, GELU, SiLU) and binary ops (Add, Mul, Mul+Add). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example` and `matmul_mul_silu_mul_f32_kernel_example`, which performs FP32 matmul with activation and binary post-op.
+This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32 and BF16 data types, optional bias addition, and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example` and `matmul_mul_silu_mul_f32_kernel_example`, which performs FP32 matmul with activation and binary post-op.
 
 
 # General MatMul Operation
 
 Let:
 
-- \( A \in \mathbb{R}^{M \times K} \)
-- \( B \in \mathbb{R}^{K \times N} \)
-- \( \text{Bias} \in \mathbb{R}^{1 \times N} \)
-- \( \text{Activation}(x) \): optional activation function (Example: ReLU, GELU)
-- \( \text{BinaryOp}(x, y) \): optional binary post-operation (Example: element-wise add/mul with another matrix)
-- \( D \in \mathbb{R}^{M \times N} \): optional second operand for binary op
-- \( C \in \mathbb{R}^{M \times N} \): the result
+- $ A \in \mathbb{R}^{M \times K} $: Input matrix
+- $ B \in \mathbb{R}^{K \times N} $: Weight matrix
+- $ \text{Bias} \in \mathbb{R}^{1 \times N} $: Optional Bias vector
+- $ \text{Activation}(x) $: Optional activation function (Example: ReLU, GELU etc.,)
+- $ \text{BinaryOp}(x, y) $: Optional binary post-operation (Example: element-wise add/mul with another matrix)
+- $ D \in \mathbb{R}^{M \times N} $: Optional second operand for binary op
+- $ \text{Transpose}(A, B) $: Optional transpose operation on matrices $A$ or $B$ (Example: $A^T$, $B^T$)
+- $ \text{Strides}(A, B) $: Optional strides for matrix $A$ or $B$, defining the step size for accessing elements
+- $ C \in \mathbb{R}^{M \times N} $: Output matrix
 
 The computation can be expressed as:
 
@@ -33,17 +35,17 @@ $$
    Z = A \times B
    $$
 
-2. **Bias Addition (if present)**:  
+2. **Bias Addition (optional)**:  
    $$
    Z = Z + \text{Bias}
    $$
 
-3. **Activation Function (if present)**:  
+3. **Activation Function (optional)**:  
    $$
    Z = \text{Activation}(Z)
    $$
 
-4. **Binary Post-Op (if present)**:  
+4. **Binary Post-Op (optional)**:  
    $$
    Z = \text{BinaryOp}(Z, D)
    $$
@@ -61,36 +63,183 @@ $$
 C = \text{ReLU}(A \times B + \text{Bias}) + D
 $$
 
-
-
-
 # MatMul Operation Support Overview
 
-This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
+- **Bias Handling**: Bias is typically applied **per channel**, meaning a unique bias value is added to each output feature or channel. This is common in neural network layers to allow each output neuron to learn an independent offset.
 
-- **Bias Handling**: Bias is typically applied **per channel**, meaning a unique bias value is added to each output feature or channel. This is common in neural network layers to allow each output unit to learn an independent offset.
+- **Binary Post-Operations**: Binary post-operations are element-wise operations applied after the MatMul and optional activation.
 
-- **Binary Post-Operations**: These are additional element-wise operations applied after the MatMul and optional activation. They are supported in two forms:
-  - **Per-channel**: For example, adding a vector to each column of the output matrix.
-  - **Full matrix (element-wise) additions**: For example, adding a matrix of the same shape as the output.
+  They are supported in two forms:
+  - **Per-channel**: A vector is added or multiplied with each column of the output matrix.
+  - **Full matrix (element-wise)**: A matrix of the same shape as the output is used for element-wise operations.
 
-- **Activation Functions**: A variety of activation functions can be applied after the MatMul and bias steps, including ReLU, Sigmoid, Tanh, GELU (both erf and tanh variants), and SiLU. These functions introduce non-linearity into the model, which is essential for learning complex patterns.
+- **Activation Functions**: Activation functions introduce non-linearity into the model, which is essential for learning complex patterns. These are applied after the MatMul and bias steps.
 
-- **Flexible Composition**: Any combination or sequence of activation functions and binary post-operations can be applied, allowing for highly customizable and expressive computation pipelines.
+  Supported activations include:
+
+  - ReLU: Rectified Linear Unit
+  - Sigmoid
+  - Tanh
+  - GELU (both erf and tanh variants)
+  - SiLU (also known as Swish)
+
+- **Flexible Composition**: The MatMul operator supports chaining multiple post-operations, allowing for expressive and customizable computation pipelines.
+  - Multiple BinaryOps
+  - Multiple Activations
+  - Mix of Binary and Activation
+
+### Matmul Operation Flow Diagram
+```text
+  Input A [M x K]                    Weights B [K x N]
+    (Optional:                         (Optional: 
+Transpose/Strides)                 Transpose/Strides)
+       |                                    |
+       +------------------x-----------------+
+                          |
+                       MatMul
+                          |
+                   +------v------+ 
+                   |   Add Bias  |
+                   +------v------+
+                   |   Post-Op   |  ← Activation / Binary Op D
+                   +------v------+
+                       Output C
+
+```
 
 ## Supported Configurations
+This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
 
-| Src<br>Data Type | Weight<br>Data Type | Output<br>Data Type | Bias | Activation     | Binary<br>Post-Op |
-|------------------|---------------------|----------------------|------|----------------|--------------------|
-| FP32             | FP32                | FP32                 | Yes  | ReLU           | Add                |
-| BF16             | BF16                | FP32, BF16           | Yes  | Sigmoid        | Mul                |
-|                  |                     |                      |      | Tanh           |                    |
-|                  |                     |                      |      | GELU (erf)     |                    |
-|                  |                     |                      |      | GELU (tanh)    |                    |
-|                  |                     |                      |      | SiLU           |                    |
+| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type | Activation     | Binary<br>Post-Op |
+|------------------|---------------------|--------------------|---------------------|----------------|-------------------|
+| FP32             | FP32                | FP32               | FP32                | ReLU           | Add               |
+| BF16             | BF16                | FP32, BF16         | FP32, BF16          | Sigmoid        | Mul               |
+|                  |                     |                    |                     | Tanh           |                   |
+|                  |                     |                    |                     | GELU (erf)     |                   |
+|                  |                     |                    |                     | GELU (tanh)    |                   |
+|                  |                     |                    |                     | SiLU           |                   |
 
+## Tensor
+A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D), matrices (2D) to higher dimensions (3D, etc.), Tensors are a fundamental building block for neural network computations, facilitating efficient data manipulation and mathematical operations.
 
+In the context of the **MatMul operator** tensors are used to represent:
+- Input data: Activations or feature maps from previous layers in the neural network.
+- Weights: Learnable parameters that are optimized during training.
+- Biases: Optional offsets that can be added to the output.
+- Output results: Results of computations.
 
+### Key Properties of a Tensor
+
+Each tensor is defined by several important attributes that determine how it behaves in computations:
+
+---
+
+#### Shape
+Specifies the dimensions of the tensor. It defines how data is organized and processed.
+
+- **Input Tensor**: \([M, K]\)
+- **Weight Tensor**: \([K, N]\)
+- **Output Tensor**: \([M, N]\)
+```cpp
+tensor.set_size({M, K}); 
+```
+---
+
+#### Data Type
+Indicates the precision of the values stored in the tensor.
+
+- **FP32**:*(Default)* 32-bit floating point
+- **BF16**: 16-bit Brain Floating Point
+```cpp
+tensor.set_data_type(data_type_t::f32);
+```
+---
+#### Storage
+The storage of a tensor defines how and where its data is allocated or managed in memory.
+
+- **Default Storage Allocation**
+- **Aligned Storage Allocation**
+- **Borrowing Memory from a Raw Pointer**
+- **Sharing Storage with Another Tensor**
+```cpp
+tensor.set_storage();
+```
+---
+#### Layout
+Describes how the tensor is stored in memory, which affects performance and access patterns.
+
+- **Contiguous**:*(default)* Linear, row-major format
+- **Blocked**: Data is stored in blocks for optimized access patterns.
+```cpp
+tensor.set_layout(tensor_layout_t::blocked);
+```
+---
+
+#### Transpose (Optional)
+Specifies whether the tensor is transposed, which swaps its rows and columns.
+
+- **Original**:*(default)* $A \in \mathbb{R}^{M \times K}$
+```cpp
+tensor.set_order("ab");
+```
+- **Transposed**: $A^T \in \mathbb{R}^{K \times M}$
+```cpp
+tensor.set_order("ba");
+```
+---
+
+#### Strides (Optional)
+Defines how many memory elements to skip to move between elements along each dimension.
+
+- Enables efficient access to non-contiguous data
+- Useful for custom memory layouts and batched operations
+```cpp
+tensor.set_stride_size({stride_m, stride_k});
+```
+
+#### Example:
+A tensor of shape **[M, K]** with strides **[stride_M, stride_K]** defines how memory is accessed along each dimension.
+
+#### Offset Calculation
+The memory offset for accessing an element at position \([i, j]\) is calculated as:
+
+$$
+\text{Offset} = i \cdot \text{stride\_M} + j \cdot \text{stride\_K}
+$$
+
+#### Where:
+- $i$: Row index $(0 \leq i < M)$
+- $j$: Column index $(0 \leq j < K)$
+```cpp
+auto tensor = tensor_t()
+              .set_name("strided_example")       // Set tensor name
+              .set_size({M, K})                // Define tensor dimensions
+              .set_stride_size({stride_M, stride_K}) // Define strides
+              .set_storage()                  // Allocate storage
+              .create();
+```
+---
+Tensor can be created in two ways:
+1. Direct Tensor creation (Fine grained control over attributes)
+```cpp
+auto tensor = tensor_t()
+              .set_name("example_tensor")       // Set tensor name
+              .set_size({M, K})                // Define tensor dimensions
+              .set_data_type(data_type::f32)   // Set data type
+              .set_stride_size({stride_1, stride_2}) // Define strides
+              .set_storage()                  // Allocate storage
+              .set_layout()                   // Set layout
+              .create();
+```
+
+2. Using Tensor Factory
+The *tensor_factory_t* class provides utility functions to create tensors with predefined configurations.
+Available APIs:
+- **uniform_dist_strided_tensor**: Creates a tensor with uniform random values and custom strides.
+- **zero_tensor**: Creates a tensor initialized with zeros.
+- **uniform_tensor**: Creates a tensor with a uniform value.
+- **uniform_dist_tensor**: Creates a tensor with uniform random values.
+- **blocked_tensor**: Creates a tensor with a blocked memory layout.
 
 ## Examples
 
@@ -112,7 +261,6 @@ This example performs matrix multiplication with `float32 (f32)` data types, app
 
 
 ```cpp
-
 int matmul_relu_f32_kernel_example() {
   try {
     // Status variable to track success or failure of operations
@@ -192,7 +340,6 @@ int matmul_relu_f32_kernel_example() {
   // Return success status
   return OK;
 }
-
 ```
 
 
@@ -209,7 +356,6 @@ This example showcases an advanced operation combining matrix multiplication wit
   - Involves setting multiple input tensors corresponding to the operations defined in the context.
 
 ```cpp
-
 // Function to demonstrate a fused MatMul operator with binary_mul, SiLU, and another binary_mul
 int matmul_mul_silu_mul_f32_kernel_example() {
   testlog_info("**matmul binary_mul + silu + binary_mul operator f32 kernel example.");
@@ -232,7 +378,7 @@ int matmul_mul_silu_mul_f32_kernel_example() {
     binary_mul_params_t binary_mul;
     binary_mul.scale = 1.0;
 
-    auto binary_mul_po   = post_op_t{binary_mul};                     // First binary_mul
+    auto binary_mul_po   = post_op_t{binary_mul};                    // First binary_mul
     auto silu_post_op    = post_op_t{post_op_type_t::swish};         // SiLU activation
     auto binary_mul_po_2 = post_op_t{post_op_type_t::binary_mul};    // Second binary_mul
 
@@ -300,9 +446,19 @@ int matmul_mul_silu_mul_f32_kernel_example() {
 
   return OK;
 }
-
 ```
 
+## Parameter Naming Convention
+**Important:** The string identifiers used in .set_param(), .set_input(), and .set_output() are fixed and must not be changed. These names are internally mapped and executed by the operator implementation.
+
+Required Identifers:
+
+- .set_param("weights", ...) → must use "weights"
+- .set_param("bias", ...) → must use "bias"
+- .set_input("matmul_input", ...) → must use "matmul_input"
+- .set_output("matmul_output", ...) → must use "matmul_output"
+
+Changing these names will result in incorrect behavior or operator failure.
 
 ## Common Variables
 
