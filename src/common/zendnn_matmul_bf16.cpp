@@ -153,7 +153,7 @@ void zenMatMul_gemm_bf16bf16f32of32(
                               post_ops);
 
     if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
-        reorder_filter != NULL) {
+            reorder_filter != NULL) {
         free(reorder_filter);
     }
     // Free memory for postops.
@@ -392,7 +392,7 @@ void zenMatMul_gemm_bf16bf16f32obf16(
                                post_ops);
 
     if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
-        reorder_filter != NULL) {
+            reorder_filter != NULL) {
         free(reorder_filter);
     }
     // Free memory for postops.
@@ -749,22 +749,31 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                         bool is_inplace) {
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-
+    auto algo_type = zenEnvObj.zenBF16GEMMalgo;
     map_mutex.lock();
     obj.is_log = true;
     map_mutex.unlock();
-    if ((zenEnvObj.zenBF16GEMMalgo ==
-            zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
-            zenEnvObj.zenBF16GEMMalgo ==
-            zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
+    // TODO: Remove once gelu_erf accuracy issue is resolved.
+    if (algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
+            algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) {
+        auto elt_idx_ = po_ops.find(impl::primitive_kind::eltwise);
+        if (elt_idx_ >= 0 &&
+                po_ops.entry_[elt_idx_].eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
+            //If blocked AOCL then call blocked JIT
+            //If non-blocked AOCL then call non-blocked JIT
+            algo_type = algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16 ?
+                        zenBF16MatMulAlgoType::MATMUL_JIT_BF16 :
+                        zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
+        }
+    }
+    if ((algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
+            algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
             && (beta == 0.0 || beta == 1.0 || alpha == 1.0)
        ) {
         if (dst_type == zendnn_bf16) {
             if (has_binary_index<0 &&
-                    zenEnvObj.zenBF16GEMMalgo ==
-                    zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16) {
-                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                           zenEnvObj.zenBF16GEMMalgo);
+                    algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16) {
+                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
                 zenMatMul_gemm_parallel_bf16bf16f32obf16(ctx, Layout, transA, transB, M, K, N,
                         alpha, (int16_t *)src, lda, (int16_t *)weights, ldb,
                         (int16_t *)bias,
@@ -772,8 +781,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                         scale_size, is_weights_const, is_inplace, bias_type);
             }
             else {
-                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                           zenEnvObj.zenBF16GEMMalgo);
+                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
                 zenMatMul_gemm_bf16bf16f32obf16(ctx, Layout, transA, transB, M, K, N, alpha,
                                                 (int16_t *)src, lda, (int16_t *)weights, ldb,
                                                 (int16_t *)bias,
@@ -783,10 +791,9 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
         }
         else if (dst_type == zendnn_f32) {
             if (has_binary_index<0 &&
-                    zenEnvObj.zenBF16GEMMalgo ==
+                    algo_type ==
                     zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16) {
-                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                           zenEnvObj.zenBF16GEMMalgo);
+                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
                 zenMatMul_gemm_parallel_bf16bf16f32of32(ctx, Layout, transA, transB, M, K, N,
                                                         alpha,
                                                         (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
@@ -794,8 +801,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                                         is_weights_const, is_inplace, bias_type);
             }
             else {
-                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                           zenEnvObj.zenBF16GEMMalgo);
+                zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
                 zenMatMul_gemm_bf16bf16f32of32(ctx, Layout, transA, transB, M, K, N, alpha,
                                                (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
                                                has_eltwise_relu, po_ops, geluType, beta, (float *)dst, ldc,
@@ -803,13 +809,10 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             }
         }
     }
-    else if ((zenEnvObj.zenBF16GEMMalgo ==
-              zenBF16MatMulAlgoType::MATMUL_AOCL_BF16)
-             && (beta == 0.0 || beta == 1.0 || alpha == 1.0)
-            ) {
+    else if ((algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16)
+             && (beta == 0.0 || beta == 1.0 || alpha == 1.0)) {
         if (dst_type == zendnn_bf16) {
-            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
             zenMatMul_gemm_bf16bf16f32obf16(ctx, Layout, transA, transB, M, K, N, alpha,
                                             (int16_t *)src, lda, (int16_t *)weights, ldb,
                                             (int16_t *)bias,
@@ -817,27 +820,24 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                             ldc, output_scales, scale_size, is_weights_const, is_inplace, bias_type, false);
         }
         else if (dst_type == zendnn_f32) {
-            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
             zenMatMul_gemm_bf16bf16f32of32(ctx, Layout, transA, transB, M, K, N, alpha,
                                            (int16_t *)src, lda, (int16_t *)weights, ldb, (float *)bias,
                                            has_eltwise_relu, po_ops, geluType, beta, (float *)dst, ldc,
-                                           is_weights_const, is_inplace, bias_type, true);
+                                           is_weights_const, is_inplace, bias_type, false);
         }
     }
-    else if (zenEnvObj.zenBF16GEMMalgo ==
-             zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16
-             || zenEnvObj.zenBF16GEMMalgo ==
-             zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
+    else if (algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16
+             || algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
         //CALL blocked BRGEMM Primitive
         map_mutex.lock();
         obj.is_brgemm = true;
         obj.is_log = false;
         map_mutex.unlock();
-        if (has_binary_index<0 && zenEnvObj.zenBF16GEMMalgo ==
+        if (has_binary_index<0 && algo_type ==
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+                       algo_type);
             unsigned int thread_qty = (zenEnvObj.omp_num_threads>M)?M:
                                       zenEnvObj.omp_num_threads;
             omp_set_max_active_levels(1);
@@ -873,8 +873,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             }
         }
         else {
-            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
             zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
                                    transB, M, N, K,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
@@ -892,9 +891,8 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
         obj.is_log = false;
         map_mutex.unlock();
         if (has_binary_index<0 &&
-                zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16) {
-            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+                algo_type == zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16) {
+            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
             unsigned int thread_qty = (zenEnvObj.omp_num_threads>M)?M:
                                       zenEnvObj.omp_num_threads;
             omp_set_max_active_levels(1);
@@ -930,8 +928,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
             }
         }
         else {
-            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
-                       zenEnvObj.zenBF16GEMMalgo);
+            zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
             zenMatMulPrimitiveBF16(ctx, zenEnvObj, dst_type, bias_type, Layout, transA,
                                    transB, M, N, K,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
@@ -942,5 +939,5 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
         obj.is_brgemm = false;
         map_mutex.unlock();
     }
-    return zenEnvObj.zenBF16GEMMalgo;
+    return algo_type;
 }

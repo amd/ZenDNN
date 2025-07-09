@@ -120,7 +120,7 @@ void zenMatMul_gemm_blocked(
                             post_ops);
 
     if (weight_cache_type == zendnnWeightCacheType::WEIGHT_CACHE_DISABLE &&
-        reorder_filter != NULL) {
+            reorder_filter != NULL) {
         free(reorder_filter);
     }
     // Free memory for postops.
@@ -325,7 +325,7 @@ void zenMatMul_gemm(
 ) {
     //Set Format to GEMM as Matrix multiplication is always GEMM
     zenEnvObj.zenConvAlgo = zenConvAlgoType::GEMM;
-
+    auto algo_type = zenEnvObj.zenGEMMalgo;
     unsigned int thread_qty = zenEnvObj.omp_num_threads;
     //Exploiting BLIS GEMM directly for MatMul is not optimal hence,
     //currently we take a different approach by splitting and parallelizing
@@ -336,6 +336,19 @@ void zenMatMul_gemm(
     obj.is_log = true;
     map_mutex.unlock();
 
+    // TODO: Remove once gelu_erf accuracy issue is resolved.
+    if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32 ||
+            algo_type == zenMatMulAlgoType::MATMUL_AOCL_FP32) {
+        auto elt_idx_ = po_ops.find(impl::primitive_kind::eltwise);
+        if (elt_idx_ >= 0 &&
+                po_ops.entry_[elt_idx_].eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
+            //If blocked AOCL then call blocked JIT
+            //If non-blocked AOCL then call non-blocked JIT
+            algo_type = algo_type == zenMatMulAlgoType::MATMUL_AOCL_FP32 ?
+                        zenMatMulAlgoType::MATMUL_JIT_FP32 :
+                        zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
+        }
+    }
     //We don't have support for MATMUL_BLIS_GEMM1.
     if (0) {
         //Perform MatMul using AMD BLIS
@@ -350,7 +363,7 @@ void zenMatMul_gemm(
                        thread_qty, alpha);
         }
     }
-    else if (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
+    else if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
         //Blocked JIT kernel
         map_mutex.lock();
         obj.is_brgemm = true;
@@ -363,21 +376,19 @@ void zenMatMul_gemm(
                            is_weights_const, is_inplace);
 
     }
-    else if (zenEnvObj.zenGEMMalgo ==
-             zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
+    else if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32) {
         zenMatMul_gemm_blocked(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
                                output, ldc, is_weights_const, is_inplace, true);
     }
-    else if (zenEnvObj.zenGEMMalgo ==
-             zenMatMulAlgoType::MATMUL_AOCL_FP32) {
+    else if (algo_type == zenMatMulAlgoType::MATMUL_AOCL_FP32) {
         zenMatMul_gemm_blocked(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
                                transpose_filter,
                                m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
                                output, ldc, is_weights_const, is_inplace, false);
     }
-    else{
+    else {
         //JIT kernel call
         map_mutex.lock();
         obj.is_brgemm = true;
@@ -389,7 +400,7 @@ void zenMatMul_gemm(
                            false,
                            is_weights_const, is_inplace);
     }
-    if(false) {
+    if (false) {
         zenMatmulSplit(ctx, zenEnvObj, auto_tuner, Layout, transpose_input,
                        transpose_filter,
                        m, k, n, alpha, input, lda, filter, ldb, bias, po_ops, relu, gelu, beta,
@@ -524,7 +535,7 @@ void run_aocl_batch_gemm(
     float dummy_scale = 1.0f;
     dim_t eltwise_index = 0;
     create_post_ops_fp32(post_ops, ctx, po_ops, bias, alpha, N_, thread_qty,
-                            eltwise_index, dummy_scale);
+                         eltwise_index, dummy_scale);
     char mem_format_a = 'n';
     char mem_format_b = 'n';
     const dim_t batch_size = batch_size_;
@@ -536,26 +547,26 @@ void run_aocl_batch_gemm(
     const dim_t ldc = ldc_;
 
     zendnnVerbose(ZENDNN_PROFLOG,
-                    "Using AOCL GEMM API: aocl_batch_gemm_f32f32f32of32");
+                  "Using AOCL GEMM API: aocl_batch_gemm_f32f32f32of32");
     aocl_batch_gemm_f32f32f32of32(&order,
-                                &transa,
-                                &transb,
-                                &M,
-                                &N,
-                                &K,
-                                &alpha,
-                                src,
-                                &lda,
-                                weight,
-                                &ldb,
-                                &beta,
-                                dst,
-                                &ldc,
-                                group_count,
-                                &batch_size,
-                                &mem_format_a,
-                                &mem_format_b,
-                                &post_ops);
+                                  &transa,
+                                  &transb,
+                                  &M,
+                                  &N,
+                                  &K,
+                                  &alpha,
+                                  src,
+                                  &lda,
+                                  weight,
+                                  &ldb,
+                                  &beta,
+                                  dst,
+                                  &ldc,
+                                  group_count,
+                                  &batch_size,
+                                  &mem_format_a,
+                                  &mem_format_b,
+                                  &post_ops);
 
     //Free memory for postops.
     clear_post_ops_memory(post_ops, alpha, eltwise_index);

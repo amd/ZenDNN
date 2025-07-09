@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Modifications Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+* Modifications Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 * Notified per clause 4(b) of the license.
 *******************************************************************************/
 
@@ -364,7 +364,7 @@ void matmul_example_3D(zendnn::engine eng, zendnn::stream engine_stream) {
     const float alpha = 0.f;
     const float beta = 0.f;
     post_ops matmul_ops;
-    matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+    matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf, alpha, beta);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     // Create primitive descriptor.
@@ -436,7 +436,7 @@ void matmul_example_2D(zendnn::engine eng, zendnn::stream engine_stream) {
     const float alpha = 0.f;
     const float beta = 0.f;
     post_ops matmul_ops;
-    matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu, alpha, beta);
+    matmul_ops.append_eltwise(scale, algorithm::eltwise_gelu_erf,alpha, beta);
     primitive_attr matmul_attr;
     matmul_attr.set_post_ops(matmul_ops);
     // Create primitive descriptor.
