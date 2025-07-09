@@ -16,7 +16,8 @@
 
 set(aocl_blis_matmul_operator_sources
   matmul_fp32_avx512_kernel.cpp
-  matmul_bf16_avx512_kernel.cpp)
+  matmul_bf16_avx512_kernel.cpp
+  matmul_int8_avx512_kernel.cpp)
 
 if (ZENDNNL_DEPENDS_AOCLDLP)
   list(APPEND aocl_blis_matmul_operator_sources matmul_aocl_dlp_utils.cpp)
@@ -30,7 +31,8 @@ endif()
 
 set(aocl_blis_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
-  matmul_bf16_avx512_kernel.hpp)
+  matmul_bf16_avx512_kernel.hpp
+  matmul_int8_avx512_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

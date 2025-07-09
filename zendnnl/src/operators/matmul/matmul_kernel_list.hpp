@@ -20,5 +20,7 @@
 #include "aocl_blis/matmul_fp32_avx512_kernel.hpp"
 #include "aocl_blis/matmul_bf16_avx512_kernel.hpp"
 #include "onednn/matmul_onednn_kernel.hpp"
+#include "aocl_blis/matmul_int8_avx512_kernel.hpp"
 
 #endif
+

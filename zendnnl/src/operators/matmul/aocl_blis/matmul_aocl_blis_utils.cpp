@@ -87,19 +87,27 @@ void aocl_dlp_utils_t::reorder_weights_execute(
   return;
 }
 
+
 status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
-    &inputs_, bool is_bias) {
+    &inputs_, bool is_bias, tensor_t &output_tensor) {
   uint32_t max_matrix_mul_po = post_op_size["binary_mul_2d"] +
                                post_op_size["binary_mul_1d"];
   uint32_t max_matrix_add_po = post_op_size["binary_add_2d"] +
-                               post_op_size["binary_add_1d"];
+                               post_op_size["binary_add_1d"] -
+                               (zp_comp_ndim != 0 ? (uint32_t)1 : (uint32_t)0); //Remove zp comp
 
+  bool is_dst_scale_zp = output_tensor.is_quantized();
+  // Find 1d_mul idx for aocl post-op
+  // (src, wei scales are applied first) and dst scale as last
+  size_t mul_idx_1d = post_op_size["scales"] - is_dst_scale_zp;
+  size_t mul_idx_2d = 0;
+  // If bias is present, add one for bias
+  // If zp_comp_ndim is 1d then increment
+  size_t add_idx_1d = (is_bias ? 1 : 0) + (zp_comp_ndim == 1 ? 1 : 0);
+  // If zp_comp_ndim is 2d then increment
+  size_t add_idx_2d = (zp_comp_ndim == 2 ? 1 : 0);
   if (inputs_.size() > max_matrix_mul_po + max_matrix_add_po) {
     // Set Matrix Mul buffer
-    size_t mul_idx_1d = 0;
-    size_t mul_idx_2d = 0;
-    size_t add_idx_1d = is_bias ? 1 : 0; // If bias is present, add one for bias
-    size_t add_idx_2d = 0;
     for (size_t mul_idx=0; mul_idx < max_matrix_mul_po ; mul_idx++) {
       // name of tensor should be binary_mul_<num>
       std::string key_mul = "binary_mul_tensor_" + std::to_string(mul_idx);
@@ -107,16 +115,13 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
       if (found_obj_mul != inputs_.end()) {
         auto mul_buff_tensor = inputs_[key_mul];
         if (found_obj_mul->second.get_size().size() == 1 &&
-            aocl_dlp_po_ptr->bias != nullptr) {
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->scale_factor  =
+            aocl_dlp_po_ptr->sum != nullptr) {
+          (aocl_dlp_po_ptr->sum + mul_idx_1d)->scale_factor =
             mul_buff_tensor.get_raw_handle_unsafe();
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zero_point    = malloc(sizeof(float));
-          float *temp_dzero_point_ptr = (float *)(aocl_dlp_po_ptr->sum +
-                                                  mul_idx_1d)->zero_point;
-          temp_dzero_point_ptr[0] = (float)0;
+          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zero_point   = &dummy_zp;
           (aocl_dlp_po_ptr->sum + mul_idx_1d)->sf_stor_type = get_aocl_store_type(
                 mul_buff_tensor.get_data_type());
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zp_stor_type = AOCL_GEMM_F32;
+          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zp_stor_type = AOCL_GEMM_INT32;
           mul_idx_1d++;
         }
         else if (found_obj_mul->second.get_size().size() == 2 &&
@@ -174,23 +179,55 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
     log_error("Not enough inputs passed for buffer based post-ops");
     return status_t::failure;
   }
+  // Set Dst scale and dst zero-point buffer
+  if (is_dst_scale_zp) {
+    auto   dst_scale_ = output_tensor.get_quant_scale_raw_handle_const();
+    auto   dst_zp_    = output_tensor.get_quant_subtype() ==
+                        quant_subtype_t::asymmetric ? output_tensor.get_quant_zero_raw_handle_const() :
+                        nullptr;
+    if (dst_scale_ != nullptr || dst_zp_ != nullptr) {
+      // Set dst scale
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->scale_factor  =
+        dst_scale_ != nullptr ? const_cast<void *>(dst_scale_) : &dummy_scale;
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->sf_stor_type =
+        dst_scale_ != nullptr ? get_aocl_store_type(
+          output_tensor.get_quant_scale_data_type()) : AOCL_GEMM_F32;
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->scale_factor_len =
+        dst_scale_ != nullptr ? compute_product(output_tensor.get_quant_scale_size()) :
+        1;
+      // Set dst zero-point
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->zero_point =
+        dst_zp_ != nullptr ? const_cast<void *>(dst_zp_) : &dummy_zp;
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->zp_stor_type =
+        dst_zp_ != nullptr ? get_aocl_store_type(
+          output_tensor.get_quant_zero_data_type()) : AOCL_GEMM_INT32;
+      (aocl_dlp_po_ptr->sum + mul_idx_1d)->zero_point_len =
+        dst_zp_ != nullptr ? compute_product(output_tensor.get_quant_zero_size()) : 1;
+      mul_idx_1d++;
+    }
+  }
   return status_t::success;
 }
 
 status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
-    std::vector<post_op_t>
-    &post_op_vec_, bool is_bias,
+    std::vector<post_op_t> &post_op_vec_, bool is_bias,
     std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
   LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_blis_utils_t");
   //Allocate memory
-  size_t max_post_ops = post_op_vec_.size();
+  size_t max_post_ops         = post_op_vec_.size();
+  int num_post_ops_1d_add     = post_op_size["binary_add_1d"];
+  int num_post_ops_binary_add = post_op_size["binary_add_2d"];
+  int num_post_ops_1d_mul     = post_op_size["binary_mul_1d"];
+  int num_post_ops_binary_mul = post_op_size["binary_mul_2d"];
+  int num_post_ops_eltwise    = post_op_size["eltwise"];
+  int num_post_ops_scale      = post_op_size["scales"];
 
-  if (max_post_ops || is_bias) {
-    int num_post_ops_1d_add     = is_bias ? 1 : 0;
-    int num_post_ops_binary_add = 0;
-    int num_post_ops_1d_mul     = 0;
-    int num_post_ops_binary_mul = 0;
-    int num_post_ops_eltwise    = 0;
+  bool alloc_aocl_po = (is_bias || max_post_ops || num_post_ops_1d_add ||
+                        num_post_ops_binary_add ||
+                        num_post_ops_eltwise || num_post_ops_binary_mul || num_post_ops_1d_mul ||
+                        num_post_ops_scale);
+
+  if (alloc_aocl_po) {
     for (size_t i = 0; i < max_post_ops; ++ i) {
       post_op_t zen_po = post_op_vec_[i];
       switch (zen_po.type) {
@@ -241,25 +278,25 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
         return status_t::failure;
       }
     }
-    aocl_dlp_po_ptr->bias        = (aocl_post_op_bias *) calloc(
-                                      num_post_ops_1d_add,
-                                      sizeof(aocl_post_op_bias));
-    aocl_dlp_po_ptr->sum         = (aocl_post_op_sum *) calloc(num_post_ops_1d_mul,
-                                    sizeof(aocl_post_op_sum));
+    int total_bias_mem            = num_post_ops_1d_add + (is_bias ? 1 : 0);
+    aocl_dlp_po_ptr->bias        = (aocl_post_op_bias *) calloc(total_bias_mem,
+                                   sizeof(aocl_post_op_bias));
+    aocl_dlp_po_ptr->sum         = (aocl_post_op_sum *) calloc(
+                                     num_post_ops_1d_mul + num_post_ops_scale,
+                                     sizeof(aocl_post_op_sum));
     aocl_dlp_po_ptr->eltwise     = (aocl_post_op_eltwise *) calloc(
-                                      num_post_ops_eltwise,
-                                      sizeof(aocl_post_op_eltwise));
+                                     num_post_ops_eltwise,
+                                     sizeof(aocl_post_op_eltwise));
     aocl_dlp_po_ptr->matrix_add  = (aocl_post_op_matrix_add *) calloc(
-                                      num_post_ops_binary_add,
-                                      sizeof(aocl_post_op_matrix_add));
+                                     num_post_ops_binary_add,
+                                     sizeof(aocl_post_op_matrix_add));
     aocl_dlp_po_ptr->matrix_mul  = (aocl_post_op_matrix_mul *) calloc(
-                                      num_post_ops_binary_mul,
-                                      sizeof(aocl_post_op_matrix_mul));
+                                     num_post_ops_binary_mul,
+                                     sizeof(aocl_post_op_matrix_mul));
     post_op_size["eltwise"]       = num_post_ops_eltwise;
     post_op_size["binary_add_2d"] = num_post_ops_binary_add;
     post_op_size["binary_mul_2d"] = num_post_ops_binary_mul;
-    post_op_size["binary_add_1d"] = num_post_ops_1d_add - (is_bias ? 1 :
-                                    0); /*Don't count bias*/
+    post_op_size["binary_add_1d"] = num_post_ops_1d_add;
     post_op_size["binary_mul_1d"] = num_post_ops_1d_mul;
   }
   return status_t::success;
@@ -267,15 +304,13 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
 
 status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     &post_op_vec_, int &post_op_count, bool is_bias,
-    std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
+    std::map<std::string, zendnnl::memory::tensor_t> &inputs_,
+    tensor_t &output_tensor,
+    dim_t eltwise_index, dim_t add_index_2d, dim_t mul_index_1d,
+    dim_t mul_index_2d) {
   LOG_DEBUG_INFO("Initializing aocl post-op in aocl_blis_utils_t");
   //add remaining post-ops
   size_t max_post_ops = post_op_vec_.size();
-  //Index for each post-op
-  md_t eltwise_index = 0;
-  md_t add_index_2d = 0;
-  md_t mul_index_2d = 0;
-  md_t mul_index_1d = 0;
 
   for (size_t i = 0; i < max_post_ops; ++ i) {
     post_op_t zen_po = post_op_vec_[i];
@@ -389,28 +424,247 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
   return status_t::success;
 }
 
+void aocl_dlp_utils_t::zero_point_compensation(
+  int M,
+  int N,
+  int K,
+  tensor_t &src,
+  tensor_t &wei,
+  int32_t src_zero_point,
+  int32_t wei_zero_point
+) {
+  LOG_DEBUG_INFO("Calculating zero-point compensation in zero_point_compensation");
+
+  int src_s0;
+  int src_s1;
+  int wei_s0;
+  int wei_s1;
+
+  if (src.get_order() == "ba") {
+    src_s0 = 1; // Stride along the second dimension
+    src_s1 = src.get_stride(1);
+  }
+  else {
+    src_s0 = src.get_stride(0);
+    src_s1 = 1; // Stride along the second dimension
+  }
+
+  // Determine strides for wei tensor
+  if (wei.get_order() == "ba") {
+    wei_s0 = 1; // Stride along the second dimension
+    wei_s1 = wei.get_stride(1);
+  }
+  else {
+    wei_s0 = wei.get_stride(0);
+    wei_s1 = 1; // Stride along the second dimension
+  }
+  char   *src_buff = (char *)src.get_raw_handle_unsafe();
+  int8_t *wei_buff = (int8_t *)wei.get_raw_handle_unsafe();
+  if (!wei_zero_point && !src_zero_point) {
+    return;
+  }
+  else if (!wei_zero_point) {
+    // acc is freed in post_op free function.
+    size_t alignment = 64;
+    size_t comp_size = (N*sizeof(int32_t) + alignment - 1) &
+                       ~(alignment - 1);
+    zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+    std::vector<int32_t> wei_comp(N,0);
+
+    for (dim_t k = 0; k < K; ++k) {
+      for (dim_t n = 0; n < N; ++n) {
+        if (k == 0) {
+          wei_comp[n] = int32_t(0);
+        }
+        wei_comp[n] += wei_buff[wei_s0 * k + wei_s1 * n];
+      }
+    }
+    for (dim_t n = 0; n < N; ++n) {
+      zp_comp_acc[n] = 0 - src_zero_point * wei_comp[n];
+    }
+  }
+  else if (!src_zero_point) {
+    std::vector<int32_t> src_comp(M,0);
+    // acc is freed in post_op free function.
+    size_t alignment = 64;
+    size_t comp_size = (M*N*sizeof(int32_t) + alignment - 1) &
+                       ~(alignment - 1);
+    zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+
+    for (dim_t m = 0; m < M; ++m) {
+      for (dim_t k = 0; k < K; ++k) {
+        if (k == 0) {
+          src_comp[m] = int32_t(0);
+        }
+        src_comp[m] += src_buff[src_s0 * m + src_s1 * k];
+      }
+    }
+
+    for (dim_t m = 0; m < M; ++m) {
+      for (dim_t n = 0; n < N; ++n) {
+        zp_comp_acc[m * N + n] = 0 - wei_zero_point * src_comp[m];
+      }
+    }
+  }
+  else {
+    std::vector<int32_t> src_comp(M,0);
+    std::vector<int32_t> wei_comp(N,0);
+    // acc is freed in post_op free function.
+    size_t alignment = 64;
+    size_t comp_size = (M*N*sizeof(int32_t) + alignment - 1) &
+                       ~(alignment - 1);
+    zp_comp_acc = (int32_t *)aligned_alloc(64, comp_size);
+    //Src comp
+    for (dim_t m = 0; m < M; ++m) {
+      for (dim_t k = 0; k < K; ++k) {
+        if (k == 0) {
+          src_comp[m] = int32_t(0);
+        }
+        src_comp[m] += src_buff[src_s0 * m + src_s1 * k];
+      }
+    }
+
+    for (dim_t k = 0; k < K; ++k) {
+      for (dim_t n = 0; n < N; ++n) {
+        if (k == 0) {
+          wei_comp[n] = int32_t(0);
+        }
+        wei_comp[n] += wei_buff[wei_s0 * k + wei_s1 * n];
+      }
+    }
+
+    for (dim_t m = 0; m < M; ++m) {
+      for (dim_t n = 0; n < N; ++n) {
+        zp_comp_acc[m * N + n] = 0 - src_zero_point * wei_comp[n]
+                                 - wei_zero_point * src_comp[m]
+                                 + src_zero_point * wei_zero_point * (int)K;
+      }
+    }
+  }
+}
+
 status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
-    &post_op_vec_,
-    std::optional<tensor_t> optional_bias_tensor_,
-    std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
+    &post_op_vec_, std::optional<tensor_t> optional_bias_tensor_,
+    tensor_t &weight_tensor,
+    std::map<std::string, zendnnl::memory::tensor_t> &inputs_,
+    zendnnl::memory::tensor_t &output_tensor) {
   LOG_DEBUG_INFO("Allocating post-ops in aocl_blis_utils_t");
 
+  // Return if post-ops already set for context
+  if (aocl_dlp_po_ptr != nullptr) {
+    return status_t::success;
+  }
   // Iterate through each postop, check and add it if needed.
-  int post_op_count = 0;
+  int post_op_count  = 0;
   // Find total number of post-ops with bias and scales
-  int total_po = post_op_vec_.size();
+  int total_po       = post_op_vec_.size();
+
+  auto src_it        = inputs_.find("matmul_input");
+  if (src_it == inputs_.end()) {
+    log_error("matmul_input tensor not found in inputs");
+    return status_t::failure;
+  }
+  bool is_quant = (src_it->second.get_data_type() == data_type_t::u8 ||
+                   src_it->second.get_data_type() == data_type_t::s8) &&
+                  weight_tensor.get_data_type() == data_type_t::s8;
+
+  [[maybe_unused]] uint32_t dim_M           = src_it->second.get_size(0);
+  [[maybe_unused]] uint32_t dim_K           = weight_tensor.get_size(0);
+  [[maybe_unused]] uint32_t dim_N           = weight_tensor.get_size(1);
+  // Src scale
+  [[maybe_unused]] void *src_scale_         = nullptr;
+  [[maybe_unused]] int src_scale_size       = 0;
+  [[maybe_unused]] data_type_t src_scale_dt = data_type_t::f32;
+  // Wei scale
+  [[maybe_unused]] void *wei_scale_         = nullptr;
+  [[maybe_unused]] int wei_scale_size       = 0;
+  [[maybe_unused]] data_type_t wei_scale_dt = data_type_t::f32;
+  //dst scale
+  bool is_dst_scale_                        = false;
+  const void *dst_zp_                       = nullptr;
+
+  if (is_quant) {
+    auto src_tensor    = inputs_.find("matmul_input")->second;
+    auto is_src_scale_ = src_tensor.is_quantized();
+    auto is_wei_scale_ = weight_tensor.is_quantized();
+    auto src_zp_       = is_src_scale_ &&
+                         src_tensor.get_quant_subtype() == quant_subtype_t::asymmetric ?
+                         src_tensor.get_quant_zero_raw_handle_const() : nullptr;
+    auto wei_zp_       = is_wei_scale_ &&
+                         weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric ?
+                         weight_tensor.get_quant_zero_raw_handle_const() : nullptr;
+    //Dst quant data
+    is_dst_scale_      = output_tensor.is_quantized();
+    dst_zp_            = is_dst_scale_ &&
+                         output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric ?
+                         output_tensor.get_quant_zero_raw_handle_const() : nullptr;
+
+    if (is_src_scale_) {
+      src_scale_      = const_cast<void *>
+                        (src_tensor.get_quant_scale_raw_handle_const());
+      // Compute the product of all elements in the vector
+      src_scale_size = compute_product(src_tensor.get_quant_scale_size());
+      src_scale_dt    = src_tensor.get_quant_scale_data_type();
+      total_po++;
+      post_op_size["scales"]++;
+    }
+
+    if (is_wei_scale_) {
+      wei_scale_      = const_cast<void *>
+                        (weight_tensor.get_quant_scale_raw_handle_const());
+      // Compute the product of all elements in the vector
+      wei_scale_size = compute_product(weight_tensor.get_quant_scale_size());
+      wei_scale_dt    = weight_tensor.get_quant_scale_data_type();
+      total_po++;
+      post_op_size["scales"]++;
+    }
+
+    // dst scale and zp are applied as a single post-op
+    if (is_dst_scale_ || dst_zp_ != nullptr) {
+      total_po++;
+      post_op_size["scales"]++;
+    }
+    // Compute zero_point compensation
+    int32_t src_zp_val = src_zp_ != nullptr ? read_and_cast<int32_t>(src_zp_,
+                         src_tensor.get_quant_zero_data_type()) : (int32_t)0;
+    int32_t wei_zp_val = wei_zp_ != nullptr ? read_and_cast<int32_t>(wei_zp_,
+                         weight_tensor.get_quant_zero_data_type()) : (int32_t)0;
+    if (src_zp_val == 0 && wei_zp_val == 0) {
+      zp_comp_ndim = 0;
+    }
+    else if (wei_zp_val == 0) {
+      zero_point_compensation(dim_M, dim_N, dim_K, src_it->second,
+                              weight_tensor, src_zp_val, wei_zp_val);
+      zp_comp_ndim = 1;
+      total_po++;
+      post_op_size["binary_add_1d"]++;
+    }
+    else {
+      zero_point_compensation(dim_M, dim_N, dim_K, src_it->second,
+                              weight_tensor, src_zp_val, wei_zp_val);
+      zp_comp_ndim = 2;
+      total_po++;
+      post_op_size["binary_add_2d"]++;
+    }
+  }
+
   if (optional_bias_tensor_) {
     total_po++;
   }
   if (total_po > 0) {
+    //Index for each post-op
+    dim_t eltwise_index = 0;
+    dim_t add_index_2d  = 0;
+    dim_t mul_index_2d  = 0;
+    dim_t mul_index_1d  = 0;
+    dim_t bias_index    = 0;
     aocl_dlp_po_ptr = (aocl_post_op *) calloc(1, sizeof(aocl_post_op));
     if (aocl_dlp_po_ptr == NULL) {
       return status_t::failure;
     }
     aocl_dlp_po_ptr->seq_vector = (AOCL_POST_OP_TYPE *) calloc(total_po,
-                                   sizeof(AOCL_POST_OP_TYPE));
+                                  sizeof(AOCL_POST_OP_TYPE));
     if (aocl_dlp_po_ptr->seq_vector == NULL) {
-      free(aocl_dlp_po_ptr);
       return status_t::failure;
     }
 
@@ -429,24 +683,83 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
       return status_t::failure;
     }
 
+    if (is_quant) {
+      // Add zero-point compensation
+      if (zp_comp_ndim == 1) {
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = BIAS;
+        if (aocl_dlp_po_ptr->bias == NULL) {
+          return status_t::failure;
+        }
+        (aocl_dlp_po_ptr->bias + bias_index)->stor_type = AOCL_GEMM_INT32;
+        (aocl_dlp_po_ptr->bias + bias_index)->bias      = zp_comp_acc;
+        bias_index++;
+      }
+      else if (zp_comp_ndim == 2) {
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = MATRIX_ADD;
+        if (aocl_dlp_po_ptr->matrix_add == NULL) {
+          return status_t::failure;
+        }
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->stor_type = AOCL_GEMM_INT32;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->ldm = dim_N;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->matrix = zp_comp_acc;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->scale_factor = malloc(sizeof(
+              float));
+        *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).scale_factor) = 1.0f;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->scale_factor_len = 1;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->stor_type = AOCL_GEMM_F32;
+        add_index_2d++;
+      }
+
+      // Src Scale
+      if (src_scale_) {
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = SCALE;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor  = const_cast<void *>
+            (src_scale_);
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->sf_stor_type  =
+          get_aocl_store_type(src_scale_dt);
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor_len = src_scale_size;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point = &dummy_zp;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zp_stor_type = AOCL_GEMM_INT32;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point_len = 1;
+        mul_index_1d++;
+      }
+      // Wei Scale
+      if (wei_scale_) {
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = SCALE;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor  = const_cast<void *>
+            (wei_scale_);
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->sf_stor_type  =
+          get_aocl_store_type(wei_scale_dt);
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor_len = wei_scale_size;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point = &dummy_zp;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zp_stor_type = AOCL_GEMM_INT32;
+        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point_len = 1;
+        mul_index_1d++;
+      }
+    }
     // Add bias postop
     if (optional_bias_tensor_) {
       auto bias_type = optional_bias_tensor_->get_data_type();
       aocl_dlp_po_ptr->seq_vector[post_op_count++] = BIAS;
       if (aocl_dlp_po_ptr->bias == NULL) {
-        free(aocl_dlp_po_ptr->seq_vector);
-        free(aocl_dlp_po_ptr);
         return status_t::failure;
       }
-      (aocl_dlp_po_ptr->bias)->bias = (void *)
-                                       optional_bias_tensor_->get_raw_handle_unsafe();
-      (aocl_dlp_po_ptr->bias)->stor_type = get_aocl_store_type(bias_type);
+      (aocl_dlp_po_ptr->bias + bias_index)->bias = (void *)
+          optional_bias_tensor_->get_raw_handle_unsafe();
+      (aocl_dlp_po_ptr->bias + bias_index)->stor_type = get_aocl_store_type(
+            bias_type);
+      bias_index++;
     }
 
     //Initialize other post-ops.
     if (aocl_post_op_initialize(post_op_vec_, post_op_count,
-                                optional_bias_tensor_? true : false, inputs_) != status_t::success) {
+                                optional_bias_tensor_ ? true : false, inputs_, output_tensor,
+                                eltwise_index, add_index_2d, mul_index_1d, mul_index_2d) != status_t::success) {
       return status_t::failure;
+    }
+
+    if (is_dst_scale_ || dst_zp_ != nullptr) {
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = SCALE;
     }
     aocl_dlp_po_ptr->seq_length = post_op_count;
   }
@@ -454,6 +767,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
   return status_t::success;
 }
 
+/*Modify the free function to free all allocated resources properly*/
 void aocl_dlp_utils_t::free_post_op() {
   LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_blis_utils_t");
   if (aocl_dlp_po_ptr == nullptr) {
@@ -467,7 +781,6 @@ void aocl_dlp_utils_t::free_post_op() {
   int count_elt           = 0;
   int count_matrix_add_2d = 0;
   int count_matrix_mul_2d = 0;
-  int count_matrix_mul_1d = 0;
   for (int idx = 0; idx < aocl_dlp_po_ptr->seq_length; idx++) {
     if (aocl_dlp_po_ptr->seq_vector[idx] == ELTWISE) {
       if (aocl_dlp_po_ptr->eltwise[count_elt].algo.alpha) {
@@ -489,12 +802,6 @@ void aocl_dlp_utils_t::free_post_op() {
         free(aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].scale_factor);
       }
       count_matrix_mul_2d++;
-    }
-    else if (aocl_dlp_po_ptr->seq_vector[idx] == SCALE) {
-      if (aocl_dlp_po_ptr->sum[count_matrix_mul_1d].zero_point) {
-        free(aocl_dlp_po_ptr->sum[count_matrix_mul_1d].zero_point);
-      }
-      count_matrix_mul_1d++;
     }
   }
   if (aocl_dlp_po_ptr->sum) {
@@ -523,7 +830,7 @@ aocl_post_op *aocl_dlp_utils_t::get_aocl_dlp_post_op_ptr_unsafe() const {
   return aocl_dlp_po_ptr;
 }
 
-status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights) {
+status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights, data_type_t src_dt) {
   LOG_DEBUG_INFO("Selecting aocl_blis reorder function based on data type");
   if (!weights) {
     log_error("Weights tensor is not set");
@@ -567,6 +874,34 @@ status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights) {
       aocl_reorder_bf16bf16f32of32 // reorder_func
     );
   }
+  else if (weight_data_type == data_type_t::s8) {
+    if (src_dt == data_type_t::s8) {
+      log_info("Reordering INT8 weights and INT8 input");
+      reorder_weights_execute<int8_t>(
+        weights_ptr, // weights
+        k, // k
+        n, // n
+        ldb, // ldb
+        'r', // order
+        trans_weights ? 't':'n', // trans
+        aocl_get_reorder_buf_size_s8s8s32os32, // size function
+        aocl_reorder_s8s8s32os32 // reorder_func
+      );
+    }
+    else if (src_dt == data_type_t::u8) {
+      log_info("Reordering INT8 weights and UINT8 input");
+      reorder_weights_execute<int8_t>(
+        weights_ptr, // weights
+        k, // k
+        n, // n
+        ldb, // ldb
+        'r', // order
+        trans_weights ? 't':'n', // trans
+        aocl_get_reorder_buf_size_u8s8s32os32, // size function
+        aocl_reorder_u8s8s32os32 // reorder_func
+      );
+    }
+  }
   else {
     log_error("Unsupported data type for aocl reorder.");
     return status_t::failure;
@@ -580,12 +915,18 @@ void *aocl_dlp_utils_t::get_aocl_dlp_reordered_weights_ptr_unsafe() const {
 }
 
 aocl_dlp_utils_t::aocl_dlp_utils_t()
-  :aocl_dlp_po_ptr{nullptr}, reordered_weights_ptr{nullptr} {
+  :zp_comp_acc{nullptr}, aocl_dlp_po_ptr{nullptr}, reordered_weights_ptr{nullptr} {
   post_op_size.insert({"eltwise",0});
   post_op_size.insert({"binary_add_2d",0});
   post_op_size.insert({"binary_mul_2d",0});
   post_op_size.insert({"binary_add_1d",0});
   post_op_size.insert({"binary_mul_1d",0});
+  // Src, weight, dst scales
+  post_op_size.insert({"scales",0});
+  // Default zero-point compensation ndim
+  zp_comp_ndim = 0;
+  dummy_zp = (int32_t)0;
+  dummy_scale = 1.0f;
 }
 
 aocl_dlp_utils_t::~aocl_dlp_utils_t() {
@@ -597,6 +938,10 @@ aocl_dlp_utils_t::~aocl_dlp_utils_t() {
   if (aocl_dlp_po_ptr) {
     free_post_op();
     aocl_dlp_po_ptr = nullptr;
+  }
+  if (zp_comp_acc) {
+    free(zp_comp_acc);
+    zp_comp_acc = nullptr;
   }
 }
 

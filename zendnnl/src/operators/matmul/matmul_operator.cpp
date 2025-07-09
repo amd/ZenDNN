@@ -348,23 +348,28 @@ status_t matmul_operator_t::preprocess() {
   //get bias tensor
   auto optional_bias_tensor = context.get_param("bias");
 
+  //get weight tensor for reorder
+  auto weight_tensor = context.get_param("weights");
+  // output tensor
+  auto output_tensor = outputs["matmul_output"];
+
   if (forced_kernel == "aocl_blis_blocked") {
-    //get weight tensor for reorder
-    auto weight_tensor = context.get_param("weights");
-    if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor)
+    // input tensor
+    auto input_dt = inputs["matmul_input"].get_data_type();
+    if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor, input_dt)
         == status_t::failure) {
       return status_t::failure;
     }
   }
   //initialize aocl po
   if (context.aocl_dlp_utils_ptr->alloc_post_op(context.get_post_op(),
-      optional_bias_tensor, inputs)
+      optional_bias_tensor, *weight_tensor, inputs, output_tensor)
       == status_t::failure) {
     return status_t::failure;
   }
   //set runtime post ops from inputs
   return context.aocl_dlp_utils_ptr->set_runtime_post_op_buffer(inputs,
-         optional_bias_tensor ? true : false);
+         optional_bias_tensor ? true : false, output_tensor);
 }
 
 std::string matmul_operator_t::op_create_info() {
@@ -483,6 +488,16 @@ status_t matmul_operator_t::kernel_factory() {
               output_dtype == data_type_t::bf16)) {
       kernel = std::shared_ptr<matmul_bf16_avx512_kernel_t>
                (get_matmul_bf16_avx512_kernel());
+    }
+    else if ((weight_dtype == data_type_t::s8) &&
+             (input_dtype  == data_type_t::s8 ||
+              input_dtype  == data_type_t::u8) &&
+             (output_dtype == data_type_t::f32 ||
+              output_dtype == data_type_t::bf16 ||
+              output_dtype == data_type_t::s8 ||
+              output_dtype == data_type_t::u8 ||
+              output_dtype == data_type_t::s32)) {
+      kernel = get_matmul_int8_avx512_kernel();
     }
     else {
       apilog_error("<", name, "> kernel unimplemented.");

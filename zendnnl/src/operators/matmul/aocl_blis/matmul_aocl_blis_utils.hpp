@@ -24,6 +24,7 @@
 #include "common/zendnnl_global.hpp"
 #include "memory/tensor.hpp"
 #include "operators/common/post_op.hpp"
+#include "memory/memory_utils.hpp"
 
 #include "blis.h"
 using md_t = dim_t;
@@ -58,7 +59,7 @@ class aocl_dlp_utils_t {
                                     const md_t, const md_t, const md_t);
 
   /** @brief entry function for tensor reordering for the AOCL */
-  status_t      reorder_weights(std::optional<tensor_t> weights);
+  status_t      reorder_weights(std::optional<tensor_t> weights, data_type_t src_dt);
 
   /** @brief weight reordering for the AOCL */
   template <typename T>
@@ -72,6 +73,11 @@ class aocl_dlp_utils_t {
     get_reorder_buff_size_func_ptr get_reorder_buf_size,
     reorder_func_ptr<T> reorder_func);
 
+  /** @brief compute zero-point compensation for INT8 */
+  void          zero_point_compensation(int M, int N, int K, tensor_t &src,
+                                        tensor_t &wei, int32_t src_zero_point,
+                                        int32_t wei_zero_point);
+
   /** @brief allocate memory for the AOCL post-ops */
   status_t      aocl_post_op_memory_alloc(const std::vector<post_op_t>
                                           &post_op_vec_,
@@ -80,18 +86,24 @@ class aocl_dlp_utils_t {
   /** @brief initialize the post-ops */
   status_t      aocl_post_op_initialize(const std::vector<post_op_t> &post_op_vec_,
                                         int &post_op_count, bool is_bias,
-                                        std::map<std::string, zendnnl::memory::tensor_t> &inputs_);
+                                        std::map<std::string, zendnnl::memory::tensor_t> &inputs_,
+                                        zendnnl::memory::tensor_t &output_tensor,
+                                        dim_t eltwise_index, dim_t add_index_2d, dim_t mul_index_1d,
+                                        dim_t mul_index_2d);
 
   /** @brief allocate aocl post op */
   status_t      alloc_post_op(const std::vector<post_op_t> &post_op_vec_,
                               std::optional<tensor_t> optional_bias_tensor_,
-                              std::map<std::string, zendnnl::memory::tensor_t> &inputs_);
+                              tensor_t &weight_tensor,
+                              std::map<std::string, zendnnl::memory::tensor_t> &inputs_,
+                              zendnnl::memory::tensor_t &output_tensor);
 
   /** @brief free aocl post op */
   void          free_post_op();
 
   /** @brief sets runtime post-op buffers in aocl_dlp_po_ptr */
-  status_t      set_runtime_post_op_buffer(tensor_map_type &inputs, bool is_bias);
+  status_t      set_runtime_post_op_buffer(tensor_map_type &inputs, bool is_bias,
+      tensor_t &output_tensor);
 
   /** @brief get the post op pointer */
   aocl_post_op *get_aocl_dlp_post_op_ptr_unsafe() const;
@@ -101,6 +113,10 @@ class aocl_dlp_utils_t {
 
  protected:
   std::map<std::string, uint32_t> post_op_size;
+  unsigned int zp_comp_ndim;
+  int32_t dummy_zp;
+  float dummy_scale;
+  int32_t *zp_comp_acc;
   aocl_post_op *aocl_dlp_po_ptr;
   void *reordered_weights_ptr;
 };

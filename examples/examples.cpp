@@ -52,13 +52,13 @@ int main() {
    */
   matmul_relu_f32_kernel_example();
   matmul_relu_bf16_kernel_example();
-  matmul_relu_forced_ref_kernel_example();
-  matmul_broadcast_example(); //2d mm broadcast example
+  matmul_silu_add_int8_kernel_example();
   matmul_mul_silu_mul_f32_kernel_example();
   matmul_silu_mul_bf16_kernel_example();
   matmul_strided_f32_kernel_example();
+  matmul_relu_forced_ref_kernel_example();
+  matmul_broadcast_example(); //2d mm broadcast example
   run_lowoha_matmul_fp32_test();
-  matmul_silu_add_int8_kernel_example();
 
   /** BatchMatMul operator functionality examples.
    *  Demonstrates fused post-ops, different data types computation,

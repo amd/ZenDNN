@@ -225,7 +225,6 @@ int matmul_silu_add_int8_kernel_example() {
              .set_output("matmul_output", output_tensor)
              .set_input(matmul_context.get_post_op(1).binary_add_params.tensor_name,
                         binary_tensor)
-             .set_forced_kernel("reference")
              .execute();
 
     if (status == status_t::success) {
