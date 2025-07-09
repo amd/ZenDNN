@@ -112,12 +112,6 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
         return status::unimplemented;
     }
 
-    // TODO: Remove this check once gelu_erf accuracy is resolved.
-    auto elt_idx = attr()->post_ops_.find(primitive_kind::eltwise);
-    if (elt_idx >= 0 &&
-            attr()->post_ops_.entry_[elt_idx].eltwise.alg == alg_kind::eltwise_gelu_erf) {
-        return status::unimplemented;
-    }
     // set state
     params_.dst_is_acc_ = true;
     if (!has_runtime_dims_or_strides())
