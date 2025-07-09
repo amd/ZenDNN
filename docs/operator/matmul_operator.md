@@ -12,15 +12,15 @@ This section provides a high-level overview of matrix multiplication (`matmul`) 
 
 Let:
 
-- $ A \in \mathbb{R}^{M \times K} $: Input matrix
-- $ B \in \mathbb{R}^{K \times N} $: Weight matrix
-- $ \text{Bias} \in \mathbb{R}^{1 \times N} $: Optional Bias vector
-- $ \text{Activation}(x) $: Optional activation function (Example: ReLU, GELU etc.,)
-- $ \text{BinaryOp}(x, y) $: Optional binary post-operation (Example: element-wise add/mul with another matrix)
-- $ D \in \mathbb{R}^{M \times N} $: Optional second operand for binary op
-- $ \text{Transpose}(A, B) $: Optional transpose operation on matrices $A$ or $B$ (Example: $A^T$, $B^T$)
-- $ \text{Strides}(A, B) $: Optional strides for matrix $A$ or $B$, defining the step size for accessing elements
-- $ C \in \mathbb{R}^{M \times N} $: Output matrix
+- *A* ∈ ℝᴹˣᴷ : Input matrix 
+- *B* ∈ ℝᴷˣᴺ : Weight matrix
+- *C* ∈ ℝᴹˣᴺ : Output matrix
+- *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
+- *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
+- *BinaryOp(x, y)* : Optional binary post-operation (Example: element-wise add/mul with another matrix)
+- *D* ∈ ℝᴹˣᴺ : Optional second operand for binary operations
+- *Transpose(A, B)* : Optional transpose operation on matrices A or B (Example: Aᵀ, Bᵀ)
+- *Strides(A, B)* : Optional strides for matrix A or B, defining the step size for accessing elements
 
 The computation can be expressed as:
 
@@ -31,29 +31,29 @@ $$
 ## Steps to Perform MatMul Operation
 
 1. **Matrix Multiplication**:  
-   $$
-   Z = A \times B
-   $$
+   ```
+   Z = A × B
+   ```
 
 2. **Bias Addition (optional)**:  
-   $$
-   Z = Z + \text{Bias}
-   $$
+   ```
+   Z = Z + Bias
+   ```
 
 3. **Activation Function (optional)**:  
-   $$
-   Z = \text{Activation}(Z)
-   $$
+   ```
+   Z = Activation(Z)
+   ```
 
 4. **Binary Post-Op (optional)**:  
-   $$
-   Z = \text{BinaryOp}(Z, D)
-   $$
+   ```
+   Z = BinaryOp(Z, D)
+   ```
 
 5. **Store Result**:  
-   $$
+   ```
    C = Z
-   $$
+   ```
 
 ## Example with ReLU and Add Post-Op
 
@@ -178,11 +178,11 @@ tensor.set_layout(tensor_layout_t::blocked);
 #### Transpose (Optional)
 Specifies whether the tensor is transposed, which swaps its rows and columns.
 
-- **Original**:*(default)* $A \in \mathbb{R}^{M \times K}$
+- **Original**:*(default)* *A* ∈ ℝᴹˣᴷ
 ```cpp
 tensor.set_order("ab");
 ```
-- **Transposed**: $A^T \in \mathbb{R}^{K \times M}$
+- **Transposed**: *Aᵀ* ∈ ℝᴷˣᴹ
 ```cpp
 tensor.set_order("ba");
 ```
@@ -203,13 +203,13 @@ A tensor of shape **[M, K]** with strides **[stride_M, stride_K]** defines how m
 #### Offset Calculation
 The memory offset for accessing an element at position \([i, j]\) is calculated as:
 
-$$
-\text{Offset} = i \cdot \text{stride\_M} + j \cdot \text{stride\_K}
-$$
+```
+Offset = i * stride_M + j * stride_K
+```
 
 #### Where:
-- $i$: Row index $(0 \leq i < M)$
-- $j$: Column index $(0 \leq j < K)$
+- *i* : Row index *i* ∈ [ 0 , M )
+- *j* : Column index *j* ∈ [ 0 , K )
 ```cpp
 auto tensor = tensor_t()
               .set_name("strided_example")       // Set tensor name

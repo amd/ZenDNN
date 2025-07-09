@@ -5,9 +5,9 @@
 
 ## Overview
 
-This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specalized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contiguous memory format to optimized blocked format based on backend.
+This section provides a high-level overview of reorder operations with support for FP32 and BF16 data types, using Out-of-Place and In-Place memory. To achieve best performance, certain compute-intensive operations such as matrix multiplication (Matmul) require data in a specialized memory layout known as blocked memory format. The reorder operator efficiently transfers data from contiguous memory format to optimized blocked format based on backend.
 
-**Important:** By default, the reorder operator expects the input tensor to have a shape of [K x N]. However, if the tensor is going to be transposed before being consumed by a downstream operator like matmul, then the reorder must be applied to the transposed version of the tensor i.e N x K. Otherwise the expected input dimension remains K x N.
+**Important:** By default, the reorder operator expects the input tensor to have a shape of [K x N]. However, if the tensor is going to be transposed before being consumed by a downstream operator like matmul, then the reorder must be applied to the transposed version of the tensor i.e `N x K`. Otherwise the expected input dimension remains `K x N`.
 
 Practical examples from `reorder_example.cpp` demonstrate these configurations, such as `reorder_outofplace_f32_kernel_example` and `reorder_inplace_bf16_kernel_example`.
 
@@ -15,9 +15,9 @@ Practical examples from `reorder_example.cpp` demonstrate these configurations, 
 
 Let:
 
-- $ B \in \mathbb{R}^{K \times N} $: Input matrix
-- $ \text{Backend}(x) $: Backend used for reorder computation (Example: AOCL, OneDNN)
-- $ \text{Data type} $: Supported data types for reorder (Example: FP32, BF16)
+- *B* ∈ ℝᴷˣᴺ : Input matrix
+- *Backend(x)* : Backend used for reorder computation (Example: AOCL, OneDNN)
+- *Data type* : Supported data types for reorder (Example: FP32, BF16)
 
 ## Steps to Perform Reorder Operation
 

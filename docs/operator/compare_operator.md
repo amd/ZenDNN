@@ -17,39 +17,39 @@ This document provides an overview of the Compare Operator, its functionality, a
 
 Let:
 
-- $ A \in \mathbb{R}^{M \times N} $: First tensor  
-- $ B \in \mathbb{R}^{M \times N} $: Second tensor
+- *A* ∈ ℝᴹˣᴺ : First tensor
+- *B* ∈ ℝᴹˣᴺ : Second tensor
 
 
 The comparison operation calculates the following metrics:
 
 1. **Match Percentage**:
-   $$
-   \text{match\_percent} = \frac{\text{Number of Matching Elements}}{\text{Total Elements}} \times 100
-   $$
+   ```
+   match_percent = (Number of Matching Elements / Total Elements) * 100
+   ```
 
 2. **Maximum Deviation**:
-   $$
-   \text{max\_deviation} = \max(|A_{ij} - B_{ij}|)
-   $$
+   ```
+   max_deviation = max(|Aᵢⱼ - Bᵢⱼ|)
+   ```
 
 3. **Mean Deviation**:
-   $$
-   \text{mean\_deviation} = \frac{\sum_{i,j} |A_{ij} - B_{ij}|}{\text{Total Elements}}
-   $$
+   ```
+   mean_deviation = (∑ᵢⱼ|Aᵢⱼ - Bᵢⱼ|) / Total Elements
+   ```
 
 4. **Minimum Deviation**:
-   $$
-   \text{min\_deviation} = \min(|A_{ij} - B_{ij}|)
-   $$
+   ```
+   min_deviation = min(|Aᵢⱼ - Bᵢⱼ|) 
+   ```
 
 ## Steps to Perform Compare Operation
 
 1. **Input Tensors**:
-   - Two tensors, $A$ and $B$, with the same dimensions are provided as input.
+   - Two tensors, `A` and `B`, with the same dimensions are provided as input.
 
 2. **Element-Wise Comparison**:
-   - Each element of $A$ is compared with the corresponding element of $B$.
+   - Each element of `A` is compared with the corresponding element of `B`.
 
 3. **Metric Calculation**:
    - Compute `match_percent`, `max_deviation`, `mean_deviation`, and `min_deviation`.
