@@ -25,7 +25,7 @@ endif()
 
 set(AMDBLIS_LIB_ROOT "${AMDBLIS_ROOT}/lib")
 find_library(AMDBLIS_LIB
-  NAMES libblis-mt.so libblis.so
+  NAMES libblis-mt.so libblis.so libblis-mt.a
   PATHS ${AMDBLIS_LIB_ROOT}
   PATH_SUFFIXES LP64 amdzen
   )

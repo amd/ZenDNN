@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.22)
 
 # Project name
 project(amdZenDNN)
@@ -128,7 +128,7 @@ if(NOT AMDBLIS_FOUND)
     set(BLIS_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/amdblis-build")
 
     execute_process(
-        COMMAND bash -c "rm -rf ${BLIS_BINARY_DIR} && mkdir -p ${BLIS_BINARY_DIR} && export CXXFLAGS=\"-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}\" && cmake -B ${BLIS_BINARY_DIR} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBLIS_CONFIG_FAMILY=${AMDBLIS_BLIS_CONFIG_FAMILY} -DENABLE_ADDON=${AMDBLIS_ENABLE_ADDON} -DENABLE_THREADING=${AMDBLIS_ENABLE_THREADING} -DENABLE_BLAS=${AMDBLIS_ENABLE_BLAS} -DENABLE_CBLAS=${AMDBLIS_ENABLE_CBLAS} -DCMAKE_INSTALL_PREFIX=$ENV{ZENDNN_BLIS_PATH} ."
+        COMMAND bash -c "rm -rf ${BLIS_BINARY_DIR} && mkdir -p ${BLIS_BINARY_DIR} && export CXXFLAGS=\"-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}\" && cmake -B ${BLIS_BINARY_DIR} -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBLIS_CONFIG_FAMILY=${AMDBLIS_BLIS_CONFIG_FAMILY} -DENABLE_ADDON=${AMDBLIS_ENABLE_ADDON} -DENABLE_THREADING=${AMDBLIS_ENABLE_THREADING} -DENABLE_BLAS=${AMDBLIS_ENABLE_BLAS} -DENABLE_CBLAS=${AMDBLIS_ENABLE_CBLAS} -DCMAKE_INSTALL_PREFIX=$ENV{ZENDNN_BLIS_PATH} ."
         WORKING_DIRECTORY ${AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR}
         RESULT_VARIABLE BASH_COMMAND_RESULT)
 
@@ -206,6 +206,9 @@ else()
     message(STATUS "FBGEMM, not included")
 endif()
 message(STATUS "FBGEMM, INCLUDE_DIRS/LIBRARIES, ${FBGEMM_INCLUDE_DIRS}, ${FBGEMM_LIBRARIES}")
+
+find_package(Threads REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # Set Composable Kernel paths
 # Check if DEPEND_ON_CK is set to 1
@@ -353,6 +356,9 @@ target_include_directories(amdZenDNN PUBLIC src)
 target_include_directories(amdZenDNN PUBLIC src/common)
 target_include_directories(amdZenDNN PUBLIC src/cpu)
 target_include_directories(amdZenDNN PUBLIC src/tpp)
+
+target_link_libraries(amdZenDNN PUBLIC Threads::Threads)
+target_link_libraries(amdZenDNN PUBLIC OpenMP::OpenMP_CXX OpenMP::OpenMP_C)
 
 set(dep_target "amdblis::amdblis")
 if(TARGET ${dep_target})
