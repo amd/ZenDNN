@@ -76,7 +76,7 @@ The following prerequisites must be met for this release of ZenDNN:
 
 # AOCL-BLAS Library Installation
 
-**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/AOCL-Jun2025-b2.tar.gz
+**AOCL-BLAS** AOCL-BLAS is a high-performant implementation of the Basic Linear Algebra Subprograms (BLAS). The BLAS was designed to provide the essential kernels of matrix and vector computation and are the most commonly used computationally intensive operations in dense numerical linear algebra. This can be downloaded from https://github.com/amd/blis/archive/refs/tags/AOCL-Jul2025-b1.tar.gz
 
 Note: ZenDNN depends only on AOCL-BLAS and has no dependency on any other AOCL library.
 ## General Convention
@@ -89,11 +89,11 @@ The following points must be considered while installing AOCL-BLAS:
 Complete the following steps to setup the GCC compiled AOCL-BLAS library:
 1. Execute the command `cd <compdir>`
 2. Download BLIS
-   wget https://github.com/amd/blis/archive/refs/tags/AOCL-Jun2025-b2.tar.gz
+   wget https://github.com/amd/blis/archive/refs/tags/AOCL-Jul2025-b1.tar.gz
 3. Execute the following commands:
     ```bash
-    tar -xvf AOCL-Jun2025-b2.tar.gz
-    cd blis-AOCL-Jun2025-b2/
+    tar -xvf AOCL-Jul2025-b1.tar.gz
+    cd blis-AOCL-Jul2025-b1
     make clean; make distclean; CC=gcc ./configure -a aocl_gemm --prefix=../amd-blis --enable-threading=openmp --enable-cblas amdzen; make -j install
     cd ../amd-blis/include
     mkdir LP64
