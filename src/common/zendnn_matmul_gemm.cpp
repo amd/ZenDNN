@@ -24,7 +24,6 @@
 #endif // ZENDNN_USE_AOCL_BLIS_API
 #include <time.h>
 #include <vector>
-#include <mutex>
 #include <cmath>
 #include "common/primitive.hpp"
 #include "zendnn_logging.hpp"
@@ -33,7 +32,6 @@
 #include "zendnn.hpp"
 #include "zendnn_reorder_cache.hpp"
 
-std::mutex map_mutex;
 using namespace zendnn;
 using tag = memory::format_tag;
 using dt = memory::data_type;
@@ -332,9 +330,7 @@ void zenMatMul_gemm(
     //MatMul with pipelining
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    map_mutex.lock();
     obj.is_log = true;
-    map_mutex.unlock();
 
     // TODO: Remove once gelu_erf accuracy issue is resolved.
     if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32 ||
@@ -365,9 +361,7 @@ void zenMatMul_gemm(
     }
     else if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32) {
         //Blocked JIT kernel
-        map_mutex.lock();
         obj.is_brgemm = true;
-        map_mutex.unlock();
         zenMatMulPrimitive(ctx, zenEnvObj, Layout, transpose_input, transpose_filter, m,
                            n,
                            k,
@@ -390,9 +384,7 @@ void zenMatMul_gemm(
     }
     else {
         //JIT kernel call
-        map_mutex.lock();
         obj.is_brgemm = true;
-        map_mutex.unlock();
         zenMatMulPrimitive(ctx, zenEnvObj, Layout, transpose_input, transpose_filter, m,
                            n,
                            k,
@@ -502,10 +494,8 @@ void zenMatMul_gemm_wrapper(
                   " Time=", elapsed, "ms"," graph_exe_count=",graph_exe_count, " weight_address=",
                   (void *)filter);
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    map_mutex.lock();
     obj.is_log = true;
     obj.is_brgemm = false;
-    map_mutex.unlock();
 }
 
 void run_aocl_batch_gemm(
@@ -1173,10 +1163,8 @@ void zenBatchMatMul(const impl::exec_ctx_t &ctx, const impl::post_ops_t &po_ops,
                     float *output, int ldc, int batch_size,
                     const float *bias) {
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
-    map_mutex.lock();
     obj.is_brgemm = true;
     obj.is_log = true;
-    map_mutex.unlock();
 
     zendnnEnv zenEnvObj = readEnv();
 
@@ -1225,10 +1213,8 @@ void zenBatchMatMul(const impl::exec_ctx_t &ctx, const impl::post_ops_t &po_ops,
                           input, lda, filter, ldb,
                           beta, output, ldc,
                           batch_size, bias);
-    map_mutex.lock();
     obj.is_log = true;
     obj.is_brgemm = false;
-    map_mutex.unlock();
 
 #endif
     // Code for time profiling of this kernel

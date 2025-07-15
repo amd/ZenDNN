@@ -29,7 +29,7 @@
 #include "utils.hpp"
 
 using namespace zendnn;
-extern std::mutex map_mutex;
+std::mutex map_mutex;
 
 //Total num of algo available
 #define NUM_OF_ALGO 2

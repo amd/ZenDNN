@@ -64,9 +64,6 @@ using namespace zendnn;
 using namespace zendnn::impl::cpu;
 using tag = memory::format_tag;
 using dt = memory::data_type;
-extern int graph_exe_count;
-extern std::mutex map_mutex;
-
 namespace zendnn {
 namespace impl {
 namespace cpu {
