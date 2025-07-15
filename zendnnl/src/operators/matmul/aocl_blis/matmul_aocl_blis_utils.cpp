@@ -101,10 +101,13 @@ status_t aocl_blis_utils_t::set_runtime_post_op_buffer(tensor_map_type
             aocl_blis_po_ptr->bias != nullptr) {
           (aocl_blis_po_ptr->sum + mul_idx_1d)->scale_factor  =
             mul_buff_tensor.get_raw_handle_unsafe();
-          (aocl_blis_po_ptr->sum + mul_idx_1d)->zero_point    = malloc(sizeof(int32_t));
-          int32_t *temp_dzero_point_ptr = (int32_t *)(aocl_blis_po_ptr->sum +
-                                          mul_idx_1d)->zero_point;
-          temp_dzero_point_ptr[0] = (int32_t)0;
+          (aocl_blis_po_ptr->sum + mul_idx_1d)->zero_point    = malloc(sizeof(float));
+          float *temp_dzero_point_ptr = (float *)(aocl_blis_po_ptr->sum +
+                                                  mul_idx_1d)->zero_point;
+          temp_dzero_point_ptr[0] = (float)0;
+          (aocl_blis_po_ptr->sum + mul_idx_1d)->sf_stor_type = get_aocl_store_type(
+                mul_buff_tensor.get_data_type());
+          (aocl_blis_po_ptr->sum + mul_idx_1d)->zp_stor_type = AOCL_GEMM_F32;
           mul_idx_1d++;
         }
         else if (found_obj_mul->second.get_size().size() == 2 &&

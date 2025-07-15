@@ -34,8 +34,8 @@ set(AMDBLIS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/amdblis"
 set(AMDBLIS_GIT_REPO "https://github.com/amd/blis.git")
 # amdblis tag 5.0
 # set(AMDBLIS_GIT_TAG "34d4bbade33a4384cfaff2208c833fc33a311c5d")
-# amdblis tag AOCL-Mar2025-b2
-set(AMDBLIS_GIT_TAG "6d1afeae95b198ea7f19e251a19cba4f0a19813c")
+# amdblis tag AOCL-Jul2025-b1
+set(AMDBLIS_GIT_TAG "98bc1d80e7a685ee1beeb83f971891a52ef651ba")
 option(AMDBLIS_GIT_PROGRESS ON)
 
 # aocl-utils repo information
