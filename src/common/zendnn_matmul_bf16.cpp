@@ -64,8 +64,6 @@ using namespace zendnn;
 using namespace zendnn::impl::cpu;
 using tag = memory::format_tag;
 using dt = memory::data_type;
-extern int graph_exe_count;
-extern std::mutex map_mutex;
 
 void zenMatMul_gemm_bf16bf16f32of32(
     const impl::exec_ctx_t &ctx,
@@ -750,9 +748,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
 
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     auto algo_type = zenEnvObj.zenBF16GEMMalgo;
-    map_mutex.lock();
     obj.is_log = true;
-    map_mutex.unlock();
     // TODO: Remove once gelu_erf accuracy issue is resolved.
     if (algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
             algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) {
@@ -830,10 +826,8 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
     else if (algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16
              || algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
         //CALL blocked BRGEMM Primitive
-        map_mutex.lock();
         obj.is_brgemm = true;
         obj.is_log = false;
-        map_mutex.unlock();
         if (has_binary_index<0 && algo_type ==
                 zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_PAR_BF16) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ",
@@ -879,17 +873,13 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                    po_ops, true, is_weights_const, is_inplace);
         }
-        map_mutex.lock();
         obj.is_log = true;
         obj.is_brgemm = false;
-        map_mutex.unlock();
     }
     else {
         //CALL BRGEMM Primitive
-        map_mutex.lock();
         obj.is_brgemm = true;
         obj.is_log = false;
-        map_mutex.unlock();
         if (has_binary_index<0 &&
                 algo_type == zenBF16MatMulAlgoType::MATMUL_JIT_PAR_BF16) {
             zendnnInfo(ZENDNN_TESTLOG,"zenEnvObj.zenBF16GEMMalgo : ", algo_type);
@@ -934,10 +924,8 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
                                    src, weights, bias, dst, alpha, beta, lda, ldb, ldc,
                                    po_ops, false, is_weights_const, is_inplace);
         }
-        map_mutex.lock();
         obj.is_log = true;
         obj.is_brgemm = false;
-        map_mutex.unlock();
     }
     return algo_type;
 }

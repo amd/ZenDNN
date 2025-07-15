@@ -21,6 +21,7 @@
 #include <zendnn.h>
 #include <cassert>
 #include <mutex>
+#include <atomic>
 #include <algorithm>
 #ifdef _WIN32
     #include <Windows.h>
@@ -412,10 +413,9 @@ class zendnnOpInfo {
     zendnnOpInfo() : is_brgemm(false), is_ref_gemm_bf16(false), is_log(true) {}
   public:
     //Keep tracks if brgemm kernel is required for execution
-    bool is_brgemm;
-    //To select the gemm_bf16 implementation
-    bool is_ref_gemm_bf16;
-    bool is_log;
+    std::atomic<bool> is_brgemm;
+    std::atomic<bool> is_ref_gemm_bf16;
+    std::atomic<bool> is_log;
     static zendnnOpInfo &ZenDNNOpInfo() {
         static zendnnOpInfo obj;
         return obj;
