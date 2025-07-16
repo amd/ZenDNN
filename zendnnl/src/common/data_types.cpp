@@ -22,6 +22,8 @@ namespace common {
 
 uint32_t size_of(data_type_t data_type) {
   switch(data_type) {
+  case data_type_t::none :
+    return 0;
   case data_type_t::f32 :
     return sizeof(prec_traits<data_type_t::f32>::type);
   case data_type_t::f16 :
@@ -51,6 +53,8 @@ uint32_t size_of(data_type_t data_type) {
 
 std::string dtype_info(data_type_t data_type) {
 switch(data_type) {
+  case data_type_t::none :
+    return "none";
   case data_type_t::f32 :
     return "f32";
   case data_type_t::f16 :

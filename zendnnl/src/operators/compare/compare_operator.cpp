@@ -62,9 +62,10 @@ status_t compare_operator_t::validate() {
     return status_t::failure;
   }
 
-  if ((expec_layout != tensor_layout_t::contiguous) ||
-      (test_layout  != tensor_layout_t::contiguous) ||
-      (diff_layout  != tensor_layout_t::contiguous)) {
+  //nonzero layout is non-contiguous
+  if ((expec_layout) ||
+      (test_layout ) ||
+      (diff_layout )) {
     apilog_error("<", get_name(), "> compare kernel needs contiguous tensors.");
     return status_t::failure;
   }

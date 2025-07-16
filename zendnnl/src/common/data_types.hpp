@@ -41,6 +41,7 @@ namespace common {
  * more cumbersome.
  */
 enum class data_type_t : uint8_t {
+  none, /*!< unknown data type */
   f32,  /*!< float 32bit */
   f16,  /*!< float 16bit */
   bf16, /*!< brain float 16bit */
@@ -57,6 +58,12 @@ enum class data_type_t : uint8_t {
 /** @brief conversion from data_type_t to corresponding C++ type */
 template <data_type_t>
 struct prec_traits {};
+
+/** @brief none to void */
+template <>
+struct prec_traits<data_type_t::none> {
+    typedef void type;
+};
 
 /** @brief f32 to float */
 template <>
@@ -127,6 +134,12 @@ struct prec_traits<data_type_t::u4> {
 /** @brief Conversion from C++ types to data_type_t */
 template <typename>
 struct data_traits {};
+
+/** @brief void to none */
+template <>
+struct data_traits<void> {
+    static constexpr data_type_t data_type = data_type_t::none;
+};
 
 /** @brief float to f32 */
 template <>

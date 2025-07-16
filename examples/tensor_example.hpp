@@ -172,5 +172,14 @@ int tensor_broadcast_example();
  *  access the tensor differently.
  */
 int tensor_axes_permutation_example();
+
+/** @fn tensor_quantization_example
+ *  @brief Demonstrates how a tensor os same tensor options can be created.
+ *
+ *  This is demonstration of how tensor options of a tensor can be used to
+ *  create another tensor.
+ */
+int tensor_quantization_example();
+
 } //examples
 } //zendnnl

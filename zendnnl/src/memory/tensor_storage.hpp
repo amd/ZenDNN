@@ -44,6 +44,7 @@ using namespace zendnnl::error_handling;
  */
 class tensor_storage_t final : public hash_object_t {
   friend class tensor_t;
+  friend class tensor_quant_t;
 
 public:
   /** @brief Parent type */

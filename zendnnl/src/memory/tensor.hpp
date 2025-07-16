@@ -28,6 +28,7 @@
 #include "common/hash_object.hpp"
 #include "common/data_types.hpp"
 #include "tensor_options.hpp"
+#include "tensor_quant.hpp"
 #include "tensor_storage.hpp"
 
 namespace zendnnl {
@@ -101,7 +102,7 @@ public:
   using   index_type        = tensor_option_t::index_type;
 
   /** @brief Index vector type */
-  using   index_vec_type    = std::vector<index_type>;
+  using   index_vec_type    = tensor_option_t::index_vec_type;
 
   /** @name Constructors, Destructors and Assignment
    */
@@ -131,12 +132,13 @@ public:
    * @param size_ : a vector of tensor sizes.
    * @return A reference to self.
    */
-  tensor_t& set_size(std::vector<index_type> size_);
+
+  tensor_t& set_size(index_vec_type size_);
 
   /** @brief Get tensor size.
    * @return Size vector.
    */
-  std::vector<index_type> get_size() const;
+  index_vec_type get_size() const;
 
   /** @brief Get tensor size at an index.
    * @param index_ : size vector index.
@@ -147,7 +149,7 @@ public:
   /** @brief Get tensor dimensions.
    * @return Tensor dimensions.
    */
-  uint32_t get_dim()  const;
+  uint32_t get_dim() const;
 
   /** @brief Set aligned size for aligned tensor
    *
@@ -166,12 +168,12 @@ public:
    * @param  aligned_size_ : a vector of aligned sizes.
    * @return A reference to self.
    */
-  tensor_t& set_aligned_size(std::vector<index_type> aligned_size_);
+  tensor_t& set_aligned_size(index_vec_type aligned_size_);
 
   /** @brief Get aligned size of the tensor.
    * @return Aligned size vector.
    */
-  std::vector<index_type> get_aligned_size() const;
+  index_vec_type get_aligned_size() const;
 
   /** @brief Get tensor aligned size at an index.
    * @param index_ : aligned size vector index.
@@ -192,14 +194,14 @@ public:
    * @param base_ : base index.
    * @return A reference to self.
    */
-  tensor_t& set_base_index(std::vector<index_type> base_);
+  tensor_t& set_base_index(index_vec_type base_);
 
   /** @brief Get tensor base index.
    *
    * Please see @c set_base_index() for base index description.
    * @return Base index.
    */
-  std::vector<index_type> get_base_index() const;
+  index_vec_type get_base_index() const;
 
   /** @brief Set stride.
    *
@@ -207,7 +209,7 @@ public:
    *  broadcast along any axis. For example a tensor of size (5,4,3), and stride
    *  (0,3,1) is broadcasting a 4x3 tensor along depth.
    */
-  tensor_t& set_stride(std::vector<index_type> stride_);
+  tensor_t& set_stride(index_vec_type stride_);
 
   /** @brief Get stride vector.
    *
@@ -216,7 +218,7 @@ public:
    *
    *  @return Stride vector.
    */
-  std::vector<index_type> get_stride() const;
+  index_vec_type get_stride() const;
 
   /** @brief Get stride at an index.
    *
@@ -227,6 +229,69 @@ public:
    *  @return Stride at given index.
    */
   index_type get_stride(uint32_t index_) const;
+
+  /**@}*/
+
+  /** @name Tensor Quantization
+   */
+  /**@{*/
+
+  /** @brief set tensor scale */
+  tensor_t& set_quant_scale(const tensor_t& quant_scale_);
+
+  /** @brief set tensor zero */
+  tensor_t& set_quant_zero_point(const tensor_t& quant_zero_);
+
+  /** @brief check if it is a quantized tensor */
+  bool is_quantized() const;
+
+  /** @brief get quant type */
+  quant_type_t get_quant_type() const;
+
+  /** @brief get quant subtype */
+  quant_subtype_t get_quant_subtype() const;
+
+  /** @brief get quant scale size */
+  index_vec_type get_quant_scale_size() const;
+
+  /** @brief get quant scale stride */
+  index_vec_type get_quant_scale_stride() const;
+
+  /** @brief get quant scale stride */
+  index_vec_type get_quant_scale_block_size() const;
+
+  /** @brief compute scale offset */
+  uint64_t compute_quant_scale_offset(const index_vec_type& index_) const;
+
+  /** @brief get quant scale data type */
+  data_type_t get_quant_scale_data_type() const;
+
+  /** @brief get quant scale raw handle */
+  const void* get_quant_scale_raw_handle_const() const;
+
+  /** @brief get quant scale raw handle */
+  const void* get_quant_scale_raw_handle_const(const index_vec_type& index_) const;
+
+  /** @brief get quant scale size */
+  index_vec_type get_quant_zero_size() const;
+
+  /** @brief get quant scale stride */
+  index_vec_type get_quant_zero_stride() const;
+
+  /** @brief get quant scale stride */
+  index_vec_type get_quant_zero_block_size() const;
+
+  /** @brief compute quant zero offset */
+  uint64_t compute_quant_zero_offset(const index_vec_type& index_) const;
+
+  /** @brief get quant zero data type */
+  data_type_t get_quant_zero_data_type() const;
+
+  /** @brief get quant scale data type */
+  const void* get_quant_zero_raw_handle_const() const;
+
+  /** @brief get quant scale data type */
+  const void* get_quant_zero_raw_handle_const(const index_vec_type& index_) const;
 
   /**@}*/
 
@@ -264,7 +329,7 @@ public:
    * @sa @c tensor_layout_t enum for suppported layouts.
    * @return Tensor layout.
    */
-  tensor_layout_t get_layout() const;
+  uint8_t get_layout() const;
 
   /** @brief Set tensor channel order.
    *
@@ -347,7 +412,7 @@ public:
    * @param index_ : an index for which offset is required.
    * @return offset of the index.
    */
-  uint64_t compute_offset(const std::vector<index_type> index_) const;
+  uint64_t compute_offset(const index_vec_type& index_) const;
 
   /** @brief Get tensor element.
    *
@@ -356,7 +421,7 @@ public:
    * @param index_ : element index.
    * @return Dequantized or float converted element.
    */
-  float at(const std::vector<index_type>& index_) const;
+  float at(const index_vec_type& index_) const;
 
 
   /**@}*/
@@ -614,17 +679,47 @@ protected:
    */
   status_t validate_meta_info();
 
-private:
-  tensor_option_t     option; /**< Tensor meta data. See @c tensor_option_t
-                               for further description. */
-  tensor_quant_t      quant; /**< Tensor quantization data. See @c tensor_quant_t
-                              for further description */
-  storage_sptr_type   storage; /**< A shared pointer to tensor storage. See
-                                @c tensor_storage_t for further description */
+  /** @brief Compute quant block size
+   *
+   * @return  quant block size for given size
+   */
+  index_vec_type compute_quant_block_size(const index_vec_type& size_);
 
-  bool                allocate; /**< Allocate strorage to tensor */
-  std::string         name; /**< Tensor name. This is relevant only for profiling
-                             and diagnostic purposes. */
+  /** @brief Compute quant stride
+   *
+   * @return  quant stride for given size
+   */
+  index_vec_type compute_quant_stride(const index_vec_type& size_);
+
+  /** @brief Validate quant scale.
+   *
+   * @return memory_bad_quant in case of failure.
+   */
+  status_t validate_quant_scale();
+
+  /** @brief Validate quant zero point.
+   *
+   * @return memory_bad_quant in case of failure.
+   */
+  status_t validate_quant_zero();
+
+  /** @brief Validate scale tensor.
+   *
+   * @se if scale tensor is not proper, set status to memory_bad_quant.
+   */
+  status_t validate_quant_info();
+
+private:
+  tensor_option_t                option; /**< Tensor meta data. See @c tensor_option_t
+                                            for further description. */
+  std::optional<tensor_quant_t>  quant; /**< Tensor quantization data. See @c tensor_quant_t
+                                           for further description */
+  storage_sptr_type              storage; /**< A shared pointer to tensor storage. See
+                                             @c tensor_storage_t for further description */
+
+  bool                           allocate; /**< Allocate strorage to tensor */
+  std::string                    name; /**< Tensor name. This is relevant only for profiling
+                                          and diagnostic purposes. */
 };
 
 } //memory

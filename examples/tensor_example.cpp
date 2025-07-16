@@ -376,6 +376,7 @@ int tensor_broadcast_example() {
 }
 
 int tensor_axes_permutation_example() {
+
   //create and linearly populate a 4D tensor. stride [120,24,6,1]
   auto orig_tensor = tensor_t()
     .set_name("orig_tensor")
@@ -423,6 +424,111 @@ int tensor_axes_permutation_example() {
   //access same element with permuted index
   index = {2,3,4,1};
   testlog_info(stride_tensor.get_name(), " [2,3,4,1] = ", stride_tensor.at(index));
+
+  return OK;
+}
+
+int tensor_quantization_example() {
+  testlog_info("Quantizated tensor creation example");
+
+  //use tensor factory to create a uniform tensor
+  tensor_factory_t tensor_factory;
+
+  //get a uniformly distributed tensor
+  auto udtensor = tensor_factory.uniform_dist_strided_tensor({MATMUL_ROWS, MATMUL_COLS},
+                                                             {MATMUL_ROWS, MATMUL_COLS},
+                                                             data_type_t::f32,
+                                                             1.0,
+                                                             "udtensor");
+
+  //get a scale tensor for row-wise channel quantization
+  float scale  = 1.0/127.0;
+
+  auto scales  = tensor_factory.uniform_tensor({MATMUL_ROWS, 1},
+                                               data_type_t::f32,
+                                               scale, "scale tensor");
+
+  auto qtensor = tensor_t()
+    .set_name("quantized tensor")
+    .set_size({MATMUL_ROWS, MATMUL_COLS})
+    .set_data_type(data_type_t::s8)
+    .set_quant_scale(scales)
+    .set_storage()
+    .create();
+
+  if (! qtensor.check() ) {
+    testlog_error("tensor creation of ", qtensor.get_name(), " failed");
+    return NOT_OK;
+  }
+
+  //quantize the tensor
+  const float*  udhandle = (const float *)udtensor.get_raw_handle_const();
+  int8_t*       qhandle  = (int8_t *)qtensor.get_raw_handle_unsafe();
+  const float*  shandle  = (const float *)qtensor.get_quant_scale_raw_handle_const();
+
+  for (uint32_t r = 0; r < MATMUL_ROWS; ++r) {
+    float scale = shandle[r];
+
+    for (uint32_t c = 0; c < MATMUL_COLS; ++c) {
+      auto udoffset = udtensor.compute_offset({r,c});
+      auto qoffset  = qtensor.compute_offset({r,c});
+
+      qhandle[qoffset] = int8_t(udhandle[udoffset]/scale);
+    }
+  }
+
+  //query quantization parameters
+  auto quant_type = qtensor.get_quant_type();
+  if (quant_type == quant_type_t::uniform)
+    testlog_info(qtensor.get_name()," quant type : uniform");
+  else
+    testlog_info(qtensor.get_name(), " quant type : nonuniform");
+
+  auto quant_subtype = qtensor.get_quant_subtype();
+  if (quant_subtype == quant_subtype_t::symmetric)
+    testlog_info(qtensor.get_name()," quant subtype : symmetric");
+  else
+    testlog_info(qtensor.get_name(), " quant subtype : asymmetric");
+
+  //dequantize the tensor
+  qtensor.set_const(true);
+
+  auto dqtensor = tensor_t()
+    .set_name("dequantized tensor")
+    .set_size({MATMUL_ROWS, MATMUL_COLS})
+    .set_data_type(data_type_t::f32)
+    .set_storage()
+    .create();
+
+  if (! dqtensor.check() ) {
+    testlog_error("tensor creation of ", dqtensor.get_name(), " failed");
+    return NOT_OK;
+  }
+
+  float*  dqhandle       = (float *)dqtensor.get_raw_handle_unsafe();
+  const int8_t* qchandle = (const int8_t *)qtensor.get_raw_handle_const();
+  shandle                = (const float *)qtensor.get_quant_scale_raw_handle_const();
+
+  for (uint32_t r = 0; r < MATMUL_ROWS; ++r) {
+    float scale = shandle[r];
+
+    for (uint32_t c = 0; c < MATMUL_COLS; ++c) {
+      auto dqoffset = dqtensor.compute_offset({r,c});
+      auto qoffset  = qtensor.compute_offset({r,c});
+
+      dqhandle[dqoffset] = qchandle[qoffset]*scale;
+    }
+  }
+
+  //display results
+  for (uint32_t r = 0; r < MATMUL_ROWS; ++r) {
+    for (uint32_t c = 0; c < MATMUL_COLS; ++c) {
+      auto udval  = udtensor.at({r,c});
+      auto dqval  = dqtensor.at({r,c});
+
+      testlog_info("orig[",r,",",c,"]=",udval," dq[",r,",",c,"]=",dqval);
+    }
+  }
 
   return OK;
 }

@@ -25,7 +25,7 @@ using namespace zendnnl::error_handling;
 tensor_option_t::tensor_option_t():
   size{}, aligned_size{}, stride{}, base{},
   nelem{0}, aligned_nelem{0}, base_offset{0},
-  data_type{data_type_t::f32}, layout{tensor_layout_t::contiguous},
+  data_type{data_type_t::f32}, layout{0},
   is_const{false}, order{} {
 }
 
@@ -41,7 +41,7 @@ void tensor_option_t::reset() {
   aligned_nelem  = 0;
   base_offset    = 0;
   data_type      = data_type_t::f32;
-  layout         = tensor_layout_t::contiguous;
+  layout         = 0;
   is_const       = false;
   order          = std::string();
 }
@@ -61,23 +61,6 @@ std::size_t tensor_option_t::hash() {
   hash_key = hash_combine(hash_key, uint32_t(is_const));
   hash_key = hash_combine(hash_key, order);
 
-  return hash_key;
-}
-
-tensor_quant_t::tensor_quant_t():
-  zero_point{0},scale{0} {
-}
-
-void tensor_quant_t::reset() {
-  LOG_DEBUG_INFO("Resetting qtensor");
-  parent_type::reset();
-
-  zero_point = 0;
-  scale      = 0;
-}
-
-std::size_t tensor_quant_t::hash() {
-  LOG_DEBUG_INFO("Generating qtensor hash");
   return hash_key;
 }
 

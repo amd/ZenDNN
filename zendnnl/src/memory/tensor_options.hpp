@@ -38,10 +38,13 @@ using namespace zendnnl::error_handling;
  * the tensor memory (contiguous, blocked or strided etc.).
  */
 enum class tensor_layout_t : uint8_t {
-  contiguous, /*!< Contiguous layout */
-  aligned,    /*!< Memory aligned layout */
-  blocked,    /*!< Blocked layout */
-  oblique     /*!< Oblique layout */
+  contiguous = 0,    /*!< Contiguous layout */
+  aligned    = 1,    /*!< Memory aligned layout */
+  broadcast  = 2,    /*!< Broadcast tensor */
+  transpose  = 4,    /*!< Transpose tensor */
+  quantized  = 8,    /*!< A quantized tensor */
+  blocked    = 16,   /*!< Blocked layout */
+  oblique    = 32    /*!< Oblique layout */
 };
 
 /** @class tensor_option_t
@@ -56,12 +59,13 @@ enum class tensor_layout_t : uint8_t {
  */
 class tensor_option_t final : public hash_object_t {
   friend class tensor_t;
+  friend class tensor_quant_t;
 
   /** @brief Parent type */
-  using parent_type = hash_object_t;
+  using parent_type    = hash_object_t;
 
   /** @brief Index type */
-  using index_type = uint64_t;
+  using index_type     = uint64_t;
 
   /** @brief Index vector type */
   using index_vec_type = std::vector<index_type>;
@@ -106,53 +110,12 @@ private:
   uint64_t           base_offset;    /**< Base offset, computed from @c base
                                         and @c stride */
   data_type_t        data_type;      /**< Tensor data type */
-  tensor_layout_t    layout;         /**< Tensor layout */
+  uint8_t            layout;         /**< Tensor layout */
   bool               is_const;       /**< Tensor constness */
   std::string        order;          /**< Tensor channel order(for example
                                         NCHW or NHCW) */
 };
 
-/** @class tensor_quant_t
- *  @brief A class to hold tensor quantization data.
- *
- * @sa tensor_t
- */
-class tensor_quant_t final : public hash_object_t {
-  friend class tensor_t;
-
-  /** @brief Parent type */
-  using parent_type = hash_object_t;
-public:
-  /** @name Constructors, Destructors and Assignment
-   */
-  /**@{*/
-  /** @brief Default constructor */
-  tensor_quant_t();
-  /**@}*/
-
-  /** @name Reset and Hash
-   */
-  /**@{*/
-  /** @brief Reset the object.
-   *
-   * Resets all quant data of a tensor. Used by
-   * @c tensor_t::reset() to reset the tensor.
-   */
-  void        reset();
-
-  /** @brief Generate hash
-   *
-   * Hash generated is used by @c tensor_t::hash() to generate
-   * tensor hash.
-   * @return Generated hash.
-   */
-  std::size_t hash() override;
-  /**@}*/
-
-private:
-  float    zero_point; /**< Zero point of quantization. */
-  float    scale; /**< Quantization scale. */
-};
 
 } //memory
 

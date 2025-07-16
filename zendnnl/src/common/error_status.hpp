@@ -31,23 +31,26 @@ namespace error_handling {
  *  @brief Error status of a function, an object or a class.
  */
 enum class status_t : int32_t {
-  success = 1, /*!< Success. Also used to represent a valid object */
-  failure = 0, /*!< Unknown failure */
-  unimplemented   = -1, /*!< Unimplemented function,kernel or feature */
-  bad_hash_object = -2, /*!< Bad or ill formed hashable object */
-  op_bad_context  = -3, /*!< Bad operator context */
-  op_bad_io = -4, /*!< Bad input-output to operator */
-  op_bad_forced_kernel = -5, /*!< Bad or inconsistant forced kernel */
-  utils_bad_module_name = -6, /*!< Bad module name */
+  success                  = 1,  /*!< Success. Also used to represent a valid object */
+  failure                  = 0,  /*!< Unknown failure */
+  unimplemented            = -1, /*!< Unimplemented function,kernel or feature */
+  bad_hash_object          = -2, /*!< Bad or ill formed hashable object */
+  op_bad_context           = -3, /*!< Bad operator context */
+  op_bad_io                = -4, /*!< Bad input-output to operator */
+  op_bad_forced_kernel     = -5, /*!< Bad or inconsistant forced kernel */
+  utils_bad_module_name    = -6, /*!< Bad module name */
   utils_bad_dynamic_module = -7, /*!< Bad dynamic module */
-  config_bad_json_file = -8, /*!< bad json file */
-  memory_bad_size = -9, /*!< bad tensor size */
-  memory_bad_aligned_size = -10, /*!< bad tensor aligned size */
-  memory_bad_order = -11, /*!< bad tensor axis order */
-  memory_bad_stride = -12, /*!< bad tensor stride */
-  memory_bad_base = -13, /*!< bad tensor base */
-  memory_bad_index = -14, /*!< bad tensor index */
-  memory_bad_storage = -15 /*!< bad tensor index */
+  memory_bad_size          = -8, /*!< bad tensor size */
+  memory_bad_aligned_size  = -9, /*!< bad tensor aligned size */
+  memory_bad_order         = -10, /*!< bad tensor axis order */
+  memory_bad_stride        = -11, /*!< bad tensor stride */
+  memory_bad_base          = -12, /*!< bad tensor base */
+  memory_bad_index         = -13, /*!< bad tensor index */
+  memory_bad_storage       = -14, /*!< bad tensor index */
+  config_bad_json_file     = -15, /*!< bad json file */
+  memory_bad_meta          = -16,  /*!< bad quantization input to tensor */
+  memory_bad_quant         = -17  /*!< bad quantization input to tensor */
+
 };
 
 } //error_handling

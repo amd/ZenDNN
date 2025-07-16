@@ -17,11 +17,13 @@
 set(memory_sources
   tensor_storage.cpp
   tensor_options.cpp
+  tensor_quant.cpp
   tensor.cpp)
 
 set(memory_headers
   tensor_storage.hpp
   tensor_options.hpp
+  tensor_quant.hpp
   tensor.hpp)
 
 target_sources(zendnnl_archive
