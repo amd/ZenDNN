@@ -216,7 +216,7 @@ The different ACTORS are as follows:
 | CORE    | Logs all the core ZenDNN library operations
 | API     | Logs all the ZenDNN API calls
 | TEST    | Logs used in API tests, functionality tests and regression tests
-| PROF    | Logs the performance of operations in millisecond
+| PROF    | Logs metadata for the op
 | FWK     | Logs all the framework (TensorFlow, and PyTorch) specific calls
 
 For example:
@@ -226,10 +226,15 @@ For example:
 * To only log info for ALGO, use **ZENDNN_LOG_OPTS=ALL:-1,ALGO:2**
 * To only log info for CORE, use **ZENDNN_LOG_OPTS=ALL:-1,CORE:2**
 * To only log info for API, use **ZENDNN_LOG_OPTS=ALL:-1,API:2**
-* To only log info for PROF (profile), use **ZENDNN_LOG_OPTS=ALL:-1,PROF:2**
+* To only log info for PROF (profile), use **ZENDNN_LOG_OPTS=ALL:-1,PROF:3**
 * To only log info for FWK, use **ZENDNN_LOG_OPTS=ALL:-1,FWK:2**
 
+Enable Log Profiling
 
+To enable the log profiling of zendnn_primitive_create and zendnn_primitive_execute, set
+
+**ZENDNN_PRIMITIVE_LOG_ENABLE=1**
+**ZENDNN_LOG_OPTS=ALL:-1,PROF:3**
 
 The Different Debug Levels (DBGLVL) are as follows:
 ```bash
