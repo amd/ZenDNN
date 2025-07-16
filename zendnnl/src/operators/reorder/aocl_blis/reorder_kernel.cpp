@@ -40,8 +40,9 @@ status_t reorder_kernel_t::execute(const context_type &context_,
   const char order            = 'r';
   bool is_transpose           = input_tensor.get_order() == "ba";
   const char trans            = is_transpose ? 't' : 'n';
-  int ldb                     = is_transpose ? input_tensor.get_stride_size(
-                                  0) : input_tensor.get_stride_size(1);
+  int ldb                     = is_transpose ?
+                                  input_tensor.get_aligned_size(0) :
+                                  input_tensor.get_aligned_size(1);
 
   size_t reorder_size         = output_tensor.get_buffer_sz_bytes();
   void *reorder_weights       = aligned_alloc(64, reorder_size);

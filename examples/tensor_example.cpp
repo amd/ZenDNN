@@ -76,7 +76,7 @@ int tensor_strided_aligned_allocation_example() {
   testlog_info("Tensor strided aligned memory allocation example");
   auto tensor =  tensor_t()
                  .set_name("aligned_strided_tensor")
-                 .set_stride_size({MATMUL_ROWS, MATMUL_STRIDE_COLS})
+                 .set_aligned_size({MATMUL_ROWS, MATMUL_STRIDE_COLS})
                  .set_size({MATMUL_ROWS, MATMUL_COLS})
                  .set_storage(ALIGNMENT_BOUNDARY)
                  .create();
@@ -261,6 +261,168 @@ int tensor_create_alike_example() {
     testlog_error(ex.what());
     return NOT_OK;
   }
+
+  return OK;
+}
+
+int tensor_broadcast_example() {
+  testlog_info("Tensor broadcast example");
+
+  {
+    //create a 3D tensor broadcasted along depth
+    auto depth_tensor = tensor_t()
+      .set_name("depth_broadcast_tensor")
+      .set_size({10,4,6})
+      .set_stride({0,6,1})
+      .set_data_type(data_type_t::f32)
+      .set_storage()
+      .create();
+
+    if (! depth_tensor.check()) {
+      testlog_error("Creation of ", depth_tensor.get_name(), " failed.");
+      return NOT_OK;
+    }
+    else {
+      testlog_info("Created detphwise broadcast tensor of size {10,6,4}, stride {0,6,1}");
+    }
+
+    auto      nelem   = depth_tensor.get_nelem();
+    float*    buf_ptr = static_cast<float*>(depth_tensor.get_raw_handle_unsafe());
+    for (uint32_t i = 0; i < nelem; ++i)
+      buf_ptr[i] = i+1;
+
+    testlog_info(depth_tensor.get_name()," has ", nelem, " elements.");
+
+    //print same row and col element at differet depths
+    testlog_info("Printing elements with same row, col but only depth changing...");
+    uint32_t r = 2; uint32_t c = 3;
+    for (uint32_t d = 0; d < 5; ++d) {
+      auto val = depth_tensor.at({d,r,c});
+      testlog_info(depth_tensor.get_name(), "[", d, ",", r, ",", c,"] = ", val);
+    }
+  }
+
+  {
+    //create a 3D tensor broadcasted along row
+    auto row_tensor = tensor_t()
+      .set_name("row_broadcast_tensor")
+      .set_size({10,4,6})
+      .set_stride({6,0,1})
+      .set_data_type(data_type_t::f32)
+      .set_storage()
+      .create();
+
+    if (! row_tensor.check()) {
+      testlog_error("Creation of ", row_tensor.get_name(), " failed.");
+      return NOT_OK;
+    }
+    else {
+      testlog_info("Created row-wise broadcast tensor of size {10,4,6}, stride {6,0,1}");
+    }
+
+    auto      nelem   = row_tensor.get_nelem();
+    float*    buf_ptr = static_cast<float*>(row_tensor.get_raw_handle_unsafe());
+    for (uint32_t i = 0; i < nelem; ++i)
+      buf_ptr[i] = i+1;
+
+    testlog_info(row_tensor.get_name()," has ", nelem, " elements.");
+
+    //print same row and col element at differet depths
+    testlog_info("Printing elements with same depth, col but only row changing...");
+    uint32_t d = 4; uint32_t c = 3;
+    for (uint32_t r = 0; r < 4; ++r) {
+      auto val = row_tensor.at({d,r,c});
+      testlog_info(row_tensor.get_name(), "[", d, ",", r, ",", c,"] = ", val);
+    }
+  }
+
+  {
+    //create a 4D tensor with 'ac' subtensor broadcasted along 'bd' axes
+    auto bd_tensor = tensor_t()
+      .set_name("bd_broadcast_tensor")
+      .set_size({10,5,4,6})
+      .set_stride({4,0,1,0})
+      .set_data_type(data_type_t::f32)
+      .set_storage()
+      .create();
+
+    if (! bd_tensor.check()) {
+      testlog_error("Creation of ", bd_tensor.get_name(), " failed.");
+      return NOT_OK;
+    }
+    else {
+      testlog_info("Created bd-wise broadcast tensor of size {10,5,4,6}, stride {4,0,1,0}");
+    }
+
+    auto      nelem   = bd_tensor.get_nelem();
+    float*    buf_ptr = static_cast<float*>(bd_tensor.get_raw_handle_unsafe());
+    for (uint32_t i = 0; i < nelem; ++i)
+      buf_ptr[i] = i+1;
+
+    testlog_info(bd_tensor.get_name()," has ", nelem, " elements.");
+
+    //print same row and col element at differet depths
+    testlog_info("Printing elements with same a,c, only b,d changing...");
+    uint32_t a = 2; uint32_t c = 1;
+    for (uint32_t b = 0; b < 5; ++b) {
+      for (uint32_t d = 0; d < 6; ++d) {
+        auto val = bd_tensor.at({a,b,c,d});
+        testlog_info(bd_tensor.get_name(), "[", a, ",", b, ",", c, ',', d, "] = ", val);
+      }
+    }
+  }
+
+  return OK;
+}
+
+int tensor_axes_permutation_example() {
+  //create and linearly populate a 4D tensor. stride [120,24,6,1]
+  auto orig_tensor = tensor_t()
+    .set_name("orig_tensor")
+    .set_size({10,5,4,6})
+    .set_data_type(data_type_t::f32)
+    .set_storage()
+    .create();
+
+  if (! orig_tensor.check()) {
+    testlog_error("Creation of ", orig_tensor.get_name(), " failed.");
+    return NOT_OK;
+  }
+
+  auto      nelem   = orig_tensor.get_nelem();
+  float*    buf_ptr = static_cast<float*>(orig_tensor.get_raw_handle_unsafe());
+  for (uint32_t i = 0; i < nelem; ++i)
+    buf_ptr[i] = i+1;
+
+  //access an element
+  tensor_t::index_vec_type index = {2,3,1,4};
+  testlog_info(orig_tensor.get_name(), " [2,3,1,4] = ", orig_tensor.at(index));
+
+  //create another tensor with permuted axes, but same buffer
+  auto permuted_tensor = tensor_t()
+    .set_name("permuted_tensor")
+    .set_size({10,5,6,4})
+    .set_order("abdc")
+    .set_data_type(data_type_t::f32)
+    .set_storage(orig_tensor)
+    .create();
+
+  //access same element with permuted index
+  index = {2,3,4,1};
+  testlog_info(permuted_tensor.get_name(), " [2,3,4,1] = ", permuted_tensor.at(index));
+
+  //give strides in place of order
+  auto stride_tensor = tensor_t()
+    .set_name("stride_tensor")
+    .set_size({10,5,6,4})
+    .set_stride({120,24,1,6})
+    .set_data_type(data_type_t::f32)
+    .set_storage(orig_tensor)
+    .create();
+
+  //access same element with permuted index
+  index = {2,3,4,1};
+  testlog_info(stride_tensor.get_name(), " [2,3,4,1] = ", stride_tensor.at(index));
 
   return OK;
 }

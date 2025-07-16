@@ -113,11 +113,11 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   auto weight_dtype            = weight_tensor.get_data_type();
   auto output_dtype            = output_tensor.get_data_type();
 
-  const int   lda              = is_trans_src ? input_tensor.get_stride_size(
-                                   0) : input_tensor.get_stride_size(1);
-  const int   ldb              = is_trans_weights ? weight_tensor.get_stride_size(
-                                   0) : weight_tensor.get_stride_size(1);
-  const int   ldc              = output_tensor.get_stride_size(1);
+  const int   lda              = is_trans_src ? input_tensor.get_aligned_size(
+                                   0) : input_tensor.get_aligned_size(1);
+  const int   ldb              = is_trans_weights ? weight_tensor.get_aligned_size(
+                                   0) : weight_tensor.get_aligned_size(1);
+  const int   ldc              = output_tensor.get_aligned_size(1);
 
   // Interim accumaltion buffer with float type
   float *output_buff_f32       = (float *)aligned_alloc(64,

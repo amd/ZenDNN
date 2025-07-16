@@ -98,13 +98,13 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
 }
 
 tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
-    std::vector<index_type> size_, const std::vector<index_type> stride_,
+    std::vector<index_type> size_, const std::vector<index_type> aligned_size_,
     data_type dtype_, float range_, bool trans) {
   auto udstensor = tensor_t()
                    .set_name("uniform distributed strided tensor")
                    .set_size(size_)
                    .set_data_type(dtype_)
-                   .set_stride_size(stride_)
+                   .set_aligned_size(aligned_size_)
                    .set_storage()
                    .create();
 
@@ -115,9 +115,9 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::mt19937 gen(100);
     std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
 
-    auto  buf_nelem   = stride_[0];
-    for (size_t i = 1; i < stride_.size(); i++) {
-      buf_nelem *= stride_[i];
+    auto  buf_nelem   = aligned_size_[0];
+    for (size_t i = 1; i < aligned_size_.size(); i++) {
+      buf_nelem *= aligned_size_[i];
     }
     void *buf_vptr = udstensor.get_raw_handle_unsafe();
 

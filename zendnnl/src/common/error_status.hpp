@@ -40,7 +40,14 @@ enum class status_t : int32_t {
   op_bad_forced_kernel = -5, /*!< Bad or inconsistant forced kernel */
   utils_bad_module_name = -6, /*!< Bad module name */
   utils_bad_dynamic_module = -7, /*!< Bad dynamic module */
-  config_bad_json_file = -8 /*< bad json file */
+  config_bad_json_file = -8, /*!< bad json file */
+  memory_bad_size = -9, /*!< bad tensor size */
+  memory_bad_aligned_size = -10, /*!< bad tensor aligned size */
+  memory_bad_order = -11, /*!< bad tensor axis order */
+  memory_bad_stride = -12, /*!< bad tensor stride */
+  memory_bad_base = -13, /*!< bad tensor base */
+  memory_bad_index = -14, /*!< bad tensor index */
+  memory_bad_storage = -15 /*!< bad tensor index */
 };
 
 } //error_handling

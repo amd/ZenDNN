@@ -65,6 +65,15 @@ class tensor_factory_t {
                           StorageParam param, std::string tensor_name_="blocked");
 };
 
+/** @class tensor_functions
+ * @brief Quick generation of predefined tensors.
+ */
+
+class tensor_functions_t {
+public:
+  void tensor_pretty_print(const tensor_t& tensor_);
+};
+
 } //examples
 } //zendnnl
 

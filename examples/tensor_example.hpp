@@ -97,5 +97,80 @@ int tensor_constness_example();
  */
 int tensor_create_alike_example();
 
+/** @fn tensor_broadcast_example
+ *  @brief Demonstrates how tensor strides can be used to broadcast a low
+ *  dimensional tensor across an axis of a high-dimensional tensor.
+ *
+ *  Consider a matrix A of size (M x N). We need to broadcast this matrix
+ *  across depth of a 3D tensor B of size (D x M x N), such that every
+ *  sub-tensor of B at detph 'd' is is matrix A. In other words, actual
+ *  size of B is M x N, with these M x N elements repeated across depth D.
+ *
+ *  Tensor stride can be used to create such a broadcast tensor. In order
+ *  to create such a tensor, its size is set as (D,M,N), but the stride
+ *  is set as (0, N, 1), indicating M x N sub-tensor is being broadcasted
+ *  along depth.
+ *
+ *  If we can name tensor axes as "a,b,c,...", where axis 'a' corresponds
+ *  to slowest moving dimension axis (left-most dimension) and so on,
+ *  then we can say that tensor B is its sub-tensor across (bc) axes
+ *  broadcasted along 'a' axes.
+ *
+ *  This can be generalized to any axes. Continuing with the above
+ *  example, stride (N, 0, 1) implies a (D x N) matrix along (ac)
+ *  axes is broadcasted along 'b' axis, and stride (M, 1, 0) implies
+ *  that a ( D x M) matrix along (ab) axis is boadcasted along 'c'
+ *  axis.
+ *
+ *  This cae be further generalized to higher dimensions. For example
+ *  a tensor of size (L x D x M x N), with stride (0, MN, N, 1) implies
+ *  sub-tensor along axes (bcd) is broadcasted along axis 'a'. A stride
+ *  (0, N, 0, 1) implies a matrix of ( D x N) along (bd) axes is
+ *  broadcasted along (ac) axes.
+ *
+ */
+int tensor_broadcast_example();
+
+/** @fn tensor_axis_permutation_example
+ *  @brief Demonstrates how axes permutation works to change the order
+ *  of axes in accessing the thnsor data.
+ *
+ *  Axis permutation can be best understood in the context of matrix
+ *  transpose. The ZenDNNL library names axes 'abc...', with 'a'
+ *  being the slowest moving axis. Consider a (3x4) matrix with
+ *  size(3,4), stride(4,1) and order('ab'). Let the matrix be
+ *
+ *  1,  2,  3,  4
+ *  5,  6,  7,  8
+ *  9, 10, 11, 12
+ *
+ *  This matrix will be stored in row major form with a buffer
+ *  [1,2,...,12]. An elemnt at (i,j) will be at 4*i + j in this
+ *  buffer.
+ *
+ *  Let us sey we want to "transpose" the matrix. One way is to
+ *  change the buffer to [1,5,9,2,6,10,...,12], size to (4,3) and
+ *  stride(3,1). This requires rearranging the buffer, and time
+ *  consuming.
+ *
+ *  Another way is to read the same buffer in column-major form.
+ *  This does not require buffer rearrangement, but change only in
+ *  the meta data. This can be done by changing size to (4,3),
+ *  stride to (1,4) and order to ('ba'). The order indicates the
+ *  order of size, stride and index. It can be seen that index
+ *  (j,i) accesses the elemnt at j + 4*i, thus "transposing"
+ *  the matrix.
+ *
+ *  This can be generalized to any dimensions. If a tensor A
+ *  has size (Da, Db, Dc), stride (Sa, Sb, Sc), and order ("abc")
+ *  then index (ia, ib, ic) will access (Sa*ia+Sb*ib+Sc*ic) element.
+ *  Now if another tensor B, whcih shares same buffer, but size
+ *  (Da, Dc, Db), stride (Sa, Sb, Sc), order ("acb") then index
+ *  (ia,ic,ib) will access the same element in tensor B.
+ *
+ *  Thus axes perumtation can be used to keep the buffer same, but
+ *  access the tensor differently.
+ */
+int tensor_axes_permutation_example();
 } //examples
 } //zendnnl

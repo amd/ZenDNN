@@ -22,13 +22,13 @@ namespace examples {
 using namespace zendnnl::interface;
 
 tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
-    std::vector<index_type> size_, const std::vector<index_type> stride_,
+    std::vector<index_type> size_, const std::vector<index_type> aligned_size_,
     data_type dtype_, float range_, std::string tensor_name_) {
   auto udstensor = tensor_t()
                    .set_name(tensor_name_)
                    .set_size(size_)
                    .set_data_type(dtype_)
-                   .set_stride_size(stride_)
+                   .set_aligned_size(aligned_size_)
                    .set_storage()
                    .create();
 
@@ -39,9 +39,9 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::mt19937 gen(100);
     std::uniform_real_distribution<float> dist(-1.0 * range_, 1.0 * range_);
 
-    auto  buf_nelem   = stride_[0];
-    for (size_t i = 1; i<stride_.size(); i++) {
-      buf_nelem *=stride_[i];
+    auto  buf_nelem   = aligned_size_[0];
+    for (size_t i = 1; i < aligned_size_.size(); i++) {
+      buf_nelem *= aligned_size_[i];
     }
     void *buf_vptr    = udstensor.get_raw_handle_unsafe();
 
@@ -195,6 +195,26 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
   }
 
   return btensor;
+}
+
+void tensor_functions_t::tensor_pretty_print(const tensor_t& tensor_) {
+  //works only for 3D as of now
+  auto tensor_size = tensor_.get_size();
+
+  auto depths = tensor_size[0];
+  auto rows   = tensor_size[1];
+  auto cols   = tensor_size[2];
+
+  for (uint64_t d = 0; d < depths; ++d) {
+    std::cout << "depth = " << d << std::endl;
+    for (uint64_t r = 0; r < rows; ++r) {
+      std::cout << "r" << r << " : ";
+      for (uint64_t c = 0; c < cols; ++c) {
+        std::cout << tensor_.at({d,r,c}) << ", ";
+      }
+      std::cout << std::endl;
+    }
+  }
 }
 
 } //examples

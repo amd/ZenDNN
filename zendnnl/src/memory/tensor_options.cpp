@@ -23,10 +23,10 @@ using namespace zendnnl::common;
 using namespace zendnnl::error_handling;
 
 tensor_option_t::tensor_option_t():
-  size{}, stride_size{}, stride{}, base{},
-  nelem{0}, strided_nelem{0}, base_offset{0},
+  size{}, aligned_size{}, stride{}, base{},
+  nelem{0}, aligned_nelem{0}, base_offset{0},
   data_type{data_type_t::f32}, layout{tensor_layout_t::contiguous},
-  is_const{false}, order{"ab"} {
+  is_const{false}, order{} {
 }
 
 void tensor_option_t::reset() {
@@ -34,11 +34,11 @@ void tensor_option_t::reset() {
   parent_type::reset();
 
   size.clear();
-  stride_size.clear();
+  aligned_size.clear();
   stride.clear();
   base.clear();
   nelem          = 0;
-  strided_nelem  = 0;
+  aligned_nelem  = 0;
   base_offset    = 0;
   data_type      = data_type_t::f32;
   layout         = tensor_layout_t::contiguous;
@@ -54,7 +54,7 @@ std::size_t tensor_option_t::hash() {
   }
 
   hash_key = hash_combine(hash_key, size);
-  hash_key = hash_combine(hash_key, stride_size);
+  hash_key = hash_combine(hash_key, aligned_size);
   hash_key = hash_combine(hash_key, base);
   hash_key = hash_combine(hash_key, uint32_t(data_type));
   hash_key = hash_combine(hash_key, uint32_t(layout));

@@ -57,13 +57,16 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   const char  trans_weight  = is_transpose_weights ? 't' : 'n';
   const char  input_format  = 'n';
   const char  weight_format = is_blocked ? 'r': 'n';
+
   const float alpha         = context_.get_alpha();
   const float beta          = context_.get_beta();
-  const int   lda           = is_transpose_src ? input_tensor.get_stride_size(
-                                0) : input_tensor.get_stride_size(1);
+  const int   lda           = is_transpose_src ?
+                              input_tensor.get_aligned_size(0) :
+                              input_tensor.get_aligned_size(1);
+
   const int   ldb           = is_transpose_weights ?
-                              weight_tensor.get_stride_size(0) : weight_tensor.get_stride_size(1);
-  const int   ldc           = output_tensor.get_stride_size(1);
+                              weight_tensor.get_aligned_size(0) : weight_tensor.get_aligned_size(1);
+  const int   ldc           = output_tensor.get_aligned_size(1);
 
   aocl_gemm_f32f32f32of32(order, trans_input, trans_weight,
                           m,n,k,

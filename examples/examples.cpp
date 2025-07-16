@@ -38,6 +38,8 @@ int main() {
   tensor_move_and_refcount_example();
   tensor_constness_example();
   tensor_create_alike_example();
+  tensor_broadcast_example();
+  tensor_axes_permutation_example();
 
   /** MatMul operator functionality examples.
    *  Demonstrates fused post-ops, different data types computation,
@@ -66,7 +68,9 @@ int main() {
   compare_op_example();
   compare_ref_and_aocl_matmul_kernel_example();
 
-  // Sample functionality examples.
+  /** Sample functionality examples.
+   *
+   */
   sample_f32_kernel_example();
   sample_bf16_kernel_example();
 

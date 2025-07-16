@@ -39,9 +39,9 @@ using namespace zendnnl::error_handling;
  */
 enum class tensor_layout_t : uint8_t {
   contiguous, /*!< Contiguous layout */
-  strided, /*!< Strided layout */
-  blocked, /*!< Blocked layout */
-  oblique  /*!< Oblique layout */
+  aligned,    /*!< Memory aligned layout */
+  blocked,    /*!< Blocked layout */
+  oblique     /*!< Oblique layout */
 };
 
 /** @class tensor_option_t
@@ -94,15 +94,15 @@ public:
 private:
   index_vec_type     size;           /**< Tensor size. Tensor dimensions are
                                         decided by length of size vector. */
-  index_vec_type     stride_size;    /**< Tensor stride size. */
-  index_vec_type     stride;         /**< Tensor Stride, computed from
-                                        @c size or @c stride_size. */
+  index_vec_type     aligned_size;   /**< Tensor aligned size. */
+  index_vec_type     stride;         /**< Tensor stride that defines access
+                                        pattern */
   index_vec_type     base;           /**< Index of the element to be consider
                                         first element. */
   uint64_t           nelem;          /**< Number of elements, computed from
                                         size */
-  uint64_t           strided_nelem;  /**< Memory buffer size in terms of
-                                        elements computed from stride_size */
+  uint64_t           aligned_nelem;  /**< Memory buffer size in terms of
+                                        elements computed from aligned_size */
   uint64_t           base_offset;    /**< Base offset, computed from @c base
                                         and @c stride */
   data_type_t        data_type;      /**< Tensor data type */
