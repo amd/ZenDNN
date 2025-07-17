@@ -268,19 +268,9 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
   return OK;
 }
 
-
-/**
- * @brief Runs the reorder benchmark for a list of configurations.
- *
- * For each configuration, performs warmup and measured iterations, collects timing stats.
- *
- * @param configs List of ReorderConfig objects.
- * @param stats Output vector of TimingStats for each config.
- * @return int OK (0) on success, NOT_OK (1) on failure.
- */
 int reorder_benchdnn(std::vector<ReorderConfig> configs,
-                     std::vector<TimingStats> &stats) {
-  testlog_info("Reorder operator f32 kernel example");
+                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results) {
+  bool skip;
   for (const auto &cfg:configs) {
     try {
       tensor_factory_t tensor_factory;
@@ -292,13 +282,21 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
                           1.0, "reorder_input");
 
       TimingStats time_stats;
+      skip = false;
       // warm-up iterations
       for (auto i = 0; i < cfg.warmup_iters; i++) {
         status = run_reorder(input_tensor, cfg, time_stats);
         if (status != OK) {
           testlog_error("run_reorder execution failed.");
-          return NOT_OK;
+          skip = true;
+          break;
         }
+      }
+      if (skip) {
+        commonlog_error("Benchmark failed for ", cfg.rows, ", ", cfg.cols, ", ",
+                        cfg.iters, ", ", datatypeToStr(cfg.dt),
+                        ", ", cfg.kernel_name, ", ", cfg.isInplace);
+        continue;
       }
 
       double elapsed_ms = 0.0;
@@ -313,7 +311,8 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
         status = run_reorder(input_tensor, cfg, time_stats, true);
         if (status != OK) {
           testlog_error("run_reorder execution failed.");
-          return NOT_OK;
+          skip = true;
+          break;
         }
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto end = std::chrono::high_resolution_clock::now();
@@ -322,13 +321,19 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
         elapsed_ms += time_taken;
 #endif
       }
+      if (skip) {
+        commonlog_error("Benchmark failed for ", cfg.rows, ", ", cfg.cols, ", ",
+                        cfg.iters, ", ", datatypeToStr(cfg.dt),
+                        ", ", cfg.kernel_name, ", ", cfg.isInplace);
+        continue;
+      }
 #if MEASURE_INDIVIDUAL_TIMINGS
       elapsed_ms = time_stats.context_creation_ms +
                    time_stats.operator_creation_ms + time_stats.operator_execution_ms +
                    time_stats.other_ms;
 #endif
       time_stats.total_time_ms = elapsed_ms;
-      stats.push_back(time_stats);
+      reorder_results.emplace_back(cfg, time_stats);
     }
     catch (const exception_t &ex) {
       std::cout << ex.what() << std::endl;
@@ -336,19 +341,12 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
     }
   }
 
+  if (skip) {
+    return NOT_OK;
+  }
   return OK;
 }
 
-
-/**
- * @brief Main entry point for reorder benchmarking.
- *
- * Reads input configurations from file, runs benchmarks, prints and writes results to CSV.
- *
- * @param in_filename Input file path (configurations).
- * @param out_filename Output CSV file path.
- * @return int OK (0) on success, NOT_OK (1) on failure.
- */
 int bench(const std::string &in_filename, const std::string &out_filename) {
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
@@ -359,26 +357,35 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   std::vector<ReorderConfig> reorderConfig;
   inputParser(infile, reorderConfig);
 
-  std::vector<TimingStats> time_stat;    // Stores timing statistics
-  int status = reorder_benchdnn(reorderConfig, time_stat);
+  std::vector<std::pair<ReorderConfig, TimingStats>> reorder_results;
+  int status = reorder_benchdnn(reorderConfig, reorder_results);
+  if (status != OK) {
+    testlog_error("Reorder benchmark failed.");
+    return NOT_OK;
+  }
 
   // Print results to console for each configuration
-  for (size_t i = 0; i < reorderConfig.size(); ++i) {
+  // Iterate over all benchmarked configurations and their timing statistics.
+  // For each configuration, print the configuration parameters and timing results to the console.
+  // This provides a summary of the benchmark results for each tested reorder scenario.
+  for (const auto &result : reorder_results) {
+    const auto &config = result.first;
+    const auto &stat = result.second;
     std::cout <<
-              reorderConfig[i].rows << ", " <<
-              reorderConfig[i].cols << ", " <<
-              reorderConfig[i].iters << ", " <<
-              datatypeToStr(reorderConfig[i].dt) << ", " <<
-              reorderConfig[i].kernel_name << ", " <<
-              reorderConfig[i].isInplace;
-    std::cout << ", Warm-up iterations: " << reorderConfig[i].warmup_iters;
-    std::cout << ", Total time: " << time_stat[i].total_time_ms << " ms";
+              config.rows << ", " <<
+              config.cols << ", " <<
+              config.iters << ", " <<
+              datatypeToStr(config.dt) << ", " <<
+              config.kernel_name << ", " <<
+              config.isInplace;
+    std::cout << ", Warm-up iterations: " << config.warmup_iters;
+    std::cout << ", Total time: " << stat.total_time_ms << " ms";
 #if MEASURE_INDIVIDUAL_TIMINGS
     std::cout << ", Context creation: " <<
-              time_stat[i].context_creation_ms << " ms, Operator creation: " <<
-              time_stat[i].operator_creation_ms << " ms, Operator execution: " <<
-              time_stat[i].operator_execution_ms << " ms, Others: " <<
-              time_stat[i].other_ms << " ms";
+              stat.context_creation_ms << " ms, Operator creation: " <<
+              stat.operator_creation_ms << " ms, Operator execution: " <<
+              stat.operator_execution_ms << " ms, Others: " <<
+              stat.other_ms << " ms";
 #endif
     std::cout << std::endl;
 
@@ -400,25 +407,27 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   outfile << std::endl;
 
   // Write results to CSV for each configuration
-  for (size_t i = 0; i < time_stat.size(); ++i) {
+  for (const auto &result : reorder_results) {
+    const auto &config = result.first;
+    const auto &stat = result.second;
     outfile <<
-            reorderConfig[i].rows << ", " <<
-            reorderConfig[i].cols << ", " <<
-            reorderConfig[i].iters << ", " <<
-            datatypeToStr(reorderConfig[i].dt) << ", " <<
-            reorderConfig[i].kernel_name << ", " <<
-            reorderConfig[i].isInplace << ", " <<
-            reorderConfig[i].warmup_iters << ", " <<
-            time_stat[i].total_time_ms
+            config.rows << ", " <<
+            config.cols << ", " <<
+            config.iters << ", " <<
+            datatypeToStr(config.dt) << ", " <<
+            config.kernel_name << ", " <<
+            config.isInplace << ", " <<
+            config.warmup_iters << ", " <<
+            stat.total_time_ms;
 #if MEASURE_INDIVIDUAL_TIMINGS
-            << ", " <<
-            time_stat[i].context_creation_ms << ", " <<
-            time_stat[i].operator_creation_ms << ", " <<
-            time_stat[i].operator_execution_ms << ", " <<
-            time_stat[i].other_ms
+    outfile <<
+            ", " <<
+            stat.context_creation_ms << ", " <<
+            stat.operator_creation_ms << ", " <<
+            stat.operator_execution_ms << ", " <<
+            stat.other_ms;
 #endif
-            << std::endl;
-
+    outfile << std::endl;
   }
 
   outfile.close();

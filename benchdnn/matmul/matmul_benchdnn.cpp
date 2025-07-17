@@ -126,9 +126,21 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
     auto start_operator_execution = std::chrono::high_resolution_clock::now();
     matmul_operator.set_input("matmul_input", input_tensor);
     for (size_t i = 0; i < binary_post_ops_tensors.size(); i++) {
-      matmul_operator.set_input(matmul_context.get_post_op(
-                                  cfg.binary_post_ops_pos[i]).binary_mul_params.tensor_name,
-                                binary_post_ops_tensors[i]);
+      if (postOpsToStr(cfg.post_ops[cfg.binary_post_ops_pos[i]]) == "binary_mul") {
+        // Set the input tensor for binary post-op multiplication
+        // using the tensor name defined in the context.
+        matmul_operator.set_input(matmul_context.get_post_op(
+                                    cfg.binary_post_ops_pos[i]).binary_mul_params.tensor_name,
+                                  binary_post_ops_tensors[i]);
+      }
+      else if (postOpsToStr(
+                 cfg.post_ops[cfg.binary_post_ops_pos[i]]) == "binary_add") {
+        // Set the input tensor for binary post-op addition
+        // using the tensor name defined in the context.
+        matmul_operator.set_input(matmul_context.get_post_op(
+                                    cfg.binary_post_ops_pos[i]).binary_add_params.tensor_name,
+                                  binary_post_ops_tensors[i]);
+      }
     }
     status = matmul_operator.set_output("matmul_output", output_tensor)
              .execute();
@@ -155,11 +167,12 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
 }
 
 int matmul_benchdnn(std::vector<MatmulConfig> configs,
-                    std::vector<double> &gflops,
-                    std::vector<TimingStats> &stats) {
+                    std::vector<std::pair<MatmulConfig, TimingStats>> &matmul_results) {
 
+  bool skip;
   for (const auto &cfg:configs) {
     try {
+      skip = false;
 
       tensor_factory_t tensor_factory;
       tensor_t weights, bias;
@@ -265,8 +278,24 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         }
         else {
           testlog_error("run_matmul execution failed.");
-          return NOT_OK;
+          skip = true;
+          break;
         }
+      }
+      if (skip) {
+        std::string post_op = "";
+        if (!cfg.post_ops.empty()) {
+          for (auto j = 0; j < cfg.post_ops.size(); j++) {
+            post_op += (j > 0 ? ":" : "") + postOpsToStr(cfg.post_ops[j]);
+          }
+        }
+        commonlog_error("Benchmark failed for ", cfg.m, ", ", cfg.k, ", ",
+                        cfg.n, ", ", datatypeToStr(cfg.dt[0]), ":",
+                        datatypeToStr(cfg.dt[1]), ":", datatypeToStr(cfg.dt[2]), ", ",
+                        cfg.isBiasEnabled, ", ", (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) :""),
+                        ", ",
+                        post_op, ", ", cfg.kernel_name, ", ", cfg.warmup_iters);
+        continue;
       }
 
       double elapsed_ms = 0.0;
@@ -285,7 +314,8 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         }
         else {
           testlog_error("run_matmul execution failed.");
-          return NOT_OK;
+          skip = true;
+          break;
         }
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto end = std::chrono::high_resolution_clock::now();
@@ -294,15 +324,27 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         elapsed_ms += time_taken;
 #endif
       }
+      if (skip) {
+        std::string post_op = "";
+        if (!cfg.post_ops.empty()) {
+          for (auto j = 0; j < cfg.post_ops.size(); j++) {
+            post_op += (j > 0 ? ":" : "") + postOpsToStr(cfg.post_ops[j]);
+          }
+        }
+        commonlog_error("Benchmark failed for ", cfg.m, ", ", cfg.k, ", ",
+                        cfg.n, ", ", datatypeToStr(cfg.dt[0]), ":",
+                        datatypeToStr(cfg.dt[1]), ":", datatypeToStr(cfg.dt[2]), ", ",
+                        cfg.isBiasEnabled, ", ", (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) :""),
+                        ", ",
+                        post_op, ", ", cfg.kernel_name, ", ", cfg.warmup_iters);
+        continue;
+      }
 #if MEASURE_INDIVIDUAL_TIMINGS
       elapsed_ms = time_stats.context_creation_ms +
                    time_stats.operator_creation_ms + time_stats.operator_execution_ms;
 #endif
       time_stats.total_time_ms = elapsed_ms;
-      stats.push_back(time_stats);
-      double gops = (2 * cfg.m * cfg.k * cfg.n * 0.000000001);
-      double gflops_val = (gops / elapsed_ms) * 1000;
-      gflops.push_back(gflops_val);
+      matmul_results.emplace_back(cfg, time_stats);
     }
     catch (const exception_t &ex) {
       std::cout << ex.what() << std::endl;
@@ -310,6 +352,9 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
     }
   }
 
+  if (skip) {
+    return NOT_OK;
+  }
   return OK;
 }
 
@@ -323,37 +368,47 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   std::vector<MatmulConfig> matmulConfig;
   inputParser(infile, matmulConfig);
 
-  std::vector<double> gflops;            // Stores GFLOPS results
-  std::vector<TimingStats> time_stat;    // Stores timing statistics
-  int status = matmul_benchdnn(matmulConfig, gflops, time_stat);
+  std::vector<std::pair<MatmulConfig, TimingStats>> matmul_results;
+  // Run the matmul benchmark with the provided configurations
+  int status = matmul_benchdnn(matmulConfig, matmul_results);
+  if (status != OK) {
+    testlog_error("Matmul benchmark failed.");
+    return NOT_OK;
+  }
 
   // Print results to console for each configuration
-  for (size_t i = 0; i < time_stat.size(); ++i) {
+  for (const auto &result : matmul_results) {
+    const MatmulConfig &config = result.first;
+    const TimingStats &stat = result.second;
+    double gops = (2 * config.m * config.k * config.n * 0.000000001);
+    double gflops_val = (gops / stat.total_time_ms) * 1000;
     std::cout <<
-              matmulConfig[i].m << ", " <<
-              matmulConfig[i].k << ", " <<
-              matmulConfig[i].n << ", " <<
-              matmulConfig[i].iters << ", " <<
-              datatypeToStr(matmulConfig[i].dt[0]) << ":" <<
-              datatypeToStr(matmulConfig[i].dt[1]) << ":" <<
-              datatypeToStr(matmulConfig[i].dt[2]) << ", ";
-    if (!matmulConfig[i].post_ops.empty()) {
-      for (auto j = 0; j < matmulConfig[i].post_ops.size(); j++) {
+              config.m << ", " <<
+              config.k << ", " <<
+              config.n << ", " <<
+              config.iters << ", " <<
+              datatypeToStr(config.dt[0]) << ":" <<
+              datatypeToStr(config.dt[1]) << ":" <<
+              datatypeToStr(config.dt[2]) << ", " <<
+              config.isBiasEnabled << ", " << (config.isBiasEnabled ? datatypeToStr(
+                    config.bias_dt) :"") << ", ";
+    if (!config.post_ops.empty()) {
+      for (auto j = 0; j < config.post_ops.size(); j++) {
         if (j > 0) {
           std::cout << ":";
         }
-        std::cout << postOpsToStr(matmulConfig[i].post_ops[j]);
+        std::cout << postOpsToStr(config.post_ops[j]);
       }
     }
     std::cout << ", ";
-    std::cout << matmulConfig[i].kernel_name << ", " <<
-              matmulConfig[i].warmup_iters << ", Total time: " <<
-              time_stat[i].total_time_ms << " ms, GFLOPS: " << gflops[i]
+    std::cout << config.kernel_name << ", " <<
+              config.warmup_iters << ", Total time: " <<
+              stat.total_time_ms << " ms, GFLOPS: " << gflops_val
 #if MEASURE_INDIVIDUAL_TIMINGS
               << ", Context creation: " <<
-              time_stat[i].context_creation_ms << " ms, Operator creation: " <<
-              time_stat[i].operator_creation_ms << " ms, Operator execution: " <<
-              time_stat[i].operator_execution_ms << " ms"
+              stat.context_creation_ms << " ms, Operator creation: " <<
+              stat.operator_creation_ms << " ms, Operator execution: " <<
+              stat.operator_execution_ms << " ms"
 #endif
               << std::endl;
 
@@ -367,7 +422,7 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
 
   // Write CSV header
   outfile <<
-          "M, K, N, Iterations, Data type, Post Operation, Kernel name, Warmup iterations, Total time (ms), GFLOPS";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, Warmup iterations, Total time (ms), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation Time (ms), Operator Creation Time (ms), Operator Execution Time (ms)";
@@ -375,30 +430,36 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   outfile << std::endl;
 
   // Write results to CSV for each configuration
-  for (size_t i = 0; i < time_stat.size(); ++i) {
+  for (const auto &result : matmul_results) {
+    const MatmulConfig &config = result.first;
+    const TimingStats &stat = result.second;
+    double gops = (2 * config.m * config.k * config.n * 0.000000001);
+    double gflops_val = (gops / stat.total_time_ms) * 1000;
     outfile <<
-            matmulConfig[i].m << ", " <<
-            matmulConfig[i].k << ", " <<
-            matmulConfig[i].n << ", " <<
-            matmulConfig[i].iters << ", " <<
-            datatypeToStr(matmulConfig[i].dt[0]) << ":" <<
-            datatypeToStr(matmulConfig[i].dt[1]) << ":" <<
-            datatypeToStr(matmulConfig[i].dt[2]) << ", ";
-    if (!matmulConfig[i].post_ops.empty()) {
-      for (const auto &post_op : matmulConfig[i].post_ops) {
+            config.m << ", " <<
+            config.k << ", " <<
+            config.n << ", " <<
+            config.iters << ", " <<
+            datatypeToStr(config.dt[0]) << ":" <<
+            datatypeToStr(config.dt[1]) << ":" <<
+            datatypeToStr(config.dt[2]) << ", " <<
+            config.isBiasEnabled << ", " << (config.isBiasEnabled ? datatypeToStr(
+                  config.bias_dt) : "") << ", ";
+    if (!config.post_ops.empty()) {
+      for (const auto &post_op : config.post_ops) {
         outfile << postOpsToStr(post_op) << ":";
       }
       outfile.seekp(-1, std::ios_base::end); // Remove trailing colon
     }
     outfile << ", ";
-    outfile << matmulConfig[i].kernel_name << ", " <<
-            matmulConfig[i].warmup_iters << ", " <<
-            time_stat[i].total_time_ms << ", " << gflops[i]
+    outfile << config.kernel_name << ", " <<
+            config.warmup_iters << ", " <<
+            stat.total_time_ms << ", " << gflops_val
 #if MEASURE_INDIVIDUAL_TIMINGS
             << ", " <<
-            time_stat[i].context_creation_ms << ", " <<
-            time_stat[i].operator_creation_ms << ", " <<
-            time_stat[i].operator_execution_ms
+            stat.context_creation_ms << ", " <<
+            stat.operator_creation_ms << ", " <<
+            stat.operator_execution_ms
 #endif
             << std::endl;
 

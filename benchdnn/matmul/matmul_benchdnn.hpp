@@ -52,16 +52,16 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
 /**
  * @brief Benchmarks matmul (optionally fused with post-ops) using user-specified parameters.
  *
- * Accepts a vector of MatmulConfig objects, each specifying a benchmark configuration, and outputs
- * the achieved GFLOPS and timing statistics for each run.
+ * For each configuration in the provided vector, performs warmup and measured iterations,
+ * collects timing statistics, and stores the results in the provided vector.
  *
  * @param configs Vector of MatmulConfig objects specifying benchmark parameters for each run.
- * @param gflops Reference to a vector to store the computed GFLOPS for each configuration.
- * @param stats Reference to a vector to store timing statistics for each configuration.
+ * @param matmul_results Vector to store pairs of configuration and timing statistics (std::pair<MatmulConfig, TimingStats>).
+ *        Each entry corresponds to a unique configuration and its associated timing results.
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int matmul_benchdnn(std::vector<MatmulConfig> configs,
-                    std::vector<double> &gflops, std::vector<TimingStats> &stats);
+                    std::vector<std::pair<MatmulConfig, TimingStats>> &matmul_results);
 
 /**
  * @brief Runs the full matmul benchmark suite from an input file and writes results to a CSV file.

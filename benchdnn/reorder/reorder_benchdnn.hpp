@@ -21,6 +21,7 @@
 #include "benchdnn.hpp"
 #include "reorder_parser.hpp"
 #include <chrono>
+#include <map>
 
 namespace zendnnl {
 namespace benchdnn {
@@ -45,14 +46,16 @@ int run_reorder(tensor_t input_tensor, std::string kernel_name,
 /**
  * @brief Runs the reorder benchmark for a set of configurations.
  *
- * For each configuration, performs warmup and measured iterations, collects timing stats.
+ * Iterates through each provided configuration, performs warmup and measured iterations,
+ * collects timing statistics, and stores the results in the provided vector.
  *
  * @param configs Vector of ReorderConfig objects specifying each benchmark run.
- * @param stats Vector to store timing statistics for each configuration.
+ * @param reorder_results Vector to store pairs of configuration and timing statistics (std::pair<ReorderConfig, TimingStats>).
+ *        Each entry corresponds to a unique configuration and its associated timing results.
  * @return Status code (0 for success, non-zero for error).
  */
 int reorder_benchdnn(std::vector<ReorderConfig> configs,
-                     std::vector<TimingStats> &stats);
+                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results);
 
 /**
  * @brief Entry point for the reorder benchmark utility.

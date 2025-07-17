@@ -78,9 +78,7 @@ data_type_t strToDatatype(const std::string &str) {
   if (str == "u4") {
     return data_type_t::u4;
   }
-  commonlog_warning("Unknown data type string '", str,
-                    "', defaulting to f32.");
-  return data_type_t::f32;
+  throw std::invalid_argument("Unknown data type string '" + str + "'");
 }
 
 std::string datatypeToStr(data_type_t dt) {
