@@ -197,13 +197,13 @@ std::string embag_operator_t::op_create_info() {
   ss << table.tensor_info();
 
   if (algo == embag_algo_t::mean) {
-     ss << ",algo:mean" ;
+    ss << ",algo:mean" ;
   }
   else if (algo == embag_algo_t::max) {
-     ss << ",algo:max" ;
+    ss << ",algo:max" ;
   }
   else {
-     ss << ",algo:sum" ;
+    ss << ",algo:sum" ;
   }
 
   return ss.str();
@@ -234,13 +234,13 @@ std::string embag_operator_t::op_execute_info() {
      << output.value().tensor_info();
 
   if (algo == embag_algo_t::mean) {
-     ss << ",algo:mean" ;
+    ss << ",algo:mean" ;
   }
   else if (algo == embag_algo_t::max) {
-     ss << ",algo:max" ;
+    ss << ",algo:max" ;
   }
   else {
-     ss << ",algo:sum" ;
+    ss << ",algo:sum" ;
   }
 
   return ss.str();

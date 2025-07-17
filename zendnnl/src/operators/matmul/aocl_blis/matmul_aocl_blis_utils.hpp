@@ -62,7 +62,7 @@ class aocl_blis_utils_t {
 
   /** @brief weight reordering for the AOCL */
   template <typename T>
-  size_t        reorder_weights_execute(
+  void reorder_weights_execute(
     const void *weights,
     const int k,
     const int n,

@@ -57,7 +57,13 @@ int reorder_outofplace_f32_kernel_example() {
 
     // Compute the reorder size and create a buffer with reorderd size
     size_t reorder_size = reorder_operator.get_reorder_size();
-    void *reorder_weights = aligned_alloc(64, reorder_size);
+    size_t alignment = 64;
+    reorder_size = get_aligned_size(alignment, reorder_size);
+    void *reorder_weights = aligned_alloc(alignment, reorder_size);
+    if (reorder_weights == nullptr) {
+      testlog_error("reorder_weights can not have align allocation.");
+      return NOT_OK;
+    }
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation
@@ -130,8 +136,14 @@ int reorder_outofplace_s8_kernel_example() {
     }
 
     // Compute the reorder size and create a buffer with reorderd size
+    size_t alignment = 64;
     size_t reorder_size = reorder_operator.get_reorder_size();
-    void *reorder_weights = aligned_alloc(64, reorder_size);
+    reorder_size = get_aligned_size(alignment, reorder_size);
+    void *reorder_weights = aligned_alloc(alignment, reorder_size);
+    if (reorder_weights == nullptr) {
+      testlog_error("reorder_weights can not have align allocation.");
+      return NOT_OK;
+    }
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation
@@ -203,8 +215,14 @@ int reorder_outofplace_matmul_relu_f32_kernel_example() {
     }
 
     // Compute the reorder size and create a buffer with reorderd size
+    size_t alignment    = 64;
     size_t reorder_size = reorder_operator.get_reorder_size();
-    void *reorder_weights = aligned_alloc(64, reorder_size);
+    reorder_size = get_aligned_size(alignment, reorder_size);
+    void *reorder_weights = aligned_alloc(alignment, reorder_size);
+    if (reorder_weights == nullptr) {
+      testlog_error("reorder_weights can not have align allocation.");
+      return NOT_OK;
+    }
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation

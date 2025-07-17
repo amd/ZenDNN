@@ -57,7 +57,7 @@ AOCL_PARAMS_STORAGE_TYPES get_aocl_store_type(data_type_t dt) {
 }
 
 template <typename T>
-size_t aocl_blis_utils_t::reorder_weights_execute(
+void aocl_blis_utils_t::reorder_weights_execute(
   const void *weights,
   const int k,
   const int n,
@@ -70,12 +70,21 @@ size_t aocl_blis_utils_t::reorder_weights_execute(
   log_info("BLIS reorder weights");
   siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                 k, n);
+  //b_reorder_buf_siz_req%alignment(64) == 0 for portability and integration
+  //Todo: move this alignment padding to unified library utility function
+  size_t alignment      = 64;
+  b_reorder_buf_siz_req = (b_reorder_buf_siz_req + alignment - 1) &
+                          ~(alignment-1) ;
   /*TODO: add support for tensor which will wrap the pointer instead of raw buffer*/
-  reordered_weights_ptr = aligned_alloc(64, b_reorder_buf_siz_req);
+  reordered_weights_ptr = aligned_alloc(alignment, b_reorder_buf_siz_req);
+  if (reordered_weights_ptr == nullptr) {
+    log_error("reordered_weights_ptr can not have align allocation");
+    return;
+  }
   reorder_func(order, trans, 'B', (T *)weights, (T *)reordered_weights_ptr, k, n,
                ldb);
 
-  return b_reorder_buf_siz_req;
+  return;
 }
 
 status_t aocl_blis_utils_t::set_runtime_post_op_buffer(tensor_map_type

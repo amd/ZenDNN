@@ -293,6 +293,9 @@ void tensor_functions_t::tensor_pretty_print(const tensor_t &tensor_) {
   }
 }
 
+size_t get_aligned_size(size_t alignment, size_t size_) {
+  return ((size_ + alignment - 1) & ~(alignment - 1));
+}
+
 } //examples
 } //zendnnl
-

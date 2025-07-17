@@ -61,8 +61,16 @@ if(ZENDNNL_BUILD_GTEST)
     GTest::gtest_main)
 
   if(ZENDNNL_CODE_COVERAGE)
+    message(STATUS "code-coverage enabled for zendnnl gtests")
     target_compile_options(gtests PRIVATE --coverage -O0 -g)
     target_link_options(gtests PRIVATE --coverage)
+  endif()
+
+  if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(STATUS "ASAN enabled for zendnnl gtests")
+    set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1 -g)
+    target_compile_options(gtests PRIVATE ${SANITIZER_FLAGS})
+    target_link_options(gtests PRIVATE "-fsanitize=address")
   endif()
 
   install(TARGETS gtests

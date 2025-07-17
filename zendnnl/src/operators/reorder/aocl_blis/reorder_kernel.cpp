@@ -45,7 +45,15 @@ status_t reorder_kernel_t::execute(const context_type &context_,
                                 input_tensor.get_stride(0);
 
   size_t reorder_size         = output_tensor.get_buffer_sz_bytes();
-  void *reorder_weights       = aligned_alloc(64, reorder_size);
+  //reorder_size%alignment(64) = 0 for portability and integration
+  //Todo: move this alignment padding to unified library utility function
+  size_t alignment            = 64;
+  size_t reorder_size_padded  = (reorder_size + alignment - 1) & ~(alignment-1) ;
+  void *reorder_weights       = aligned_alloc(alignment, reorder_size_padded);
+  if (reorder_weights == nullptr) {
+    log_error("reorder_weights can not have align allocation");
+    return status_t::unimplemented;
+  }
 
   if (input_dtype == data_type_t::f32) {
     aocl_reorder_f32f32f32of32(order, trans, reorder_param0, (float *)input,

@@ -78,11 +78,15 @@ class tensor_factory_t {
 /** @class tensor_functions
  * @brief Quick generation of predefined tensors.
  */
-
 class tensor_functions_t {
  public:
   void tensor_pretty_print(const tensor_t &tensor_);
 };
+
+/** @fn get_aligned_size
+ *  @brief Function to align the given size_ according to the alignment
+ */
+size_t get_aligned_size(size_t alignment, size_t size_);
 
 } //examples
 } //zendnnl

@@ -137,7 +137,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
  *
  * */
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
-    bool inplace_reorder);
+    bool inplace_reorder, void **reorder_weights);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor
@@ -157,4 +157,9 @@ void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t batch_size, uint64_t m, uint64_t n,
                        const float tol, bool &flag);
 
+/** @fn get_aligned_size
+ *  @brief Function to align the given size_ according to the alignment
+ *
+ * */
+size_t get_aligned_size(size_t alignment, size_t size_);
 #endif

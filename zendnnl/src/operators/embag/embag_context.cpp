@@ -102,7 +102,6 @@ status_t embag_context_t::validate() {
   if (parent_type::validate() != status_t::success) {
     return status_t::failure;
   }
-
   auto table = get_param("table");
   if (!table) {
     apilog_error("Table parameter is null");
@@ -132,4 +131,3 @@ std::string embag_context_t::context_info() {
 
 } //namespace ops
 } //namespace zendnnl
-

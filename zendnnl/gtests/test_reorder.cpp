@@ -81,9 +81,10 @@ TEST_P(TestReorder,F32_F32) {
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
                             binary_tensor);
+  void *weights_buff      = nullptr;
 
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder, &weights_buff);
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
@@ -99,6 +100,10 @@ TEST_P(TestReorder,F32_F32) {
   }
 
   EXPECT_TRUE(is_test_successful);
+
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn TEST_P
@@ -120,9 +125,10 @@ TEST_P(TestReorder, BF16_F32) {
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
                             binary_tensor);
+  void *weights_buff      = nullptr;
 
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder, &weights_buff);
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
@@ -138,6 +144,10 @@ TEST_P(TestReorder, BF16_F32) {
   }
 
   EXPECT_TRUE(is_test_successful);
+
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn TEST_P
@@ -159,9 +169,10 @@ TEST_P(TestReorder, BF16_BF16) {
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
                             binary_tensor);
+  void *weights_buff      = nullptr;
 
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder, &weights_buff);
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
@@ -178,6 +189,10 @@ TEST_P(TestReorder, BF16_BF16) {
   }
 
   EXPECT_TRUE(is_test_successful);
+
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn TEST_P
@@ -221,8 +236,9 @@ TEST_P(TestReorder,F32_F32_Stride) {
                             bias,
                             output_tensor_ref,
                             po_index, binary_tensor);
+  void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder,&weights_buff);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
                             output_tensor,
@@ -280,8 +296,9 @@ TEST_P(TestReorder,BF16_F32_Stride) {
                             bias,
                             output_tensor_ref,
                             po_index, binary_tensor);
+  void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder, &weights_buff);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
                             output_tensor,
@@ -339,8 +356,9 @@ TEST_P(TestReorder,BF16_BF16_Stride) {
                             bias,
                             output_tensor_ref,
                             po_index, binary_tensor);
+  void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
-      inplace_reorder);
+      inplace_reorder, &weights_buff);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias,
                             output_tensor,

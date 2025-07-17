@@ -135,9 +135,17 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                    weight_dim-3) : 0;
   unsigned int offset_out      = (output_dim == 3) ? M*N : 0;
 
+  // output_size%alignment(64) = 0 for portability and integration
+  //Todo: move this alignment padding to unified library utility function
+  size_t alignment             = 64;
+  size_t output_size           = (batch_size*M*N*sizeof(float) + alignment - 1) &
+                                 ~(alignment - 1);
   // Interim accumaltion buffer with float type
-  float *output_buff_f32       = (float *)aligned_alloc(64,
-                                 batch_size * M * N * sizeof(float));
+  float *output_buff_f32       = (float *)aligned_alloc(alignment,output_size);
+  if (output_buff_f32 == nullptr) {
+    log_error("output_buff_f32 can not have align allocation");
+    return status_t::unimplemented;
+  }
 
   auto optional_bias_tensor        = context_.get_param("bias");
   [[maybe_unused]] void *bias      = nullptr;

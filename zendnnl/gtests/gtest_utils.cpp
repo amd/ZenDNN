@@ -307,7 +307,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
 }
 
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
-    bool inplace_reorder) {
+    bool inplace_reorder, void **reorder_weights) {
   try {
     tensor_factory_t tensor_factory;
     status_t status;
@@ -361,17 +361,24 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     }
     else {
       // create a buffer with reorderd size
-      float *reorder_weights = (float *) aligned_alloc(64, reorder_size);
+      size_t alignment = 64;
+      reorder_size = get_aligned_size(alignment, reorder_size);
+      *reorder_weights = (float *) aligned_alloc(alignment, reorder_size);
+      if (*reorder_weights == nullptr) {
+        log_info("reorder_weights  can not have align allocation");
+        return std::make_pair(input_tensor, status_t::failure);
+      }
 
       // Create a Pair of storage params [reorder size and reorder weights] and
       // use it in tensor creation
-      StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
+      StorageParam buffer_params = std::make_pair(reorder_size, *reorder_weights);
 
       // Create output tensor with blocked layout.
       output_tensor = tensor_factory.blocked_tensor({rows, cols},
                       dtype,
                       buffer_params);
       output_tensor.set_name("reorder_output");
+
     }
 
     // Reorder operator execution.
@@ -441,4 +448,8 @@ void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
     }
   }
   return;
+}
+
+size_t get_aligned_size(size_t alignment, size_t size_) {
+  return ((size_ + alignment - 1) & ~(alignment - 1));
 }

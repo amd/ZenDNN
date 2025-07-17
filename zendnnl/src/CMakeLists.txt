@@ -75,9 +75,19 @@ add_subdirectory(operators)
 epilog_header_file(${zendnnl_inc_file})
 
 if(ZENDNNL_CODE_COVERAGE)
+  message(STATUS "code-coverage enabled for zendnnl source code")
   target_compile_options(zendnnl_archive PRIVATE --coverage -O0 -g)
   target_link_options(zendnnl_archive PRIVATE --coverage)
 endif()
+
+
+if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(STATUS "ASAN enabled for zendnnl source code")
+  set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1 -g)
+  target_compile_options(zendnnl_archive PRIVATE ${SANITIZER_FLAGS})
+  target_link_options(zendnnl_archive PRIVATE "-fsanitize=address")
+endif()
+
 
 # install zendnnl and create package config files
 install(TARGETS zendnnl_archive zendnnl EXPORT zendnnl_targets

@@ -21,5 +21,4 @@ set(ZENDNNL_BUILD_GTEST    OFF CACHE BOOL "Build gtest")
 set(ZENDNNL_BUILD_DOXYGEN  OFF CACHE BOOL "Build doxygen docs")
 set(ZENDNNL_CODE_COVERAGE  OFF CACHE BOOL "Enable code coverage instrumentation")
 set(ZENDNNL_BUILD_BENCHDNN OFF CACHE BOOL "Build benchdnn")
-
-
+set(ZENDNNL_BUILD_ASAN     OFF CACHE BOOL "Build With Address Sanitizer")

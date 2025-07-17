@@ -22,7 +22,7 @@ using namespace zendnnl::common;
 namespace cn = std::chrono;
 
 logger_t::logger_t()
-  :log_file{}, log_ofstream{nullptr}, log_start_time{cn::steady_clock::now()},
+  :log_file{}, log_ofstream{}, log_start_time{cn::steady_clock::now()},
    log_cout_flag{true} {}
 
 logger_t &logger_t::set_log_level(log_module_t module_, log_level_t level_) {

@@ -83,9 +83,16 @@ target_link_libraries(examples
   PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,zendnnl::zendnnl_archive>")
 
 if(ZENDNNL_CODE_COVERAGE)
+  message(STATUS "code-coverage enabled for zendnnl examples")
   target_compile_options(examples PRIVATE --coverage -O0 -g)
   target_link_options(examples PRIVATE --coverage)
 endif()
 
+if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(STATUS "ASAN enabled for zendnnl examples")
+  set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1 -g)
+  target_compile_options(examples PRIVATE ${SANITIZER_FLAGS})
+  target_link_options(examples PRIVATE "-fsanitize=address")
+endif()
 #  amdblis::amdblis_archive
 install(TARGETS examples)
