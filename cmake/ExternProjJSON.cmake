@@ -22,16 +22,28 @@ if(ZENDNNL_DEPENDS_JSON)
 
   message(DEBUG "JSON_CMAKE_ARGS=${JSON_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl-deps-json
-    SOURCE_DIR "${JSON_ROOT_DIR}"
-    BINARY_DIR "${CMAKE_BINARY_DIR}/json"
-    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
-    GIT_REPOSITORY ${JSON_GIT_REPO}
-    GIT_TAG ${JSON_GIT_TAG}
-    GIT_PROGRESS ${JSON_GIT_PROGRESS}
-    CMAKE_ARGS ${JSON_CMAKE_ARGS}
-    INSTALL_COMMAND cmake --build . --config release --target install -j
-    UPDATE_DISCONNECTED TRUE)
+  if(ZENDNNL_LOCAL_JSON)
+
+    message(DEBUG "Using local JSON from ${JSON_ROOT_DIR}")
+
+    ExternalProject_ADD(zendnnl-deps-json
+      SOURCE_DIR "${JSON_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_BINARY_DIR}/json"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
+      CMAKE_ARGS ${JSON_CMAKE_ARGS}
+      INSTALL_COMMAND cmake --build . --config release --target install -j)
+  else()
+    ExternalProject_ADD(zendnnl-deps-json
+      SOURCE_DIR "${JSON_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_BINARY_DIR}/json"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
+      GIT_REPOSITORY ${JSON_GIT_REPO}
+      GIT_TAG ${JSON_GIT_TAG}
+      GIT_PROGRESS ${JSON_GIT_PROGRESS}
+      CMAKE_ARGS ${JSON_CMAKE_ARGS}
+      INSTALL_COMMAND cmake --build . --config release --target install -j
+      UPDATE_DISCONNECTED TRUE)
+  endif()
 
   list(APPEND JSON_CLEAN_FILES "${CMAKE_BINARY_DIR}/json")
   list(APPEND JSON_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/json")

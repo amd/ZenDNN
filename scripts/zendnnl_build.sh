@@ -54,6 +54,18 @@ function parse_args() {
                 ZENDNNL_NODEPS=1
                 shift
 		;;
+	    --local-amdblis )
+                ZENDNNL_LOCAL_AMDBLIS=1
+                shift
+		;;
+	    --local-aoclutils )
+                ZENDNNL_LOCAL_AOCLUTILS=1
+                shift
+		;;
+	    --local-json )
+                ZENDNNL_LOCAL_JSON=1
+                shift
+		;;
             --help )
                 echo " usage   : zendnnl-build <options>"
                 echo
@@ -64,6 +76,7 @@ function parse_args() {
                 echo " --examples : build and install examples."
                 echo " --doxygen  : build and install doxygen docs."
                 echo " --no-deps  : don't rebuild (or clean) dependencies."
+                echo " --local-amdblis  : use local amdblis."
                 echo
                 echo " examples :"
                 echo " build all targets including dependencies"
@@ -92,6 +105,9 @@ ZENDNNL_DOXYGEN=0
 ZENDNNL_ALL=0
 ZENDNNL_CLEAN=0
 ZENDNNL_NODEPS=0
+ZENDNNL_LOCAL_AMDBLIS=0
+ZENDNNL_LOCAL_AOCLUTILS=0
+ZENDNNL_LOCAL_JSON=0
 
 if ! parse_args $@;
 then
@@ -136,6 +152,24 @@ if [ ${ZENDNNL_NODEPS} -eq 1 ];then
     CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=OFF"
 else
     CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
+fi
+
+if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=ON"
+else
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=OFF"
+fi
+
+if [ ${ZENDNNL_LOCAL_AOCLUTILS} -eq 1 ];then
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=ON"
+else
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=OFF"
+fi
+
+if [ ${ZENDNNL_LOCAL_JSON} -eq 1 ];then
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=ON"
+else
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=OFF"
 fi
 
 if [ ${ZENDNNL_ALL} -eq 1 ];then

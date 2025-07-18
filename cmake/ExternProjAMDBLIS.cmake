@@ -26,17 +26,30 @@ if(ZENDNNL_DEPENDS_AMDBLIS)
 
   message(DEBUG "AMDBLIS_CMAKE_ARGS=${AMDBLIS_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl-deps-amdblis
-    SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
-    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/amdblis"
-    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis"
-    GIT_REPOSITORY ${AMDBLIS_GIT_REPO}
-    GIT_TAG ${AMDBLIS_GIT_TAG}
-    GIT_PROGRESS ${AMDBLIS_GIT_PROGRESS}
-    CMAKE_ARGS ${AMDBLIS_CMAKE_ARGS}
-    BUILD_COMMAND cmake --build . --config release --target install -j
-    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libblis-mt.a
-    UPDATE_DISCONNECTED TRUE)
+  if(ZENDNNL_LOCAL_AMDBLIS)
+
+    message(DEBUG "Using local AMDBLIS from ${AMDBLIS_ROOT_DIR}")
+
+    ExternalProject_ADD(zendnnl-deps-amdblis
+      SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/amdblis"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis"
+      CMAKE_ARGS ${AMDBLIS_CMAKE_ARGS}
+      BUILD_COMMAND cmake --build . --config release --target install -j
+      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libblis-mt.a)
+  else()
+    ExternalProject_ADD(zendnnl-deps-amdblis
+      SOURCE_DIR "${AMDBLIS_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/amdblis"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/amdblis"
+      GIT_REPOSITORY ${AMDBLIS_GIT_REPO}
+      GIT_TAG ${AMDBLIS_GIT_TAG}
+      GIT_PROGRESS ${AMDBLIS_GIT_PROGRESS}
+      CMAKE_ARGS ${AMDBLIS_CMAKE_ARGS}
+      BUILD_COMMAND cmake --build . --config release --target install -j
+      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libblis-mt.a
+      UPDATE_DISCONNECTED TRUE)
+  endif()
 
   list(APPEND AMDBLIS_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/amdblis")
   list(APPEND AMDBLIS_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/amdblis")

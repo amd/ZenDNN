@@ -27,18 +27,32 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
 
   message(DEBUG "AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
-  ExternalProject_ADD(zendnnl-deps-aoclutils
-    SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
-    BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
-    INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
-    GIT_REPOSITORY ${AOCLUTILS_GIT_REPO}
-    GIT_TAG ${AOCLUTILS_GIT_TAG}
-    GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
-    CMAKE_ARGS ${AU_CMAKE_ARGS}
-    INSTALL_COMMAND cmake --build . --config release --target install -j
-    BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
-                     <INSTALL_DIR>/lib/libau_cpuid.a
-    UPDATE_DISCONNECTED TRUE)
+  if (ZENDNNL_LOCAL_AOCLUTILS)
+
+    message(DEBUG "Using local AOCLUTILS from ${AOCLUTILS_ROOT_DIR}")
+
+    ExternalProject_ADD(zendnnl-deps-aoclutils
+      SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
+      CMAKE_ARGS ${AU_CMAKE_ARGS}
+      INSTALL_COMMAND cmake --build . --config release --target install -j
+      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
+                       <INSTALL_DIR>/lib/libau_cpuid.a)
+  else()
+    ExternalProject_ADD(zendnnl-deps-aoclutils
+      SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
+      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
+      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
+      GIT_REPOSITORY ${AOCLUTILS_GIT_REPO}
+      GIT_TAG ${AOCLUTILS_GIT_TAG}
+      GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
+      CMAKE_ARGS ${AU_CMAKE_ARGS}
+      INSTALL_COMMAND cmake --build . --config release --target install -j
+      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
+                       <INSTALL_DIR>/lib/libau_cpuid.a
+      UPDATE_DISCONNECTED TRUE)
+  endif()
 
   list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/aoclutils")
   list(APPEND AOCLUTILS_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/aoclutils")
