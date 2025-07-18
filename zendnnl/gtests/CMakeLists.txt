@@ -26,9 +26,6 @@ if(ZENDNNL_BUILD_GTEST)
 
   message(DEBUG "building gtests...")
 
-  # Option to include AI gtests
-  option(ZENDNNL_BUILD_AI_GTESTS "Build AI-specific Google Tests" ON)
-
   set(gtests_sources
     gtest_main.cpp
     gtest_utils.cpp
@@ -37,18 +34,6 @@ if(ZENDNNL_BUILD_GTEST)
 
   set(gtests_headers
     gtest_utils.hpp)
-
-  # Add AI gtests if enabled
-  if(ZENDNNL_BUILD_AI_GTESTS)
-    message(STATUS "Including AI gtests...")
-    list(APPEND gtests_sources
-      ai_gtests/gtest_utils_ai.cpp
-      ai_gtests/test_matmul_ai.cpp)
-    list(APPEND gtests_headers
-      ai_gtests/gtest_utils_ai.hpp)
-  else()
-    message(STATUS "AI gtests disabled...")
-  endif()
 
   add_executable(gtests ${gtests_sources})
 
