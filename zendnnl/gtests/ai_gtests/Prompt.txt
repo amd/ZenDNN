@@ -1,0 +1,134 @@
+================================================================================
+COMPREHENSIVE ZENDNNL TEST INFRASTRUCTURE IMPLEMENTATION PROMPTS
+================================================================================
+
+This file contains three comprehensive prompts that capture the complete journey
+of implementing a robust testing infrastructure for ZenDNNL,.
+
+These prompts can be used independently to recreate the entire testing solution
+from scratch, including compilation fixes, framework issue handling, and
+comprehensive test coverage implementation.
+
+================================================================================
+PROMPT 1: BUILD COMPLETE ZENDNNL TEST INFRASTRUCTURE FROM SCRATCH
+================================================================================
+
+Create a comprehensive parameterized Google Test infrastructure for ZenDNNL library at /proj/xcohdstaff/meghas/Zendnn/atg/gtest/zendnn_gtest_7_12/ZenDNN/zendnnl/gtests/ai_gtests with the following components:
+
+** Functionality ***
+1. Tests should focus on accuracy testing, boundary case testing, invalid cases and performance tests.
+2. Supported data types, dimension ranges and important files are mentioned in key features section
+3. refer build steps sections in the end for build process.
+
+**Core Infrastructure Files:**
+1. Keep all utilies are in gtest_utils_ai.hpp/cpp, It should have all required parameters structures for matmul op with data type combinations for accuracy/random/boundary/edge-case tensor creation
+2. Test related class and code should be in test_matmul_ai.cpp
+
+**Comprehensive Test Suites:**
+3. Use "ai" postfix for all new files.
+
+4. Add validation functions for data type combinations and parameter generation functions
+5. Ensure all parameter structures include dimensions (m,n,k or rows,cols), postop, postop combinations, data types, test categories, and success flags
+
+**Key Features:**
+- Support F32/BF16/S8/S4 data types with random dimensions [1-10000]
+- Comprehensive error validation (invalid dimensions, missing tensors, unsupported algorithms)
+- Sampling strategy for large tensors (max 10000 element validation)
+- Clean compilation with proper unused variable handling and protected method access
+- USE MACROS for min and max dimensions supported so that modification is one line change if needed
+- Implement proper error handling for boundary conditions and memory management with weight preprocessing
+- Use reference implementation to compare against present in src/operators/matmul
+- Supported kernel list is in src/operators/matmul/matmul_kernel_list.hpp
+- reference implementation is in src/common/matmul/matmul_fp32_ref_kernel.hpp/cpp
+
+**Build Integration:**
+- Update gtests/CMakeLists.txt to include all test files
+
+================================================================================
+PROMPT 2: HANDLE FRAMEWORK LIMITATIONS AND IMPLEMENT ROBUST ERROR TESTING
+================================================================================
+Build on the ZenDNNL test infrastructure by implementing robust error handling and framework limitation workarounds:
+
+1. GIVE ATTENTION TO BINARY POSTOPS AND FOLLOW SAMPLE EXAMPLES FROM CONTEXT TO SEE THE RIGHT FLOW.
+2. GIVE ATTENTION TO INVALID CASES AND ENSURE FLOW OF CALLS IS IN CORRECT ORDER.
+
+**Debug and Validation Flow:**
+3. **Add Comprehensive Debug Output**: Context validation checks before operator creation, both check() and execute() method testing, debug logging for validation flow understanding
+
+4. **Error Condition Testing**: Test operators with missing inputs/outputs, invalid configurations, wrong dimensions, unsupported data types - expect graceful failures
+
+**Build System Updates:**
+5. **Clean Compilation**: Fix all unused variables, protected method access violations, syntax errors
+6. **Cmake update**: Update cmake file to include new tests while maintaining comprehensive coverage
+7. It should build single binary gtests as before including the new tests 
+8. Keep a flag to include/exclude newly generated ai gtests
+9. **Performance Optimization**: Implement sampling for large tensor validation, proper memory management
+
+
+**Expected Test Behavior:**
+- Invalid operations should return false from check() or fail gracefully during execute()
+- All tests should compile without warnings
+- Comprehensive coverage of error paths and edge cases
+- Proper documentation of framework limitations for future fixes
+
+================================================================================
+PROMPT 3: COMPLETE ZENDNNL TEST SUITE WITH PERFORMANCE AND INTEGRATION FOCUS
+================================================================================
+
+Finalize the comprehensive ZenDNNL test suite focusing on performance optimization patterns and proper integration:
+
+**Performance-Focused Testing:**
+1. **Comprehensive Benchmarking**: Test classes with performance measurement utilities, timing comparisons, memory usage validation
+2. Performance testing should not be on high dimension values
+
+**Advanced Integration Tests:**
+
+
+3. **Boundary and Edge Cases**: Comprehensive boundary testing with minimum/maximum dimensions, memory alignment preservation, large tensor handling with sampling strategy
+
+**Production-Ready Features:**
+4. **Parameter Generation**: Robust parameter generators avoiding duplicates, covering comprehensive dimension ranges [1-10000], multiple data types (F32/BF16/S8/S4)
+
+5. **Error Handling and Validation**: Complete error path coverage, graceful failure handling, proper exception testing, validation flow debugging
+
+**Final Integration:**
+7. **Build System Completion**: 
+   - All files properly integrated into CMakeLists.txt
+   - Coverage scripts updated for comprehensive reporting
+   - Clean compilation across all test suites
+   - Proper test instantiation with unique naming
+
+8. **Documentation and Maintainability**:
+   - Clear test categorization and naming
+   - Proper handling of framework limitations
+   - Future-proof structure for framework improvements
+   - Comprehensive coverage of ZenDNNL operator patterns
+
+**Deliverables**: Complete test suite with comprehensive parameter coverage, robust error handling, performance benchmarking, clean build integration, and documented framework limitation handling.
+================================================================================
+IMPLEMENTATION NOTES:
+================================================================================
+
+1. **Build Order**: Implement Prompt 1 first (infrastructure), then Prompt 2 (error handling), finally Prompt 3 (performance and integration)
+
+2. **Framework Limitations**: The binary post-op issues are framework-level and should be documented but not block overall progress
+
+3. **Maintainability**: Structure the code for easy extension when framework issues are resolved
+
+These prompts provide a complete roadmap for building a comprehensive, production-ready testing infrastructure for ZenDNNL while properly handling discovered limitations.
+
+================================================================================
+BUILD STEPS:
+================================================================================
+1. bash
+2. conda activate zendnnltorch
+3. cd /proj/xcohdstaff/meghas/Zendnn/atg/gtest/zendnn_gtest_7_12/ZenDNN/zenddnl
+4. bash ../scripts/coverage_build.sh
+
+Location for gtests binary - /proj/xcohdstaff/meghas/Zendnn/atg/gtest/zendnn_gtest_7_12/ZenDNN/build/install/gtests/
+
+================================================================================
+IMPORTANT NOTES:
+================================================================================
+DO NOT CHANGE ANY FILE IN zendnnl/src FOLDER.
+MAKE SURE TO USE AND MAINTAIN GOOD CODING DESIGN
