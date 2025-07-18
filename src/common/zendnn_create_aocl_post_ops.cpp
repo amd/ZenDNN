@@ -414,6 +414,11 @@ void create_post_ops_fp32(aocl_post_op *&post_ops, const exec_ctx_t &ctx,
         ++postop_count;
     }
 
+    // post_op sum is applied as gemm_beta(cblas way)
+    // Not as post-op. Hence, reducing the post_op length
+    if (po_ops.find(primitive_kind::sum) >= 0) {
+        postop_count-=1;
+    }
     dim_t bias_index = 0;
     dim_t add_index = 0;
     dim_t mul_index = 0;
