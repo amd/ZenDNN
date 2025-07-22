@@ -74,7 +74,7 @@ Install the following prerequisites before installing ZenDNN*:
 1. **CMake** >= version 3.25.
 2. **g++** >= 11.2.0 toolchain.
 
-Optionally, create a Conda virtual environment (Conda >= 24.1.0) with CMake 3.25 using `ZenDNN/scripts/zendnnl_conda_env_create.sh`.
+Optionally, create a Conda virtual environment (Conda >= 24.1.0) with CMake >= 3.25.
 
 ## 2.2. Build and install
 
@@ -110,11 +110,11 @@ During library development developers may want to download and build dependencie
 the initial build, and may want to turn off Dependencies build for incremental library development and build. This
 option helps developers avoid repeatedly downloading and building Dependencies. As built and installed
 dependencies must be prevented from "clean", setting ZENDNNL_BUILD_DEPS=OFF and reconfiguring CMake before
-"clean" does not clean dependencies.
-
-A downstream package may be interested only in the library, and may want to disable examples, doxygen docs,
-and gtests. Though no direct command line option is given to avoid building gtests, it can be achieved by
-setting ZENDNNL_BUILD_GTESTS=OFF in `ZenDNN/cmake/ZenDnnlComponentsOptions.cmake`.
+"clean" does not clean dependencies. A downstream package may be interested only in the library, and may want to enable examples, doxygen docs, and gtests. Examples are built by default, while doxygen docs and gtests are disabled by default. These can be
+controlled by setting the appropriate options in `ZenDNN/cmake/ZenDnnlComponentsOptions.cmake`:
+- `ZENDNNL_BUILD_EXAMPLES=ON/OFF` (default: ON)
+- `ZENDNNL_BUILD_DOXYGEN=ON/OFF` (default: OFF)
+- `ZENDNNL_BUILD_GTEST=ON/OFF` (default: OFF)
 
 In addition, a shell script `ZenDNN/scripts/zendnnl_build.sh` is also provided to execute the build process easily.
 
@@ -123,18 +123,7 @@ In addition, a shell script `ZenDNN/scripts/zendnnl_build.sh` is also provided t
 Command Line Build refers to the usage of CMake command to configure and build the library. It consists of the
 following steps:
 
-1. (Optional) Create and activate a Conda environment with a CMake version >= 3.25. Use the shell script in
-   `scripts/zendnnl_conda_env_create.sh` for this purpose. By default, this scripts creates
-   a Conda environment "zendnnl_build". This step is needed only if the build machine does not support
-   CMake >= 3.25. Follow these steps:
-
-   1.1. Go to the ZenDNN/scripts folder.
-   ```
-   bash zendnnl_conda_env_create.sh
-   conda activate zendnnl_build
-   ```
-
-2. Create and switch to a build directory. Generally, this build folder is inside the top level ZenDNN folder
+1. Create and switch to a build directory. Generally, this build folder is inside the top level ZenDNN folder
    but it could be anywhere else. Follow these steps:
 
    2.1 Go to the ZenDNN folder.
@@ -142,7 +131,7 @@ following steps:
    mkdir build && cd build
    ```
 
-3. Configure CMake using the following command:
+2. Configure CMake using the following command:
 
    ```
    cmake <options> <source folder>
@@ -161,7 +150,7 @@ following steps:
    cmake -DZENDNNL_BUILD_DEPS=OFF ..
    ```
 
-4. Build a target using:
+3. Build a target using:
 
    ```
    cmake --build . --target <target>
@@ -182,7 +171,7 @@ following steps:
    Example: To build only library and examples:
 
    ```
-   cmake --build . --targets zendnnl zendnnl-examples
+   cmake --build . --target zendnnl zendnnl-examples
    ```
 
    Example: To clean all targets except dependencies (may need reconfiguration):
@@ -194,13 +183,13 @@ following steps:
 
 ### Shell Script Build
 
-A shell script `ZenDNN/scripts/zendnn_build.sh` is provided to assist the build process. To get 
+A shell script `ZenDNN/scripts/zendnn_build.sh` is provided to assist the build process. To get
 the usage instructions:
 
 1. Go to `ZenDNN/scripts` folder.
 2. bash zendnn_build.sh --help
 
-This displays the various options and the usage. 
+This displays the various options and the usage.
 
 ZenDNN* will be installed in the `build/install` directory.
 
