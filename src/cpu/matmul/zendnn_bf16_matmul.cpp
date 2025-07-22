@@ -106,7 +106,8 @@ status_t zendnn_bf16_matmul_t<dst_type>::pd_t::init(engine_t *engine) {
     if ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_JIT_BF16 ||
             zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_GEMM_JIT_BF16 ||
             ((zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16 ||
-              zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16) &&
+              zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_DT_BF16 ||
+              zenEnvObj.zenBF16GEMMalgo == zenBF16MatMulAlgoType::MATMUL_AUTO_BF16) &&
              (weights_md()->is_memory_const == false ||
               (weights_md()->is_inplace == false &&
                zenEnvObj.zenWeightCache > zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
