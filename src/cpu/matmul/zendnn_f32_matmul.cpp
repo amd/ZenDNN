@@ -95,10 +95,11 @@ status_t zendnn_f32_matmul_t::pd_t::init(engine_t *engine) {
 
     if ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_JIT_FP32 ||
             zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_GEMM_JIT_FP32 ||
-            (zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 &&
+            ((zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32 ||
+             zenEnvObj.zenGEMMalgo == zenMatMulAlgoType::MATMUL_AUTO_FP32) &&
              (weights_md()->is_memory_const == false ||
-              weights_md()->is_inplace == false &&
-              zenEnvObj.zenWeightCache >= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE))) &&
+              (weights_md()->is_inplace == false &&
+              zenEnvObj.zenWeightCache >= zendnnWeightCacheType::WEIGHT_CACHE_INPLACE)))) &&
             weights_md()->data_type == f32 && ndims() == 2) {
         return status::unimplemented;
     }

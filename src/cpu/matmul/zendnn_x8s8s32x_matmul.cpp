@@ -285,6 +285,11 @@ status_t zendnn_x8s8s32x_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                 zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_DT_INT8)) {
         zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_BLOCKED_JIT_INT8;
     }
+    // If the algo is MATMUL_AUTO_INT8 with non-const weights, we need to call BRG
+    if (zenEnvObj.zenINT8GEMMalgo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8
+            && !is_weights_const) {
+        zenEnvObj.zenINT8GEMMalgo = zenINT8MatMulAlgoType::MATMUL_JIT_INT8;
+    }
 
     //TODO: Seperate Implementation of Decision Tree for INT8 (MATMUL_DT_INT8)
     if (algo == zenINT8MatMulAlgoType::MATMUL_AUTO_INT8) {

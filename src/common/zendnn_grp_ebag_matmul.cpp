@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -57,7 +57,6 @@ void zen_matmul_impl(
     }
 
     int post_op_ids_size = z_post_op_ids.size();
-    int post_op_buffers_size = z_post_op_buffers.size();
     std::unordered_map<int, memory> execute_args;
     int post_op_buffer_idx = 0;
     for (int i = 0; i < post_op_ids_size; i++) {

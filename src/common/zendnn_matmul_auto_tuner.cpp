@@ -270,7 +270,7 @@ int auto_compute_matmul_woq(
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
-    key_obj.weights = mapType == 1 ? weights : NULL;
+    key_obj.weights = mapType == 1 && is_weights_const ? weights : NULL;
 
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
@@ -472,7 +472,7 @@ int auto_compute_matmul_int8(
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
-    key_obj.weights = mapType == 1 ? (int8_t *)weights : NULL;
+    key_obj.weights = mapType == 1 && is_weights_const? (int8_t *)weights : NULL;
 
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
@@ -664,7 +664,7 @@ int auto_compute_matmul_bf16(
     unsigned int map_type =
         zendnn::zendnn_getenv_int("ZENDNN_GEMM_MAP_TYPE",1);
     key_obj_auto.weights =
-        map_type == 1 ? weights : NULL;
+        map_type == 1 && is_weights_const? weights : NULL;
 
     float cur_algo_time; //current algorithm's execution time
     struct timeval start_n, end_n;
@@ -1025,7 +1025,7 @@ int auto_compute_matmul(
 
     //This condition makes sure that address
     //doesn't gets saved while using persistent map.
-    key_obj.weights = mapType == 1 &&
+    key_obj.weights = mapType == 1 && is_weights_const &&
                       persistent_map == persistentMapType::DISABLE ? weights : NULL;
 
     //Read operation from File (Persistent Map)
