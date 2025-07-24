@@ -23,14 +23,23 @@ using namespace zendnnl::interface;
 
 tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::vector<index_type> size_, const std::vector<index_type> aligned_size_,
-    data_type dtype_, float range_, std::string tensor_name_) {
+    data_type dtype_, float range_, std::string tensor_name_,
+    tensor_t scale, tensor_t zp) {
   auto udstensor = tensor_t()
                    .set_name(tensor_name_)
                    .set_size(size_)
                    .set_data_type(dtype_)
                    .set_aligned_size(aligned_size_)
-                   .set_storage()
-                   .create();
+                   .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    udstensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    udstensor.set_quant_zero_point(zp);
+  }
+
+  udstensor.create();
 
   if (! udstensor.check()) {
     log_warning("tensor creation of ", udstensor.get_name(), " failed.");
@@ -65,14 +74,23 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
-                                       data_type dtype_, std::string tensor_name_) {
+                                       data_type dtype_, std::string tensor_name_,
+                                       tensor_t scale, tensor_t zp) {
 
   auto ztensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    ztensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    ztensor.set_quant_zero_point(zp);
+  }
+
+  ztensor.create();
 
   if (! ztensor.check()) {
     log_warning("tensor creation of ", ztensor.get_name(), " failed.");
@@ -87,15 +105,23 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 
 tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
     data_type dtype_, float val_,
-    std::string tensor_name_) {
+    std::string tensor_name_, tensor_t scale,
+    tensor_t zp) {
 
   auto utensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_storage();
 
+  if (scale.get_nelem() != 0) {
+    utensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    utensor.set_quant_zero_point(zp);
+  }
+
+  utensor.create();
   if (! utensor.check()) {
     log_warning("tensor creation of ", utensor.get_name(), " failed.");
   }
@@ -131,15 +157,23 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
 tensor_t tensor_factory_t::broadcast_uniform_tensor(const
     std::vector<index_type> size_,
     const std::vector<index_type> stride_, data_type dtype_, float val_,
-    std::string tensor_name_) {
+    std::string tensor_name_, tensor_t scale, tensor_t zp) {
 
   auto utensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_stride(stride_)
                  .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    utensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    utensor.set_quant_zero_point(zp);
+  }
+
+  utensor.create();
 
   if (! utensor.check()) {
     log_warning("tensor creation of ", utensor.get_name(), " failed.");
@@ -173,16 +207,25 @@ tensor_t tensor_factory_t::broadcast_uniform_tensor(const
   return utensor;
 }
 
-tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type> size_,
+tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type>
+    size_,
     data_type dtype_, std::vector<uint32_t> val_,
-    std::string tensor_name_) {
+    std::string tensor_name_, tensor_t scale, tensor_t zp) {
 
   auto utensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    utensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    utensor.set_quant_zero_point(zp);
+  }
+
+  utensor.create();
 
   if (! utensor.check()) {
     log_warning("tensor creation of ", utensor.get_name(), " failed.");
@@ -205,16 +248,23 @@ tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type> size
 }
 
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
-    size_,
-    data_type dtype_, float range_,
-    std::string tensor_name_) {
+    size_, data_type dtype_, float range_, std::string tensor_name_,
+    tensor_t scale, tensor_t zp) {
 
   auto udtensor = tensor_t()
                   .set_name(tensor_name_)
                   .set_size(size_)
                   .set_data_type(dtype_)
-                  .set_storage()
-                  .create();
+                  .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    udtensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    udtensor.set_quant_zero_point(zp);
+  }
+
+  udtensor.create();
 
   if (! udtensor.check()) {
     log_warning("tensor creation of ", udtensor.get_name(), " failed.");
@@ -246,14 +296,21 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
 }
 
 tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
-    data_type dtype_,
-    StorageParam param, std::string tensor_name_) {
+    data_type dtype_, StorageParam param, std::string tensor_name_,
+    tensor_t scale, tensor_t zp) {
 
   auto btensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
                  .set_data_type(dtype_)
                  .set_layout(tensor_layout_t::blocked);
+
+  if (scale.get_nelem() != 0) {
+    btensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    btensor.set_quant_zero_point(zp);
+  }
 
   if (std::holds_alternative<std::pair<size_t, void *>>(param)) {
     auto [reorder_size, reorder_buff] = std::get<std::pair<size_t, void *>>(param);

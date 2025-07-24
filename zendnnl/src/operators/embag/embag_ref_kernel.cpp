@@ -14,7 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include <immintrin.h>
 #include "embag_ref_kernel.hpp"
 
 namespace zendnnl {
@@ -22,83 +21,6 @@ namespace ops {
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
-
-/**
- * @brief Convert BF16 value to float32 value using rounding to nearest-even.
- * @param bf16_val The BF16 value to be converted.
- * @return The converted float32 value.
- */
-float embag_bf16_to_float(int16_t bf16_val) {
-  int32_t inter_temp = *((int16_t *) &bf16_val);
-  inter_temp = inter_temp << 16;
-  float float_value = 0.0;
-  memcpy(&float_value, &inter_temp, sizeof(int32_t));
-  return float_value;
-}
-
-/**
- * @brief Convert 16 float32 values to 16 BF16 values using AVX512 instructions.
- * @param val The 16 float32 values packed in an AVX512 register.
- * @return The converted 16 BF16 values packed in an AVX512 register.
- */
-__attribute__((target("avx512f")))
-inline __m256i embag_float_to_bf16_avx512(__m512 val) {
-  // Reinterpret float32 as int32 for bit manipulation
-  __m512i int_val = _mm512_castps_si512(val);
-  // Extract LSB of the BF16 part to determine rounding direction
-  __m512i lsb = _mm512_and_si512(_mm512_srli_epi32(int_val, 16),
-                                 _mm512_set1_epi32(1));
-  // Add rounding bias (0x7FFF + lsb) for round-to-nearest-even
-  __m512i rounding_bias = _mm512_add_epi32(_mm512_set1_epi32(0x7FFF), lsb);
-  // Add bias to original bits
-  __m512i rounded = _mm512_add_epi32(int_val, rounding_bias);
-  // Shift right to extract upper 16 bits (BF16)
-  __m512i bf16 = _mm512_srli_epi32(rounded, 16);
-  // Narrow 32-bit integers to 16-bit integers
-  return _mm512_cvtepi32_epi16(bf16);
-}
-
-/**
- * @brief Convert an array of float32 values to BF16 values with rounding.
- * @param input Pointer to the input array of float32 values.
- * @param output Pointer to the output array of BF16 values.
- * @param count Number of elements to convert.
- */
-__attribute__((target("avx512f")))
-void embag_float32_to_bf16(const float *input, int16_t *output, size_t count) {
-  log_info("Validating the conversion");
-  size_t i = 0;
-  for (; i + 15 < count; i += 16) {
-    // Load 16 float32 values
-    __m512 val = _mm512_loadu_ps(input + i);
-    // Convert to BF16 with rounding
-    __m256i bf16 = embag_float_to_bf16_avx512(val);
-    // Store 16 BF16 values
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(output + i), bf16);
-  }
-  // Handle remaining elements
-  for (; i < count; ++i) {
-    uint32_t bits;
-    std::memcpy(&bits, &input[i], sizeof(float));
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    output[i] = static_cast<uint16_t>(bits >> 16);
-  }
-}
-
-/**
- * @brief Convert a BF16 embedding row to float32 on-demand.
- * @param bf16_row Pointer to the BF16 embedding row.
- * @param f32_row Pointer to the output float32 row buffer.
- * @param width Width of the embedding row.
- */
-void embag_convert_bf16_row_to_f32(const uint16_t *bf16_row, float *f32_row,
-                                   int64_t width) {
-  for (int64_t j = 0; j < width; ++j) {
-    f32_row[j] = embag_bf16_to_float(static_cast<int16_t>(bf16_row[j]));
-  }
-}
 
 template <typename InType, typename OutType>
 void embag_ref_kernel(
@@ -171,7 +93,7 @@ void embag_ref_kernel(
         if constexpr(input_is_bf16) {
           const uint16_t *bf16_row = reinterpret_cast<const uint16_t *>
                                      (&input[input_offset]);
-          embag_convert_bf16_row_to_f32(bf16_row, temp_input_row.data(), width);
+          bf16_to_f32_buf(bf16_row, temp_input_row.data(), width);
           input_row = temp_input_row.data();
         }
         else {
@@ -220,7 +142,7 @@ void embag_ref_kernel(
     // Convert output back to BF16 if needed
     if constexpr(output_is_bf16) {
       int16_t *bf16_dst = reinterpret_cast<int16_t *>(&dst[dst_offset]);
-      embag_float32_to_bf16(temp_output_row.data(), bf16_dst, width);
+      float32_to_bf16_(temp_output_row.data(), bf16_dst, width);
     }
   }
 

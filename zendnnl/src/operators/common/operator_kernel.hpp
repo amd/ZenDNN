@@ -25,6 +25,7 @@
 #include <memory>
 #include <type_traits>
 
+#include "memory/memory_utils.hpp"
 #include "common/zendnnl_global.hpp"
 #include "common/hash_object.hpp"
 #include "memory/tensor.hpp"

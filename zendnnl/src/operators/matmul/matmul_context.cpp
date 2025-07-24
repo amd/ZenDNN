@@ -63,6 +63,21 @@ status_t matmul_context_t::validate() {
     apilog_error("Weights size is not valid");
     return status_t::failure;
   }
+  if (weights->is_quantized()) {
+    unsigned long scale_nelems = compute_product(weights->get_quant_scale_size());
+    if (!(scale_nelems == weights_size.at(weights_size.size()-1) ||
+          scale_nelems == 1)) {
+      apilog_error("Weights quant scale supports per tensor or per channel quantization");
+      return status_t::failure;
+    }
+    if (weights->get_quant_subtype() == quant_subtype_t::asymmetric) {
+      auto zero_nelems = compute_product(weights->get_quant_zero_size());
+      if (zero_nelems != 1) {
+        apilog_error("Weights quant zero supports per tensor quantization");
+        return status_t::failure;
+      }
+    }
+  }
 
   if (bias) {
     auto bias_size = bias->get_size();

@@ -18,6 +18,7 @@
 #define _LOWOHA_MATMUL_HPP
 
 #include "operators/matmul/matmul_context.hpp"
+#include "memory/memory_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {

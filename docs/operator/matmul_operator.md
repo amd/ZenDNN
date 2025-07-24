@@ -17,6 +17,8 @@ Let:
 - *B* ∈ ℝ<sup>kxn</sup> or ℝ<sup>bsxkxn</sup>: Weight Matrix or Batched Weight Matrix
 - *C* ∈ ℝ<sup>mxn</sup> or ℝ<sup>bsxmxn</sup>: Output Matrix or Batched Output Matrix
 - *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
+- *Scale* : Scaling factor for quantized data (INT8)
+- *ZeroPoint* : Zero-point offset for quantized data (INT8)
 - *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
 - *BinaryOp(x, y)* : Optional binary post-operation (Example: element-wise add/mul with another matrix)
 - *D* ∈ ℝᴹˣᴺ : Optional second operand for binary operations
@@ -31,6 +33,12 @@ $$
 C = \text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D)
 $$
 
+The computation for quantized MatMul can be expressed as:
+
+$$
+C = \text{Scale} \cdot (\text{BinaryOp}(\text{Activation}(A \cdot B + \text{Bias}), D) + \text{ZeroPoint})
+$$
+
 ## Steps to Perform MatMul Operation
 
 1. **Matrix Multiplication**:  
@@ -43,17 +51,22 @@ $$
    Z = Z + Bias
    ```
 
-3. **Activation Function (optional)**:  
+3. **Scaling and Zero-Point Adjustment (INT8 only)**:  
+   ```
+   Z = Scale * (Z + ZeroPoint)
+   ```
+
+4. **Activation Function (optional)**:  
    ```
    Z = Activation(Z)
    ```
 
-4. **Binary Post-Op (optional)**:  
+5. **Binary Post-Op (optional)**:  
    ```
    Z = BinaryOp(Z, D)
    ```
 
-5. **Store Result**:  
+6. **Store Result**:  
    ```
    C = Z
    ```
@@ -112,18 +125,110 @@ Transpose/Strides)                 Transpose/Strides)
                        Output C
 
 ```
+## Quantization
+
+Quantization is a technique used to reduce the precision of numerical computations, enabling faster execution and reduced memory usage. In the context of the MatMul operator, quantization is primarily applied to INT8 data types, where floating-point values are mapped to 8-bit integers using a scale and zero-point.
+
+### Key Components of Quantization
+
+1. **Scale**:
+   - A multiplier used to scale the quantized values back to their original floating-point range.
+   - Defined per tensor or per channel, depending on the use case.
+
+2. **Zero-Point**:
+   - An offset added to the quantized values to represent zero in the integer domain.
+   - Helps in handling signed and unsigned integer representations.
+
+3. **Quantization Formula**:
+   - The relationship between a floating-point value \( x \) and its quantized representation \( q \) is given by:
+     $$
+     q = \text{round}\left(\frac{x}{\text{Scale}}\right) + \text{ZeroPoint}
+     $$
+   - The dequantization process to recover the floating-point value is:
+     $$
+     x = \text{Scale} \cdot (q - \text{ZeroPoint})
+     $$
+
+### Quantized MatMul Workflow
+
+1. **Input Quantization**:
+   - User passes input tensors of data type INT8 along with the scale and zero-point.
+
+2. **Matrix Multiplication**:
+   - Library performs the MatMul operation in the INT8 domain for improved performance.
+
+3. **Dequantization**:
+   - Convert the INT8 results back to FP32/BF16 using the scale and zero-point for further processing.
+
+### Benefits of Quantization
+
+- **Performance**: Reduced precision allows for faster computation on hardware optimized for INT8 operations.
+- **Memory Efficiency**: INT8 tensors consume less memory compared to FP32 or BF16 tensors.
+- **Energy Efficiency**: Lower precision computations require less energy, making them suitable for edge devices.
+
+### Example: Quantized tensor creation
+
+```cpp
+// Define scale and zero-point for input and output tensors
+auto scale_tensor = tensor_t()
+                    .set_name("scale_tensor")        // Set tensor name
+                    .set_size({1, N})                // Define tensor dimensions (per channel)
+                    .set_data_type(data_type_t::f32) // data type of buffer
+                    .set_storage()                   // Allocate storage
+                    .create();
+
+auto zp_tensor = tensor_t()
+                  .set_name("scale_tensor")        // Set tensor name
+                  .set_size({1, 1})                // Define tensor dimensions (per tensor)
+                  .set_data_type(data_type_t::s8)  // data type of buffer
+                  .set_storage()                   // Allocate storage
+                  .create();
+
+// Quantize input tensor
+auto quantized_input = tensor_t()
+                        .set_name("scale_tensor")        // Set tensor name
+                        .set_size({1, 1})                // Define tensor dimensions (per tensor)
+                        .set_data_type(data_type_t::s8)  // data type of buffer
+                        .set_storage()                   // Allocate storage
+                        .set_quant_scale(scale_tensor)   // Set scale tensor
+                        .set_quant_zero_point(zp_tensor) // Set zero_point tensor
+                        .create();
+```
+
+### Supported Quantization Configurations
+
+| Tensor         | Scale (mandatory) | Zero-Point             | Granularity               |
+|----------------|-------------------|------------------------|---------------------------|
+| Input          | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor                |
+| Weights        | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor or per-channel |
+| Output         | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor                |
+
+Quantization in the MatMul operator enables efficient computation while maintaining acceptable accuracy for many deep learning workloads.
 
 ## Supported Configurations
 This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
 
-| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type | Activation     | Binary<br>Post-Op |
-|------------------|---------------------|--------------------|---------------------|----------------|-------------------|
-| FP32             | FP32                | FP32               | FP32                | ReLU           | Add               |
-| BF16             | BF16                | FP32, BF16         | FP32, BF16          | Sigmoid        | Mul               |
-|                  |                     |                    |                     | Tanh           |                   |
-|                  |                     |                    |                     | GELU (erf)     |                   |
-|                  |                     |                    |                     | GELU (tanh)    |                   |
-|                  |                     |                    |                     | SiLU           |                   |
+| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type            | Scale | ZeroPoint |
+|------------------|---------------------|--------------------|--------------------------------|-------|-----------|
+| FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       |
+| BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       |
+| INT8             | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       |
+---
+| Activation     | Description                     |
+|----------------|---------------------------------|
+| ReLU           | Rectified Linear Unit          |
+| Sigmoid        | Sigmoid Activation Function    |
+| Tanh           | Hyperbolic Tangent Function    |
+| GELU (erf)     | Gaussian Error Linear Unit (erf variant) |
+| GELU (tanh)    | Gaussian Error Linear Unit (tanh variant) |
+| SiLU           | Sigmoid Linear Unit (Swish)    |
+---
+| Binary Post-Op | Description                     |
+|----------------|---------------------------------|
+| Add            | Element-wise addition           |
+| Mul            | Element-wise multiplication     |
+
+**Note** Binary post-ops require extra buffer from user.
 
 ## Tensor
 A **tensor** is a multi-dimensional array that serves as the primary data structure in deep learning models. It generalizes vectors (1D), matrices (2D) to higher dimensions (3D, etc.), Tensors are a fundamental building block for neural network computations, facilitating efficient data manipulation and mathematical operations.

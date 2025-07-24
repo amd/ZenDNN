@@ -21,89 +21,18 @@ namespace examples {
 
 using namespace zendnnl::interface;
 
-int matmul_strided_f32_kernel_example() {
-  try {
-    status_t status;
-    tensor_factory_t tensor_factory;
-    auto strided_weights = tensor_factory.uniform_dist_strided_tensor({MATMUL_K, MATMUL_N},
-    {MATMUL_K, MATMUL_N + 10},
-    data_type_t::f32,
-    1.0, "weights");
-
-    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
-                   data_type_t::f32,
-                   -10.0, "bias");
-
-    auto relu_post_op = post_op_t{post_op_type_t::swish};
-
-    auto matmul_context_strided = matmul_context_t()
-                                  .set_param("weights", strided_weights)
-                                  .set_param("bias", bias)
-                                  .set_post_op(relu_post_op)
-                                  .create();
-
-    if (! matmul_context_strided.check()) {
-      testlog_error("matmul context creation failed");
-      return NOT_OK;
-    }
-
-    //define matmul operator
-    auto matmul_operator = matmul_operator_t()
-                           .set_name("matmul_f32")
-                           .set_context(matmul_context_strided)
-                           .create();
-
-    if (! matmul_operator.check()) {
-      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
-      return NOT_OK;
-    }
-
-    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
-                        data_type_t::f32,
-                        1.0, "matmul_input");
-
-    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
-                         data_type_t::f32,
-                         "matmul_output");
-
-    status = matmul_operator
-             .set_input("matmul_input", input_tensor)
-             .set_output("matmul_output", output_tensor)
-             .execute();
-
-    if (status == status_t::success) {
-      testlog_info("<",matmul_operator.get_name(),">",
-                   " operator execution successful.");
-    }
-    else {
-      testlog_error("<",matmul_operator.get_name(),">",
-                    " operator execution failed.");
-      return NOT_OK;
-    }
-
-  }
-  catch (const exception_t &ex) {
-    std::cout << ex.what() << std::endl;
-    return NOT_OK;
-  }
-
-  return OK;
-}
-
 int matmul_relu_f32_kernel_example() {
-
+  testlog_info("**matmul + relu operator f32 kernel example.");
   try {
     status_t status;
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
                    data_type_t::f32,
                    1.0, "weights");
-    weights.set_name("weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
-    bias.set_name("bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
@@ -133,11 +62,9 @@ int matmul_relu_f32_kernel_example() {
     auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
                         data_type_t::f32,
                         1.0, "matmul_input");
-    input_tensor.set_name("matmul_input");
 
     auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
                          data_type_t::f32, "matmul_output");
-    output_tensor.set_name("matmul_output");
 
     status = matmul_operator
              .set_input("matmul_input", input_tensor)
@@ -164,7 +91,7 @@ int matmul_relu_f32_kernel_example() {
 }
 
 int matmul_relu_bf16_kernel_example() {
-
+  testlog_info("**matmul + relu operator bf16 kernel example.");
   try {
     status_t status;
     tensor_factory_t tensor_factory;
@@ -173,7 +100,7 @@ int matmul_relu_bf16_kernel_example() {
                    1.0, "weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
-                   data_type_t::f32,
+                   data_type_t::bf16,
                    3.0, "bias");
 
     auto relu_post_op = post_op_t{post_op_type_t::relu};
@@ -230,6 +157,94 @@ int matmul_relu_bf16_kernel_example() {
   }
 
   return NOT_OK;
+}
+
+int matmul_silu_add_int8_kernel_example() {
+  testlog_info("**matmul silu + binary_add operator int8 kernel example.");
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    auto wei_scales  = tensor_factory.uniform_tensor({1,MATMUL_N},
+                       data_type_t::f32,
+                       0.25, "scale tensor");
+
+    auto weights = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
+                   data_type_t::s8,
+                   1.0, "weights", wei_scales);
+
+    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+                   data_type_t::f32,
+                   5.0, "bias");
+
+    auto swish_post_op = post_op_t{post_op_type_t::swish};
+    auto bin_add_post_op = post_op_t{post_op_type_t::binary_add};
+
+    //define matmul context
+    auto matmul_context = matmul_context_t()
+                          .set_param("weights", weights)
+                          .set_param("bias", bias)
+                          .set_post_op(swish_post_op)
+                          .set_post_op(bin_add_post_op)
+                          .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
+    //define matmul operator
+    auto matmul_operator = matmul_operator_t()
+                           .set_name("matmul_int8")
+                           .set_context(matmul_context)
+                           .create();
+
+    if (! matmul_operator.check()) {
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    auto src_scale  = tensor_factory.uniform_tensor({1,MATMUL_K},
+                      data_type_t::f32,
+                      0.25, "src_scale_tensor");
+    auto src_zero_points  = tensor_factory.uniform_tensor({1,1},
+                            data_type_t::s8,
+                            126, "zero tensor");
+    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
+                        data_type_t::s8,
+                        1.0, "matmul_input", src_scale, src_zero_points);
+    auto binary_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                         data_type_t::s8,
+                         1.0, "binary_add");
+    auto dst_scale_tensor = tensor_factory.uniform_tensor({1,1},
+                            data_type_t::f32, 1.0/3.0, "dst_scale_output");
+    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
+                         data_type_t::f32, "matmul_output", dst_scale_tensor);
+
+    status = matmul_operator
+             .set_input("matmul_input", input_tensor)
+             .set_output("matmul_output", output_tensor)
+             .set_input(matmul_context.get_post_op(1).binary_add_params.tensor_name,
+                        binary_tensor)
+             .set_forced_kernel("reference")
+             .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<",matmul_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",matmul_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
 }
 
 int matmul_mul_silu_mul_f32_kernel_example() {
@@ -331,7 +346,7 @@ int matmul_silu_mul_bf16_kernel_example() {
                    1.0, "weights");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
-                   data_type_t::f32,
+                   data_type_t::bf16,
                    3.0, "bias");
 
     auto silu_post_op = post_op_t{post_op_type_t::swish};
@@ -397,6 +412,76 @@ int matmul_silu_mul_bf16_kernel_example() {
   }
 
   return NOT_OK;
+}
+
+int matmul_strided_f32_kernel_example() {
+  testlog_info("**matmul + silu operator f32 strided kernel example.");
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    auto strided_weights = tensor_factory.uniform_dist_strided_tensor({MATMUL_K, MATMUL_N},
+    {MATMUL_K, MATMUL_N + 10},
+    data_type_t::f32,
+    1.0, "weights");
+
+    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+                   data_type_t::f32,
+                   -10.0, "bias");
+
+    auto relu_post_op = post_op_t{post_op_type_t::swish};
+
+    auto matmul_context_strided = matmul_context_t()
+                                  .set_param("weights", strided_weights)
+                                  .set_param("bias", bias)
+                                  .set_post_op(relu_post_op)
+                                  .create();
+
+    if (! matmul_context_strided.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
+    //define matmul operator
+    auto matmul_operator = matmul_operator_t()
+                           .set_name("matmul_f32")
+                           .set_context(matmul_context_strided)
+                           .create();
+
+    if (! matmul_operator.check()) {
+      testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
+                        data_type_t::f32,
+                        1.0, "matmul_input");
+
+    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
+                         data_type_t::f32,
+                         "matmul_output");
+
+    status = matmul_operator
+             .set_input("matmul_input", input_tensor)
+             .set_output("matmul_output", output_tensor)
+             .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<",matmul_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",matmul_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
 }
 
 int matmul_relu_forced_ref_kernel_example() {
@@ -475,7 +560,7 @@ int matmul_broadcast_example() {
     status_t status;
     tensor_factory_t tensor_factory;
     auto weights = tensor_factory.broadcast_uniform_tensor({MATMUL_K, MATMUL_N}, {0,1},
-        data_type_t::f32, 1.0, "broadcasted_weight");
+                   data_type_t::f32, 1.0, "broadcasted_weight");
 
     auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
                    data_type_t::f32,

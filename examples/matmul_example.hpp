@@ -28,7 +28,6 @@
 
 namespace zendnnl {
 namespace examples {
-
 /** @fn matmul_relu_f32_kernel_example
  *  @brief Demonstrates matmul+relu fused operator on fp32 inputs.
  *
@@ -50,6 +49,17 @@ int matmul_relu_f32_kernel_example();
  *  one of its bf16 computation based kernel.
  */
 int matmul_relu_bf16_kernel_example();
+
+/** @fn matmul_silu_add_int8_kernel_example
+ *  @brief Demonstrates matmul+silu+add fused operator on int8 inputs.
+ *
+ *  matmul operator implements matrix multiplication on 2D tensors. This operator
+ *  can be fused with various post_ops.
+ *
+ *  This example demonstrates matmul_silu_add fused operator creation and execution of
+ *  one of its int8 computation based kernel.
+ */
+int matmul_silu_add_int8_kernel_example();
 
 /** @fn matmul_silu_mul_f32_kernel_example
  *  @brief Demonstrates matmul+silu+elt_mul fused operator on f32 inputs.

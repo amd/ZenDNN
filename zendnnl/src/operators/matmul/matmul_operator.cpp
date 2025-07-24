@@ -225,6 +225,36 @@ status_t matmul_operator_t::validate() {
     }
   }
 
+  if (input->is_quantized()) {
+    unsigned long scale_nelems = compute_product(input->get_quant_scale_size());
+    if (!(scale_nelems == input_size.at(input_size.size()-1) ||
+          scale_nelems == 1)) {
+      apilog_error("Input quant scale supports per tensor or per channel quantization");
+      return status_t::failure;
+    }
+    if (input->get_quant_subtype() == quant_subtype_t::asymmetric) {
+      auto zero_nelems = compute_product(input->get_quant_zero_size());
+      if (zero_nelems != 1) {
+        apilog_error("Input quant zero supports per tensor quantization");
+        return status_t::failure;
+      }
+    }
+  }
+  if (output->is_quantized()) {
+    unsigned long scale_nelems = compute_product(output->get_quant_scale_size());
+    if (!(scale_nelems == output_size.at(output_size.size()-1) ||
+          scale_nelems == 1)) {
+      apilog_error("Output quant scale supports per tensor or per channel quantization");
+      return status_t::failure;
+    }
+    if (output->get_quant_subtype() == quant_subtype_t::asymmetric) {
+      auto zero_nelems = compute_product(output->get_quant_zero_size());
+      if (zero_nelems != 1) {
+        apilog_error("Output quant zero supports per tensor quantization");
+        return status_t::failure;
+      }
+    }
+  }
   //Hard Force to Reference Kernel if 2D Matrix is broadcasted from user-side
   //No-Support in AOCL-BLIS
   {
@@ -269,10 +299,21 @@ status_t matmul_operator_t::validate_forced_kernel() {
     auto wt_dtype     = weights->get_data_type();
     auto out_order   = output->get_order();
 
-    if ((!((in_dtype == data_type_t::f32) || (in_dtype  == data_type_t::bf16))) ||
-        (!((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16))) ||
-        (!((wt_dtype == data_type_t::f32) || (wt_dtype == data_type_t::bf16))) ||
-        (out_order == "ba")) {
+    if (wt_dtype == data_type_t::s8) {
+      if (!((in_dtype == data_type_t::s8) || (in_dtype  == data_type_t::u8)) ||
+          !((out_dtype == data_type_t::s8) || (out_dtype == data_type_t::u8) ||
+            (out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16) ||
+            (out_dtype == data_type_t::s32))) {
+        log_error("<", get_name(),
+                  "> forced reference kernel needs s8/u8 input and output tensors.");
+        return status_t::failure;
+      }
+    }
+    else if ((!((in_dtype == data_type_t::f32) ||
+                (in_dtype  == data_type_t::bf16))) ||
+             (!((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16))) ||
+             (!((wt_dtype == data_type_t::f32) || (wt_dtype == data_type_t::bf16))) ||
+             (out_order == "ba")) {
       log_error("<", get_name(),
                 "> forced reference kernel needs f32 or bf16 tensors and non-transposed dst.");
       return status_t::failure;

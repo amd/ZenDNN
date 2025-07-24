@@ -21,19 +21,6 @@
 namespace zendnnl {
 namespace lowoha {
 
-inline float bf16_to_float(int16_t val) {
-  uint32_t temp = static_cast<uint16_t>(val) << 16;
-  float result;
-  std::memcpy(&result, &temp, sizeof(result));
-  return result;
-}
-
-inline int16_t float_to_bf16(float val) {
-  uint32_t temp;
-  std::memcpy(&temp, &val, sizeof(temp));
-  return static_cast<int16_t>(temp >> 16);
-}
-
 void matmul_direct_native(char layout, char transA, char transB, int M, int N,
                           int K, float alpha, const void *A, int lda,
                           const void *B, int ldb, float beta, void *C, int ldc, data_types dtypes) {
@@ -63,9 +50,9 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
           b_val = (transB == 'n') ? B_f32[k * ldb + n] : B_f32[n * ldb + k];
         }
         else if (is_bf16_src) {
-          a_val = bf16_to_float((transA == 'n') ? A_bf16[m * lda + k] : A_bf16[k * lda +
+          a_val = bf16_to_float_val((transA == 'n') ? A_bf16[m * lda + k] : A_bf16[k * lda +
                                 m]);
-          b_val = bf16_to_float((transB == 'n') ? B_bf16[k * ldb + n] : B_bf16[n * ldb +
+          b_val = bf16_to_float_val((transB == 'n') ? B_bf16[k * ldb + n] : B_bf16[n * ldb +
                                 k]);
         }
 
@@ -77,9 +64,9 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
         C_f32[m * ldc + n] = alpha * acc + beta * c_val;
       }
       else if (is_bf16_out) {
-        float c_val         = bf16_to_float(C_bf16[m * ldc + n]);
+        float c_val         = bf16_to_float_val(C_bf16[m * ldc + n]);
         float result        = alpha * acc + beta * c_val;
-        C_bf16[m * ldc + n] = float_to_bf16(result);
+        C_bf16[m * ldc + n] = float_to_bf16_val(result);
       }
     }
   }

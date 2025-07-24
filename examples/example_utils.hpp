@@ -43,36 +43,43 @@ class tensor_factory_t {
 
   /** @brief zero tensor */
   tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
-                       std::string tensor_name_="zero");
+                       std::string tensor_name_="zero", tensor_t scale = tensor_t(),
+                       tensor_t zp = tensor_t());
 
   /** @brief uniform tensor */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          float val_, std::string tensor_name_="uniform");
+                          float val_, std::string tensor_name_="uniform", tensor_t scale = tensor_t(),
+                          tensor_t zp = tensor_t());
 
   /** @brief broadcasted uniform tensor */
   tensor_t broadcast_uniform_tensor(const std::vector<index_type> size_,
                                     const std::vector<index_type> stride_, data_type dtype_, float val_,
-                                    std::string tensor_name_="broadcasted uniform");
+                                    std::string tensor_name_="broadcasted uniform", tensor_t scale = tensor_t(),
+                                    tensor_t zp = tensor_t());
 
   /** @brief non-uniform tensor */
   tensor_t non_uniform_tensor(const std::vector<index_type> size_,
                               data_type dtype_,
-                              std::vector<uint32_t> val_, std::string tensor_name_="non_uniform");
+                              std::vector<uint32_t> val_, std::string tensor_name_="non_uniform",
+                              tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_, float range_,
-                               std::string tensor_name_="uniform dist");
+                               std::string tensor_name_="uniform dist", tensor_t scale = tensor_t(),
+                               tensor_t zp = tensor_t());
 
   /** @brief uniform distributed strided tensor */
   tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
                                        const std::vector<index_type> stride_,
                                        data_type dtype_, float range_,
-                                       std::string tensor_name_="strided uniform dist");
+                                       std::string tensor_name_="strided uniform dist", tensor_t scale = tensor_t(),
+                                       tensor_t zp = tensor_t());
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          StorageParam param, std::string tensor_name_="blocked");
+                          StorageParam param, std::string tensor_name_="blocked",
+                          tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 };
 
 /** @class tensor_functions

@@ -24,7 +24,8 @@ set(memory_headers
   tensor_storage.hpp
   tensor_options.hpp
   tensor_quant.hpp
-  tensor.hpp)
+  tensor.hpp
+  memory_utils.hpp)
 
 target_sources(zendnnl_archive
   PRIVATE ${memory_sources}

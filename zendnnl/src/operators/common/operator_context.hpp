@@ -27,6 +27,7 @@
 #include "common/hash_object.hpp"
 #include "memory/tensor.hpp"
 #include "operators/common/post_op.hpp"
+#include "memory/memory_utils.hpp"
 
 namespace zendnnl {
 /** @namespace zendnnl::ops
