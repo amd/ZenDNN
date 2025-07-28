@@ -46,7 +46,8 @@ class TestReorder : public ::testing::TestWithParam<MatmulType> {
     inplace_reorder = rand() % 2;
     log_info("m: ",m, " k: ",k, " n: ",n," po_index: ",po_index, " reorder: ",
              inplace_reorder ? "In Place" : "Out of Place");
-    bias    = tensor_factory.uniform_dist_tensor({n}, data_type_t::f32, 2.0);
+    bias     = tensor_factory.uniform_dist_tensor({n}, rand() % 2 == 0 ?
+               data_type_t::bf16 : data_type_t::f32, 2.0);
     bias.set_name("bias");
   }
 

@@ -47,7 +47,8 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     }
     log_info("m: ",m, " k: ",k, " n: ", n, " TransA: ", transA, " TransB: ", transB,
              " po_index: ",po_index);
-    bias     = tensor_factory.uniform_dist_tensor({n}, data_type_t::f32, 2.0);
+    bias     = tensor_factory.uniform_dist_tensor({n}, rand() % 2 == 0 ?
+               data_type_t::bf16 : data_type_t::f32, 2.0);
     bias.set_name("bias");
   }
 

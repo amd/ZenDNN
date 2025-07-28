@@ -117,13 +117,17 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                    0) : weight_tensor.get_stride_size(1);
   const int   ldc              = output_tensor.get_stride_size(1);
 
+  // Interim accumaltion buffer with float type
   float *output_buff_f32       = (float *)aligned_alloc(64,
                                  M * N * sizeof(float));
-  auto optional_bias_tensor    = context_.get_param("bias");
-  [[maybe_unused]] float *bias = nullptr;
+
+  auto optional_bias_tensor        = context_.get_param("bias");
+  [[maybe_unused]] void *bias      = nullptr;
+  [[maybe_unused]] auto bias_dtype = data_type_t::f32;
   if (optional_bias_tensor) {
     auto bias_tensor           = context_.get_param("bias").value();
-    bias                       = (float *)bias_tensor.get_raw_handle_unsafe();
+    bias                       = bias_tensor.get_raw_handle_unsafe();
+    bias_dtype                 = bias_tensor.get_data_type();
   }
 
   for (auto i = 0; i < M; ++i) {
@@ -153,7 +157,12 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
 
       output_buff_f32[i * ldc + j] = sum;
       if (optional_bias_tensor) {
-        output_buff_f32[i * ldc + j] += bias[j];
+        if (bias_dtype == data_type_t::f32) {
+          output_buff_f32[i * ldc + j] += ((float *)bias)[j];
+        }
+        else if (bias_dtype == data_type_t::bf16) {
+          output_buff_f32[i * ldc + j] += bf16_to_float(((int16_t *)bias)[j]);
+        }
       }
     }
   }
@@ -200,7 +209,9 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
       ((float *)output)[i] = output_buff_f32[i];
     }
   }
-  free(output_buff_f32);
+  if (output_buff_f32) {
+    free(output_buff_f32);
+  }
   return status_t::success;
 }
 
