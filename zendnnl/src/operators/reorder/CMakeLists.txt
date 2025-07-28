@@ -14,18 +14,18 @@
 # * limitations under the License.
 # *******************************************************************************/
 
+add_subdirectory(aocl_blis)
+
 set(reorder_operator_sources
   reorder_context.cpp
-  reorder_operator.cpp
-  reorder_kernel.cpp)
+  reorder_operator.cpp)
 
 set(reorder_operator_public_headers
   reorder_context.hpp
   reorder_operator.hpp)
 
 set(reorder_operator_private_headers
-  reorder_kernel_list.hpp
-  reorder_kernel.hpp)
+  reorder_kernel_list.hpp)
 
 target_sources(zendnnl_archive
   PRIVATE ${reorder_operator_sources}

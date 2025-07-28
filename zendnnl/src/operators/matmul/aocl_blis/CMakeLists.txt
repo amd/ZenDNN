@@ -24,8 +24,7 @@ set(aocl_blis_matmul_operator_public_headers
 
 set(aocl_blis_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
-  matmul_bf16_avx512_kernel.hpp
-  matmul_aocl_blis_utils.hpp)
+  matmul_bf16_avx512_kernel.hpp)
 
 target_sources(zendnnl_archive
   PRIVATE ${aocl_blis_matmul_operator_sources}

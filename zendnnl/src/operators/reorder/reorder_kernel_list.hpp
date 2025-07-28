@@ -16,6 +16,6 @@
 #ifndef _REORDER_KERNEL_LIST_HPP_
 #define _REORDER_KERNEL_LIST_HPP_
 
-#include "reorder_kernel.hpp"
+#include "aocl_blis/reorder_kernel.hpp"
 
 #endif

@@ -13,37 +13,36 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _REORDER_OPERATOR_HPP_
-#define _REORDER_OPERATOR_HPP_
 
-#include "aocl_blis/reorder_utils.hpp"
-#include "common/zendnnl_global.hpp"
-#include "operators/common/operator.hpp"
-#include "reorder_context.hpp"
+#ifndef _REORDER_UTILS_HPP_
+#define _REORDER_UTILS_HPP_
+
+#include "memory/tensor.hpp"
+#include "operators/reorder/reorder_context.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-class reorder_operator_t final : public
-  operator_t<reorder_operator_t, reorder_context_t> {
- public:
-  /** @brief Parent type **/
-  using parent_type = operator_t<reorder_operator_t, reorder_context_t>;
-  size_t get_reorder_size();
-  size_t reorder_size;
+using namespace zendnnl::memory;
 
- protected:
-  status_t validate() override;
-  std::string operator_info() override;
-  status_t kernel_factory() override;
+/** @class aocl_blis_reorder_utils_t
+ *  @brief Utility class for AOCL BLIS reorder operations.
+ *
+ */
+class aocl_blis_reorder_utils_t {
+ public:
+
+  /** @brief Computes size for AOCL BLIS reorder/unreorder operations
+  *  @param context The reorder context containing configuration parameters.
+  *  @param input_tensor The input tensor for which the reorder/unreorder size is computed.
+  *  @return The size required for the AOCL BLIS reorder/unreorder operation.
+  */
+  static size_t get_aocl_reorder_size(const reorder_context_t &context,
+                                      const tensor_t &input_tensor);
 
 };
 
-} //namespace ops
+} // namespace ops
+} // namespace zendnnl
 
-namespace interface {
-using reorder_operator_t = zendnnl::ops::reorder_operator_t;
-} //export
-
-} //namespace zendnnl
 #endif

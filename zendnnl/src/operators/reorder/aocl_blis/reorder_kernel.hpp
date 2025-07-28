@@ -18,9 +18,9 @@
 
 #include <iostream>
 #include <memory>
-#include "operators/common/operator_kernel.hpp"
 #include "common/zendnnl_global.hpp"
-#include "reorder_context.hpp"
+#include "operators/common/operator_kernel.hpp"
+#include "operators/reorder/reorder_context.hpp"
 
 namespace zendnnl {
 namespace ops {
