@@ -21,7 +21,6 @@
 #include "benchdnn.hpp"
 #include "reorder_parser.hpp"
 #include <chrono>
-#include <map>
 
 namespace zendnnl {
 namespace benchdnn {
@@ -56,6 +55,39 @@ int run_reorder(tensor_t input_tensor, std::string kernel_name,
  */
 int reorder_benchdnn(std::vector<ReorderConfig> configs,
                      std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results);
+
+/**
+ * @brief Logs a detailed error message for a failed reorder benchmark configuration.
+ *
+ * Prints configuration parameters to the error log for debugging failed runs.
+ *
+ * @param cfg ReorderConfig structure for which the benchmark failed.
+ */
+void log_benchmark_failure(const ReorderConfig &cfg);
+
+
+/**
+ * @brief Prints the reorder benchmark results in a formatted table to the given output stream.
+ *
+ * Dynamically calculates column widths for neat alignment and prints a table of results for each configuration.
+ * Includes detailed timing breakdowns if enabled at compile time.
+ *
+ * @param reorder_results Vector of pairs (ReorderConfig, TimingStats) containing benchmark results.
+ * @param outfile Output stream to print the table (e.g., std::cout or file stream).
+ */
+void print_results(std::vector<std::pair<ReorderConfig, TimingStats>>
+                   &reorder_results, std::ostream &outfile);
+
+/**
+ * @brief Logs the reorder benchmark results in CSV format to the given output stream.
+ *
+ * Writes a CSV header and a row for each configuration, including timing breakdowns if enabled.
+ *
+ * @param reorder_results Vector of pairs (ReorderConfig, TimingStats) containing benchmark results.
+ * @param outfile Output stream to write the CSV data (e.g., file stream).
+ */
+void log_results(std::vector<std::pair<ReorderConfig, TimingStats>>
+                 &reorder_results, std::ostream &outfile);
 
 /**
  * @brief Entry point for the reorder benchmark utility.

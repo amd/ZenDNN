@@ -268,6 +268,12 @@ int run_reorder(tensor_t input_tensor, ReorderConfig cfg, TimingStats &stats,
   return OK;
 }
 
+void log_benchmark_failure(const ReorderConfig &cfg) {
+  testlog_error("Benchmark failed for ", cfg.rows, ", ", cfg.cols, ", ",
+                cfg.iters, ", ", datatypeToStr(cfg.dt),
+                ", ", cfg.kernel_name, ", ", cfg.isInplace);
+}
+
 int reorder_benchdnn(std::vector<ReorderConfig> configs,
                      std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results) {
   bool skip;
@@ -293,9 +299,7 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
         }
       }
       if (skip) {
-        commonlog_error("Benchmark failed for ", cfg.rows, ", ", cfg.cols, ", ",
-                        cfg.iters, ", ", datatypeToStr(cfg.dt),
-                        ", ", cfg.kernel_name, ", ", cfg.isInplace);
+        log_benchmark_failure(cfg);
         continue;
       }
 
@@ -322,9 +326,7 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
 #endif
       }
       if (skip) {
-        commonlog_error("Benchmark failed for ", cfg.rows, ", ", cfg.cols, ", ",
-                        cfg.iters, ", ", datatypeToStr(cfg.dt),
-                        ", ", cfg.kernel_name, ", ", cfg.isInplace);
+        log_benchmark_failure(cfg);
         continue;
       }
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -347,6 +349,162 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
   return OK;
 }
 
+void print_results(std::vector<std::pair<ReorderConfig, TimingStats>>
+                   &reorder_results, std::ostream &outfile) {
+  // ---- Dynamic column widths calculation ----
+  std::vector<std::string> headers = {
+    "Rows", "Cols", "Iterations", "Data_type", "Kernel_Name", "In-place", "Warmup_iters", "Total_time(ms) (all iters)"
+  };
+#if MEASURE_INDIVIDUAL_TIMINGS
+  headers.push_back("Ctx_Creation(ms_%)");
+  headers.push_back("Op_Creation(ms_%)");
+  headers.push_back("Op_Execution(ms_%)");
+  headers.push_back("Others(ms_%)");
+#endif
+  std::vector<size_t> col_widths(headers.size());
+  // Initialize with header lengths
+  for (size_t i = 0; i < headers.size(); ++i) {
+    col_widths[i] = headers[i].size() + 2;
+  }
+  // Compute max width for each column based on all data rows
+  for (const auto &result : reorder_results) {
+    const auto &config = result.first;
+    const auto &stat = result.second;
+    col_widths[0] = std::max(col_widths[0], std::to_string(config.rows).size() + 2);
+    col_widths[1] = std::max(col_widths[1], std::to_string(config.cols).size() + 2);
+    col_widths[2] = std::max(col_widths[2],
+                             std::to_string(config.iters).size() + 2);
+    std::string dt_str = datatypeToStr(config.dt);
+    col_widths[3] = std::max(col_widths[3], dt_str.size() + 2);
+    col_widths[4] = std::max(col_widths[4], config.kernel_name.size() + 2);
+    col_widths[5] = std::max(col_widths[5],
+                             std::to_string(config.isInplace).size() + 2);
+    col_widths[6] = std::max(col_widths[6],
+                             std::to_string(config.warmup_iters).size() + 2);
+    std::ostringstream total_time_ss;
+    total_time_ss << std::fixed << std::setprecision(2) << stat.total_time_ms;
+    col_widths[7] = std::max(col_widths[7], total_time_ss.str().size() + 2);
+#if MEASURE_INDIVIDUAL_TIMINGS
+    std::ostringstream ctx_str, op_create_str, op_exec_str, other_str;
+    double ctx_creation_percentage = (stat.context_creation_ms /
+                                      stat.total_time_ms) * 100;
+    double op_creation_percentage = (stat.operator_creation_ms /
+                                     stat.total_time_ms) * 100;
+    double op_execution_percentage = (stat.operator_execution_ms /
+                                      stat.total_time_ms) * 100;
+    double other_percentage = (stat.other_ms / stat.total_time_ms) * 100;
+    ctx_str << std::fixed << std::setprecision(2)
+            << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
+    op_create_str << std::fixed << std::setprecision(2)
+                  << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
+    op_exec_str << std::fixed << std::setprecision(2)
+                << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+    other_str << std::fixed << std::setprecision(2)
+              << stat.other_ms << " (" << other_percentage << " %)";
+    col_widths[8] = std::max(col_widths[8], ctx_str.str().size() + 2);
+    col_widths[9] = std::max(col_widths[9], op_create_str.str().size() + 2);
+    col_widths[10] = std::max(col_widths[10], op_exec_str.str().size() + 2);
+    col_widths[11] = std::max(col_widths[11], other_str.str().size() + 2);
+#endif
+  }
+
+  // Helper lambda to print a row for the table
+  auto print_row = [&](const std::vector<std::string> &row) {
+    for (size_t i = 0; i < row.size(); ++i) {
+      outfile << std::setw(col_widths[i]) << row[i];
+    }
+    outfile << std::endl;
+  };
+
+  // Print table header
+  outfile << std::fixed << std::setprecision(2);
+  outfile << std::left;
+  print_row(headers);
+
+  // Print each result row for every configuration
+  for (const auto &result : reorder_results) {
+    const auto &config = result.first;
+    const auto &stat = result.second;
+    std::vector<std::string> row;
+    row.push_back(std::to_string(config.rows));
+    row.push_back(std::to_string(config.cols));
+    row.push_back(std::to_string(config.iters));
+    row.push_back(datatypeToStr(config.dt));
+    row.push_back(config.kernel_name);
+    row.push_back(std::to_string(config.isInplace));
+    row.push_back(std::to_string(config.warmup_iters));
+    std::ostringstream total_time_ss;
+    total_time_ss << std::fixed << std::setprecision(2) << stat.total_time_ms;
+    row.push_back(total_time_ss.str());
+#if MEASURE_INDIVIDUAL_TIMINGS
+    std::ostringstream ctx_str, op_create_str, op_exec_str, other_str;
+    double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
+                                     * 100;
+    double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
+                                    * 100;
+    double op_execution_percentage = (stat.operator_execution_ms /
+                                      stat.total_time_ms) * 100;
+    double other_percentage = (stat.other_ms / stat.total_time_ms) * 100;
+    ctx_str << std::fixed << std::setprecision(2)
+            << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
+    op_create_str << std::fixed << std::setprecision(2)
+                  << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
+    op_exec_str << std::fixed << std::setprecision(2)
+                << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+    other_str << std::fixed << std::setprecision(2)
+              << stat.other_ms << " (" << other_percentage << " %)";
+    row.push_back(ctx_str.str());
+    row.push_back(op_create_str.str());
+    row.push_back(op_exec_str.str());
+    row.push_back(other_str.str());
+#endif
+    print_row(row);
+  }
+}
+
+void log_results(std::vector<std::pair<ReorderConfig, TimingStats>>
+                 &reorder_results, std::ostream &outfile) {
+  // Write CSV header
+  outfile <<
+          "Rows, Cols, Iterations, Data type, Kernel name, In-place, Warmup iterations, Total time (ms)";
+#if MEASURE_INDIVIDUAL_TIMINGS
+  outfile <<
+          ", Context Creation Time (ms & %), Operator Creation Time (ms & %), Operator Execution Time (ms & %), Others (ms & %)";
+#endif
+  outfile << std::endl;
+
+  // Write results to CSV for each configuration
+  for (const auto &result : reorder_results) {
+    const auto &config = result.first;
+    const auto &stat = result.second;
+    outfile <<
+            config.rows << ", " <<
+            config.cols << ", " <<
+            config.iters << ", " <<
+            datatypeToStr(config.dt) << ", " <<
+            config.kernel_name << ", " <<
+            config.isInplace << ", " <<
+            config.warmup_iters << ", " <<
+            stat.total_time_ms;
+#if MEASURE_INDIVIDUAL_TIMINGS
+    double ctx_creation_percentage = (stat.context_creation_ms /
+                                      stat.total_time_ms) * 100;
+    double op_creation_percentage = (stat.operator_creation_ms /
+                                     stat.total_time_ms) * 100;
+    double op_execution_percentage = (stat.operator_execution_ms /
+                                      stat.total_time_ms) * 100;
+    double other_percentage = (stat.other_ms /
+                               stat.total_time_ms) * 100;
+    outfile << ", " <<
+            stat.context_creation_ms << " (" << ctx_creation_percentage << " %), " <<
+            stat.operator_creation_ms << " (" << op_creation_percentage << " %), " <<
+            stat.operator_execution_ms << " (" << op_execution_percentage << " %), " <<
+            stat.other_ms << " (" << other_percentage << " %)";
+#endif
+    outfile << std::endl;
+  }
+}
+
 int bench(const std::string &in_filename, const std::string &out_filename) {
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
@@ -365,72 +523,17 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   }
 
   // Print results to console for each configuration
-  // Iterate over all benchmarked configurations and their timing statistics.
-  // For each configuration, print the configuration parameters and timing results to the console.
-  // This provides a summary of the benchmark results for each tested reorder scenario.
-  for (const auto &result : reorder_results) {
-    const auto &config = result.first;
-    const auto &stat = result.second;
-    std::cout <<
-              config.rows << ", " <<
-              config.cols << ", " <<
-              config.iters << ", " <<
-              datatypeToStr(config.dt) << ", " <<
-              config.kernel_name << ", " <<
-              config.isInplace;
-    std::cout << ", Warm-up iterations: " << config.warmup_iters;
-    std::cout << ", Total time: " << stat.total_time_ms << " ms";
-#if MEASURE_INDIVIDUAL_TIMINGS
-    std::cout << ", Context creation: " <<
-              stat.context_creation_ms << " ms, Operator creation: " <<
-              stat.operator_creation_ms << " ms, Operator execution: " <<
-              stat.operator_execution_ms << " ms, Others: " <<
-              stat.other_ms << " ms";
-#endif
-    std::cout << std::endl;
-
-  }
+  print_results(reorder_results, std::cout);
 
   std::ofstream outfile(out_filename);
   if (!outfile.is_open()) {
     testlog_error("Error: Cannot write to output file ", out_filename, "\n");
     return 1;
   }
-
-  // Write CSV header
-  outfile <<
-          "Rows, Cols, Iterations, Data type, Kernel name, In-place, Warmup iterations, Total time (ms)";
-#if MEASURE_INDIVIDUAL_TIMINGS
-  outfile <<
-          ", Context Creation Time (ms), Operator Creation Time (ms), Operator Execution Time (ms), Others (ms)";
-#endif
-  outfile << std::endl;
-
-  // Write results to CSV for each configuration
-  for (const auto &result : reorder_results) {
-    const auto &config = result.first;
-    const auto &stat = result.second;
-    outfile <<
-            config.rows << ", " <<
-            config.cols << ", " <<
-            config.iters << ", " <<
-            datatypeToStr(config.dt) << ", " <<
-            config.kernel_name << ", " <<
-            config.isInplace << ", " <<
-            config.warmup_iters << ", " <<
-            stat.total_time_ms;
-#if MEASURE_INDIVIDUAL_TIMINGS
-    outfile <<
-            ", " <<
-            stat.context_creation_ms << ", " <<
-            stat.operator_creation_ms << ", " <<
-            stat.operator_execution_ms << ", " <<
-            stat.other_ms;
-#endif
-    outfile << std::endl;
-  }
-
+  // Export results to CSV file
+  log_results(reorder_results, outfile);
   outfile.close();
+
   std::cout << "Timing results written to " << out_filename << std::endl;
   return OK;
 }

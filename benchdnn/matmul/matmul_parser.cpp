@@ -20,7 +20,8 @@ namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
 
-void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs) {
+void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
+                 bool &isPipeline) {
   std::string line;
 
   // Parse each line of the input file into a MatmulConfig object
@@ -41,7 +42,13 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs) {
       // Parse matrix dimensions and iteration count
       cfg.m = std::stoi(fields[0]);
       cfg.k = std::stoi(fields[1]);
-      cfg.n = std::stoi(fields[2]);
+      // Parse n values (colon-separated for multi-layer)
+      auto n_values = split(fields[2], ':');
+      for (const auto &n : n_values) {
+        cfg.n_values.push_back(std::stoi(n));
+      }
+      // Set isPipeline to true if more than one n value is present
+      isPipeline = (n_values.size() > 1) ? true : isPipeline;
       cfg.iters = std::stoi(fields[3]);
       // Parse data types (input:weights:output)
       auto dt = split(fields[4], ':');

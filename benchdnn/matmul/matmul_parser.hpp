@@ -35,7 +35,7 @@ namespace matmul {
  *
  * @var m Number of rows in matrix A (output rows).
  * @var k Number of columns in matrix A / rows in matrix B (inner dimension).
- * @var n Number of columns in matrix B (output columns).
+ * @var n_values Vector of output columns for each layer (multi-layer support).
  * @var iters Number of iterations to run the benchmark.
  * @var dt Data types for input, weights, and output (e.g., f32:f32:f32).
  * @var isBiasEnabled Flag indicating if bias is enabled in the matmul operation.
@@ -49,7 +49,8 @@ struct MatmulConfig {
   // TODO: Extend support to BMM for 3D tensors
   size_t m; /**< Number of rows in matrix A (output rows). */
   size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
-  size_t n; /**< Number of columns in matrix B (output columns). */
+  std::vector<size_t> n_values; /**< Vector of output columns
+                                for each layer (multi-layer support). */
   int iters; /**< Number of iterations to run the benchmark. */
   std::vector<zendnnl::common::data_type_t> dt; /**< Data types for
                                                 input, weights, and output (e.g., f32:f32:f32). */
@@ -70,11 +71,16 @@ struct MatmulConfig {
  *
  * Reads each line from the provided input file stream, parses the matrix multiplication
  * configuration parameters, and appends a MatmulConfig object to the configs vector.
+ * Supports multi-layer and post-op parsing, as well as bias and kernel selection.
+ *
+ * The function also sets the isPipeline flag to true if the input describes a pipeline (multi-layer) configuration.
  *
  * @param infile Reference to an open std::ifstream containing the input configurations.
  * @param configs Reference to a vector of MatmulConfig to be populated.
+ * @param isPipeline Reference to a boolean flag that will be set to true if the input describes a pipeline configuration.
  */
-void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs);
+void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
+                 bool &isPipeline);
 
 } // namespace matmul
 } // namespace benchdnn
