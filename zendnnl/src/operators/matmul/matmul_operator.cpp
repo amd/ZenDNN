@@ -209,14 +209,14 @@ std::string matmul_operator_t::operator_info() {
   auto post_op_count = context.get_post_op_count();
 
   ss << "matmul," << get_name() << "," << input.tensor_info()
-     << "," << weights.tensor_info() << ",";
+     << "," << weights.tensor_info();
 
   if (bias) {
-    ss <<bias.value().tensor_info()<<",";
+    ss << "," << bias.value().tensor_info();
   }
 
-  ss <<output.tensor_info();
-
+  ss << "," << output.tensor_info();
+  ss << ",alpha:" << context.get_alpha() << ",beta:" << context.get_beta();
   if (post_op_count) {
     ss << ",post-op";
 

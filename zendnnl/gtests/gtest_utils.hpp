@@ -47,6 +47,9 @@ struct MatmulType {
   uint32_t po_index;
   bool     transA;
   bool     transB;
+  //TODO: Add support for other data_types as well
+  float    alpha;
+  float    beta;
   MatmulType();
 };
 
@@ -100,7 +103,7 @@ extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor, uint32_t index,
-                            tensor_t &binary_tensor);
+                            tensor_t &binary_tensor, float alpha = 1.0f, float beta = 0.0f);
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -114,7 +117,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor);
+                                       uint32_t index, tensor_t &binary_tensor, float alpha = 1.0f, float beta = 0.0f);
 
 /** @fn reorder_kernel_test
  *  @brief Function to Reorder tensor

@@ -57,8 +57,8 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   const char  trans_weight  = is_transpose_weights ? 't' : 'n';
   const char  input_format  = 'n';
   const char  weight_format = is_blocked ? 'r': 'n';
-  const float alpha         = 1.0;
-  const float beta          = 0.0;
+  const float alpha         = context_.get_alpha();
+  const float beta          = context_.get_beta();
   const int   lda           = is_transpose_src ? input_tensor.get_stride_size(
                                 0) : input_tensor.get_stride_size(1);
   const int   ldb           = is_transpose_weights ?

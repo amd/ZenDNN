@@ -23,6 +23,13 @@ MatmulType::MatmulType() {
   transA   = rand() % 2;
   transB   = rand() % 2;
   po_index = rand() % (po_size + 1);
+
+  // Use std::random_device and std::mt19937 for random float generation
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<float> dist(0.0, 10.0);
+  alpha    = dist(gen);
+  beta     = dist(gen);
 }
 
 bool is_binary_postop(const std::string post_op) {
@@ -163,7 +170,7 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor,
-                            uint32_t index, tensor_t &binary_tensor) {
+                            uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
   try {
     // default postop relu
     post_op_t post_op = post_op_t{po_arr[0].second};
@@ -175,7 +182,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
     //define matmul context
     auto matmul_context = matmul_context_t()
                           .set_param("weights", weights)
-                          .set_param("bias", bias);
+                          .set_param("bias", bias)
+                          .set_alpha(alpha)
+                          .set_beta(beta);
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();
     }
@@ -225,7 +234,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor) {
+                                       uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
   try {
     // Default postop relu
     post_op_t post_op = post_op_t{po_arr[0].second};
@@ -237,7 +246,9 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
     //define matmul context
     auto matmul_context = matmul_context_t()
                           .set_param("weights", weights)
-                          .set_param("bias", bias);
+                          .set_param("bias", bias)
+                          .set_alpha(alpha)
+                          .set_beta(beta);
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();
     }

@@ -46,6 +46,18 @@ static inline std::size_t hash_combine(std::size_t seed, const T& v) {
   return seed ^= std::hash<T> {}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
+/**
+ * Combine hash of a floating-point type with seed.
+ * @param seed : seed to which hash to be combined.
+ * @param v    : a floating-point type variable.
+ * @return combined hash.
+ */
+template <typename T,
+          std::enable_if_t<std::is_floating_point_v<T>, bool> = true>
+static inline std::size_t hash_combine(std::size_t seed, const T& v) {
+  return seed ^= std::hash<T> {}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
 //ToDo : inroduce a check that T has hash() function.
 //       c++20 use concepts.
 /**

@@ -41,6 +41,9 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief parent type */
   using parent_type = op_context_t<matmul_context_t>;
 
+  /** @brief constructor */
+  matmul_context_t();
+
   /** TODO: Add a interface to support different backends */
   /** @brief get post op pointer */
   aocl_post_op *get_aocl_blis_post_op_ptr_unsafe() const;
@@ -48,8 +51,23 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief get reordered weights pointer */
   void *get_aocl_blis_reordered_weights_ptr_unsafe() const;
 
+  /** @brief Set parameter alpha value.*/
+  matmul_context_t &set_alpha(float alpha_);
+
+  /** @brief Get parameter alpha value.*/
+  float get_alpha() const;
+
+  /** @brief Set parameter beta value.*/
+  matmul_context_t &set_beta(float beta_);
+
+  /** @brief Get parameter beta value.*/
+  float get_beta() const;
+
   /** @brief preprocess */
   status_t preprocess() override;
+
+  /** @brief Generate object hash including matmul-specific parameters. */
+  std::size_t hash() override;
 
  protected:
   /** @brief validate parameters */
@@ -60,6 +78,10 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
 
   std::shared_ptr<aocl_blis_utils_t> aocl_blis_utils_ptr; /**< aocl blis utils */
   friend class matmul_operator_t;
+
+ private:
+  float _alpha; /**< alpha parameter */
+  float _beta;  /**< beta parameter */
 };
 
 } //namespace ops

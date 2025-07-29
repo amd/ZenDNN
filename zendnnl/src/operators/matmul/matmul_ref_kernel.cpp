@@ -95,6 +95,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   auto  input_tensor           = inputs_.find("matmul_input")->second;
   auto  output_tensor          = outputs_.find("matmul_output")->second;
   auto  weight_tensor          = context_.get_param("weights").value();
+  float alpha                  = context_.get_alpha();
+  float beta                   = context_.get_beta();
 
   void *input                  = input_tensor.get_raw_handle_unsafe();
   void *output                 = output_tensor.get_raw_handle_unsafe();
@@ -133,6 +135,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   for (auto i = 0; i < M; ++i) {
     for (auto j = 0; j < N; ++j) {
       float sum = 0.0f;
+      size_t op_idx = i*ldc + j;
       for (auto k = 0; k < K; ++k) {
         size_t wt_idx = is_trans_weights ? (j*ldb + k) : (k*ldb + j);
         size_t ip_idx = is_trans_src ? (k*lda + i) : (i*lda + k);
@@ -154,14 +157,17 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
           }
         }
       }
+      sum *= alpha;
+      sum += output_dtype == data_type_t::bf16 ? bf16_to_float(((
+               int16_t *)output)[op_idx]) * beta : ((float *)output)[op_idx] * beta;
 
-      output_buff_f32[i * ldc + j] = sum;
+      output_buff_f32[op_idx] = sum;
       if (optional_bias_tensor) {
         if (bias_dtype == data_type_t::f32) {
-          output_buff_f32[i * ldc + j] += ((float *)bias)[j];
+          output_buff_f32[op_idx] += ((float *)bias)[j];
         }
         else if (bias_dtype == data_type_t::bf16) {
-          output_buff_f32[i * ldc + j] += bf16_to_float(((int16_t *)bias)[j]);
+          output_buff_f32[op_idx] += bf16_to_float(((int16_t *)bias)[j]);
         }
       }
     }

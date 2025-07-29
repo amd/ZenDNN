@@ -341,6 +341,8 @@ int matmul_silu_mul_bf16_kernel_example() {
     auto matmul_context = matmul_context_t()
                           .set_param("weights", weights)
                           .set_param("bias", bias)
+                          .set_alpha(1.0f)
+                          .set_beta(0.0f)
                           .set_post_op(silu_post_op)
                           .set_post_op(binary_mul_po)
                           .create();

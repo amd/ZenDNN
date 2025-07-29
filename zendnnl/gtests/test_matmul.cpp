@@ -35,6 +35,8 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     n        = params.matmul_n;
     transA   = params.transA;
     transB   = params.transB;
+    alpha    = params.alpha;
+    beta     = params.beta;
     if (gtest_argc >= 3) {
       auto it = find_if(po_arr.begin(), po_arr.end(),
       [&](const std::pair<std::string, post_op_type_t> &po) {
@@ -59,6 +61,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   bool     transA, transB;
   tensor_factory_t tensor_factory{};
   tensor_t bias;
+  float alpha, beta;
 };
 
 /** @fn TEST_P
@@ -80,12 +83,12 @@ TEST_P(TestMatmul,F32) {
   status_t status         = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor,
                             po_index,
-                            binary_tensor);
+                            binary_tensor, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias,
                             output_tensor_ref,
                             po_index,
-                            binary_tensor);
+                            binary_tensor, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
