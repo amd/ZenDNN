@@ -27,12 +27,16 @@ set(aocl_blis_reorder_operator_private_headers
 target_sources(zendnnl_archive
   PRIVATE ${aocl_blis_reorder_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers})
+          TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers}
+  PUBLIC FILE_SET zendnnl_headers
+          TYPE HEADERS FILES ${aocl_blis_reorder_operator_public_headers})
 
 target_sources(zendnnl
   PRIVATE ${aocl_blis_reorder_operator_sources}
   PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers})
+          TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers}
+  PUBLIC FILE_SET zendnnl_headers
+          TYPE HEADERS FILES ${aocl_blis_reorder_operator_public_headers})
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
