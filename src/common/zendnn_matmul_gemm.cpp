@@ -332,19 +332,6 @@ void zenMatMul_gemm(
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     obj.is_log = true;
 
-    // TODO: Remove once gelu_erf accuracy issue is resolved.
-    if (algo_type == zenMatMulAlgoType::MATMUL_BLOCKED_AOCL_FP32 ||
-            algo_type == zenMatMulAlgoType::MATMUL_AOCL_FP32) {
-        auto elt_idx_ = po_ops.find(impl::primitive_kind::eltwise);
-        if (elt_idx_ >= 0 &&
-                po_ops.entry_[elt_idx_].eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
-            //If blocked AOCL then call blocked JIT
-            //If non-blocked AOCL then call non-blocked JIT
-            algo_type = algo_type == zenMatMulAlgoType::MATMUL_AOCL_FP32 ?
-                        zenMatMulAlgoType::MATMUL_JIT_FP32 :
-                        zenMatMulAlgoType::MATMUL_BLOCKED_JIT_FP32;
-        }
-    }
     //We don't have support for MATMUL_BLIS_GEMM1.
     if (0) {
         //Perform MatMul using AMD BLIS

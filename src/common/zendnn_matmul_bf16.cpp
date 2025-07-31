@@ -749,19 +749,7 @@ int matmul_bf16_wrapper(const impl::exec_ctx_t &ctx,
     zendnnOpInfo &obj = zendnnOpInfo::ZenDNNOpInfo();
     auto algo_type = zenEnvObj.zenBF16GEMMalgo;
     obj.is_log = true;
-    // TODO: Remove once gelu_erf accuracy issue is resolved.
-    if (algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
-            algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16) {
-        auto elt_idx_ = po_ops.find(impl::primitive_kind::eltwise);
-        if (elt_idx_ >= 0 &&
-                po_ops.entry_[elt_idx_].eltwise.alg == impl::alg_kind::eltwise_gelu_erf) {
-            //If blocked AOCL then call blocked JIT
-            //If non-blocked AOCL then call non-blocked JIT
-            algo_type = algo_type == zenBF16MatMulAlgoType::MATMUL_AOCL_BF16 ?
-                        zenBF16MatMulAlgoType::MATMUL_JIT_BF16 :
-                        zenBF16MatMulAlgoType::MATMUL_BLOCKED_JIT_BF16;
-        }
-    }
+
     if ((algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_BF16 ||
             algo_type == zenBF16MatMulAlgoType::MATMUL_BLOCKED_AOCL_PAR_BF16)
             && (beta == 0.0 || beta == 1.0 || alpha == 1.0)
