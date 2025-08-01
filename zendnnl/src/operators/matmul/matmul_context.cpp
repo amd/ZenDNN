@@ -87,7 +87,7 @@ std::string matmul_context_t::context_info() {
   auto bias    = get_param("bias");
 
   auto post_op_count = get_post_op_count();
-  ss << "matmul," << weights.tensor_info();
+  ss << "MatMul context create - " << weights.tensor_info();
 
   if (bias) {
     ss << "," <<bias.value().tensor_info();

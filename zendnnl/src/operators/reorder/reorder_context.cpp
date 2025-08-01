@@ -56,7 +56,7 @@ data_type_t reorder_context_t::get_source_dtype() const {
 std::string reorder_context_t::context_info() {
   std::stringstream ss;
   auto algo_format = get_algo_format();
-  ss << "reorder,";
+  ss << "Reorder context create - ";
   if (algo_format.empty()) {
     ss << "";
   }

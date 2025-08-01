@@ -277,12 +277,21 @@ class operator_t : public hash_object_t {
 
   /** @brief Returns operator information.
    *
-   * Returns a string containing opearator meta data.
+   * Returns a string containing operator meta data.
    * This includes operator name, context information, input and
    * output tensor information. This is used for logging and profiling.
    * @return std:string containing operator information.
    */
-  virtual std::string operator_info();
+  virtual std::string op_create_info();
+
+  /** @brief Returns operator information.
+   *
+   * Returns a string containing operator meta data.
+   * This includes operator name, context information, input and
+   * output tensor information. This is used for logging and profiling.
+   * @return std:string containing operator information.
+   */
+  virtual std::string op_execute_info();
 
   //data
   tensor_map_type                      inputs; /**< Input tensors. */
@@ -300,7 +309,7 @@ class operator_t : public hash_object_t {
 //implementation
 template<typename OP_T, typename OP_CONTEXT_T>
 operator_t<OP_T, OP_CONTEXT_T>::operator_t():
-  context{}, name{"unknown operator"}, kernel{nullptr},
+  context{}, name{}, kernel{nullptr},
   dynamic_module{std::make_shared<dynamic_module_t>()},
   forced_kernel{} {
   platform_info = zendnnl_platform_info();
@@ -339,7 +348,6 @@ std::string operator_t<OP_T, OP_CONTEXT_T>::get_name() {
 template<typename OP_T, typename OP_CONTEXT_T>
 OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("<", name, "> Creating operator");
-  apilog_info("Operator create - ",name);
 
   if (status != status_t::success) {
     if (! context.check()) {
@@ -352,13 +360,13 @@ OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
     status = status_t::success;
     hash();
   }
+  apilog_info(op_create_info());
   return dynamic_cast<OP_T &>(*this);
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
 status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
-  apilog_info("Operator execute - ",operator_info());
 
   try {
     // check if pre_processing is successful
@@ -400,7 +408,8 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
     //stop the timer
     obj.tbp_stop();
 
-    profilelog_info("Operator execute - ",operator_info(),
+    apilog_info(op_execute_info());
+    profilelog_info(op_execute_info(),
                     ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
 
     //cleanup
@@ -573,8 +582,14 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::validate_forced_kernel() {
 }
 
 template<typename OP_T, typename OP_CONTEXT_T>
-std::string operator_t<OP_T, OP_CONTEXT_T>::operator_info() {
-  LOG_DEBUG_INFO("Getting operator info");
+std::string operator_t<OP_T, OP_CONTEXT_T>::op_create_info() {
+  LOG_DEBUG_INFO("Getting operator create info");
+  return "";
+}
+
+template<typename OP_T, typename OP_CONTEXT_T>
+std::string operator_t<OP_T, OP_CONTEXT_T>::op_execute_info() {
+  LOG_DEBUG_INFO("Getting operator execute info");
   return "";
 }
 

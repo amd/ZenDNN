@@ -63,6 +63,9 @@ protected:
   /** @brief validate parameters */
   status_t validate() override;
 
+  /** @brief Returns compare context information */
+  std::string context_info() override;
+
 private:
   float tolerance;
   std::shared_ptr<compare_stats_t> stats;

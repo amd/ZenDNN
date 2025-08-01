@@ -29,5 +29,11 @@ status_t sample_context_t::validate() {
   return status_t::success;
 }
 
+std::string sample_context_t::context_info() {
+  std::stringstream ss;
+  ss << "Sample context create";
+  return ss.str();
+}
+
 } //namespace ops
 } //namespace zendnnl

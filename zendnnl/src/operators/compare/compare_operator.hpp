@@ -34,6 +34,8 @@ public:
 
 protected:
   status_t validate() override;
+  std::string op_create_info() override;
+  std::string op_execute_info() override;
   status_t kernel_factory() override;
 };
 } //namespace ops

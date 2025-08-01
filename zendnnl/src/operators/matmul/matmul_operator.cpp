@@ -95,6 +95,8 @@ status_t matmul_operator_t::validate() {
     return status_t::failure;
   }
 
+  //TODO: Add data type check for input output
+
   auto input        = get_input("matmul_input");
   auto output       = get_output("matmul_output");
 
@@ -199,23 +201,58 @@ status_t matmul_operator_t::preprocess() {
          optional_bias_tensor ? true : false);
 }
 
-std::string matmul_operator_t::operator_info() {
+std::string matmul_operator_t::op_create_info() {
   std::stringstream ss;
-  auto input   = get_input("matmul_input").value();
-  auto output  = get_output("matmul_output").value();
+
+  ss << "MatMul operator create - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
 
   auto weights       = context.get_param("weights").value();
   auto bias          = context.get_param("bias");
   auto post_op_count = context.get_post_op_count();
 
-  ss << "matmul," << get_name() << "," << input.tensor_info()
-     << "," << weights.tensor_info();
-
+  ss << weights.tensor_info() << ",";
   if (bias) {
-    ss << "," << bias.value().tensor_info();
+    ss << bias.value().tensor_info() << ",";
   }
 
-  ss << "," << output.tensor_info();
+  ss << "alpha:" << context.get_alpha() << ",beta:" << context.get_beta();
+  if (post_op_count) {
+    ss << ",post-op";
+
+    for (uint32_t i = 0; i < post_op_count; ++i) {
+      post_op_t zen_po = context.get_post_op(i);
+      ss << ":" <<zen_po.post_op_info(zen_po);
+    }
+  }
+
+  return ss.str();
+}
+
+std::string matmul_operator_t::op_execute_info() {
+  std::stringstream ss;
+
+  ss << "MatMul operator execute - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto input         = get_input("matmul_input");
+  auto output        = get_output("matmul_output");
+  auto weights       = context.get_param("weights").value();
+  auto bias          = context.get_param("bias");
+  auto post_op_count = context.get_post_op_count();
+
+  ss << input.value().tensor_info() << ","
+     << weights.tensor_info() << ",";
+  if (bias) {
+    ss << bias.value().tensor_info() << ",";
+  }
+
+  ss << output.value().tensor_info();
+
   ss << ",alpha:" << context.get_alpha() << ",beta:" << context.get_beta();
   if (post_op_count) {
     ss << ",post-op";

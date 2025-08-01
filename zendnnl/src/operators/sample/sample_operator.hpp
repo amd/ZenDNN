@@ -61,6 +61,16 @@ protected:
    */
   status_t validate() override;
 
+  /** @brief Print operator create information
+   * @return @c std::string
+   */
+  std::string op_create_info() override;
+
+  /** @brief Print operator execute information
+   * @return @c std::string
+   */
+  std::string op_execute_info() override;
+
   /** @brief Select kernel based on input data type.
    * @return @c status_t::success if successful.
    */

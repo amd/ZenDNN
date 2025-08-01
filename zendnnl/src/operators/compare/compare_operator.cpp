@@ -76,6 +76,41 @@ status_t compare_operator_t::validate() {
   return status_t::success;
 }
 
+std::string compare_operator_t::op_create_info() {
+  std::stringstream ss;
+
+  ss << "Compare operator create - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto tolerance = context.get_tolerance();
+  ss << "tolerance:" << tolerance;
+
+  return ss.str();
+}
+
+std::string compare_operator_t::op_execute_info() {
+  std::stringstream ss;
+
+  ss << "Compare operator execute - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto expec_tensor = get_input("expected_tensor");
+  auto test_tensor  = get_input("test_tensor");
+  auto diff_tensor  = get_output("diff_tensor");
+  auto tolerance    = context.get_tolerance();
+
+  ss << expec_tensor.value().tensor_info() << ","
+     << test_tensor.value().tensor_info() << ","
+     << diff_tensor.value().tensor_info() << ","
+     << "tolerance:" << tolerance;
+
+  return ss.str();
+}
+
 status_t compare_operator_t::kernel_factory() {
   LOG_DEBUG_INFO("Executing compare operator");
 

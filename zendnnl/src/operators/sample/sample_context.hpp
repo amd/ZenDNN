@@ -33,6 +33,9 @@ class sample_context_t final : public op_context_t<sample_context_t> {
 public:
   using parent_type = op_context_t<sample_context_t>;
 
+/** @brief Returns sample context information */
+  std::string context_info() override;
+
 protected:
   /** @brief validate parameters */
   status_t validate() override;

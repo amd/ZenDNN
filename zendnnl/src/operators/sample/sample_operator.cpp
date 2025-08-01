@@ -21,29 +21,63 @@ namespace ops {
 
 status_t sample_operator_t::validate() {
 
-  if (parent_type::validate() != status_t::success)
+  if (parent_type::validate() != status_t::success) {
     return status_t::failure;
+  }
 
-  if (!get_input("sample_input") || !get_output("sample_output"))
+  if (!get_input("sample_input") || !get_output("sample_output")) {
     return status_t::failure;
+  }
 
   return status_t::success;
+}
+
+std::string sample_operator_t::op_create_info() {
+  std::stringstream ss;
+
+  ss << "Sample operator create - ";
+  if (!(get_name().empty())) {
+    ss << get_name();
+  }
+
+  return ss.str();
+}
+
+std::string sample_operator_t::op_execute_info() {
+  std::stringstream ss;
+
+  ss << "Sample operator execute - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto input  = get_input("sample_input");
+  auto output = get_output("sample_output");
+
+  ss << input.value().tensor_info() << ","
+     << output.value().tensor_info();
+
+  return ss.str();
 }
 
 status_t sample_operator_t::kernel_factory() {
 
   auto input_dtype = get_input("sample_input")->get_data_type();
 
-  if (input_dtype == data_type_t::f32)
+  if (input_dtype == data_type_t::f32) {
     kernel = get_sample_f32_avx512_kernel();
-  else if (input_dtype == data_type_t::bf16)
+  }
+  else if (input_dtype == data_type_t::bf16) {
     kernel = get_sample_bf16_avx512_kernel();
-  else
+  }
+  else {
     return status_t::unimplemented;
+  }
 
   kernel->create();
-  if (! kernel->check())
+  if (! kernel->check()) {
     return status_t::failure;
+  }
 
   return status_t::success;
 }

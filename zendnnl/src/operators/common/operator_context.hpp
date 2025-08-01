@@ -237,7 +237,6 @@ op_context_t<OP_CONTEXT_T>::~op_context_t() {
 template<typename OP_CONTEXT_T>
 OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("Creating op_context_t");
-  apilog_info("Context create - ", context_info());
 
   // create a profiler instance
   profiler_t obj;
@@ -263,7 +262,8 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
 //stop the timer
   obj.tbp_stop();
 
-  profilelog_info("Operator context - ",context_info(),
+  apilog_info(context_info());
+  profilelog_info(context_info(),
                   ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
 
   return static_cast<OP_CONTEXT_T &>(*this);

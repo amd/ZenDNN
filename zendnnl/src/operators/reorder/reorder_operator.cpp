@@ -74,14 +74,35 @@ status_t reorder_operator_t::validate() {
   return status_t::success;
 }
 
-std::string reorder_operator_t::operator_info() {
+std::string reorder_operator_t::op_create_info() {
   std::stringstream ss;
-  auto input   = get_input("reorder_input").value();
-  auto output  = get_output("reorder_output").value();
 
-  ss << "reorder," << get_name() << "," << input.tensor_info()
-     << "," << output.tensor_info() << ","
-     << context.context_info();
+  ss << "Reorder operator create - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto algo_format = context.get_algo_format();
+  ss << "algo_format:" << algo_format;
+
+  return ss.str();
+}
+
+std::string reorder_operator_t::op_execute_info() {
+  std::stringstream ss;
+
+  ss << "Reorder operator execute - ";
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
+
+  auto input       = get_input("reorder_input");
+  auto output      = get_output("reorder_output");
+  auto algo_format = context.get_algo_format();
+
+  ss << input.value().tensor_info() << ","
+     << output.value().tensor_info() << ","
+     << "algo_format:" << algo_format;
 
   return ss.str();
 }
