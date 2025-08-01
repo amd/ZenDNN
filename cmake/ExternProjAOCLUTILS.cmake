@@ -26,6 +26,7 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
   message(DEBUG "AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
+  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
 
   if (ZENDNNL_LOCAL_AOCLUTILS)
 
@@ -36,7 +37,8 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils"
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      INSTALL_COMMAND cmake --build . --config release --target install -j
+      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config release --target install
       BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
                        <INSTALL_DIR>/lib/libau_cpuid.a)
   else()
@@ -48,7 +50,8 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       GIT_TAG ${AOCLUTILS_GIT_TAG}
       GIT_PROGRESS ${AOCLUTILS_GIT_PROGRESS}
       CMAKE_ARGS ${AU_CMAKE_ARGS}
-      INSTALL_COMMAND cmake --build . --config release --target install -j
+      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config release --target install
       BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
                        <INSTALL_DIR>/lib/libau_cpuid.a
       UPDATE_DISCONNECTED TRUE)

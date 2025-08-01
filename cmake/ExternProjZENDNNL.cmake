@@ -34,6 +34,7 @@ list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_CODE_COVERAGE=${ZENDNNL_CODE_COVERAGE}")
 list(APPEND ZL_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
 message(DEBUG "ZL_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
+cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
 
 # cmake install prefix need to be same as projects install prefix, as all the
 # paths will be computed relative to it.
@@ -44,7 +45,8 @@ ExternalProject_ADD(zendnnl
   BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/zendnnl"
   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}"
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
-  INSTALL_COMMAND cmake --build . --target install -j
+  BUILD_COMMAND cmake --build . --target all -- -j${NPROC}
+  INSTALL_COMMAND cmake --build .  --target install
   BUILD_BYPRODUCTS <INSTALL_DIR>/zendnnl/lib/libzendnnl_archive.a
   BUILD_ALWAYS TRUE
   CONFIGURE_HANDLED_BY_BUILD TRUE)
@@ -79,7 +81,7 @@ set(ZENDNNL_JSON_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/json/include")
 file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
 add_library(zendnnl_library STATIC IMPORTED GLOBAL)
 add_dependencies(zendnnl_library
-  zendnnl zendnnl-deps-amdblis zendnnl-deps-aoclutils)
+  zendnnl zendnnl-deps-amdblis zendnnl-deps-aoclutils zendnnl-deps-json zendnnl-deps-onednn)
 
 set_target_properties(zendnnl_library
   PROPERTIES
@@ -92,7 +94,8 @@ target_link_libraries(zendnnl_library
   INTERFACE OpenMP::OpenMP_CXX
   INTERFACE au::au_cpuid
   INTERFACE au::aoclutils
-  INTERFACE amdblis::amdblis_archive)
+  INTERFACE amdblis::amdblis_archive
+  INTERFACE DNNL::dnnl)
 
 target_link_options(zendnnl_library INTERFACE "-fopenmp")
 

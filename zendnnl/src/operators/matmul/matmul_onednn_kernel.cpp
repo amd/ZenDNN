@@ -14,7 +14,6 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "error_handling.hpp"
 #include "matmul_onednn_kernel.hpp"
 
 namespace zendnnl {
@@ -23,7 +22,7 @@ namespace ops {
 using namespace zendnnl::common;
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
-//using namespace dnnl;
+using namespace dnnl;
 
 matmul_onednn_kernel_t::~matmul_onednn_kernel_t() {
 }

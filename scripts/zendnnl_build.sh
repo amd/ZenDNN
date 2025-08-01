@@ -66,17 +66,24 @@ function parse_args() {
                 ZENDNNL_LOCAL_JSON=1
                 shift
 		;;
+	    --local-onednn )
+                ZENDNNL_LOCAL_ONEDNN=1
+                shift
+		;;
             --help )
                 echo " usage   : zendnnl-build <options>"
                 echo
                 echo " options :"
-                echo " --all      : build and install all targets."
-                echo " --clean    : clean all targets."
-                echo " --zendnnl  : build and install zendnnl lib."
-                echo " --examples : build and install examples."
-                echo " --doxygen  : build and install doxygen docs."
-                echo " --no-deps  : don't rebuild (or clean) dependencies."
-                echo " --local-amdblis  : use local amdblis."
+                echo " --all              : build and install all targets."
+                echo " --clean            : clean all targets."
+                echo " --zendnnl          : build and install zendnnl lib."
+                echo " --examples         : build and install examples."
+                echo " --doxygen          : build and install doxygen docs."
+                echo " --no-deps          : don't rebuild (or clean) dependencies."
+                echo " --local-amdblis    : use local amdblis."
+                echo " --local-json       : use local json."
+                echo " --local-aoclutils  : use local aoclutils."
+                echo " --local-onednn     : use local onednn."
                 echo
                 echo " examples :"
                 echo " build all targets including dependencies"
@@ -108,6 +115,7 @@ ZENDNNL_NODEPS=0
 ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
+ZENDNNL_LOCAL_ONEDNN=0
 
 if ! parse_args $@;
 then
@@ -170,6 +178,12 @@ if [ ${ZENDNNL_LOCAL_JSON} -eq 1 ];then
     CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=ON"
 else
     CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=OFF"
+fi
+
+if [ ${ZENDNNL_LOCAL_ONEDNN} -eq 1 ];then
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=ON"
+else
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=OFF"
 fi
 
 if [ ${ZENDNNL_ALL} -eq 1 ];then

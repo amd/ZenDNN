@@ -25,7 +25,8 @@ add_subdirectory(aocl_blis)
 set(matmul_operator_sources
   matmul_context.cpp
   matmul_operator.cpp
-  matmul_ref_kernel.cpp)
+  matmul_ref_kernel.cpp
+  matmul_onednn_kernel.cpp)
 
 set(matmul_operator_public_headers
   matmul_context.hpp
@@ -33,7 +34,8 @@ set(matmul_operator_public_headers
 
 set(matmul_operator_private_headers
   matmul_kernel_list.hpp
-  matmul_ref_kernel.hpp)
+  matmul_ref_kernel.hpp
+  matmul_onednn_kernel.hpp)
 
 target_sources(zendnnl_archive
   PRIVATE ${matmul_operator_sources}

@@ -22,6 +22,7 @@ if(ZENDNNL_BUILD_GTEST)
   list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
   message(DEBUG "GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
+  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
 
   ExternalProject_ADD(zendnnl-deps-gtest
     SOURCE_DIR "${GTEST_ROOT_DIR}"
@@ -31,7 +32,8 @@ if(ZENDNNL_BUILD_GTEST)
     GIT_TAG ${GTEST_GIT_TAG}
     GIT_PROGRESS ${GTEST_GIT_PROGRESS}
     CMAKE_ARGS ${GTEST_CMAKE_ARGS}
-    INSTALL_COMMAND cmake --build . --config release --target install -j
+    BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+    INSTALL_COMMAND cmake --build . --config release --target install
     UPDATE_DISCONNECTED TRUE)
 
   list(APPEND GTEST_CLEAN_FILES "${CMAKE_BINARY_DIR}/gtest")

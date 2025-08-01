@@ -57,9 +57,9 @@ set(JSON_GIT_TAG "v3.12.0")
 option(JSON_GIT_PROGRESS ON)
 
 # oneDNN repo information
-set(ONEDNN_ROOT_DIR "${ZENDNNL_DEPS_DIR}/oneDNN"
+set(ONEDNN_ROOT_DIR "${ZENDNNL_DEPS_DIR}/onednn"
   CACHE PATH "ONEDNN root dir")
 set(ONEDNN_GIT_REPO "https://github.com/oneapi-src/oneDNN.git")
-set(ONEDNN_GIT_TAG "v3.7.1")
+set(ONEDNN_GIT_TAG "v3.8.1")
 option(ONEDNN_GIT_PROGRESS ON)
 

@@ -164,7 +164,7 @@ status_t matmul_operator_t::validate() {
 status_t matmul_operator_t::validate_forced_kernel() {
 
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
-      forced_kernel == "aocl_blis_blocked") {
+      forced_kernel == "aocl_blis_blocked" || forced_kernel == "onednn") {
     return status_t::success;
   }
 
@@ -291,16 +291,6 @@ status_t matmul_operator_t::kernel_factory() {
   auto input_dtype    = get_input("matmul_input")->get_data_type();
   auto output_dtype   = get_output("matmul_output")->get_data_type();
 
-  // bool force_onednn = true;
-  // if (force_onednn)
-  //   kernel = get_matmul_onednn_kernel();
-  // else if (weight_dtype == data_type_t::f32)
-  //   kernel = get_matmul_f32_avx512_kernel();
-  // else if (weight_dtype == data_type_t::bf16)
-  //   kernel = get_matmul_bf16_avx512_kernel();
-  // else
-  //   return status_t::unimplemented;
-
   //get forced kernel if any
   if (forced_kernel.empty() || forced_kernel == "aocl_blis_blocked" ||
       forced_kernel == "aocl_blis") {
@@ -329,9 +319,7 @@ status_t matmul_operator_t::kernel_factory() {
       kernel = get_matmul_ref_kernel();
     }
     else if (forced_kernel == "onednn") {
-      //kernel = get_linear_onednn_kernel();
-      apilog_error("<", name, "> kernel unimplemented using onednn");
-      return status_t::unimplemented;
+      kernel = get_matmul_onednn_kernel();
     }
     else {
       apilog_error("<", name, "> kernel unimplemented using forced kernel ",

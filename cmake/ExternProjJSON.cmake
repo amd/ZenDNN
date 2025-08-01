@@ -21,6 +21,7 @@ if(ZENDNNL_DEPENDS_JSON)
   list(APPEND JSON_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
   message(DEBUG "JSON_CMAKE_ARGS=${JSON_CMAKE_ARGS}")
+  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
 
   if(ZENDNNL_LOCAL_JSON)
 
@@ -31,7 +32,8 @@ if(ZENDNNL_DEPENDS_JSON)
       BINARY_DIR "${CMAKE_BINARY_DIR}/json"
       INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/json"
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      INSTALL_COMMAND cmake --build . --config release --target install -j)
+      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config release --target install)
   else()
     ExternalProject_ADD(zendnnl-deps-json
       SOURCE_DIR "${JSON_ROOT_DIR}"
@@ -41,7 +43,8 @@ if(ZENDNNL_DEPENDS_JSON)
       GIT_TAG ${JSON_GIT_TAG}
       GIT_PROGRESS ${JSON_GIT_PROGRESS}
       CMAKE_ARGS ${JSON_CMAKE_ARGS}
-      INSTALL_COMMAND cmake --build . --config release --target install -j
+      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+      INSTALL_COMMAND cmake --build . --config release --target install
       UPDATE_DISCONNECTED TRUE)
   endif()
 

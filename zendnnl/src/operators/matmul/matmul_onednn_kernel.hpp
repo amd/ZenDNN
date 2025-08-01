@@ -23,8 +23,8 @@
 #include <cstdlib>
 #include "dnnl.hpp"
 #include "matmul_context.hpp"
+#include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
-#include "common/error_handling.hpp"
 
 
 namespace zendnnl {
