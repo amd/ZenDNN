@@ -115,7 +115,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
 
   const int   lda              = is_trans_src ? input_tensor.get_aligned_size(
                                    0) : input_tensor.get_aligned_size(1);
-  const int   ldb              = is_trans_weights ? weight_tensor.get_aligned_size(
+  const int   ldb              = is_trans_weights ?
+                                 weight_tensor.get_aligned_size(
                                    0) : weight_tensor.get_aligned_size(1);
   const int   ldc              = output_tensor.get_aligned_size(1);
 
@@ -157,9 +158,13 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
           }
         }
       }
-      sum *= alpha;
-      sum += output_dtype == data_type_t::bf16 ? bf16_to_float(((
-               int16_t *)output)[op_idx]) * beta : ((float *)output)[op_idx] * beta;
+      if (alpha != 1.0f) {
+        sum *= alpha;
+      }
+      if (beta) {
+        sum += output_dtype == data_type_t::bf16 ? bf16_to_float(((
+                 int16_t *)output)[op_idx]) * beta : ((float *)output)[op_idx] * beta;
+      }
 
       output_buff_f32[op_idx] = sum;
       if (optional_bias_tensor) {
