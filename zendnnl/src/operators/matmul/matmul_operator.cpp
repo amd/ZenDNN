@@ -137,6 +137,25 @@ status_t matmul_operator_t::validate() {
     return status_t::failure;
   }
 
+  //Hard Force to Reference Kernel if 2D Matrix is broadcasted from user-side
+  //No-Support in AOCL-BLIS
+  {
+    auto inp_stride = input->get_stride();
+    auto wei_stride = weights->get_stride();
+    if (inp_stride[input_size.size()-1] == 0 ||
+        inp_stride[input_size.size()-2] == 0) {
+      log_info("Input is broadcasted from user-side, forcing ref kernel");
+      forced_kernel = "reference";
+    }
+
+    if (wei_stride[weights_size.size()-1] == 0 ||
+        wei_stride[weights_size.size()-2] == 0) {
+      log_info("Weight is broadcasted from user-side, forcing ref kernel");
+      forced_kernel = "reference";
+    }
+
+  }
+
   // validate post-ops
   auto post_ops = context.get_post_op();
   return validate_buffer_post_op(output_size, post_ops, inputs);

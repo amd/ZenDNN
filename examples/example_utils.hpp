@@ -49,6 +49,11 @@ class tensor_factory_t {
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
                           float val_, std::string tensor_name_="uniform");
 
+  /** @brief broadcasted uniform tensor */
+  tensor_t broadcast_uniform_tensor(const std::vector<index_type> size_,
+                                    const std::vector<index_type> stride_, data_type dtype_, float val_,
+                                    std::string tensor_name_="broadcasted uniform");
+
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_, float range_,
@@ -70,8 +75,8 @@ class tensor_factory_t {
  */
 
 class tensor_functions_t {
-public:
-  void tensor_pretty_print(const tensor_t& tensor_);
+ public:
+  void tensor_pretty_print(const tensor_t &tensor_);
 };
 
 } //examples

@@ -469,5 +469,71 @@ int matmul_relu_forced_ref_kernel_example() {
   return NOT_OK;
 }
 
+int matmul_broadcast_example() {
+  testlog_info("matmul kernel broadcast example");
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    auto weights = tensor_factory.broadcast_uniform_tensor({MATMUL_K, MATMUL_N}, {0,1},
+        data_type_t::f32, 1.0, "broadcasted_weight");
+
+    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+                   data_type_t::f32,
+                   3.0, "bias");
+
+    auto relu_post_op = post_op_t{post_op_type_t::relu};
+
+    //define matmul context
+    auto matmul_context = matmul_context_t()
+                          .set_param("weights", weights)
+                          .set_param("bias", bias)
+                          .set_post_op(relu_post_op)
+                          .create();
+
+    if (! matmul_context.check()) {
+      testlog_error("matmul context creation failed");
+      return NOT_OK;
+    }
+
+    //define matmul operator
+    auto matmul_operator = matmul_operator_t()
+                           .set_name("matmul_broadcast_operator")
+                           .set_context(matmul_context)
+                           .create();
+
+    if (! matmul_operator.check()) {
+      testlog_error("operator ", matmul_operator.get_name(), " creation failed.");
+      return NOT_OK;
+    }
+
+    auto input_tensor = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_K},
+                        data_type_t::f32,
+                        1.0, "matmul_input");
+
+    auto output_tensor = tensor_factory.zero_tensor({MATMUL_M, MATMUL_N},
+                         data_type_t::f32,
+                         "matmul_output");
+
+    status = matmul_operator
+             .set_input("matmul_input", input_tensor)
+             .set_output("matmul_output", output_tensor)
+             .execute();
+    if (status == status_t::success) {
+      testlog_info("operator ", matmul_operator.get_name(), " execution successful.");
+    }
+    else {
+      testlog_info("operator ", matmul_operator.get_name(), " execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return NOT_OK;
+}
+
 } //examples
 } //zendnnl

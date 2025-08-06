@@ -128,6 +128,51 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
   return utensor;
 }
 
+tensor_t tensor_factory_t::broadcast_uniform_tensor(const
+    std::vector<index_type> size_,
+    const std::vector<index_type> stride_, data_type dtype_, float val_,
+    std::string tensor_name_) {
+
+  auto utensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_stride(stride_)
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
+
+  if (! utensor.check()) {
+    log_warning("tensor creation of ", utensor.get_name(), " failed.");
+  }
+  else {
+    auto  buf_nelem  = utensor.get_nelem();
+    void *buf_vptr   = utensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = val_;
+      }
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = bfloat16_t(val_);
+      }
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = static_cast<int8_t>(val_);
+      }
+    }
+    else {
+      log_warning("tensor ", utensor.get_name(), " unsupported data type.");
+    }
+  }
+  return utensor;
+}
+
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     size_,
     data_type dtype_, float range_,
@@ -197,7 +242,7 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
   return btensor;
 }
 
-void tensor_functions_t::tensor_pretty_print(const tensor_t& tensor_) {
+void tensor_functions_t::tensor_pretty_print(const tensor_t &tensor_) {
   //works only for 3D as of now
   auto tensor_size = tensor_.get_size();
 

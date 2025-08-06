@@ -48,6 +48,7 @@ int main() {
   matmul_relu_f32_kernel_example();
   matmul_relu_bf16_kernel_example();
   matmul_relu_forced_ref_kernel_example();
+  matmul_broadcast_example(); //2d mm broadcast example
   matmul_mul_silu_mul_f32_kernel_example();
   matmul_silu_mul_bf16_kernel_example();
   matmul_strided_f32_kernel_example();

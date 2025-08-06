@@ -528,8 +528,8 @@ status_t aocl_blis_utils_t::reorder_weights(std::optional<tensor_t> weights) {
   bool trans_weights = weights->get_order() == "ba";
   int k = weights->get_size(0);
   int n = weights->get_size(1);
-  int ldb = trans_weights ? weights->get_aligned_size(0) :
-            weights->get_aligned_size(1);
+  int ldb = trans_weights ? weights->get_stride(1) :
+            weights->get_stride(0);
   auto weights_ptr = weights->get_raw_handle_const();
   data_type_t weight_data_type = weights->get_data_type();
   if (weight_data_type == data_type_t::f32) {
