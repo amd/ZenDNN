@@ -33,6 +33,8 @@ struct compare_stats_t{
   float max_deviation;
   float mean_deviation;
   float min_deviation;
+  float relative_error;
+  float absolute_error;
 };
 
 /** @class compare_context_t

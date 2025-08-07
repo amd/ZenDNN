@@ -70,7 +70,42 @@ status_t compare_operator_t::validate() {
     return status_t::failure;
   }
 
-  if (diff_dtype != data_type_t::f32) {
+  if (diff_dtype != data_type_t::f32 && diff_dtype != data_type_t::bf16) {
+    return status_t::failure;
+  }
+
+   // Check for NaN or Inf values
+   auto contains_nan_or_inf = [](const std::optional<tensor_t>& tensor_opt) -> bool {
+     if (!tensor_opt.has_value()) return false;
+     const tensor_t& tensor = tensor_opt.value();
+     auto dtype = tensor.get_data_type();
+     size_t num_elements = 1;
+     for (auto dim : tensor.get_size()) {
+       num_elements *= dim;
+     }
+     // Only check for floating point types
+     if (dtype == data_type_t::f32) {
+       const float* data = static_cast<const float*>(tensor.get_raw_handle_unsafe());
+       for (size_t i = 0; i < num_elements; ++i) {
+         if (std::isnan(data[i]) || std::isinf(data[i])) {
+           return true;
+         }
+       }
+     } else if (dtype == data_type_t::bf16) {
+       const bfloat16_t* data = static_cast<const bfloat16_t*>(tensor.get_raw_handle_unsafe());
+       for (size_t i = 0; i < num_elements; ++i) {
+         float val = static_cast<float>(data[i]);
+         if (std::isnan(val) || std::isinf(val)) {
+           return true;
+         }
+       }
+     }
+     // For integer and other types, NaN/Inf are not possible
+     return false;
+   };
+
+  if (contains_nan_or_inf(expec_tensor) || contains_nan_or_inf(test_tensor) || contains_nan_or_inf(diff_tensor)) {
+    apilog_error("<", get_name(), "> tensors contain NaN or Inf values.");
     return status_t::failure;
   }
 

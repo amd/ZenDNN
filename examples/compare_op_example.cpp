@@ -64,6 +64,8 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
                       "Mean Deviation:",stats.mean_deviation,", ",
                       "Max Deviation:",stats.max_deviation,", ",
                       "Min Deviation:",stats.min_deviation,", ",
+                      "Absolute Error:",stats.absolute_error,", ",
+                      "Relative Error:",stats.relative_error,", ",
                       "output[", MATMUL_M/2, ",", MATMUL_N/2,"] = ",diff_tensor.at({MATMUL_M/2, MATMUL_N/2}));
     }
     else {
@@ -85,16 +87,29 @@ int compare_op_example() {
   try {
     tensor_factory_t tensor_factory;
 
-    auto input_tensor_1 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
-                          data_type_t::f32,
-                          2.0, "compare_input1");
+  // BF16 comparison
+  auto input_tensor_bf16_1 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                data_type_t::bf16,
+                2.0, "compare_input_bf16_1");
 
-    auto input_tensor_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
-                          data_type_t::f32,
-                          2.0, "compare_input2");
+  auto input_tensor_bf16_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                data_type_t::bf16,
+                2.0, "compare_input_bf16_2");
 
-    //Call to compare operator
-    compare_operator_execute(input_tensor_1, input_tensor_2);
+  testlog_info("Comparing bf16 tensors");
+  compare_operator_execute(input_tensor_bf16_1, input_tensor_bf16_2);
+
+  // FP32 comparison
+  auto input_tensor_fp32_1 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                data_type_t::f32,
+                2.0, "compare_input_fp32_1");
+
+  auto input_tensor_fp32_2 = tensor_factory.uniform_tensor({MATMUL_M, MATMUL_N},
+                data_type_t::f32,
+                2.0, "compare_input_fp32_2");
+
+  testlog_info("Comparing fp32 tensors");
+  compare_operator_execute(input_tensor_fp32_1, input_tensor_fp32_2);
   }
   catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;

@@ -34,6 +34,13 @@ class compare_ref_kernel_t final : public op_kernel_t<compare_context_t> {
   status_t execute(const context_type &context_,
                    tensor_map_type &inputs_,
                    tensor_map_type &outputs_) override;
+
+ private:
+  template <typename T>
+  status_t compare_ref_kernel_execute_templated(
+    const op_kernel_t<compare_context_t>::context_type& context_,
+    op_kernel_t<compare_context_t>::tensor_map_type &input_,
+    op_kernel_t<compare_context_t>::tensor_map_type &output_);
 };
 
 extern "C" {

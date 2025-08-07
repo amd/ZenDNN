@@ -20,18 +20,18 @@ namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
 
-status_t compare_ref_kernel_t::execute(const context_type &context_,
-                                       tensor_map_type &input_,
-                                       tensor_map_type &output_) {
-  LOG_DEBUG_INFO("Executing compare operator");
-
+template <typename T>
+status_t compare_ref_kernel_t::compare_ref_kernel_execute_templated(
+  const op_kernel_t<compare_context_t>::context_type& context_,
+  op_kernel_t<compare_context_t>::tensor_map_type &input_,
+  op_kernel_t<compare_context_t>::tensor_map_type &output_) {
   auto     expec_tensor  = input_.at("expected_tensor");
   auto     test_tensor   = input_.at("test_tensor");
   auto     diff_tensor   = output_.at("diff_tensor");
 
-  float   *expec_ptr  = (float *)expec_tensor.get_raw_handle_unsafe();
-  float   *test_ptr   = (float *)test_tensor.get_raw_handle_unsafe();
-  float   *diff_ptr   = (float *)diff_tensor.get_raw_handle_unsafe();
+  T*   expec_ptr  = (T *)expec_tensor.get_raw_handle_unsafe();
+  T*   test_ptr   = (T *)test_tensor.get_raw_handle_unsafe();
+  float*   diff_ptr   = (float *)diff_tensor.get_raw_handle_unsafe();
 
   auto stats        = context_.get_compare_stats();
   auto tolerance    = context_.get_tolerance();
@@ -41,11 +41,22 @@ status_t compare_ref_kernel_t::execute(const context_type &context_,
   float sum_dev     = 0.0f;
   float max_dev     = std::numeric_limits<float>::lowest();
   float min_dev     = std::numeric_limits<float>::max();
+  float sum_abs_error = 0.0f;
+  float sum_rel_error = 0.0f;
 
-  for (size_t i = 0; i<nelem; i++) {
-    float diff = std::fabs(expec_ptr[i] - test_ptr[i]);
+  for (size_t i = 0; i < nelem; i++) {
+    float expec_val = static_cast<float>(expec_ptr[i]);
+    float test_val  = static_cast<float>(test_ptr[i]);
+    float diff = std::fabs(expec_val - test_val);
     diff_ptr[i] = diff;
     sum_dev += diff;
+
+    // Calculate absolute error
+    sum_abs_error += diff;
+    float expected_val = std::fabs(expec_val);
+    if (expected_val > 1e-8f) {
+      sum_rel_error += diff / expected_val;
+    }
 
     if (diff > max_dev) {
       max_dev = diff;
@@ -56,7 +67,7 @@ status_t compare_ref_kernel_t::execute(const context_type &context_,
     }
 
     // Check if the difference is within the tolerance range
-    if (std::fabs(diff - tolerance) <= tolerance) {
+    if (std::fabs(diff) <= tolerance) {
       ++match_count;
     }
   }
@@ -65,9 +76,35 @@ status_t compare_ref_kernel_t::execute(const context_type &context_,
   stats->max_deviation  = max_dev;
   stats->mean_deviation = sum_dev / nelem;
   stats->min_deviation  = min_dev;
+  stats->absolute_error = sum_abs_error / nelem;
+  stats->relative_error = sum_rel_error / nelem;
 
   return status_t::success;
 }
+
+status_t compare_ref_kernel_t::execute(const context_type &context_,
+                     tensor_map_type &input_,
+                     tensor_map_type &output_) {
+  LOG_DEBUG_INFO("Executing compare operator");
+  auto expec_tensor = input_.at("expected_tensor");
+  auto dtype = expec_tensor.get_data_type();
+  if (dtype == data_type_t::f32) {
+    return this->compare_ref_kernel_execute_templated<float>(context_, input_, output_);
+  } else {
+    return this->compare_ref_kernel_execute_templated<bfloat16_t>(context_, input_, output_);
+  }
+}
+
+// Explicit template instantiation
+template status_t compare_ref_kernel_t::compare_ref_kernel_execute_templated<float>(
+  const op_kernel_t<compare_context_t>::context_type& context_,
+  op_kernel_t<compare_context_t>::tensor_map_type &input_,
+  op_kernel_t<compare_context_t>::tensor_map_type &output_);
+
+template status_t compare_ref_kernel_t::compare_ref_kernel_execute_templated<bfloat16_t>(
+  const op_kernel_t<compare_context_t>::context_type& context_,
+  op_kernel_t<compare_context_t>::tensor_map_type &input_,
+  op_kernel_t<compare_context_t>::tensor_map_type &output_);
 
 extern "C" {
   zendnnl::ops::compare_ref_kernel_t *get_compare_kernel() {
@@ -76,3 +113,4 @@ extern "C" {
 }
 } //namespace ops
 } //namespace zendnnl
+
