@@ -18,7 +18,8 @@
 namespace zendnnl {
 namespace ops {
 
-matmul_context_t::matmul_context_t() : op_context_t(), _alpha(1.0f), _beta(0.0f) {
+matmul_context_t::matmul_context_t() : op_context_t(), _alpha(1.0f),
+  _beta(0.0f) {
 }
 
 matmul_context_t &matmul_context_t::set_alpha(float alpha_) {
@@ -29,7 +30,7 @@ matmul_context_t &matmul_context_t::set_alpha(float alpha_) {
 }
 float matmul_context_t::get_alpha() const {
   LOG_DEBUG_INFO("Getting alpha param op_context_t");
-    return _alpha;
+  return _alpha;
 }
 
 matmul_context_t &matmul_context_t::set_beta(float beta_) {
@@ -40,7 +41,7 @@ matmul_context_t &matmul_context_t::set_beta(float beta_) {
 }
 float matmul_context_t::get_beta() const {
   LOG_DEBUG_INFO("Getting beta param op_context_t");
-    return _beta;
+  return _beta;
 }
 
 status_t matmul_context_t::validate() {
@@ -66,7 +67,8 @@ status_t matmul_context_t::validate() {
   if (bias) {
     auto bias_size = bias->get_size();
     if (weights_size.at(weights_size.size()-1) != bias_size.at(0)) {
-      apilog_error("Bias size mismatch with weights");
+      apilog_error("Bias size mismatch with weights. weights size=",
+                   weights_size.at(weights_size.size()-1), " bias size=", bias_size.at(0));
       return status_t::failure;
     }
   }

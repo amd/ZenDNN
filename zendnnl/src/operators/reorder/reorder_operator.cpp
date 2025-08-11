@@ -41,7 +41,8 @@ status_t reorder_operator_t::validate() {
     size_t input_buffer_size = input->get_buffer_sz_bytes();
 
     if (reorder_size != input_buffer_size) {
-      apilog_error("Reorder size mismatch, Inplace reorder doesn't work for given matrix");
+      apilog_error("Reorder size mismatch, Inplace reorder doesn't work for given matrix: reorder_size=",
+                   reorder_size, " input_buffer_size=", input_buffer_size);
       return status_t::failure;
     }
     else {
@@ -55,19 +56,21 @@ status_t reorder_operator_t::validate() {
   }
 
   if (input_size.at(0) != output_size.at(0)) {
-    apilog_error("Input and output size mismatch at dim - 0");
+    apilog_error("Input and output size mismatch at dim - 0: input_size=",
+                 input_size.at(0), " output_size=", output_size.at(0));
     return status_t::failure;
   }
 
   if (input_size.at(1) != output_size.at(1)) {
-    apilog_error("Input and output size mismatch at dim - 1");
+    apilog_error("Input and output size mismatch at dim - 1: input_size=",
+                 input_size.at(1), " output_size=", output_size.at(1));
     return status_t::failure;
   }
 
   auto source_dtype  = context.get_source_dtype();
   if ((input->get_data_type() == data_type_t::s8) &&
       (!((source_dtype == data_type_t::s8) || (source_dtype == data_type_t::u8)))) {
-    apilog_error("Source data type mismatch for s8");
+    apilog_error("Source data type mismatch for s8: source_dtype=", dtype_info(source_dtype));
     return status_t::failure;
   }
 

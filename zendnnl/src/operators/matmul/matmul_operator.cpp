@@ -62,7 +62,8 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
         }
         else {
           apilog_error(add_tensor_obj->second.get_name(),
-                       " Invalid post-op: size mismatch for binary_add post op.");
+                       " Invalid post-op: size mismatch for binary_add post op: Output_size=",
+                       output_size.size(), " Tensor_size=", tensor_size.size());
           return status_t::failure;
         }
       }
@@ -99,7 +100,8 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
         }
         else {
           apilog_error(mul_tensor_obj->second.get_name(),
-                       " Invalid post-op: size mismatch for binary_mul post op.");
+                       " Invalid post-op: size mismatch for binary_mul post op: Output_size=",
+                       output_size.size(), " Tensor_size=", tensor_size.size());
           return status_t::failure;
         }
       }
@@ -152,7 +154,8 @@ status_t matmul_operator_t::validate() {
 
   //Input and Output Dimension Check
   if (input_size.size()==3 && input_size.at(0) != output_size.at(0)) {
-    apilog_error("Input and output size mismatch at dim - 0 for batchMatmul");
+    apilog_error("Input and output size mismatch at dim - 0 for batchMatmul. Input size= ",
+                 input_size.at(0), " Output size= ",output_size.at(0));
     return status_t::failure;
   }
 
@@ -160,26 +163,33 @@ status_t matmul_operator_t::validate() {
   if (input_size.at(input_size.size()-2) != output_size.at(
         output_size.size()-2)) {
     apilog_error("Input and output size mismatch at output dim - ",
-                 output_size.size()-2," for matmul/batchMatmul");
+                 output_size.size()-2," for matmul/batchMatmul. Input size= ",
+                 input_size.at(input_size.size()-2),
+                 " Output size= ", output_size.at(output_size.size()-2));
     return status_t::failure;
   }
 
   //Input and Weight Dimension check
   if (input_size.at(input_size.size()-1) != weights_size.at(
         weights_size.size()-2)) {
-    apilog_error("Dimension mismatch with input and weights");
+    apilog_error("Dimension mismatch with input and weights. Input dim= ",
+                 input_size.at(input_size.size()-1),
+                 " Weight dim= ", weights_size.at(weights_size.size()-2));
     return status_t::failure;
   }
 
   //Weight and Output Dimension Check
   if (weights_size.size()==3 && weights_size.at(0) != output_size.at(0)) {
-    apilog_error("weights and output size mismatch at dim - 0 for batchMatmul");
+    apilog_error("weights and output size mismatch at dim - 0 for batchMatmul: weights size=",
+                 weights_size.at(0), " output size=", output_size.at(0));
     return status_t::failure;
   }
 
   if (weights_size.at(weights_size.size()-1) != output_size.at(
         output_size.size()-1)) {
-    apilog_error("Dimension mismatch with weights and output");
+    apilog_error("Dimension mismatch with weights and output: weights dim= ",
+                 weights_size.at(weights_size.size()-1), " output dim= ",
+                 output_size.at(output_size.size()-1));
     return status_t::failure;
   }
 

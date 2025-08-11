@@ -38,7 +38,7 @@ status_t embag_operator_t::validate() {
   // get offset tensor
   auto offsets_tensor = get_input("offsets").value();
   [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-    (offsets_tensor.get_raw_handle_const());
+      (offsets_tensor.get_raw_handle_const());
 
   //input output dimensions
   auto table_sizes         = context.get_param("table")->get_size();
@@ -56,7 +56,8 @@ status_t embag_operator_t::validate() {
   auto output_data_type  = get_output("output")->get_data_type();
 
   if (output_sizes[1] != table_sizes[1]) {
-    log_error(name, ": size mismatch in input/output/params");
+    log_error(name, ": size mismatch in input/output/params. ", name,
+              " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
     return status_t::failure;
   }
 
@@ -120,7 +121,7 @@ status_t embag_operator_t::validate_forced_kernel() {
     // get offset tensor
     auto offsets_tensor = get_input("offsets").value();
     [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-      (offsets_tensor.get_raw_handle_const());
+        (offsets_tensor.get_raw_handle_const());
 
     //input output dimensions
     auto table_sizes         = context.get_param("table")->get_size();
@@ -135,7 +136,9 @@ status_t embag_operator_t::validate_forced_kernel() {
     auto output_data_type  = get_output("output")->get_data_type();
 
     if (output_sizes[1] != table_sizes[1]) {
-      apilog_error(name, ": size mismatch in input/output/params");
+      apilog_error(name, ": size mismatch in input/output/params. ", name,
+                   " output_size=", output_sizes[1],
+                   " table_size=", table_sizes[1]);
       return status_t::failure;
     }
 

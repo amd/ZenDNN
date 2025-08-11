@@ -15,12 +15,30 @@
 # *******************************************************************************/
 
 #include "tensor.hpp"
+#include <sstream>
 
 namespace zendnnl {
 namespace memory {
 
 using namespace zendnnl::common;
 using namespace zendnnl::error_handling;
+
+// Helper to stringify vectors for logging
+namespace {
+template <typename T>
+std::string vec_to_string(const std::vector<T> &v) {
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (i) {
+      oss << ",";
+    }
+    oss << v[i];
+  }
+  oss << "]";
+  return oss.str();
+}
+}
 
 //constructors and destructor
 tensor_t::tensor_t():
@@ -256,7 +274,7 @@ void *tensor_t::get_raw_handle_unsafe() const {
   return (void *)((uint8_t *)storage->get_raw_handle() + option.base_offset);
 }
 
-void *tensor_t::get_raw_handle_unsafe(const index_vec_type& index_) const {
+void *tensor_t::get_raw_handle_unsafe(const index_vec_type &index_) const {
   if (status != status_t::success) {
     std::string message  = "attempt to get raw handle of an invalid tensor.";
     EXCEPTION_WITH_LOC(message);
@@ -289,7 +307,7 @@ const void *tensor_t::get_raw_handle_const() const {
                         option.base_offset);
 }
 
-const void *tensor_t::get_raw_handle_const(const index_vec_type& index_) const {
+const void *tensor_t::get_raw_handle_const(const index_vec_type &index_) const {
   if (status != status_t::success) {
     std::string message  = "attempt to get raw handle of an invalid tensor.";
     EXCEPTION_WITH_LOC(message);
@@ -341,8 +359,9 @@ tensor_t &tensor_t::create() {
   LOG_DEBUG_INFO("Creating tensor object");
 
   //if already formed object, return the object
-  if (status == status_t::success)
+  if (status == status_t::success) {
     return (*this);
+  }
 
   //validate meta info
   auto l_status = validate_meta_info();
@@ -467,13 +486,15 @@ status_t tensor_t::size_sanity_check() const {
   LOG_DEBUG_INFO("size sanity check");
 
   //size can not be empty
-  if (option.size.empty())
+  if (option.size.empty()) {
     return status_t::memory_bad_size;
+  }
 
   //size can not be zero
   if (std::find(option.size.begin(), option.size.end(), 0)
-      != option.size.end())
+      != option.size.end()) {
     return status_t::memory_bad_size;
+  }
 
   return status_t::success;
 };
@@ -483,8 +504,9 @@ status_t tensor_t::aligned_size_sanity_check() {
   LOG_DEBUG_INFO("Stride sanity check");
 
   //aligned size length should be equal to size
-  if (option.size.size() != option.aligned_size.size())
+  if (option.size.size() != option.aligned_size.size()) {
     return status_t::memory_bad_aligned_size;
+  }
 
   for (size_t i = 0; i < option.size.size(); ++i) {
     //if aligned_size less than size flag error
@@ -513,16 +535,18 @@ void tensor_t::set_default_order(bool is_stride_) {
     std::vector<uint32_t> ivec;
     //scan stride for zeros
     for (uint32_t i = 0; i < stride.size(); ++i) {
-      if (option.stride[i] == 0)
+      if (option.stride[i] == 0) {
         ivec.push_back(i);
+      }
     }
 
     //scan stride from max to min
     while (ivec.size() < stride.size()) {
       uint32_t max_index = 0;
-      for(uint32_t i = 1; i < stride.size(); ++i) {
-        if (stride[i] > stride[max_index])
+      for (uint32_t i = 1; i < stride.size(); ++i) {
+        if (stride[i] > stride[max_index]) {
           max_index = i;
+        }
       }
 
       ivec.push_back(max_index);
@@ -538,8 +562,9 @@ void tensor_t::set_default_order(bool is_stride_) {
 
   }
   else {
-    for (int8_t i = 0; i < int8_t(option.size.size()); ++i)
+    for (int8_t i = 0; i < int8_t(option.size.size()); ++i) {
       option.order[i] = char('a' + i);
+    }
   }
 }
 
@@ -547,15 +572,17 @@ status_t tensor_t::order_sanity_check() {
 
   LOG_DEBUG_INFO("order sanity check");
 
-  if (option.order.size() != option.size.size())
+  if (option.order.size() != option.size.size()) {
     return status_t::memory_bad_order;
+  }
 
   for (int8_t i = 0; i < int8_t(option.size.size()); ++i) {
     auto count = std::count(option.order.cbegin(),
                             option.order.cend(),
                             char('a' + i));
-    if (count != 1)
+    if (count != 1) {
       return status_t::memory_bad_order;
+    }
   }
 
   return status_t::success;
@@ -592,8 +619,12 @@ status_t tensor_t::stride_sanity_check() {
   LOG_DEBUG_INFO("stride sanity check");
 
   //stride size should be at least size of tensor size
-  if (option.stride.size() != option.aligned_size.size())
+  if (option.stride.size() != option.aligned_size.size()) {
+    apilog_error("tensor ", name, " bad stride size: got stride.size()=",
+                 option.stride.size(),
+                 " expected=", option.aligned_size.size());
     return status_t::memory_bad_stride;
+  }
 
   //permute size and stride if order is set
   auto default_order_size =
@@ -611,8 +642,12 @@ status_t tensor_t::stride_sanity_check() {
     stride_rightmost_nz--;
 
     //if strides are all zero, flag error
-    if (stride_rightmost_nz < 0)
+    if (stride_rightmost_nz < 0) {
+      apilog_error("tensor ", name, " all strides are zero: stride=",
+                   vec_to_string(default_order_stride),
+                   " (must have at least one non-zero stride)");
       return status_t::memory_bad_stride;
+    }
   }
 
   //scan strides for consistency with tensor size
@@ -622,17 +657,22 @@ status_t tensor_t::stride_sanity_check() {
   option.nelem         = 1;
   option.aligned_nelem = 1;
 
-  for (int32_t i = stride_right; i >= stride_left; --i ) {
-    auto& stride = default_order_stride[i];
+  for (int32_t i = stride_right; i >= stride_left; --i) {
+    auto &stride = default_order_stride[i];
 
     //ignore zero strides
-    if (stride == 0)
+    if (stride == 0) {
       continue;
+    }
 
     //match stride with alignd_nelem as it is product of aligned_size
     //so far. stride should match this.
-    if (stride != option.aligned_nelem)
+    if (stride != option.aligned_nelem) {
+      apilog_error("tensor ", name, " invalid stride at dimension ", i,
+                   ": got stride=", stride,
+                   " expected=", option.aligned_nelem);
       return status_t::memory_bad_stride;
+    }
 
     option.nelem         *= default_order_size[i];
     option.aligned_nelem *= default_order_aligned_size[i];
@@ -650,7 +690,7 @@ void tensor_t::set_default_base() {
 }
 
 
-status_t tensor_t::index_sanity_check(const index_vec_type& index_) const {
+status_t tensor_t::index_sanity_check(const index_vec_type &index_) const {
 
   LOG_DEBUG_INFO("Index sanity check");
 
@@ -668,14 +708,14 @@ status_t tensor_t::index_sanity_check(const index_vec_type& index_) const {
 }
 
 tensor_t::index_vec_type
-tensor_t::permute_axes_order(const index_vec_type& in_vec_,
+tensor_t::permute_axes_order(const index_vec_type &in_vec_,
                              bool order_to_default) {
   //clear and fill with zeros
   index_vec_type out_vec(in_vec_.size(),0);
 
   //permute
   int32_t sz = int32_t(option.order.size());
-  for(auto i = 0; i < sz; ++i) {
+  for (auto i = 0; i < sz; ++i) {
     int32_t index = int32_t(option.order[i] - 'a');
 
     //direction true:order to default, false:default to order
@@ -684,10 +724,12 @@ tensor_t::permute_axes_order(const index_vec_type& in_vec_,
     // else
     //   out_vec[sz -1 -index] = in_vec_[sz -1 -i];
 
-    if (order_to_default)
+    if (order_to_default) {
       out_vec[i] = in_vec_[index];
-    else
+    }
+    else {
       out_vec[index] = in_vec_[i];
+    }
 
   }
 
@@ -738,7 +780,6 @@ status_t tensor_t::validate_meta_info() {
   }
   else {
     set_default_order(is_stride);
-
     if (is_stride) {
       if (stride_sanity_check() != status_t::success) {
         apilog_error("tensor ", name, " order and stride mismatch.");
