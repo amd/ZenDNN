@@ -254,9 +254,7 @@ status_t matmul_operator_t::validate_forced_kernel() {
 // TODO: Move optional dependency prerpocessor to respective kernel file.
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
       forced_kernel == "aocl_blis_blocked"
-#if ZENDNNL_DEPENDS_ONEDNN
       || forced_kernel == "onednn"
-#endif
      ) {
     return status_t::success;
   }
@@ -436,12 +434,9 @@ status_t matmul_operator_t::kernel_factory() {
     if (forced_kernel == "reference") {
       kernel = get_matmul_ref_kernel();
     }
-// TODO: Move optional dependency prerpocessor to respective kernel file.
-#if ZENDNNL_DEPENDS_ONEDNN
     else if (forced_kernel == "onednn") {
       kernel = get_matmul_onednn_kernel();
     }
-#endif
     else {
       apilog_error("<", name, "> kernel unimplemented using forced kernel ",
                    forced_kernel);

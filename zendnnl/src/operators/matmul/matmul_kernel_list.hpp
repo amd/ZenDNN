@@ -19,7 +19,6 @@
 #include "matmul_ref_kernel.hpp"
 #include "aocl_blis/matmul_fp32_avx512_kernel.hpp"
 #include "aocl_blis/matmul_bf16_avx512_kernel.hpp"
-#if ZENDNNL_DEPENDS_ONEDNN
-  #include "matmul_onednn_kernel.hpp"
-#endif
+#include "onednn/matmul_onednn_kernel.hpp"
+
 #endif

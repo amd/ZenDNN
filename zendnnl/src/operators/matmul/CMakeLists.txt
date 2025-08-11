@@ -15,6 +15,15 @@
 # *******************************************************************************/
 
 add_subdirectory(aocl_blis)
+add_subdirectory(onednn)
+
+if(ZENDNNL_DEPENDS_ONEDNN)
+  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+else()
+  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+endif()
 
 set(matmul_operator_sources
   matmul_context.cpp
@@ -30,16 +39,6 @@ set(matmul_operator_public_headers
 set(matmul_operator_private_headers
   matmul_kernel_list.hpp
   matmul_ref_kernel.hpp)
-
-if(ZENDNNL_DEPENDS_ONEDNN)
-  list (APPEND matmul_operator_sources matmul_onednn_kernel.cpp)
-  list (APPEND matmul_operator_private_headers matmul_onednn_kernel.hpp)
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-else()
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
-endif()
 
 target_sources(zendnnl_archive
   PRIVATE ${matmul_operator_sources}
