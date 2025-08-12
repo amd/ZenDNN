@@ -70,9 +70,15 @@ set(example_headers
   embedding_bag_example.hpp)
 
 add_executable(examples ${examples_sources})
+# target_link_libraries(examples
+#   OpenMP::OpenMP_CXX
+#   zendnnl::zendnnl_archive)
+
+# target_link_libraries(examples
+#   OpenMP::OpenMP_CXX)
 target_link_libraries(examples
-  OpenMP::OpenMP_CXX
-  zendnnl::zendnnl_archive)
+  PUBLIC  OpenMP::OpenMP_CXX
+  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,zendnnl::zendnnl_archive>")
 
 if(ZENDNNL_CODE_COVERAGE)
   target_compile_options(examples PRIVATE --coverage -O0 -g)

@@ -34,9 +34,9 @@ target_sources(zendnnl_archive
           TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
 target_link_options(zendnnl_archive
   PUBLIC "-fopenmp")
-target_link_libraries(zendnnl_archive
-  PUBLIC OpenMP::OpenMP_CXX
-  PUBLIC amdblis::amdblis_archive)
+# target_link_libraries(zendnnl_archive
+#   PUBLIC OpenMP::OpenMP_CXX
+#   PUBLIC amdblis::amdblis_archive)
 
 target_sources(zendnnl
   PRIVATE ${aocl_blis_matmul_operator_sources}

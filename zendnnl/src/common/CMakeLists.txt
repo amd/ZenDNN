@@ -46,10 +46,10 @@ set(common_headers
 target_sources(zendnnl_archive
   PRIVATE ${common_sources}
   PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${common_headers})
-target_link_libraries(zendnnl_archive
-  PUBLIC au::aoclutils au::au_cpuid
-  PUBLIC nlohmann_json::nlohmann_json
-  PUBLIC DNNL::dnnl)
+# target_link_libraries(zendnnl_archive
+#   PUBLIC au::aoclutils au::au_cpuid
+#   PUBLIC nlohmann_json::nlohmann_json
+#   PUBLIC DNNL::dnnl)
 
 target_sources(zendnnl
   PRIVATE ${common_sources}

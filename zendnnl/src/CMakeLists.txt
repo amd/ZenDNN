@@ -34,8 +34,15 @@ target_include_directories(zendnnl_archive
   INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
 target_link_libraries(zendnnl_archive
   PUBLIC OpenMP::OpenMP_CXX
-  PUBLIC ${CMAKE_DL_LIBS})
+  PUBLIC ${CMAKE_DL_LIBS}
+  PUBLIC nlohmann_json::nlohmann_json)
 
+target_link_libraries(zendnnl_archive
+  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
+  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+
+#  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
 add_library(zendnnl SHARED)
 set_property(TARGET zendnnl
   PROPERTY POSITION_INDEPENDENT_CODE ON)
