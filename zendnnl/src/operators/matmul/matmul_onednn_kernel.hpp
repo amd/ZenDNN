@@ -33,29 +33,30 @@ namespace ops {
 using namespace zendnnl::common;
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
-
-//using namespace dnnl;
+using namespace dnnl;
 
 class matmul_onednn_kernel_t final : public op_kernel_t<matmul_context_t> {
-public:
+ public:
   ~matmul_onednn_kernel_t();
 
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
-private:
-  dnnl::memory::dims       to_dnnl_dims(tensor_t& zendnnl_tensor);
-  dnnl::memory::format_tag to_dnnl_format(tensor_t& zendnnl_tensor);
-  dnnl::memory::data_type  to_dnnl_datatype(tensor_t& zendnnl_tensor);
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
+ private:
+  dnnl::memory::dims       to_dnnl_dims(tensor_t &zendnnl_tensor);
+  dnnl::memory::format_tag to_dnnl_format(tensor_t &zendnnl_tensor);
+  dnnl::memory::data_type  to_dnnl_datatype(tensor_t &zendnnl_tensor);
 
-  dnnl::memory             to_dnnl_tensor(tensor_t& zendnnl_tensor, dnnl::engine eng);
+  dnnl::memory             to_dnnl_tensor(tensor_t &zendnnl_tensor,
+                                          dnnl::engine eng);
 };
 
 } //namespace ops
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t> get_matmul_onednn_kernel();
+  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t>
+  get_matmul_onednn_kernel();
 }
 
 #endif

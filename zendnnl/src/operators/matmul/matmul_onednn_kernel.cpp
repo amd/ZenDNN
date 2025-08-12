@@ -22,27 +22,28 @@ namespace ops {
 using namespace zendnnl::common;
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
-using namespace dnnl;
 
 matmul_onednn_kernel_t::~matmul_onednn_kernel_t() {
 }
 
-dnnl::memory::dims matmul_onednn_kernel_t::to_dnnl_dims(tensor_t& zendnnl_tensor) {
+dnnl::memory::dims matmul_onednn_kernel_t::to_dnnl_dims(
+  tensor_t &zendnnl_tensor) {
   auto zendnnl_size =  zendnnl_tensor.get_size();
 
   dnnl::memory::dims dnnl_dims;
-  for (auto& i : zendnnl_size) {
+  for (auto &i : zendnnl_size) {
     dnnl_dims.push_back(int64_t(i));
   }
 
   return dnnl_dims;
 }
 
-dnnl::memory::format_tag matmul_onednn_kernel_t::to_dnnl_format(tensor_t& zendnnl_tensor) {
+dnnl::memory::format_tag matmul_onednn_kernel_t::to_dnnl_format(
+  tensor_t &zendnnl_tensor) {
 
   auto  zendnnl_dim = zendnnl_tensor.get_dim();
 
-  switch (zendnnl_dim){
+  switch (zendnnl_dim) {
   case 1:
     return dnnl::memory::format_tag::a;
   case 2:
@@ -56,11 +57,12 @@ dnnl::memory::format_tag matmul_onednn_kernel_t::to_dnnl_format(tensor_t& zendnn
   return dnnl::memory::format_tag::ab;
 }
 
-dnnl::memory::data_type matmul_onednn_kernel_t::to_dnnl_datatype(tensor_t& zendnnl_tensor) {
+dnnl::memory::data_type matmul_onednn_kernel_t::to_dnnl_datatype(
+  tensor_t &zendnnl_tensor) {
 
   auto zendnnl_data_type = zendnnl_tensor.get_data_type();
 
-  switch(zendnnl_data_type) {
+  switch (zendnnl_data_type) {
   case data_type_t::f32:
     return dnnl::memory::data_type::f32;
   case data_type_t::bf16:
@@ -72,8 +74,8 @@ dnnl::memory::data_type matmul_onednn_kernel_t::to_dnnl_datatype(tensor_t& zendn
   return dnnl::memory::data_type::f32;
 }
 
-dnnl::memory matmul_onednn_kernel_t::to_dnnl_tensor(tensor_t& zendnnl_tensor,
-                                                    dnnl::engine eng) {
+dnnl::memory matmul_onednn_kernel_t::to_dnnl_tensor(tensor_t &zendnnl_tensor,
+    dnnl::engine eng) {
 
   dnnl::memory::dims tensor_dims       = to_dnnl_dims(zendnnl_tensor);
   dnnl::memory::data_type tensor_dtype = to_dnnl_datatype(zendnnl_tensor);
@@ -82,15 +84,15 @@ dnnl::memory matmul_onednn_kernel_t::to_dnnl_tensor(tensor_t& zendnnl_tensor,
   auto tensor_md  = dnnl::memory::desc(tensor_dims, tensor_dtype, tensor_tag);
   auto tensor_mem = dnnl::memory(tensor_md, eng);
 
-  void* data_handle = zendnnl_tensor.get_raw_handle_unsafe();
+  void *data_handle = zendnnl_tensor.get_raw_handle_unsafe();
   tensor_mem.set_data_handle(data_handle);
 
   return tensor_mem;
 }
 
-status_t matmul_onednn_kernel_t::execute(const context_type& context_,
-                                         tensor_map_type& inputs_,
-                                         tensor_map_type& outputs_) {
+status_t matmul_onednn_kernel_t::execute(const context_type &context_,
+    tensor_map_type &inputs_,
+    tensor_map_type &outputs_) {
 
   log_info("matmul onednn kernel");
 
@@ -110,8 +112,8 @@ status_t matmul_onednn_kernel_t::execute(const context_type& context_,
   auto dnnl_weight_desc = dnnl_weight_tensor.get_desc();
 
   auto matmul_pd = dnnl::matmul::primitive_desc(eng, dnnl_input_desc,
-                                                dnnl_weight_desc,
-                                                dnnl_output_desc);
+                   dnnl_weight_desc,
+                   dnnl_output_desc);
 
   auto matmul_prim = dnnl::matmul(matmul_pd);
 
@@ -131,7 +133,8 @@ status_t matmul_onednn_kernel_t::execute(const context_type& context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t> get_matmul_onednn_kernel() {
+  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t>
+  get_matmul_onednn_kernel() {
     return std::make_shared<zendnnl::ops::matmul_onednn_kernel_t>();
   }
 }

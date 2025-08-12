@@ -14,16 +14,13 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-
 #------------------------------------------------------------------------------
 # functions
-
 # argument parsing
 function parse_args() {
     while [[ $# -gt 0 ]]
     do
 	key="$1"
-
 	case $key in
 	    --zendnnl-nogtest )
 		ZENDNNL_NOGTEST=1
@@ -50,8 +47,16 @@ function parse_args() {
 		ZENDNNL_CLEAN=1
 		shift
 		;;
+	    --clean-all )
+		ZENDNNL_CLEAN_ALL=1
+		shift
+		;;
 	    --no-deps )
                 ZENDNNL_NODEPS=1
+                shift
+		;;
+	    --enable-onednn )
+                ZENDNNL_DEPENDS_ONEDNN=1
                 shift
 		;;
 	    --local-amdblis )
@@ -76,10 +81,12 @@ function parse_args() {
                 echo " options :"
                 echo " --all              : build and install all targets."
                 echo " --clean            : clean all targets."
+                echo " --clean-all        : clean dependencies and build folders."
                 echo " --zendnnl          : build and install zendnnl lib."
                 echo " --examples         : build and install examples."
                 echo " --doxygen          : build and install doxygen docs."
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
+                echo " --enable-onednn    : enable onednn."
                 echo " --local-amdblis    : use local amdblis."
                 echo " --local-json       : use local json."
                 echo " --local-aoclutils  : use local aoclutils."
@@ -100,10 +107,8 @@ function parse_args() {
 		return 1
 	esac
     done
-
     return 0
 }
-
 # parse arguments
 ZENDNNL_NOGTEST=0
 ZENDNNL=0
@@ -111,114 +116,115 @@ ZENDNNL_EXAMPLES=0
 ZENDNNL_DOXYGEN=0
 ZENDNNL_ALL=0
 ZENDNNL_CLEAN=0
+ZENDNNL_CLEAN_ALL=0
 ZENDNNL_NODEPS=0
 ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
 ZENDNNL_LOCAL_ONEDNN=0
-
+ZENDNNL_DEPENDS_ONEDNN=0
 if ! parse_args $@;
 then
    return 1
 fi
-
 # sanity check
 curr_dir="$(pwd)"
 parent_dir="$(dirname "$curr_dir")"
 last_dir="$(basename $curr_dir)"
-
 if [ ${last_dir} != "scripts" ];then
     echo "error: <${last_dir}> does not seem to be <scripts> folder."
     return 1;
 fi
-
 # create build folder
 # echo "switching to <${parent_dir}>."
 cd ${parent_dir}
-
 if [ ! -d "build" ];then
     echo "creating ${parent_dir}/build directory..."
     mkdir -p build
 # else
 #     echo "<build> directory exists."
 fi
-
 # if [ ! -z "$(ls -A "./build")" ];then
 #     echo "<build> is not empty. please empty it manually for fresh build."
 # fi
-
-
-# go to build folder
-echo "switching to ${parent_dir}/build ..."
-cd build
-
-# configure and build
-CMAKE_OPTIONS=""
-TARGET_OPTIONS=""
-
-if [ ${ZENDNNL_NODEPS} -eq 1 ];then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=OFF"
-else
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
-fi
-
-if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=ON"
-else
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=OFF"
-fi
-
-if [ ${ZENDNNL_LOCAL_AOCLUTILS} -eq 1 ];then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=ON"
-else
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=OFF"
-fi
-
-if [ ${ZENDNNL_LOCAL_JSON} -eq 1 ];then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=ON"
-else
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=OFF"
-fi
-
-if [ ${ZENDNNL_LOCAL_ONEDNN} -eq 1 ];then
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=ON"
-else
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=OFF"
-fi
-
-if [ ${ZENDNNL_ALL} -eq 1 ];then
-
-    cmake ${CMAKE_OPTIONS} ..
-    #cmake --build . --target clean
-    cmake --build . --target all
-
-elif [ ${ZENDNNL_CLEAN} -eq 1 ];then
-
-    cmake ${CMAKE_OPTIONS} ..
-    cmake --build . --target clean
-
-else
-    if [ ${ZENDNNL} -eq 1 ];then
-        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl"
+if [ ${ZENDNNL_CLEAN_ALL} -eq 1 ];then
+    echo "cleaning ${parent_dir}/dependencies..."
+    cd ${parent_dir}/dependencies
+    if [ $? -eq 0 ];then
+        rm -rf *
+    else
+        echo "${parent_dir}/dependencies does not exist."
     fi
-
-    if [ ${ZENDNNL_EXAMPLES} -eq 1 ];then
-        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-examples"
+    echo "cleaning ${parent_dir}/build..."
+    cd ${parent_dir}/build
+    if [ $? -eq 0 ];then
+        rm -rf *
+    else
+        echo "${parent_dir}/build does not exist."
     fi
-
-    if [ ${ZENDNNL_DOXYGEN} -eq 1 ];then
-        TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-doxygen"
+    echo "cleaned dependencies and build folder. please rerun the script."
+else
+    # go to build folder
+    echo "switching to ${parent_dir}/build ..."
+    cd build
+    # configure and build
+    CMAKE_OPTIONS=""
+    TARGET_OPTIONS=""
+    if [ ${ZENDNNL_NODEPS} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=OFF"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
     fi
-
-    if [[ ! -z ${TARGET_OPTIONS} ]];then
-        echo "building targets ${TARGET_OPTIONS}"
+    if [ ${ZENDNNL_DEPENDS_ONEDNN} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=OFF"
+    fi
+    if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=OFF"
+    fi
+    if [ ${ZENDNNL_LOCAL_AOCLUTILS} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AOCLUTILS=OFF"
+    fi
+    if [ ${ZENDNNL_LOCAL_JSON} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_JSON=OFF"
+    fi
+    if [ ${ZENDNNL_LOCAL_ONEDNN} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_ONEDNN=OFF"
+    fi
+    if [ ${ZENDNNL_ALL} -eq 1 ];then
         cmake ${CMAKE_OPTIONS} ..
         #cmake --build . --target clean
-        cmake --build . --target ${TARGET_OPTIONS}
+        cmake --build . --target all
+    elif [ ${ZENDNNL_CLEAN} -eq 1 ];then
+        cmake ${CMAKE_OPTIONS} ..
+        cmake --build . --target clean
     else
-        echo "no targets given... nothing to do."
+        if [ ${ZENDNNL} -eq 1 ];then
+            TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl"
+        fi
+        if [ ${ZENDNNL_EXAMPLES} -eq 1 ];then
+            TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-examples"
+        fi
+        if [ ${ZENDNNL_DOXYGEN} -eq 1 ];then
+            TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-doxygen"
+        fi
+        if [[ ! -z ${TARGET_OPTIONS} ]];then
+            echo "building targets ${TARGET_OPTIONS}"
+            cmake ${CMAKE_OPTIONS} ..
+            #cmake --build . --target clean
+            cmake --build . --target ${TARGET_OPTIONS}
+        else
+            echo "no targets given... nothing to do."
+        fi
     fi
 fi
-
-
 cd ${curr_dir}

@@ -16,7 +16,7 @@
 include_guard(GLOBAL)
 
 set(ZENDNNL_DEPENDS_AMDBLIS ON CACHE BOOL "Add AMD BLIS as a dependency")
-set(ZENDNNL_DEPENDS_ONEDNN ON CACHE BOOL "Add ONEDNN as a dependency")
+set(ZENDNNL_DEPENDS_ONEDNN OFF CACHE BOOL "Add ONEDNN as a dependency")
 set(ZENDNNL_DEPENDS_AOCLUTILS ON CACHE BOOL "Use aocl utils for hardware identification")
 set(ZENDNNL_DEPENDS_JSON ON CACHE BOOL "Use JSON script for configuration")
 

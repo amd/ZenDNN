@@ -37,10 +37,16 @@ target_link_libraries(zendnnl_archive
   PUBLIC ${CMAKE_DL_LIBS}
   PUBLIC nlohmann_json::nlohmann_json)
 
-target_link_libraries(zendnnl_archive
-  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
-  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+if (ZENDNNL_DEPENDS_ONEDNN)
+  target_link_libraries(zendnnl_archive
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+else()
+  target_link_libraries(zendnnl_archive
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+endif()
 
 #  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
 add_library(zendnnl SHARED)
