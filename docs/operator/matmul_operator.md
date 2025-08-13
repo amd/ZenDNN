@@ -5,22 +5,25 @@
 
 ## Overview
 
-This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32 and BF16 data types, optional bias addition, and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example` and `matmul_mul_silu_mul_f32_kernel_example`, which performs FP32 matmul with activation and binary post-op.
+This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32 and BF16 data types, optional bias addition, and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example` and `matmul_mul_silu_mul_f32_kernel_example`, which performs FP32 2D-matmul with activation and binary post-op and 
+`batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
 
 
 # General MatMul Operation
 
 Let:
 
-- *A* ∈ ℝᴹˣᴷ : Input matrix 
-- *B* ∈ ℝᴷˣᴺ : Weight matrix
-- *C* ∈ ℝᴹˣᴺ : Output matrix
+- *A* ∈ ℝ<sup>mxk</sup> or ℝ<sup>bsxmxk</sup>: Input Matrix  or Batched Input Matrix
+- *B* ∈ ℝ<sup>kxn</sup> or ℝ<sup>bsxkxn</sup>: Weight Matrix or Batched Weight Matrix
+- *C* ∈ ℝ<sup>mxn</sup> or ℝ<sup>bsxmxn</sup>: Output Matrix or Batched Output Matrix
 - *Bias* ∈ ℝ¹ˣᴺ : Optional Bias vector
 - *Activation(x)* : Optional activation function (Example: ReLU, GELU, etc.)
 - *BinaryOp(x, y)* : Optional binary post-operation (Example: element-wise add/mul with another matrix)
 - *D* ∈ ℝᴹˣᴺ : Optional second operand for binary operations
 - *Transpose(A, B)* : Optional transpose operation on matrices A or B (Example: Aᵀ, Bᵀ)
 - *Strides(A, B)* : Optional strides for matrix A or B, defining the step size for accessing elements
+
+- Note: If Input and Weight matrices both are not batched, then Output matrix can not be batched.
 
 The computation can be expressed as:
 
@@ -54,6 +57,8 @@ $$
    ```
    C = Z
    ```
+
+- Above steps(#1 to 5) are repated for number of batches in batchedmatmul operation with proper offset.
 
 ## Example with ReLU and Add Post-Op
 
@@ -90,7 +95,8 @@ $$
 
 ### Matmul Operation Flow Diagram
 ```text
-  Input A [M x K]                    Weights B [K x N]
+       Input A                            Weights B 
+  ([M x K] or [BS x M x K])         ([K x N] or [BS x K x N])
     (Optional:                         (Optional: 
 Transpose/Strides)                 Transpose/Strides)
        |                                    |
@@ -137,11 +143,12 @@ Each tensor is defined by several important attributes that determine how it beh
 #### Shape
 Specifies the dimensions of the tensor. It defines how data is organized and processed.
 
-- **Input Tensor**: \([M, K]\)
-- **Weight Tensor**: \([K, N]\)
-- **Output Tensor**: \([M, N]\)
+- **Input Tensor**: \([M, K]\)  or \([BS, M, K]\)
+- **Weight Tensor**: \([K, N]\) or \([BS, K, N]\)
+- **Output Tensor**: \([M, N]\) or \([BS, M, N]\)
 ```cpp
-tensor.set_size({M, K}); 
+tensor.set_size({M, K});
+tensor.set_size({BS, M, K}); 
 ```
 ---
 
@@ -180,11 +187,13 @@ Specifies whether the tensor is transposed, which swaps its rows and columns.
 
 - **Original**:*(default)* *A* ∈ ℝᴹˣᴷ
 ```cpp
-tensor.set_order("ab");
+tensor.set_order("ab");   //for 2D case
+tensor.set_order("abc");  //for 3D case
 ```
 - **Transposed**: *Aᵀ* ∈ ℝᴷˣᴹ
 ```cpp
-tensor.set_order("ba");
+tensor.set_order("ba");   //for 2D case
+tensor.set_order("acb");  //for 3D case
 ```
 ---
 
@@ -193,8 +202,10 @@ Defines how many memory elements to skip to move between elements along each dim
 
 - Enables efficient access to non-contiguous data
 - Useful for custom memory layouts and batched operations
+- default stride = {K,1} if not passed for 2D tensor of size {M,K}
+- default stride = {MxK,K,1} if not passed for 3D tensor of size {BS,M,K}
 ```cpp
-tensor.set_stride_size({stride_m, stride_k});
+tensor.set_stride({stride_m, stride_k});
 ```
 
 #### Example:
@@ -214,7 +225,7 @@ Offset = i * stride_M + j * stride_K
 auto tensor = tensor_t()
               .set_name("strided_example")       // Set tensor name
               .set_size({M, K})                // Define tensor dimensions
-              .set_stride_size({stride_M, stride_K}) // Define strides
+              .set_stride({stride_M, stride_K}) // Define strides
               .set_storage()                  // Allocate storage
               .create();
 ```
@@ -224,9 +235,9 @@ Tensor can be created in two ways:
 ```cpp
 auto tensor = tensor_t()
               .set_name("example_tensor")       // Set tensor name
-              .set_size({M, K})                // Define tensor dimensions
+              .set_size({M, K})                // Define tensor dimensions, can be {BS, M, K} for batched tensor
               .set_data_type(data_type::f32)   // Set data type
-              .set_stride_size({stride_1, stride_2}) // Define strides
+              .set_stride({stride_1, stride_2}) // Define strides
               .set_storage()                  // Allocate storage
               .set_layout()                   // Set layout
               .create();
@@ -448,6 +459,190 @@ int matmul_mul_silu_mul_f32_kernel_example() {
 }
 ```
 
+
+### 3. batch_matmul_relu_bf16_kernel_example
+
+This example showcases an advanced operation combining batched matrix multiplication with ReLU operation for BFloat16 datatype.
+
+**Key Components**
+
+- **Post-Operations**  
+  - Applies the ReLU operation on the result.
+
+- **Execution**  
+  - Involves setting multiple input tensors corresponding to the operations defined in the context.
+
+```cpp
+int batch_matmul_relu_bf16_kernel_example() {
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    // Create a weights tensor with shape {BS, K, N}, data type bf16, filled with uniform values
+    auto weights = tensor_factory.uniform_tensor({BATCH_SIZE, BATCH_MATMUL_K, BATCH_MATMUL_N},
+                   data_type_t::bf16,
+                   1.0, "weights");
+    // Create a bias tensor with shape {N}, data type f32
+    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+                   data_type_t::f32,
+                   3.0, "bias");
+
+    // Define a ReLU post-operation to be applied after matrix multiplication
+    auto relu_post_op = post_op_t{post_op_type_t::relu};
+
+    //define batch_matmul context
+    auto batch_matmul_context = matmul_context_t()
+                                .set_param("weights", weights)
+                                .set_param("bias", bias)
+                                .set_post_op(relu_post_op)
+                                .create();
+
+    if (! batch_matmul_context.check()) {
+      testlog_error("batch_matmul context creation failed");
+      return NOT_OK;
+    }
+
+    //define batch_matmul operator
+    auto batch_matmul_operator = matmul_operator_t()
+                                 .set_name("batch_matmul_bf16_operator")
+                                 .set_context(batch_matmul_context)
+                                 .create();
+
+    if (! batch_matmul_operator.check()) {
+      testlog_error(" operator ", batch_matmul_operator.get_name(),
+                    " creation failed.");
+      return NOT_OK;
+    }
+
+    // Create an input tensor with dimensions [BS, M, K], data type BFloat16
+    auto input_tensor = tensor_factory.uniform_tensor({BATCH_SIZE, BATCH_MATMUL_M, BATCH_MATMUL_K},
+                        data_type_t::bf16,
+                        1.0, "matmul_input");
+
+    // Create an output tensor with dimensions [BS, M, N], data type BFloat16
+    auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, BATCH_MATMUL_M, BATCH_MATMUL_N},
+                         data_type_t::bf16,
+                         "matmul_output");
+
+    // Set inputs and outputs for the operator, force aocl-blis kernel and execute
+    status = batch_matmul_operator
+             .set_input("matmul_input", input_tensor)
+             .set_output("matmul_output", output_tensor)
+             .set_forced_kernel("aocl_blis")
+             .execute();
+
+    // Log the result of execution
+    if (status == status_t::success) {
+      testlog_info("operator ", batch_matmul_operator.get_name(),
+                   " execution successful.");
+    }
+    else {
+      testlog_info("operator ", batch_matmul_operator.get_name(),
+                   " execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return NOT_OK;
+}
+```
+
+
+### 4. batch_matmul_inp2d_relu_f32_kernel_example
+
+This example showcases an advanced operation combining batched matrix multiplication with 2D input_tensor and ReLU postop for float32 datatype.
+
+**Key Components**
+
+- **Post-Operations**  
+  - Applies the ReLU operation on the result.
+
+- **Execution**  
+  - Involves setting multiple input tensors corresponding to the operations defined in the context and performing batched Matrix Mulitplication with 2D Input and 3D Weights.
+
+```cpp
+int batch_matmul_inp2d_relu_f32_kernel_example() {
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+    // Create a weights 3D tensor with shape {BS, K, N}, data type float32, filled with uniform values
+    auto weights = tensor_factory.uniform_tensor({BATCH_SIZE, BATCH_MATMUL_K, BATCH_MATMUL_N},
+                   data_type_t::f32,
+                   1.0, "weights");
+
+    // Create a bias tensor with shape {N}, data type float32
+    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+                   data_type_t::f32,
+                   -10.0, "bias");
+
+    // Define a ReLU post-operation to be applied after matrix multiplication
+    auto relu_post_op = post_op_t{post_op_type_t::relu};
+
+    //define batch_matmul context
+    auto batch_matmul_context = matmul_context_t()
+                                .set_param("weights", weights)
+                                .set_param("bias", bias)
+                                .set_post_op(relu_post_op)
+                                .create();
+
+    if (! batch_matmul_context.check()) {
+      testlog_error("batch_matmul context creation failed");
+      return NOT_OK;
+    }
+
+    //define batch_matmul operator
+    auto batch_matmul_operator = matmul_operator_t()
+                                 .set_name("batch_matmul_f32")
+                                 .set_context(batch_matmul_context)
+                                 .create();
+
+    if (! batch_matmul_operator.check()) {
+      testlog_error(" operator ", batch_matmul_operator.get_name(),
+                    " creation failed.");
+      return NOT_OK;
+    }
+
+    // Create an output 2D tensor with dimensions [M, K], data type float32
+    auto input_tensor = tensor_factory.uniform_tensor({BATCH_MATMUL_M, BATCH_MATMUL_K},
+                        data_type_t::f32,
+                        1.0, "matmul_input");
+    
+    // Create an output 3D tensor with dimensions [BS, M, N], data type float32
+    auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, BATCH_MATMUL_M, BATCH_MATMUL_N},
+                         data_type_t::f32, "matmul_output");
+    
+    // Set inputs and outputs for the operator, force aocl-blis kernel and execute
+    status = batch_matmul_operator
+             .set_input("matmul_input", input_tensor)
+             .set_output("matmul_output", output_tensor)
+             .set_forced_kernel("aocl_blis")
+             .execute();
+
+    // Log the result of execution
+    if (status == status_t::success) {
+      testlog_info("<",batch_matmul_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",batch_matmul_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+```
+
 ## Parameter Naming Convention
 **Important:** The string identifiers used in .set_param(), .set_input(), and .set_output() are fixed and must not be changed. These names are internally mapped and executed by the operator implementation.
 
@@ -470,18 +665,14 @@ Changing these names will result in incorrect behavior or operator failure.
 - **Logging utilities**: `testlog_info`, `testlog_error`.
 
 
-
 ## Error Handling
 
 Each example includes error checking where the operator creation and execution status is checked, and relevant logging is provided.
 
 
-
 ## Logger
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors, respectively, in the operation flow.
-
-
 
 These examples demonstrate the versatility and composability of matrix multiplication operations, showcasing the use of different data types and post-processing operations in the computational graphs defined within the `ZenDNN*` library.
 
