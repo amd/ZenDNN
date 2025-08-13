@@ -230,12 +230,13 @@ status_t embag_operator_t::kernel_factory() {
         }
       }
       else if (table_dtype == data_type_t::bf16) {
-        if (platform_info.get_avx512f_status()) {
-          kernel = get_embag_bf16_avx512_kernel();
-        }
-        else {
+        //TODO: To be enabled once the kernel supports BF16 for gcc<12
+        // if (platform_info.get_avx512f_status()) {
+        //   kernel = get_embag_bf16_avx512_kernel();
+        // }
+        // else {
           kernel = get_embag_bf16_avx2_kernel();
-        }
+        // }
       }
       else {
         apilog_error("<", name, "> kernel unimplemented.");
