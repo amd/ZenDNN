@@ -30,13 +30,15 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
    * */
   virtual void SetUp() {
     MatmulType params = GetParam();
-    m        = params.matmul_m;
-    k        = params.matmul_k;
-    n        = params.matmul_n;
-    transA   = params.transA;
-    transB   = params.transB;
-    alpha    = params.alpha;
-    beta     = params.beta;
+    m            = params.matmul_m;
+    k            = params.matmul_k;
+    n            = params.matmul_n;
+    transA       = params.transA;
+    transB       = params.transB;
+    alpha        = params.alpha;
+    beta         = params.beta;
+    source_dtype = params.source_dtype;
+    output_dtype = params.output_dtype;
     if (!cmd_post_op.empty()) {
       auto it = find_if(po_arr.begin(), po_arr.end(),
       [&](const std::pair<std::string, post_op_type_t> &po) {
@@ -63,6 +65,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   tensor_factory_t tensor_factory{};
   float alpha, beta;
   bool use_LOWOHA;
+  data_type_t source_dtype, output_dtype;
 };
 
 /** @fn TEST_P
@@ -337,12 +340,65 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
+
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
                             use_LOWOHA, alpha,
                             beta);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+                              epsilon_bf16, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param INT8 user-defined name of test according to test
+ *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
+ */
+TEST_P(TestMatmul, INT8) {
+  // TODO: Extend support for test cases with a wider range of values.
+  auto wei_scale          = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 0.2);
+  auto src_scale          = tensor_factory.uniform_dist_tensor({1, 1},
+                            data_type_t::f32, 0.3);
+  auto dst_scale          = !(output_dtype == data_type_t::f32 ||
+                              output_dtype == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
+                                  data_type_t::f32, 1.2) : tensor_t();
+  auto src_zp             = source_dtype == data_type_t::u8 ?
+                            tensor_factory.uniform_tensor({1, 1},
+                                data_type_t::s8, 16) : tensor_t();
+  auto dst_zp             = output_dtype == data_type_t::u8 ?
+                            tensor_factory.uniform_tensor({1, 1},
+                                data_type_t::u8, 53) : tensor_t();
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+                            data_type_t::s8, 25.0, transB, wei_scale);
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+                            source_dtype, 25.0, transA, src_scale, src_zp);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                              == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor      = (po_index < po_arr.size() &&
+                             is_binary_postop(po_arr[po_index].first)) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+                            output_dtype, 2.0, false, dst_scale, dst_zp);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+                            output_dtype, 2.0, false, dst_scale, dst_zp);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                            output_tensor, po_index, binary_tensor,0 /*Use lowoha*/, 1.0, 0.0);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index,
+                            binary_tensor, 0/*use lowoha*/, 1.0, 0.0);
+
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

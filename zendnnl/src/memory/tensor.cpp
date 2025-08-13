@@ -479,10 +479,22 @@ float tensor_t::at(const index_vec_type &index_) const {
       break;
     }
     case data_type_t::s8 : {
-      using cpptype   = prec_traits<data_type_t::s8>::type;
+      using cpptype = prec_traits<data_type_t::s8>::type;
       const cpptype *handle = static_cast<const cpptype *>(raw_handle);
-      return float(handle[offset]);
+      return static_cast<float>(handle[offset]);
       break;
+    }
+    case data_type_t::u8 : {
+        using cpptype = prec_traits<data_type_t::u8>::type;
+        const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+        return static_cast<float>(handle[offset]);
+        break;
+    }
+    case data_type_t::s32 : {
+        using cpptype = prec_traits<data_type_t::s32>::type;
+        const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+        return static_cast<float>(handle[offset]);
+        break;
     }
     default :
       std::string message  = "getting element with this data type is unimplemented";

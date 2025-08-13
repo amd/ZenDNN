@@ -46,8 +46,8 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
       po_index = params.mat.po_index;
     }
     inplace_reorder = params.inplace_reorder;
-    source_dtype = params.source_dtype;
     use_LOWOHA = 0; // TODO: Enable LOWOHA support
+    source_dtype = params.mat.source_dtype;
     log_info("m: ",m, " k: ",k, " n: ",n," po_index: ",po_index, " reorder: ",
              inplace_reorder ? "In Place" : "Out of Place");
   }

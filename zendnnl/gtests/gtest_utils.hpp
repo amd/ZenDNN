@@ -59,6 +59,8 @@ struct MatmulType {
   float    beta;
   bool     use_LOWOHA;
   bool     use_LIBXSMM;
+  data_type_t source_dtype;
+  data_type_t output_dtype;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
@@ -71,7 +73,6 @@ struct BatchMatmulType {
 
 struct ReorderType {
   bool inplace_reorder;
-  data_type_t source_dtype;
   MatmulType mat{};
   ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
@@ -103,6 +104,7 @@ struct EmbeddingType {
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
+extern const uint32_t dtype_size;
 extern int seed;
 extern std::string cmd_post_op;
 extern const float MATMUL_F32_TOL;
@@ -129,18 +131,20 @@ class tensor_factory_t {
   using data_type  = data_type_t;
 
   /** @brief zero tensor */
-  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_);
+  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_, tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniformly distributed tensor */
-  tensor_t uniform_dist_tensor(const std::vector<index_type>
-                               size_,
-                               data_type dtype_, float val,
-                               bool trans = false);
+
+  tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
+                               data_type dtype_,
+                               float val, bool trans = false,
+                               tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniformly distributed strided tensor */
   tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
                                        const std::vector<index_type> stride_,
-                                       data_type dtype_, float range_, bool trans);
+                                       data_type dtype_, float range_, bool trans = false,
+                                      tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniform tensor */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
@@ -191,6 +195,10 @@ bool is_binary_postop(const std::string post_op);
 
 //Supported Postops declaration
 extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
+
+//Supported Dtype declaration
+extern std::vector<data_type_t> dtype_arr;
+
 
 /** @fn matmul_kernel_test
  *  @brief Compute Matmul Operation using AOCL kernel.

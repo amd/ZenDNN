@@ -22,6 +22,10 @@ using namespace std;
 const uint32_t po_size = 8; //Supported postop
 vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 
+const uint32_t dtype_size = 4; //Supported dtype
+vector<data_type_t> dtype_arr(dtype_size);
+
+
 // Matmul Tolerance Limit
 // TODO: Make the tolerance value dynamic based on factors such
 // as tensor dimensions, data type, and value range.
@@ -69,6 +73,7 @@ int main(int argc, char **argv) {
     {"binary_mul", post_op_type_t::binary_mul}
   };
 
+  dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
   // Command line argument parser
   Parser parse;
   parse(argc, argv, seed, test_num, cmd_post_op);

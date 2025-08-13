@@ -49,6 +49,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
     alpha = 1;
     beta = 0;
   }
+  source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+  output_dtype = dtype_arr[rand() % dtype_size];
 }
 
 // EmbagType constructor
@@ -85,7 +87,6 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
 
 ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
   inplace_reorder = rand() % 2;
-  source_dtype    = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   mat = MatmulType(test_index, total_tests);
 }
 
@@ -94,14 +95,21 @@ bool is_binary_postop(const std::string post_op) {
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
-                                       data_type dtype_) {
+                                       data_type dtype_, tensor_t scale, tensor_t zp) {
 
   auto ztensor = tensor_t()
                  .set_name("zero tensor")
                  .set_size(size_)
                  .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_storage();
+
+  if (scale.get_nelem() != 0) {
+    ztensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    ztensor.set_quant_zero_point(zp);
+  }
+  ztensor.create();
 
   if (! ztensor.check()) {
     log_warning("tensor creation of ", ztensor.get_name(), " failed.");
@@ -115,9 +123,8 @@ tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
 }
 
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
-    size_,
-    data_type dtype_, float val,
-    bool trans) {
+    size_, data_type dtype_, float val,
+    bool trans, tensor_t scale, tensor_t zp) {
   auto udtensor = tensor_t()
                   .set_name("uniform distributed tensor")
                   .set_size(size_)
@@ -133,7 +140,15 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     udtensor.set_order(tag);
   }
 
-  udtensor.set_storage().create();
+  udtensor.set_storage();
+
+  if (scale.get_nelem() != 0) {
+    udtensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    udtensor.set_quant_zero_point(zp);
+  }
+  udtensor.create();
 
   if (! udtensor.check()) {
     log_warning("tensor creation of ", udtensor.get_name(), " failed.");
@@ -154,8 +169,19 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist2(gen));});
     }
     else if (dtype_ == data_type::s8) {
+      std::uniform_int_distribution<int> dist_s8(-1*val, val);
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist2(gen));});
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist_s8(gen)); });
+    } 
+    else if (dtype_ == data_type::u8) {
+      std::uniform_int_distribution<int> dist_u8(0, val);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<uint8_t>(dist_u8(gen)); });
+    }
+    else if (dtype_ == data_type::s32) {
+      std::uniform_int_distribution<int> dist_s32(-1 * val, val);
+      int32_t *buf_ptr = static_cast<int32_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int32_t>(dist_s32(gen)); });
     }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
@@ -200,6 +226,12 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = static_cast<int8_t>(val_);
       }
     }
+    else if (dtype_ == data_type::u8) {
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = static_cast<uint8_t>(val_);
+      }
+    }
     else {
       log_warning("tensor ", utensor.get_name(), " unsupported data type.");
     }
@@ -209,14 +241,20 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
 
 tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::vector<index_type> size_, const std::vector<index_type> aligned_size_,
-    data_type dtype_, float range_, bool trans) {
+    data_type dtype_, float range_, bool trans, tensor_t scale, tensor_t zp) {
   auto udstensor = tensor_t()
                    .set_name("uniform distributed strided tensor")
                    .set_size(size_)
                    .set_data_type(dtype_)
                    .set_aligned_size(aligned_size_)
-                   .set_storage()
-                   .create();
+                   .set_storage();
+  if (scale.get_nelem() != 0) {
+    udstensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    udstensor.set_quant_zero_point(zp);
+  }
+  udstensor.create();
 
   if (! udstensor.check()) {
     log_warning("tensor creation of ", udstensor.get_name(), " failed.");
@@ -241,7 +279,11 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return int8_t(dist(gen));});
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist(gen)); });
+    } 
+    else if (dtype_ == data_type::u8) {
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<uint8_t>(dist(gen)); });
     }
     else {
       log_warning("tensor ", udstensor.get_name(), " unsupported data type.");
