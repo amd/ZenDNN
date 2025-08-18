@@ -314,6 +314,17 @@ std::string matmul_operator_t::op_execute_info() {
   auto bias          = context.get_param("bias");
   auto post_op_count = context.get_post_op_count();
 
+  if (forced_kernel.empty()) {
+    if (weights.get_layout() == tensor_layout_t::blocked) {
+      ss << "kernel:aocl_blis_blocked" << ",";
+    }
+    else {
+      ss << "kernel:aocl_blis" << ",";
+    }
+  }
+  else {
+    ss << "kernel:" << forced_kernel << ",";
+  }
   ss << input.value().tensor_info() << ","
      << weights.tensor_info() << ",";
   if (bias) {
