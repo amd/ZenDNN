@@ -188,7 +188,7 @@ Clone ZenDNN git:
 ```bash
 git clone https://github.com/amd/ZenDNN.git
 cd ZenDNN
-git checkout r5.1
+git checkout zendnn_master
 ```
 
 ## GCC compiler
