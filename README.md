@@ -57,10 +57,16 @@ This release of ZenDNN supports the following Operating Systems (OS) and compile
 Binaires will be supported on
 * Ubuntu® 20.04, 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 8.6, 9.2, 9.5
+* Anolis 8.8, 8.9
+* SLES15 SP6, SP3
+* RockyLinux 8.10, 9.4
 
 Build from source will be supported on
 * Ubuntu® 22.04, 24.04
 * Red Hat® Enterprise Linux® (RHEL) 9.2, 9.5
+* Anolis 8.8,8.9
+* SLES15 SP6, SP3
+* RockyLinux 8.10, 9.4
 
 ## Compilers
 * GCC 12.2 and later
@@ -68,6 +74,8 @@ Build from source will be supported on
 Theoretically, for wheel files any Linux based OS with GLIBC version later than 2.28 could be supported.
 
 For C++ interface binaries, any Linux based OS with GLIBC version later than 2.28 could be supported.
+
+For TF-JAVA interface binaries, any Linux based OS with GLIBC version 2.33 and later could be supported.
 
 # Prerequisites
 The following prerequisites must be met for this release of ZenDNN:
@@ -180,6 +188,7 @@ Clone ZenDNN git:
 ```bash
 git clone https://github.com/amd/ZenDNN.git
 cd ZenDNN
+git checkout r5.1
 ```
 
 ## GCC compiler
@@ -201,7 +210,7 @@ After the library is built on Linux host, user can run unit tests using:
 ```bash
 source scripts/runApiTest.sh
 ```
-Corresponding tests are located in the **tests/api_tests** directory. These unit tests don't produce any information/logs in the terminal. Library logs can be enabled with:
+Corresponding tests are located in the **tests/api_tests** directory. Library logs can be enabled with:
 ```bash
 ZENDNN_LOG_OPTS=ALL:2 source scripts/runApiTest.sh
 ```
