@@ -1,3 +1,5 @@
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # Overview
 `benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul and Reorder operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
 
@@ -18,7 +20,64 @@ Accuracy is at the heart of `benchdnn`'s design. To ensure that performance metr
   - Context creation
   - Operator setup
   - Execution time
+
 These capabilities help isolate performance bottlenecks and provide a reliable foundation for performance tuning and regression analysis
+
+## Supported Features Overview
+
+| Feature              | Supported Values                        |
+|----------------------|----------------------------------------|
+| Operators            | matmul, reorder                         |
+| Multi-layer Matmul   | Supported                               |
+| Data Types           | f32, bf16                               |
+| Timing Modes         | end-to-end, detailed timing breakdowns  |
+| Cache Modes          | hot cache, cold cache                   |
+| Warmup Iterations    | Supported (configurable)                |
+
+## Flow Diagram
+
+Below is a high-level flow diagram illustrating the benchmarking process:
+
+<img src="./images/BenchDNNFlow_diagram.png" alt="BenchDNN Flow Diagram" width="700"/>
+
+### Benchmark Workflow Diagram
+
+#### Cold Cache Control
+The cold cache behavior is controlled by the macro `COLD_CACHE` defined in `utils/benchdnn_utils.hpp`:
+
+- If `COLD_CACHE` is set to `1`, the CPU cache is flushed before each operation to simulate cold-start performance. This affects both individual and end-to-end timing modes.
+- If `COLD_CACHE` is set to `0`, cache flushing is disabled and benchmarks run with warm cache.
+
+Set this macro according to your benchmarking needs before building the project.
+#### Timing Mode Selection
+The timing mode is controlled by the macro `MEASURE_INDIVIDUAL_TIMINGS` defined in `benchdnn.hpp`:
+
+- If `MEASURE_INDIVIDUAL_TIMINGS` is set to `1`, individual timings for each operation (context creation, operator creation, operator execution, other operations) are recorded.
+- If `MEASURE_INDIVIDUAL_TIMINGS` is set to `0`, only end-to-end timings are recorded.
+
+Set this macro according to your benchmarking needs before building the project.
+
+Below is a workflow diagram showing the main steps in the benchmarking process:
+
+
+<img src="./images/Benchmark_workflow.png" alt="Benchmark Workflow" width="450" height="450"/>
+
+#### Benchmark Workflow Overview
+
+The flow is split into two main sections:
+
+**1. Individual Timings**
+  - Each operation is timed separately using distinct timers:
+    - T1: Context Creation
+    - T2: Operator Creation
+    - T3: Operator Execution
+    - T4: Other Operations
+  - If `cold_cache` is true, the CPU cache is flushed before each operation to simulate cold-start performance.
+
+**2. End-to-End Timings**
+  - All operations are timed together using a single timer:
+    - T: Measures the total time for Context Creation + Operator Creation + Operator Execution + Other Operations.
+  - Cache flushing also occurs here if `cold_cache` is enabled.
 
 ## Features
 - **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`).
@@ -50,12 +109,18 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 
 ## Directory Structure
 - `benchdnn.cpp` / `benchdnn.hpp`: Main benchmarking logic and configuration structures
-- `matmul/matmul_benchdnn.cpp` / `matmul/matmul_benchdnn.hpp`: Matrix multiplication benchmarking implementation
-- `matmul/matmul_parser.cpp` / `matmul/matmul_parser.hpp`: Input parsing for matmul benchmark
-- `reorder/reorder_benchdnn.cpp` / `reorder/reorder_benchdnn.hpp`: Reorder benchmarking implementation
-- `reorder/reorder_parser.cpp` / `reorder/reorder_parser.hpp`: Input parsing for reorder benchmark
-- `utils/benchdnn_utils.hpp` / `utils/benchdnn_utils.cpp`: Utility functions for benchmarking (string conversion, cache flush, etc.)
-- `build/input.txt`: Example input file for benchmarking (located in the build directory)
+### matmul/
+  - `CMakeLists.txt`: CMake build configuration for matmul benchmarking
+  - `matmul_benchdnn.cpp` / `matmul_benchdnn.hpp`: Matrix multiplication benchmarking implementation
+  - `matmul_tensor_factory.cpp` / `matmul_tensor_factory.hpp`: Tensor creation utilities for matmul benchmarks
+  - `matmul_utils.cpp` / `matmul_utils.hpp`: Utility functions for matmul benchmarking
+### reorder/
+  - `CMakeLists.txt`: CMake build configuration for reorder benchmarking
+  - `reorder_benchdnn.cpp` / `reorder_benchdnn.hpp`: Reorder benchmarking implementation
+  - `reorder_parser.cpp` / `reorder_parser.hpp`: Input parsing for reorder benchmark
+### utils/
+  - `CMakeLists.txt`: CMake build configuration for utils
+  - `benchdnn_utils.cpp` / `benchdnn_utils.hpp`: Utility functions for benchmarking (string conversion, cache flush, etc.)
 - `build/timings_<timestamp>.csv`: Output CSV files with timing results (created in the build directory)
 
 ## Build Instructions
@@ -73,7 +138,7 @@ cmake --build .
 Run the benchmark by passing the operator and input file as command-line arguments (from the build directory):
 
 ```sh
-./bench/benchdnn --op=<operator> --input_file=input.txt
+./benchdnn/benchdnn --op=<operator> --input_file=input.txt
 ```
 
 - `<operator>`: The operator to benchmark (e.g., `matmul`, `reorder`).

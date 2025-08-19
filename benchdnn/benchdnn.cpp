@@ -20,8 +20,12 @@
  *
  * This file implements the main() function for the benchdnn utility, which parses
  * command-line arguments, reads the input configuration file, and dispatches the
- * appropriate benchmark (e.g., matmul) based on user input. Results are written
+ * appropriate benchmark (matmul or reorder) based on user input. Results are written
  * to a timestamped CSV file and printed to stdout.
+ *
+ * Usage:
+ *   ./benchdnn --op=<matmul|reorder> --input_file=<filename>
+ *
  */
 
 #include "benchdnn.hpp"
@@ -29,19 +33,9 @@
 /**
  * @brief Main entry point for the benchdnn benchmark utility.
  *
- * This function reads a configuration file where each line specifies a benchmark run.
- * Each line must have the format:
- *   m, k, n, iterations, input_dtype:weights_dtype:output_dtype, postOp, kernel name
- *
- * The function parses each line, constructs a Config object, and runs the benchmark for all configurations.
- * Results are printed to stdout and written to a CSV file with a timestamped filename.
- *
- * Command-line arguments:
- *   --op=<matmul|reorder>         Operator to benchmark
- *   --input_file=<filename>       Path to the input configuration file
- *
- * Example usage:
- *   ./benchdnn --op=matmul --input_file=config.txt
+ * Parses command-line arguments to determine the operator (matmul or reorder) and input file.
+ * Validates arguments, generates a timestamped output filename, and dispatches the benchmark.
+ * Results are printed to stdout and written to a CSV file.
  *
  * @param argc Number of command-line arguments.
  * @param argv Array of command-line argument strings.
@@ -52,9 +46,11 @@ int main(int argc, char **argv) {
   std::string op, input_file;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
+    // Parse operator argument
     if (arg.find("--op=") == 0) {
       op = arg.substr(5);
     }
+    // Parse input file argument
     else if (arg.find("--input_file=") == 0) {
       input_file = arg.substr(13);
     }
@@ -73,9 +69,9 @@ int main(int argc, char **argv) {
               now.time_since_epoch()) % 1000;
   std::time_t t = std::chrono::system_clock::to_time_t(now);
   std::stringstream ss;
-  ss << "timings_" <<
-     std::put_time(std::localtime(&t), "%Y%m%d_%H%M%S") <<
-     "_" << std::setfill('0') << std::setw(3) << ms.count() << ".csv";
+  ss << "timings_"
+     << std::put_time(std::localtime(&t), "%Y%m%d_%H%M%S")
+     << "_" << std::setfill('0') << std::setw(3) << ms.count() << ".csv";
 
   std::string out_filename = ss.str();
   std::string in_filename = input_file;
