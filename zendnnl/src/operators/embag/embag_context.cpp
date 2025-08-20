@@ -117,6 +117,16 @@ std::string embag_context_t::context_info() {
   auto table = get_param("table").value();
   ss << "Embedding bag context create - " << table.tensor_info();
 
+  if (algo == embag_algo_t::mean) {
+     ss << ",algo:mean" ;
+  }
+  else if (algo == embag_algo_t::max) {
+     ss << ",algo:max" ;
+  }
+  else {
+     ss << ",algo:sum" ;
+  }
+
   return ss.str();
 }
 

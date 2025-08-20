@@ -189,7 +189,19 @@ std::string embag_operator_t::op_create_info() {
     ss << get_name() << ",";
   }
   auto table = context.get_param("table").value();
+  auto algo  = context.get_algo();
+
   ss << table.tensor_info();
+
+  if (algo == embag_algo_t::mean) {
+     ss << ",algo:mean" ;
+  }
+  else if (algo == embag_algo_t::max) {
+     ss << ",algo:max" ;
+  }
+  else {
+     ss << ",algo:sum" ;
+  }
 
   return ss.str();
 }
@@ -205,10 +217,21 @@ std::string embag_operator_t::op_execute_info() {
   auto indices  = get_input("indices");
   auto offsets  = get_input("offsets");
   auto output   = get_output("output");
+  auto algo     = context.get_algo();
 
   ss << indices.value().tensor_info() << ","
      << offsets.value().tensor_info() << ","
      << output.value().tensor_info();
+
+  if (algo == embag_algo_t::mean) {
+     ss << ",algo:mean" ;
+  }
+  else if (algo == embag_algo_t::max) {
+     ss << ",algo:max" ;
+  }
+  else {
+     ss << ",algo:sum" ;
+  }
 
   return ss.str();
 }

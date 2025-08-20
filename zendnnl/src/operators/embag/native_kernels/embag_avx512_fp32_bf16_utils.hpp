@@ -143,21 +143,6 @@ void embag_avx512_kernel(
     int64_t dst_offset = oi * dst_stride;
     float wt_sum = 0.0f;
 
-    // Initialize output buffer
-    if (algo == embag_algo_t::max) {
-      for (int j = 0; j < width; ++j) {
-        if constexpr(std::is_same_v<OutType, float>) {
-          dst[dst_offset + j] = -std::numeric_limits<float>::infinity();
-        }
-        else {
-          dst[dst_offset + j] = 0xFF7F;  // BF16 representation of -inf
-        }
-      }
-    }
-    else {
-      std::memset(&dst[dst_offset], 0, sizeof(OutType) * width);
-    }
-
     // Accumulator registers for SIMD blocks
     __m512 acc[full_blocks + 1];
     for (int b = 0; b < full_blocks; ++b) {
