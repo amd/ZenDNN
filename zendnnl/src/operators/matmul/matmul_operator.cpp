@@ -296,19 +296,19 @@ status_t matmul_operator_t::preprocess() {
   auto weight_tensor = context.get_param("weights");
 
   if (forced_kernel == "aocl_blis_blocked") {
-    if (context.aocl_blis_utils_ptr->reorder_weights(weight_tensor)
+    if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor)
         == status_t::failure) {
       return status_t::failure;
     }
   }
   //initialize aocl po
-  if (context.aocl_blis_utils_ptr->alloc_post_op(context.get_post_op(),
+  if (context.aocl_dlp_utils_ptr->alloc_post_op(context.get_post_op(),
       optional_bias_tensor, inputs)
       == status_t::failure) {
     return status_t::failure;
   }
   //set runtime post ops from inputs
-  return context.aocl_blis_utils_ptr->set_runtime_post_op_buffer(inputs,
+  return context.aocl_dlp_utils_ptr->set_runtime_post_op_buffer(inputs,
          optional_bias_tensor ? true : false);
 }
 
@@ -358,10 +358,18 @@ std::string matmul_operator_t::op_execute_info() {
 
   if (forced_kernel.empty()) {
     if (weights.get_layout() == tensor_layout_t::blocked) {
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+      ss << "kernel:aocl_dlp_blocked" << ",";
+#else
       ss << "kernel:aocl_blis_blocked" << ",";
+#endif
     }
     else {
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+      ss << "kernel:aocl_dlp" << ",";
+#else
       ss << "kernel:aocl_blis" << ",";
+#endif
     }
   }
   else {

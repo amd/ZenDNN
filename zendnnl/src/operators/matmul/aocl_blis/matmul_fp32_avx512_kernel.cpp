@@ -26,7 +26,7 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_fp32_avx512 kernel");
   log_info("Executing matmul_fp32_avx512 kernel");
 
-  auto   aocl_blis_po_ptr     = context_.get_aocl_blis_post_op_ptr_unsafe();
+  auto   aocl_dlp_po_ptr     = context_.get_aocl_dlp_post_op_ptr_unsafe();
   auto   input_tensor         = inputs_.find("matmul_input")->second;
   auto   output_tensor        = outputs_.find("matmul_output")->second;
   auto   weight_tensor        = context_.get_param("weights").value();
@@ -47,7 +47,7 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
                                 tensor_layout_t::blocked ? true : false;
 
   auto reorder_weights        = (float *)
-                                context_.get_aocl_blis_reordered_weights_ptr_unsafe();
+                                context_.get_aocl_dlp_reordered_weights_ptr_unsafe();
   bool is_reordered_weights   = false;
   if (reorder_weights != nullptr) {
     log_info("Using reordered weights");
@@ -89,7 +89,7 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
                             (is_reordered_weights && weight_dim == 2) ?
                             reorder_weights : weights_raw_handle + bs * offset_wei,
                             ldb, weight_format, beta, output_raw_handle + bs * offset_out,
-                            ldc, aocl_blis_po_ptr);
+                            ldc, aocl_dlp_po_ptr);
   }
   return status_t::success;
 }

@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,11 +16,17 @@
 
 set(aocl_blis_matmul_operator_sources
   matmul_fp32_avx512_kernel.cpp
-  matmul_bf16_avx512_kernel.cpp
-  matmul_aocl_blis_utils.cpp)
+  matmul_bf16_avx512_kernel.cpp)
 
-set(aocl_blis_matmul_operator_public_headers
-  matmul_aocl_blis_utils.hpp)
+if (ZENDNNL_DEPENDS_AOCLDLP)
+  list(APPEND aocl_blis_matmul_operator_sources matmul_aocl_dlp_utils.cpp)
+  set(aocl_blis_matmul_operator_public_headers
+    matmul_aocl_dlp_utils.hpp)
+elseif(ZENDNNL_DEPENDS_AMDBLIS)
+  list(APPEND aocl_blis_matmul_operator_sources matmul_aocl_blis_utils.cpp)
+  set(aocl_blis_matmul_operator_public_headers
+    matmul_aocl_blis_utils.hpp)
+endif()
 
 set(aocl_blis_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
@@ -46,9 +52,15 @@ target_sources(zendnnl
           TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
 target_link_options(zendnnl
   PUBLIC "-fopenmp")
-target_link_libraries(zendnnl
-  PUBLIC OpenMP::OpenMP_CXX
-  PUBLIC amdblis::amdblis)
+if (ZENDNNL_DEPENDS_AOCLDLP)
+  target_link_libraries(zendnnl
+    PUBLIC OpenMP::OpenMP_CXX
+    PUBLIC aocldlp::aocl_dlp)
+elseif(ZENDNNL_DEPENDS_AMDBLIS)
+  target_link_libraries(zendnnl
+    PUBLIC OpenMP::OpenMP_CXX
+    PUBLIC amdblis::amdblis)
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

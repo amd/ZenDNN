@@ -22,7 +22,12 @@
 
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_context.hpp"
+
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#include "operators/matmul/aocl_blis/matmul_aocl_dlp_utils.hpp"
+#else
 #include "operators/matmul/aocl_blis/matmul_aocl_blis_utils.hpp"
+#endif
 
 namespace zendnnl {
 namespace ops {
@@ -46,10 +51,14 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
 
   /** TODO: Add a interface to support different backends */
   /** @brief get post op pointer */
-  aocl_post_op *get_aocl_blis_post_op_ptr_unsafe() const;
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+  dlp_metadata_t *get_aocl_dlp_post_op_ptr_unsafe() const;
+#else
+  aocl_post_op *get_aocl_dlp_post_op_ptr_unsafe() const;
+#endif
 
   /** @brief get reordered weights pointer */
-  void *get_aocl_blis_reordered_weights_ptr_unsafe() const;
+  void *get_aocl_dlp_reordered_weights_ptr_unsafe() const;
 
   /** @brief Set parameter alpha value.*/
   matmul_context_t &set_alpha(float alpha_);
@@ -76,7 +85,7 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief Returns matmul context information */
   std::string context_info() override;
 
-  std::shared_ptr<aocl_blis_utils_t> aocl_blis_utils_ptr; /**< aocl blis utils */
+  std::shared_ptr<aocl_dlp_utils_t> aocl_dlp_utils_ptr; /**< aocl blis utils */
   friend class matmul_operator_t;
 
  private:

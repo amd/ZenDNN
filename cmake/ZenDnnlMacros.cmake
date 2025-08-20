@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -30,6 +30,12 @@ macro(find_dependencies  _install_prefix)
   if(ZENDNNL_DEPENDS_AMDBLIS)
     set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
     find_package(ZLAMDBLIS REQUIRED)
+  endif()
+
+  # find aocl dlp
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
+    find_package(AOCLDLP REQUIRED)
   endif()
 
   if(ZENDNNL_DEPENDS_ONEDNN)

@@ -16,7 +16,11 @@
 #include "reorder_operator.hpp"
 #include "reorder_kernel_list.hpp"
 
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#include "aocl_dlp.h"
+#else
 #include "blis.h"
+#endif
 
 namespace zendnnl {
 namespace ops {
@@ -137,7 +141,7 @@ size_t reorder_operator_t::get_reorder_size() {
 
   if (algo_format == "aocl") {
     auto input_tensor = get_input("reorder_input");
-    reorder_size = aocl_blis_reorder_utils_t::get_aocl_reorder_size(context,
+    reorder_size = aocl_dlp_reorder_utils_t::get_aocl_reorder_size(context,
                    *input_tensor);
   }
   else if (algo_format == "onednn") {

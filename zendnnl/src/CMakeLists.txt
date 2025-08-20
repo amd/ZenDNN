@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -40,11 +40,19 @@ target_link_libraries(zendnnl_archive
 if (ZENDNNL_DEPENDS_ONEDNN)
   target_link_libraries(zendnnl_archive
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
 else()
   target_link_libraries(zendnnl_archive
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
+endif()
+
+# Backend-specific links and compile defs
+if (ZENDNNL_DEPENDS_AOCLDLP)
+  target_link_libraries(zendnnl_archive
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
+elseif(ZENDNNL_DEPENDS_AMDBLIS)
+  target_link_libraries(zendnnl_archive
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
 endif()
 
@@ -64,6 +72,11 @@ target_include_directories(zendnnl
 target_link_libraries(zendnnl
   PUBLIC OpenMP::OpenMP_CXX
   PUBLIC ${CMAKE_DL_LIBS})
+
+# Propagate backend compile defs to shared library
+if (ZENDNNL_DEPENDS_AOCLDLP)
+  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
+endif()
 
 # create top level include file
 prolog_header_file(${zendnnl_inc_file})
@@ -104,6 +117,8 @@ install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlMacros.cmake"
   DESTINATION zendnnl/lib/cmake)
 
 install(FILES "${CMAKE_MODULE_PATH}/FindZLAMDBLIS.cmake"
+  DESTINATION zendnnl/lib/cmake)
+install(FILES "${CMAKE_MODULE_PATH}/FindAOCLDLP.cmake"
   DESTINATION zendnnl/lib/cmake)
 
 install(EXPORT zendnnl_targets

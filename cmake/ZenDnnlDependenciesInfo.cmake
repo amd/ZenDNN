@@ -28,6 +28,13 @@ endif()
 set(ZENDNNL_DEPS_DIR "${ZENDNNL_SOURCE_DIR}/dependencies")
 message(DEBUG "ZENDNNL_DEPS_DIR=${ZENDNNL_DEPS_DIR}")
 
+# aocl-dlp repo information
+set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
+  CACHE PATH "AOCL DLP root dir")
+# set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
+# set(AOCLDLP_GIT_TAG "main")
+# option(AOCLDLP_GIT_PROGRESS ON)
+
 # amdblis repo information
 set(AMDBLIS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/amdblis"
   CACHE PATH "AMD BLIS root dir")

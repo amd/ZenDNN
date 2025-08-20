@@ -13,51 +13,46 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "operators/matmul/aocl_blis/matmul_aocl_blis_utils.hpp"
-#include "common/data_types.hpp" // Ensure this header defines data_type_t
+#include "operators/matmul/aocl_blis/matmul_aocl_dlp_utils.hpp"
+#include "common/data_types.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-inline void eltwise_init(aocl_post_op *&aocl_dlp_po_ptr, int eltwise_count,
-                         AOCL_ELT_ALGO_TYPE algo_type) {
-  (aocl_dlp_po_ptr->eltwise[eltwise_count]).is_power_of_2 = false;
-  (aocl_dlp_po_ptr->eltwise[eltwise_count]).scale_factor = nullptr;
-  (aocl_dlp_po_ptr->eltwise[eltwise_count]).scale_factor_len = 0;
-  (aocl_dlp_po_ptr->eltwise[eltwise_count]).algo.alpha = nullptr;
-  (aocl_dlp_po_ptr->eltwise[eltwise_count]).algo.beta = nullptr;
+inline void eltwise_init(dlp_metadata_t *&aocl_dlp_po_ptr, int eltwise_count,
+                         DLP_ELT_ALGO_TYPE algo_type) {
   (aocl_dlp_po_ptr->eltwise[eltwise_count]).algo.algo_type = algo_type;
 }
 
 //Returns AOCL data type
-AOCL_PARAMS_STORAGE_TYPES get_aocl_store_type(data_type_t dt) {
+DLP_TYPE get_aocl_store_type(data_type_t dt) {
   switch (dt) {
   case data_type_t::f32:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_F32 ;
+    return DLP_TYPE::DLP_F32 ;
     break;
   case data_type_t::bf16:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_BF16 ;
+    return DLP_TYPE::DLP_BF16 ;
     break;
   case data_type_t::s32:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT32 ;
+    return DLP_TYPE::DLP_S32 ;
     break;
   case data_type_t::s8:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT8 ;
+    return DLP_TYPE::DLP_S8 ;
     break;
   case data_type_t::u8:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_UINT8 ;
+    return DLP_TYPE::DLP_U8 ;
     break;
   case data_type_t::s4:
-    return AOCL_PARAMS_STORAGE_TYPES::AOCL_GEMM_INT4 ;
+    return DLP_TYPE::DLP_S4 ;
     break;
   default:
     break;
   };
-  return AOCL_PARAMS_STORAGE_TYPES::NULLTYPE;
+  return DLP_TYPE::DLP_INVALID;
 }
 
 template <typename T>
-void aocl_dlp_utils_t::reorder_weights_execute(
+size_t aocl_dlp_utils_t::reorder_weights_execute(
   const void *weights,
   const int k,
   const int n,
@@ -66,25 +61,16 @@ void aocl_dlp_utils_t::reorder_weights_execute(
   const char trans,
   get_reorder_buff_size_func_ptr get_reorder_buf_size,
   reorder_func_ptr<T> reorder_func) {
-  LOG_DEBUG_INFO("Reodering weights aocl_blis_utils_t");
-  log_info("BLIS reorder weights");
-  siz_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
-                                k, n);
-  //b_reorder_buf_siz_req%alignment(64) == 0 for portability and integration
-  //Todo: move this alignment padding to unified library utility function
-  size_t alignment      = 64;
-  b_reorder_buf_siz_req = (b_reorder_buf_siz_req + alignment - 1) &
-                          ~(alignment-1) ;
+  LOG_DEBUG_INFO("Reodering weights aocl_dlp_utils_t");
+  log_info("DLP reorder weights");
+  size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                 k, n, nullptr);
   /*TODO: add support for tensor which will wrap the pointer instead of raw buffer*/
-  reordered_weights_ptr = aligned_alloc(alignment, b_reorder_buf_siz_req);
-  if (reordered_weights_ptr == nullptr) {
-    log_error("reordered_weights_ptr can not have align allocation");
-    return;
-  }
+  reordered_weights_ptr = aligned_alloc(64, b_reorder_buf_siz_req);
   reorder_func(order, trans, 'B', (T *)weights, (T *)reordered_weights_ptr, k, n,
-               ldb);
+               ldb, nullptr);
 
-  return;
+  return b_reorder_buf_siz_req;
 }
 
 status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
@@ -108,15 +94,17 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
         auto mul_buff_tensor = inputs_[key_mul];
         if (found_obj_mul->second.get_size().size() == 1 &&
             aocl_dlp_po_ptr->bias != nullptr) {
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->scale_factor  =
+          (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor  =
             mul_buff_tensor.get_raw_handle_unsafe();
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zero_point    = malloc(sizeof(float));
-          float *temp_dzero_point_ptr = (float *)(aocl_dlp_po_ptr->sum +
-                                                  mul_idx_1d)->zero_point;
+          (aocl_dlp_po_ptr->scale + mul_idx_1d)->zp->zero_point    = malloc(sizeof(
+                float));
+          float *temp_dzero_point_ptr = (float *)(aocl_dlp_po_ptr->scale +
+                                                  mul_idx_1d)->zp->zero_point;
           temp_dzero_point_ptr[0] = (float)0;
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->sf_stor_type = get_aocl_store_type(
-                mul_buff_tensor.get_data_type());
-          (aocl_dlp_po_ptr->sum + mul_idx_1d)->zp_stor_type = AOCL_GEMM_F32;
+          (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor_type =
+            get_aocl_store_type(
+              mul_buff_tensor.get_data_type());
+          (aocl_dlp_po_ptr->scale + mul_idx_1d)->zp->zero_point_type = DLP_TYPE::DLP_F32;
           mul_idx_1d++;
         }
         else if (found_obj_mul->second.get_size().size() == 2 &&
@@ -181,7 +169,7 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
     std::vector<post_op_t>
     post_op_vec_, bool is_bias,
     std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
-  LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_dlp_utils_t");
   //Allocate memory
   size_t max_post_ops = post_op_vec_.size();
 
@@ -241,26 +229,38 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
         return status_t::failure;
       }
     }
-    aocl_dlp_po_ptr->bias        = (aocl_post_op_bias *) calloc(
-                                      num_post_ops_1d_add,
-                                      sizeof(aocl_post_op_bias));
-    aocl_dlp_po_ptr->sum         = (aocl_post_op_sum *) calloc(num_post_ops_1d_mul,
-                                    sizeof(aocl_post_op_sum));
-    aocl_dlp_po_ptr->eltwise     = (aocl_post_op_eltwise *) calloc(
-                                      num_post_ops_eltwise,
-                                      sizeof(aocl_post_op_eltwise));
-    aocl_dlp_po_ptr->matrix_add  = (aocl_post_op_matrix_add *) calloc(
-                                      num_post_ops_binary_add,
-                                      sizeof(aocl_post_op_matrix_add));
-    aocl_dlp_po_ptr->matrix_mul  = (aocl_post_op_matrix_mul *) calloc(
-                                      num_post_ops_binary_mul,
-                                      sizeof(aocl_post_op_matrix_mul));
+    aocl_dlp_po_ptr->bias        = (dlp_post_op_bias *) calloc(
+                                     num_post_ops_1d_add,
+                                     sizeof(dlp_post_op_bias));
+    aocl_dlp_po_ptr->scale       = (dlp_scale_t *) calloc(num_post_ops_1d_mul,
+                                   sizeof(dlp_scale_t));
+    aocl_dlp_po_ptr->eltwise     = (dlp_post_op_eltwise *) calloc(
+                                     num_post_ops_eltwise,
+                                     sizeof(dlp_post_op_eltwise));
+    aocl_dlp_po_ptr->matrix_add  = (dlp_post_op_matrix_add *) calloc(
+                                     num_post_ops_binary_add,
+                                     sizeof(dlp_post_op_matrix_add));
+    aocl_dlp_po_ptr->matrix_mul  = (dlp_post_op_matrix_mul *) calloc(
+                                     num_post_ops_binary_mul,
+                                     sizeof(dlp_post_op_matrix_mul));
     post_op_size["eltwise"]       = num_post_ops_eltwise;
     post_op_size["binary_add_2d"] = num_post_ops_binary_add;
     post_op_size["binary_mul_2d"] = num_post_ops_binary_mul;
     post_op_size["binary_add_1d"] = num_post_ops_1d_add - (is_bias ? 1 :
                                     0); /*Don't count bias*/
     post_op_size["binary_mul_1d"] = num_post_ops_1d_mul;
+
+    // Allocate nested structures for scale/sum and matrix ops to prevent null deref
+    for (int i = 0; i < num_post_ops_1d_mul; ++i) {
+      aocl_dlp_po_ptr->scale[i].sf = (dlp_sf_t *) calloc(1, sizeof(dlp_sf_t));
+      aocl_dlp_po_ptr->scale[i].zp = (dlp_zp_t *) calloc(1, sizeof(dlp_zp_t));
+    }
+    for (int i = 0; i < num_post_ops_binary_add; ++i) {
+      aocl_dlp_po_ptr->matrix_add[i].sf = (dlp_sf_t *) calloc(1, sizeof(dlp_sf_t));
+    }
+    for (int i = 0; i < num_post_ops_binary_mul; ++i) {
+      aocl_dlp_po_ptr->matrix_mul[i].sf = (dlp_sf_t *) calloc(1, sizeof(dlp_sf_t));
+    }
   }
   return status_t::success;
 }
@@ -268,7 +268,7 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
 status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     post_op_vec_, int &post_op_count, bool is_bias,
     std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
-  LOG_DEBUG_INFO("Initializing aocl post-op in aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Initializing aocl post-op in aocl_dlp_utils_t");
   //add remaining post-ops
   size_t max_post_ops = post_op_vec_.size();
   //Index for each post-op
@@ -283,55 +283,55 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
     switch (zen_po.type) {
     case post_op_type_t::relu:
       log_info("Adding relu post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, RELU);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::RELU);
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::leaky_relu:
       log_info("Adding leaky_relu post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, PRELU);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::PRELU);
       (aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha)
         = zen_po.leaky_relu_params.nslope;
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::gelu_tanh:
       log_info("Adding gelu_tanh post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, GELU_TANH);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::GELU_TANH);
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::gelu_erf:
       log_info("Adding gelu_erf post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, GELU_ERF);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::GELU_ERF);
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::tanh:
       log_info("Adding tanh post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, TANH);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::TANH);
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::swish:
       log_info("Adding swish post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, SWISH);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::SWISH);
       (aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha) =
         zen_po.swish_params.scale;
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::sigmoid:
       log_info("Adding sigmoid post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, SIGMOID);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::SIGMOID);
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::clip:
       log_info("Adding clip post-op");
-      eltwise_init(aocl_dlp_po_ptr, eltwise_index, CLIP);
+      eltwise_init(aocl_dlp_po_ptr, eltwise_index, DLP_ELT_ALGO_TYPE::CLIP);
       (aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha = malloc(sizeof(float));
       *((float *)(aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.alpha) =
         zen_po.clip_params.lower;
@@ -339,21 +339,21 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       *((float *)(aocl_dlp_po_ptr->eltwise[eltwise_index]).algo.beta) =
         zen_po.clip_params.upper;
       eltwise_index++;
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = ELTWISE;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::binary_add:
       log_info("Adding binary_add post-op");
       if (inputs_.find(zen_po.binary_add_params.tensor_name)->second.get_size().size()
           == 1) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = BIAS;
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
       }
       else {
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->scale_factor = malloc(sizeof(
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor = malloc(sizeof(
               float));
-        *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).scale_factor) =
+        *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).sf->scale_factor) =
           zen_po.binary_add_params.scale;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->scale_factor_len = 1;
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = MATRIX_ADD;
+        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor_len = 1;
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_ADD;
         add_index_2d++;
       }
       break;
@@ -361,23 +361,22 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       log_info("Adding binary_mul post-op");
       if (inputs_.find(zen_po.binary_mul_params.tensor_name)->second.get_size().size()
           == 1) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = SCALE;
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->is_power_of_2 = FALSE;
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor = NULL;
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->buff = NULL;
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point = NULL;
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->scale_factor_len = inputs_.find(
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
+        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor = NULL;
+        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = NULL;
+        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = inputs_.find(
               zen_po.binary_mul_params.tensor_name)->second.get_size()[0];
-        (aocl_dlp_po_ptr->sum + mul_index_1d)->zero_point_len = 1;
+        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
+        log_info("Adding done");
         mul_index_1d++;
       }
       else {
-        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->scale_factor = malloc(sizeof(
+        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor = malloc(sizeof(
               float));
-        *((float *)(aocl_dlp_po_ptr->matrix_mul[mul_index_2d]).scale_factor) =
+        *((float *)(aocl_dlp_po_ptr->matrix_mul[mul_index_2d]).sf->scale_factor) =
           zen_po.binary_mul_params.scale;
-        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->scale_factor_len = 1;
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = MATRIX_MUL;
+        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor_len = 1;
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_MUL;
         mul_index_2d++;
       }
       break;
@@ -393,7 +392,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
     post_op_vec_,
     std::optional<tensor_t> optional_bias_tensor_,
     std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
-  LOG_DEBUG_INFO("Allocating post-ops in aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Allocating post-ops in aocl_dlp_utils_t");
 
   // Iterate through each postop, check and add it if needed.
   int post_op_count = 0;
@@ -403,12 +402,12 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
     total_po++;
   }
   if (total_po > 0) {
-    aocl_dlp_po_ptr = (aocl_post_op *) calloc(1, sizeof(aocl_post_op));
+    aocl_dlp_po_ptr = (dlp_metadata_t *) calloc(1, sizeof(dlp_metadata_t));
     if (aocl_dlp_po_ptr == NULL) {
       return status_t::failure;
     }
-    aocl_dlp_po_ptr->seq_vector = (AOCL_POST_OP_TYPE *) calloc(total_po,
-                                   sizeof(AOCL_POST_OP_TYPE));
+    aocl_dlp_po_ptr->seq_vector = (DLP_POST_OP_TYPE *) calloc(total_po,
+                                  sizeof(DLP_POST_OP_TYPE));
     if (aocl_dlp_po_ptr->seq_vector == NULL) {
       free(aocl_dlp_po_ptr);
       return status_t::failure;
@@ -417,7 +416,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
     //Set all post-ops to NULL
     aocl_dlp_po_ptr->eltwise = NULL;
     aocl_dlp_po_ptr->bias = NULL;
-    aocl_dlp_po_ptr->sum = NULL;
+    aocl_dlp_po_ptr->scale = NULL;
     aocl_dlp_po_ptr->matrix_add = NULL;
     aocl_dlp_po_ptr->matrix_mul = NULL;
     aocl_dlp_po_ptr->pre_ops = NULL;
@@ -432,14 +431,14 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
     // Add bias postop
     if (optional_bias_tensor_) {
       auto bias_type = optional_bias_tensor_->get_data_type();
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = BIAS;
+      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
       if (aocl_dlp_po_ptr->bias == NULL) {
         free(aocl_dlp_po_ptr->seq_vector);
         free(aocl_dlp_po_ptr);
         return status_t::failure;
       }
       (aocl_dlp_po_ptr->bias)->bias = (void *)
-                                       optional_bias_tensor_->get_raw_handle_unsafe();
+                                      optional_bias_tensor_->get_raw_handle_unsafe();
       (aocl_dlp_po_ptr->bias)->stor_type = get_aocl_store_type(bias_type);
     }
 
@@ -455,7 +454,7 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
 }
 
 void aocl_dlp_utils_t::free_post_op() {
-  LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_dlp_utils_t");
   if (aocl_dlp_po_ptr == nullptr) {
     return;
   }
@@ -469,7 +468,7 @@ void aocl_dlp_utils_t::free_post_op() {
   int count_matrix_mul_2d = 0;
   int count_matrix_mul_1d = 0;
   for (int idx = 0; idx < aocl_dlp_po_ptr->seq_length; idx++) {
-    if (aocl_dlp_po_ptr->seq_vector[idx] == ELTWISE) {
+    if (aocl_dlp_po_ptr->seq_vector[idx] == DLP_POST_OP_TYPE::ELTWISE) {
       if (aocl_dlp_po_ptr->eltwise[count_elt].algo.alpha) {
         free(aocl_dlp_po_ptr->eltwise[count_elt].algo.alpha);
       }
@@ -478,27 +477,42 @@ void aocl_dlp_utils_t::free_post_op() {
       }
       count_elt++;
     }
-    else if (aocl_dlp_po_ptr->seq_vector[idx] == MATRIX_ADD) {
-      if (aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].scale_factor) {
-        free(aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].scale_factor);
+    else if (aocl_dlp_po_ptr->seq_vector[idx] == DLP_POST_OP_TYPE::MATRIX_ADD) {
+      if (aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].sf &&
+          aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].sf->scale_factor) {
+        free(aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].sf->scale_factor);
+      }
+      if (aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].sf) {
+        free(aocl_dlp_po_ptr->matrix_add[count_matrix_add_2d].sf);
       }
       count_matrix_add_2d++;
     }
-    else if (aocl_dlp_po_ptr->seq_vector[idx] == MATRIX_MUL) {
-      if (aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].scale_factor) {
-        free(aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].scale_factor);
+    else if (aocl_dlp_po_ptr->seq_vector[idx] == DLP_POST_OP_TYPE::MATRIX_MUL) {
+      if (aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].sf &&
+          aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].sf->scale_factor) {
+        free(aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].sf->scale_factor);
+      }
+      if (aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].sf) {
+        free(aocl_dlp_po_ptr->matrix_mul[count_matrix_mul_2d].sf);
       }
       count_matrix_mul_2d++;
     }
-    else if (aocl_dlp_po_ptr->seq_vector[idx] == SCALE) {
-      if (aocl_dlp_po_ptr->sum[count_matrix_mul_1d].zero_point) {
-        free(aocl_dlp_po_ptr->sum[count_matrix_mul_1d].zero_point);
+    else if (aocl_dlp_po_ptr->seq_vector[idx] == DLP_POST_OP_TYPE::SCALE) {
+      if (aocl_dlp_po_ptr->scale[count_matrix_mul_1d].zp &&
+          aocl_dlp_po_ptr->scale[count_matrix_mul_1d].zp->zero_point) {
+        free(aocl_dlp_po_ptr->scale[count_matrix_mul_1d].zp->zero_point);
+      }
+      if (aocl_dlp_po_ptr->scale[count_matrix_mul_1d].zp) {
+        free(aocl_dlp_po_ptr->scale[count_matrix_mul_1d].zp);
+      }
+      if (aocl_dlp_po_ptr->scale[count_matrix_mul_1d].sf) {
+        free(aocl_dlp_po_ptr->scale[count_matrix_mul_1d].sf);
       }
       count_matrix_mul_1d++;
     }
   }
-  if (aocl_dlp_po_ptr->sum) {
-    free(aocl_dlp_po_ptr->sum);
+  if (aocl_dlp_po_ptr->scale) {
+    free(aocl_dlp_po_ptr->scale);
   }
   if (aocl_dlp_po_ptr->eltwise) {
     free(aocl_dlp_po_ptr->eltwise);
@@ -518,13 +532,13 @@ void aocl_dlp_utils_t::free_post_op() {
   free(aocl_dlp_po_ptr);
 }
 
-aocl_post_op *aocl_dlp_utils_t::get_aocl_dlp_post_op_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl blis post-op ptr from aocl_blis_utils_t");
+dlp_metadata_t *aocl_dlp_utils_t::get_aocl_dlp_post_op_ptr_unsafe() const {
+  LOG_DEBUG_INFO("Getting aocl dlp post-op ptr from aocl_dlp_utils_t");
   return aocl_dlp_po_ptr;
 }
 
 status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights) {
-  LOG_DEBUG_INFO("Selecting aocl_blis reorder function based on data type");
+  LOG_DEBUG_INFO("Selecting aocl_dlp reorder function based on data type");
   if (!weights) {
     log_error("Weights tensor is not set");
     return status_t::failure;
@@ -575,7 +589,7 @@ status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights) {
 }
 
 void *aocl_dlp_utils_t::get_aocl_dlp_reordered_weights_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl blis reordered weights ptr from aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Getting aocl dlp reordered weights ptr from aocl_dlp_utils_t");
   return reordered_weights_ptr;
 }
 
@@ -589,7 +603,7 @@ aocl_dlp_utils_t::aocl_dlp_utils_t()
 }
 
 aocl_dlp_utils_t::~aocl_dlp_utils_t() {
-  LOG_DEBUG_INFO("Destroying aocl_blis_utils_t");
+  LOG_DEBUG_INFO("Destroying aocl_dlp_utils_t");
   if (reordered_weights_ptr) {
     free(reordered_weights_ptr);
     reordered_weights_ptr = nullptr;

@@ -13,56 +13,46 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _MATMUL_AOCL_BLIS_CONTEXT_HPP_
-#define _MATMUL_AOCL_BLIS_CONTEXT_HPP_
+#ifndef _MATMUL_DLP_UTILS_HPP_
+#define _MATMUL_DLP_UTILS_HPP_
 
 #include <vector>
 #include <map>
 #include <memory>
 #include <optional>
-
 #include "common/zendnnl_global.hpp"
 #include "memory/tensor.hpp"
 #include "operators/common/post_op.hpp"
-
-#include "blis.h"
-using md_t = dim_t;
+#include "aocl_dlp.h" // aocl-dlp header
 namespace zendnnl {
 namespace ops {
-
 using namespace zendnnl::memory;
-
 /** @class aocl_dlp_utils_t
- *  @brief reordering to blocked format for @c tensor_t and setting AOCL BLIS post-ops.
+ *  @brief reordering to blocked format for @c tensor_t and setting AOCL DLP post-ops.
  *
  * Reorders the tensor to blocked format according to data type.
- * Sets AOCL BLIS post-ops for MatMul
+ * Sets AOCL DLP post-ops for MatMul using the new dlp_metadata_t structure
  */
 class aocl_dlp_utils_t {
  public:
   aocl_dlp_utils_t();
   ~aocl_dlp_utils_t();
-
   using tensor_map_type = std::map<std::string, tensor_t>;
-
   /** @brief function pointer type for getting the reorder buffer size */
   using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
                                          const char,
                                          const char, const md_t,
-                                         const md_t);
-
+                                         const md_t, dlp_metadata_t *);
   /** @brief template function pointer type for reordering */
   template <typename T>
   using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
                                     T *,
-                                    const md_t, const md_t, const md_t);
-
+                                    const md_t, const md_t, const md_t, dlp_metadata_t *);
   /** @brief entry function for tensor reordering for the AOCL */
   status_t      reorder_weights(std::optional<tensor_t> weights);
-
   /** @brief weight reordering for the AOCL */
   template <typename T>
-  void reorder_weights_execute(
+  size_t        reorder_weights_execute(
     const void *weights,
     const int k,
     const int n,
@@ -71,40 +61,31 @@ class aocl_dlp_utils_t {
     const char trans,
     get_reorder_buff_size_func_ptr get_reorder_buf_size,
     reorder_func_ptr<T> reorder_func);
-
-  /** @brief allocate memory for the AOCL post-ops */
+  /** @brief allocate memory for the AOCL DLP post-ops */
   status_t      aocl_post_op_memory_alloc(const std::vector<post_op_t>
                                           post_op_vec_,
                                           bool is_bias, std::map<std::string, zendnnl::memory::tensor_t> inputs_);
-
   /** @brief initialize the post-ops */
   status_t      aocl_post_op_initialize(const std::vector<post_op_t> post_op_vec_,
                                         int &post_op_count, bool is_bias,
                                         std::map<std::string, zendnnl::memory::tensor_t> inputs_);
-
   /** @brief allocate aocl post op */
   status_t      alloc_post_op(const std::vector<post_op_t> post_op_vec_,
                               std::optional<tensor_t> optional_bias_tensor_,
                               std::map<std::string, zendnnl::memory::tensor_t> inputs_);
-
   /** @brief free aocl post op */
   void          free_post_op();
-
-  /** @brief sets runtime post-op buffers in aocl_dlp_po_ptr */
+  /** @brief sets runtime post-op buffers in dlp_metadata_t */
   status_t      set_runtime_post_op_buffer(tensor_map_type &inputs, bool is_bias);
-
   /** @brief get the post op pointer */
-  aocl_post_op *get_aocl_dlp_post_op_ptr_unsafe() const;
-
+  dlp_metadata_t *get_aocl_dlp_post_op_ptr_unsafe() const;
   /** @brief get the reordered weights pointer*/
   void         *get_aocl_dlp_reordered_weights_ptr_unsafe() const;
-
  protected:
   std::map<std::string, uint32_t> post_op_size;
-  aocl_post_op *aocl_dlp_po_ptr;
+  dlp_metadata_t *aocl_dlp_po_ptr;  // Changed from aocl_post_op to dlp_metadata_t
   void *reordered_weights_ptr;
 };
-
 } // namespace ops
 } // namespace zendnnl
 #endif

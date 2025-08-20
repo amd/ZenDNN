@@ -25,11 +25,11 @@ namespace ops {
 
 using namespace zendnnl::memory;
 
-/** @class aocl_blis_reorder_utils_t
+/** @class aocl_dlp_reorder_utils_t
  *  @brief Utility class for AOCL BLIS reorder operations.
  *
  */
-class aocl_blis_reorder_utils_t {
+class aocl_dlp_reorder_utils_t {
  public:
 
   /** @brief Computes size for AOCL BLIS reorder/unreorder operations

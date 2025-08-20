@@ -25,7 +25,12 @@
 #include "operators/common/operator_kernel.hpp"
 #include "operators/matmul/matmul_context.hpp"
 
+
+#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#include "aocl_dlp.h"
+#else
 #include "blis.h"
+#endif
 
 namespace zendnnl {
 namespace ops {

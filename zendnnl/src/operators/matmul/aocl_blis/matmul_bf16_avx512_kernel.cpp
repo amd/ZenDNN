@@ -27,7 +27,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_bf16_avx512 kernel");
   log_info("Executing matmul_bf16_avx512 kernel");
 
-  auto     aocl_blis_po_ptr   = context_.get_aocl_blis_post_op_ptr_unsafe();
+  auto     aocl_dlp_po_ptr   = context_.get_aocl_dlp_post_op_ptr_unsafe();
   auto     input_tensor       = inputs_.find("matmul_input")->second;
   auto     output_tensor      = outputs_.find("matmul_output")->second;
   auto     weight_tensor      = context_.get_param("weights").value();
@@ -49,7 +49,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                                 true : false;
 
   auto reorder_weights        = (int16_t *)
-                                context_.get_aocl_blis_reordered_weights_ptr_unsafe();
+                                context_.get_aocl_dlp_reordered_weights_ptr_unsafe();
   bool is_reordered_weights   = false;
   if (reorder_weights != nullptr) {
     log_info("Using reordered weights");
@@ -95,7 +95,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                                 reorder_weights : weights_raw_handle + bs * offset_wei,
                                 ldb, weight_format, beta,
                                 (float *)output_raw_handle + bs * offset_out, ldc,
-                                aocl_blis_po_ptr);
+                                aocl_dlp_po_ptr);
     }
   }
   else if (output_tensor.get_data_type() == data_type_t::bf16) {
@@ -108,7 +108,7 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
                                  reorder_weights : weights_raw_handle + bs * offset_wei,
                                  ldb, weight_format, beta,
                                  (int16_t *)output_raw_handle + bs * offset_out,
-                                 ldc, aocl_blis_po_ptr);
+                                 ldc, aocl_dlp_po_ptr);
     }
   }
   return status_t::success;
