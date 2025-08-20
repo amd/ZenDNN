@@ -49,13 +49,7 @@ if(NOT FBGEMM_LIB_CPUINFO)
     return()
 endif()
 
-find_library(FBGEMM_LIB_CLOG clog PATHS ${FBGEMM_LIB_ROOT})
-if(NOT FBGEMM_LIB_CLOG)
-    message(STATUS "Library clog not found!")
-    return()
-endif()
-
-set(FBGEMM_LIBRARIES ${FBGEMM_LIB_FBGEMM} ${FBGEMM_LIB_ASMJIT} ${FBGEMM_LIB_CPUINFO} ${FBGEMM_LIB_CLOG})
+set(FBGEMM_LIBRARIES ${FBGEMM_LIB_FBGEMM} ${FBGEMM_LIB_ASMJIT} ${FBGEMM_LIB_CPUINFO})
 
 set(FBGEMM_INCLUDE_ROOT "${FBGEMM_ROOT}/include")
 set(FBGEMM_INCLUDE_DIRS "${FBGEMM_INCLUDE_ROOT}")
@@ -101,14 +95,6 @@ set_target_properties(fbgemm::cpuinfo
    INTERFACE_INCLUDE_DIRECTORIES ${FBGEMM_INCLUDE_DIRS}
    INCLUDE_DIRECTORIES ${FBGEMM_INCLUDE_DIRS})
 mark_as_advanced(fbgemm::cpuinfo)
-
-add_library(fbgemm::clog STATIC IMPORTED GLOBAL)
-set_target_properties(fbgemm::clog
-   PROPERTIES
-   IMPORTED_LOCATION ${FBGEMM_LIB_CLOG}
-   INTERFACE_INCLUDE_DIRECTORIES ${FBGEMM_INCLUDE_DIRS}
-   INCLUDE_DIRECTORIES ${FBGEMM_INCLUDE_DIRS})
-mark_as_advanced(fbgemm::clog)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(FBGEMM

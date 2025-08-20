@@ -369,7 +369,7 @@ else()
 endif()
 
 if(FBGEMM_ENABLE EQUAL 1)
-    set(dep_target_list fbgemm fbgemm::fbgemm fbgemm::asmjit fbgemm::cpuinfo fbgemm::clog)
+    set(dep_target_list fbgemm fbgemm::fbgemm fbgemm::asmjit fbgemm::cpuinfo)
     foreach(dep_target IN LISTS dep_target_list)
         if(TARGET ${dep_target} EQUAL 0)
             message(STATUS "TARGET ${dep_target}, doesn't exist")
@@ -441,4 +441,3 @@ cmake_print_properties(TARGETS amdblis::amdblis PROPERTIES INTERFACE_INCLUDE_DIR
 cmake_print_properties(TARGETS fbgemm::fbgemm PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
 cmake_print_properties(TARGETS fbgemm::asmjit PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
 cmake_print_properties(TARGETS fbgemm::cpuinfo PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
-cmake_print_properties(TARGETS fbgemm::clog amdZenDNN PROPERTIES INTERFACE_INCLUDE_DIRECTORIES)
