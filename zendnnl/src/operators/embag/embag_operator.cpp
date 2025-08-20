@@ -219,6 +219,13 @@ std::string embag_operator_t::op_execute_info() {
   auto output   = get_output("output");
   auto algo     = context.get_algo();
 
+  if (forced_kernel.empty()) {
+    ss << "kernel:native" << ",";
+  }
+  else {
+    ss << "kernel:" << forced_kernel << ",";
+  }
+
   ss << indices.value().tensor_info() << ","
      << offsets.value().tensor_info() << ","
      << output.value().tensor_info();
@@ -253,13 +260,17 @@ status_t embag_operator_t::kernel_factory() {
         }
       }
       else if (table_dtype == data_type_t::bf16) {
-        //TODO: To be enabled once the kernel supports BF16 for gcc<12
-        // if (platform_info.get_avx512f_status()) {
-        //   kernel = get_embag_bf16_avx512_kernel();
-        // }
-        // else {
+        if (platform_info.get_avx512f_status()) {
+//TODO:To implement BF16 kernel for gcc<12
+#if __GNUC__ >= 12
+          kernel = get_embag_bf16_avx512_kernel();
+#else
           kernel = get_embag_bf16_avx2_kernel();
-        // }
+#endif
+        }
+        else {
+          kernel = get_embag_bf16_avx2_kernel();
+        }
       }
       else {
         apilog_error("<", name, "> kernel unimplemented.");

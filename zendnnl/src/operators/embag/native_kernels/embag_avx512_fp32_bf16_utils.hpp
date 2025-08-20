@@ -171,18 +171,20 @@ void embag_avx512_kernel(
       __m512 wt_vec = _mm512_set1_ps(wt);
 
       for (int b = 0; b < full_blocks; ++b) {
-        __m512 in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
-
-        //TODO: Implement BF16 support for gcc < 12
-        // if constexpr(std::is_same_v<InType, float>) {
-        //   in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
-        // }
-        // else {
-        //   __m256i bf16_data = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
-        //       &input[input_offset + b * simd_width]));
-        //   in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
-        // }
-
+        __m512 in_vec;
+//TODO:To implement BF16 kernel for gcc<12
+#if __GNUC__ >= 12
+        if constexpr(std::is_same_v<InType, float>) {
+          in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
+        }
+        else {
+          __m256i bf16_data = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(
+              &input[input_offset + b * simd_width]));
+          in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
+        }
+#else
+        in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
+#endif
         if (algo == embag_algo_t::max) {
           acc[b] = _mm512_max_ps(acc[b], in_vec);
         }
@@ -193,22 +195,24 @@ void embag_avx512_kernel(
 
       if (tail > 0) {
         __mmask16 tail_mask = (1 << tail) - 1;
-        __m512 in_vec = _mm512_maskz_loadu_ps(tail_mask,
-                                              &input[input_offset + full_blocks * simd_width]);
-
-        //TODO: Implement BF16 support for gcc < 12
-        // if constexpr(std::is_same_v<InType, float>) {
-        //   in_vec = _mm512_maskz_loadu_ps(tail_mask,
-        //                                  &input[input_offset + full_blocks * simd_width]);
-        // }
-        // else {
-        //   uint16_t tmp[simd_width] = {0};
-        //   std::memcpy(tmp, &input[input_offset + full_blocks * simd_width],
-        //               tail * sizeof(uint16_t));
-        //   __m256i bf16_data = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(tmp));
-        //   in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
-        // }
-
+        __m512 in_vec;
+//TODO:To implement BF16 kernel for gcc<12
+#if __GNUC__ >= 12
+        if constexpr(std::is_same_v<InType, float>) {
+          in_vec = _mm512_maskz_loadu_ps(tail_mask,
+                                         &input[input_offset + full_blocks * simd_width]);
+        }
+        else {
+          uint16_t tmp[simd_width] = {0};
+          std::memcpy(tmp, &input[input_offset + full_blocks * simd_width],
+                      tail * sizeof(uint16_t));
+          __m256i bf16_data = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(tmp));
+          in_vec = _mm512_cvtpbh_ps((__m256bh)bf16_data);
+        }
+#else
+        in_vec = _mm512_maskz_loadu_ps(tail_mask,
+                                       &input[input_offset + full_blocks * simd_width]);
+#endif
         if (algo == embag_algo_t::max) {
           acc[full_blocks] = _mm512_max_ps(acc[full_blocks], in_vec);
         }
@@ -234,12 +238,11 @@ void embag_avx512_kernel(
       if constexpr(std::is_same_v<OutType, float>) {
         _mm512_storeu_ps(&dst[dst_offset + b * simd_width], acc[b]);
       }
-      //TODO: Implement BF16 support for gcc < 12
-      // else {
-      //   __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[b]);
-      //   _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
-      //                       simd_width]), (__m256i)bf16_vec);
-      // }
+      else {
+        __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[b]);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
+                                       simd_width]), (__m256i)bf16_vec);
+      }
     }
 
     if (tail > 0) {
@@ -248,13 +251,12 @@ void embag_avx512_kernel(
         _mm512_mask_storeu_ps(&dst[dst_offset + full_blocks * simd_width], tail_mask,
                               acc[full_blocks]);
       }
-      //TODO: Implement BF16 support for gcc < 12
-      // else {
-      //   __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[full_blocks]);
-      //   for (int t = 0; t < tail; ++t) {
-      //     dst[dst_offset + full_blocks * simd_width + t] = ((uint16_t *)&bf16_vec)[t];
-      //   }
-      // }
+      else {
+        __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[full_blocks]);
+        for (int t = 0; t < tail; ++t) {
+          dst[dst_offset + full_blocks * simd_width + t] = ((uint16_t *)&bf16_vec)[t];
+        }
+      }
     }
   }
 
