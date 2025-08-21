@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ enum class log_module_t : uint32_t {
  *  manager use.
  */
 class logger_support_t final {
-public:
+ public:
   /** @brief Convert from log module to string
    *
    *  @param module_ : log module
@@ -85,7 +85,7 @@ public:
 
   /** @brief Convert from string to log module.
    *
-   *  @param str_ : string containng log module name.
+   *  @param str_ : string containing log module name.
    *  @return log module for appropriate string.
    *          log_module_t::log_module_count if string is not
    *          appropriate.
@@ -93,18 +93,25 @@ public:
   static log_module_t str_to_log_module(std::string str_) {
     //transform str_ to lowercase
     std::transform(str_.begin(), str_.end(), str_.begin(),
-                   [](unsigned char c){return std::tolower(c);});
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
     //convert to integer value
-    if ("common" == str_)
+    if ("common" == str_) {
       return log_module_t::common;
-    if ("api" == str_)
+    }
+    if ("api" == str_) {
       return log_module_t::api;
-    if ("test" == str_)
+    }
+    if ("test" == str_) {
       return log_module_t::test;
-    if ("profile" == str_)
+    }
+    if ("profile" == str_) {
       return log_module_t::profile;
-    if ("debug" == str_)
+    }
+    if ("debug" == str_) {
       return log_module_t::debug;
+    }
 
     return log_module_t::log_module_count;
   }
@@ -142,18 +149,25 @@ public:
   static log_level_t str_to_log_level(std::string str_) {
     //transform str_ to lowercase
     std::transform(str_.begin(), str_.end(), str_.begin(),
-                   [](unsigned char c){return std::tolower(c);});
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
     //convert to integer value
-    if ("disabled" == str_)
+    if ("disabled" == str_) {
       return log_level_t::disabled;
-    if ("error" == str_)
+    }
+    if ("error" == str_) {
       return log_level_t::error;
-    if ("warning" == str_)
+    }
+    if ("warning" == str_) {
       return log_level_t::warning;
-    if ("info" == str_)
+    }
+    if ("info" == str_) {
       return log_level_t::info;
-    if ("verbose" == str_)
+    }
+    if ("verbose" == str_) {
       return log_level_t::verbose;
+    }
 
     return log_level_t::disabled;
   }

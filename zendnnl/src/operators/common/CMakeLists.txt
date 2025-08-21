@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ set(ops_common_headers
   operator_context.hpp
   operator.hpp
   operator_kernel.hpp
+  operator_config.hpp
   post_op.hpp)
 
 target_sources(zendnnl_archive

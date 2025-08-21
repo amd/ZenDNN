@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ namespace common {
 
 using namespace zendnnl::error_handling;
 using json = nlohmann::json;
+using namespace zendnnl::ops;
 
 void config_manager_t::config() {
   //default config
@@ -60,14 +61,26 @@ status_t config_manager_t::parse(std::string file_name_) {
 
 void config_manager_t::set_default_config() {
   set_default_logger_config();
+
+  // Retrieve the singleton instance of matmul_config_t and set default configuration.
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  matmul_config.set_default_config();
 }
 
 void config_manager_t::set_user_config() {
   set_user_logger_config();
+
+  // Retrieve the singleton instance of matmul_config_t and set user configuration.
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  matmul_config.set_user_config(config_json);
 }
 
 void config_manager_t::set_env_config() {
   set_env_logger_config();
+
+  // Retrieve the singleton instance of matmul_config_t and set env configuration.
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  matmul_config.set_env_config();
 }
 
 status_t config_manager_t::set_default_logger_config() {

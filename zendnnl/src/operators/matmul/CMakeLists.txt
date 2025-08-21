@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -14,22 +14,18 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-# set(matmul_operator_sources
-#   matmul_context.cpp
-#   matmul_operator.cpp
-#   matmul_fp32_avx512_kernel.cpp
-#   matmul_bf16_avx512_kernel.cpp
-#   matmul_onednn_kernel.cpp)
 add_subdirectory(aocl_blis)
 
 set(matmul_operator_sources
   matmul_context.cpp
   matmul_operator.cpp
+  matmul_config.cpp
   matmul_ref_kernel.cpp)
 
 set(matmul_operator_public_headers
   matmul_context.hpp
-  matmul_operator.hpp)
+  matmul_operator.hpp
+  matmul_config.hpp)
 
 set(matmul_operator_private_headers
   matmul_kernel_list.hpp

@@ -15,5 +15,17 @@
         "test"    : "info",
         "profile" : "disabled",
         "debug"   : "disabled"
+    },
+    "runtime_variables" : {
+        "__description" : "runtime variables for operators",
+        "matmul" : {
+            "__description" : [
+                "sets matmul algo",
+                "acceptable values are as follows",
+                "none, aocl_blis, aocl_blis_blocked, ",
+                "onednn, onednn_blocked, reference"
+                ],
+            "kernel" : "none"
+        }
     }
 }

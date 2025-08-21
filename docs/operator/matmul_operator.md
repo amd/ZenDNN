@@ -655,6 +655,41 @@ Required Identifers:
 
 Changing these names will result in incorrect behavior or operator failure.
 
+## Runtime Variables
+To achieve optimal performance for the MatMul operator, you can configure runtime variables using either a JSON configuration file or environment variables.
+
+### Supported Matmul Kernels
+| Algo |       Kernel       |
+|------|--------------------|
+| 1    | aocl_blis          |
+| 2    | aocl_blis_blocked  |
+| 3    | onednn             |
+| 4    | onednn_blocked     |
+| 5    | reference          |
+
+### Configuration methods
+
+#### 1. JSON Configuration
+Specify the desired kernel in your JSON config file:
+```json
+{
+  "matmul" : {
+      "kernel" : "<kernel name>"
+  }
+}
+```
+Example: `"kernel": "aocl_blis_blocked"`
+
+#### 2. Environment Variable
+Set the environment variable before running your application:
+```
+export ZENDNN_MATMUL_ALGO = <algo>
+```
+Example: `export ZENDNN_MATMUL_ALGO = 2` (for aocl_blis_blocked)
+
+- Note: Runtime variable can be set via either method, precedence is given to JSON configuration if both are provided.
+
+
 ## Common Variables
 
 - **tensor_factory_t**: Utility for creating tensors with specific shapes, types, and initial values.

@@ -18,6 +18,7 @@
 
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator.hpp"
+#include "matmul_config.hpp"
 #include "matmul_context.hpp"
 
 namespace zendnnl {
@@ -57,17 +58,23 @@ namespace ops {
  *   1. (mandatory) matmul_output : A MxN 2D tensor.
  *
  */
-class matmul_operator_t final : public operator_t<matmul_operator_t, matmul_context_t> {
-public:
+class matmul_operator_t final : public
+  operator_t<matmul_operator_t, matmul_context_t> {
+ public:
   using parent_type = operator_t<matmul_operator_t, matmul_context_t>;
 
-protected:
+ protected:
   status_t validate() override;
   status_t validate_forced_kernel() override;
   status_t kernel_factory() override;
-  status_t preprocess();
   std::string op_create_info() override;
   std::string op_execute_info() override;
+
+  status_t preprocess();
+  status_t update_matmul_kernel();
+  status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
+                                   std::vector<post_op_t> &po,
+                                   std::map<std::string,tensor_t> &inputs);
 };
 } //namespace ops
 

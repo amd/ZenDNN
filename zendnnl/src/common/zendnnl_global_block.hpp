@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -100,7 +100,7 @@ private:
   static std::mutex              instance_mutex; /*!< mutex for thread safety */
   static zendnnl_global_block_t* instance; /*!< singleton instance pointer */
 
-  config_manager_t               config_manager;
+  config_manager_t               config_manager; /*!< config manager */
   platform_info_t                platform_info; /*!< platform info */
   logger_t                       logger; /*!< logger */
 };

@@ -19,9 +19,10 @@
 namespace zendnnl {
 namespace ops {
 
-status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
-                                 std::vector<post_op_t> &po,
-                                 std::map<std::string,tensor_t> &inputs) {
+status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
+    &output_size,
+    std::vector<post_op_t> &po,
+    std::map<std::string,tensor_t> &inputs) {
   /**
   * @todo Add validation support for per tensor and per channel
   * for binary post-ops
@@ -110,6 +111,29 @@ status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
   return status_t::success;
 }
 
+status_t matmul_operator_t::update_matmul_kernel() {
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  uint32_t algo = matmul_config.get_algo();
+  if (algo == static_cast<int>(matmul_algo_t::aocl_blis)) {
+    forced_kernel = "aocl_blis";
+  }
+  else if (algo == static_cast<int>(matmul_algo_t::aocl_blis_blocked)) {
+    forced_kernel = "aocl_blis_blocked";
+  }
+  else if (algo == static_cast<int>(matmul_algo_t::onednn) ||
+           algo == static_cast<int>(matmul_algo_t::onednn_blocked)) {
+    forced_kernel = "onednn";
+  }
+  else if (algo == static_cast<int>(matmul_algo_t::reference)) {
+    forced_kernel = "reference";
+  }
+  else if (algo == static_cast<int>(matmul_algo_t::algo_count)) {
+    return status_t::failure;
+  }
+
+  return status_t::success;
+}
+
 status_t matmul_operator_t::validate() {
   LOG_DEBUG_INFO("<", get_name(),
                  "> Validating matmul op parameters matmul_operator_t");
@@ -190,6 +214,12 @@ status_t matmul_operator_t::validate() {
     apilog_error("Dimension mismatch with weights and output: weights dim= ",
                  weights_size.at(weights_size.size()-1), " output dim= ",
                  output_size.at(output_size.size()-1));
+    return status_t::failure;
+  }
+
+  // Update forced kernel if env/config is set.
+  if (update_matmul_kernel() == status_t::failure) {
+    log_error("Invalid matmul kernel algo is set");
     return status_t::failure;
   }
 

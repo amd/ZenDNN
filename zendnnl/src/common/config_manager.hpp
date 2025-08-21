@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include "nlohmann/json.hpp"
 #include "common/error_status.hpp"
 #include "common/config_params.hpp"
+#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace common {
@@ -60,7 +61,7 @@ using json = nlohmann::json;
  *  tries to set user parameters from environment variables.
  */
 class config_manager_t final {
-public:
+ public:
   /** @name Configure
    */
   /**@{*/
@@ -78,10 +79,10 @@ public:
    *
    *  @return Logger configuration.
    */
-  const config_logger_t&      get_logger_config() const;
+  const config_logger_t      &get_logger_config() const;
   /**@}*/
 
-private:
+ private:
 
   /** @brief Parse a JSON file.
    *
@@ -99,7 +100,7 @@ private:
    */
   void              set_user_config();
 
-  /** @brief Set config using evnironment variables.
+  /** @brief Set config using environment variables.
    */
   void              set_env_config();
 
