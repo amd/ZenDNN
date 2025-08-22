@@ -91,19 +91,36 @@ set_target_properties(zendnnl_library
   INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
   INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR};${ZENDNNL_JSON_INC_DIR}")
 
+# if (ZENDNNL_DEPENDS_ONEDNN)
+#   target_link_libraries(zendnnl_library
+#     INTERFACE ${CMAKE_DL_LIBS}
+#     INTERFACE OpenMP::OpenMP_CXX
+#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
+#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+# else()
+#   target_link_libraries(zendnnl_library
+#     INTERFACE ${CMAKE_DL_LIBS}
+#     INTERFACE OpenMP::OpenMP_CXX
+#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
+#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+# endif()
+
 if (ZENDNNL_DEPENDS_ONEDNN)
   target_link_libraries(zendnnl_library
     INTERFACE ${CMAKE_DL_LIBS}
     INTERFACE OpenMP::OpenMP_CXX
-    INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-    INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
-    INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+    INTERFACE au::aoclutils
+    INTERFACE au::au_cpuid
+    INTERFACE DNNL::dnnl
+    INTERFACE amdblis::amdblis_archive)
 else()
   target_link_libraries(zendnnl_library
     INTERFACE ${CMAKE_DL_LIBS}
     INTERFACE OpenMP::OpenMP_CXX
-    INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-    INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+    INTERFACE au::aoclutils
+    INTERFACE au::au_cpuid
+    INTERFACE amdblis::amdblis_archive)
 endif()
 
 target_link_options(zendnnl_library INTERFACE "-fopenmp")
