@@ -253,9 +253,10 @@ void embag_avx512_kernel(
       }
       else {
         __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[full_blocks]);
-        for (int t = 0; t < tail; ++t) {
-          dst[dst_offset + full_blocks * simd_width + t] = ((uint16_t *)&bf16_vec)[t];
-        }
+        uint16_t tmp_store[simd_width];
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(tmp_store), (__m256i)bf16_vec);
+        std::memcpy(&dst[dst_offset + full_blocks * simd_width], tmp_store,
+                    tail * sizeof(uint16_t));
       }
     }
   }

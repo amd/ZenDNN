@@ -296,16 +296,14 @@ void embag_avx2_kernel(
       if constexpr(std::is_same_v<OutType, float>) {
         float tail_result[simd_width];
         _mm256_storeu_ps(tail_result, acc[full_blocks]);
-        for (int t = 0; t < tail; ++t) {
-          dst[dst_offset + full_blocks * simd_width + t] = tail_result[t];
-        }
+        std::memcpy(&dst[dst_offset + full_blocks * simd_width], tail_result,
+                    tail * sizeof(float));
       }
       else {
         uint16_t tail_result_bf16[simd_width];
         fp32_to_bf16_avx2(acc[full_blocks], tail_result_bf16);
-        for (int t = 0; t < tail; ++t) {
-          dst[dst_offset + full_blocks * simd_width + t] = tail_result_bf16[t];
-        }
+        std::memcpy(&dst[dst_offset + full_blocks * simd_width], tail_result_bf16,
+                    tail * sizeof(uint16_t));
       }
     }
   }
