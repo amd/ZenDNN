@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -32,8 +32,8 @@ message(DEBUG "ZENDNNL_DEPS_DIR=${ZENDNNL_DEPS_DIR}")
 set(AMDBLIS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/amdblis"
   CACHE PATH "AMD BLIS root dir")
 set(AMDBLIS_GIT_REPO "https://github.com/amd/blis.git")
-# amdblis tag AOCL-Weekly-250725
-set(AMDBLIS_GIT_TAG "273a05f0bdf83557727c488730447c6f79dc0523")
+# amdblis tag AOCL-Aug2025-b1
+set(AMDBLIS_GIT_TAG "c96e7eb197c6860338ff76bb6631b60b3e3644de")
 option(AMDBLIS_GIT_PROGRESS ON)
 
 # aocl-utils repo information
