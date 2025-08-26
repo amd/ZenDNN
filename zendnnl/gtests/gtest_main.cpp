@@ -32,6 +32,10 @@ vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 const float MATMUL_F32_TOL = 0.001;
 const float MATMUL_BF16_TOL = 0.01;
 
+// Test tolerance constants
+const float EMBAG_F32_TOL = 0.001;
+const float EMBAG_BF16_TOL = 0.01;
+
 //number of testcases and random seed
 const uint32_t TEST_NUM = 100; //ToDo: make it command line argument
 int seed = time(NULL);
@@ -41,6 +45,9 @@ std::vector<MatmulType> matmul_test{};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random BatchMatmul Parameters */
 std::vector<BatchMatmulType> batchmatmul_test{};
+
+/** @brief embag_test Data Structure(vector of structures) to hold random Embedding Bag Parameters */
+std::vector<EmbagType> embag_test{};
 
 int main(int argc, char **argv) {
   //ToDO: Write a Command-line parser to avoid hardcodings in cmd arguments
@@ -71,6 +78,8 @@ int main(int argc, char **argv) {
   matmul_test.resize(TEST_NUM);
   //Creating Random parameters for BatchMatmul
   batchmatmul_test.resize(TEST_NUM);
+  //Creating Random parameters for Embedding Bag
+  embag_test.resize(TEST_NUM);
 
   ::testing :: InitGoogleTest(&argc, argv);
   gtest_argc = argc;

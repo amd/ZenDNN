@@ -182,7 +182,12 @@ void embag_ref_kernel(
           wt_sum = wt;
           // Initialize with first valid embedding
           for (auto j = 0; j < width; ++j) {
-            output_row[j] = wt * input_row[j];
+            if (algo != embag_algo_t::max) {
+              output_row[j] = wt * input_row[j];
+            }
+            else {
+              output_row[j] = input_row[j];
+            }
           }
           first_valid_index = false;
         }
@@ -190,9 +195,8 @@ void embag_ref_kernel(
           // Compute embedding bags as per the algorithm
           if (algo == embag_algo_t::max) {
             for (auto j = 0; j < width; ++j) {
-              float weighted_value = wt * input_row[j];
-              if (output_row[j] < weighted_value) {
-                output_row[j] = weighted_value;
+              if (output_row[j] < input_row[j]) {
+                output_row[j] = input_row[j];
               }
             }
           }

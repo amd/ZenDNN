@@ -27,6 +27,8 @@
 #include "operators/matmul/matmul_operator.hpp"
 #include "operators/reorder/reorder_context.hpp"
 #include "operators/reorder/reorder_operator.hpp"
+#include "operators/embag/embag_context.hpp"
+#include "operators/embag/embag_operator.hpp"
 
 
 #define MATMUL_SIZE_START 1
@@ -62,6 +64,20 @@ struct BatchMatmulType {
   BatchMatmulType();
 };
 
+/** @brief Embag Op Parameters Structure */
+struct EmbagType {
+  uint64_t num_embeddings;
+  uint64_t embedding_dim;
+  uint64_t num_bags;
+  uint64_t num_indices;
+  embag_algo_t algo;
+  int64_t padding_index;
+  bool include_last_offset;
+  bool is_weights;
+  int64_t scatter_stride;
+  EmbagType();
+};
+
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
@@ -69,8 +85,11 @@ extern int seed;
 extern const uint32_t TEST_NUM;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
+extern const float EMBAG_F32_TOL;
+extern const float EMBAG_BF16_TOL;
 extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
+extern std::vector<EmbagType> embag_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -96,6 +115,14 @@ class tensor_factory_t {
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,
                           StorageParam param);
+
+  /** @brief Generate random indices tensor with optional padding index */
+  tensor_t random_indices_tensor(const std::vector<index_type> size_,
+                                 uint64_t num_embeddings);
+
+  /** @brief Generate random offsets tensor for bag boundaries */
+  tensor_t random_offsets_tensor(const std::vector<index_type> size_,
+                                 uint64_t num_indices, bool include_last_offset = true);
 };
 
 bool is_binary_postop(const std::string post_op);
@@ -138,6 +165,38 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
  * */
 std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     bool inplace_reorder, void **reorder_weights);
+
+/** @fn embag_kernel_test
+ *  @brief Test function for embag kernel
+ *
+ * @return status_t Success or failure status
+ */
+status_t embag_kernel_test(tensor_t &table_tensor,
+                           tensor_t &indices_tensor,
+                           tensor_t &offsets_tensor,
+                           tensor_t &weights_tensor,
+                           tensor_t &output_tensor,
+                           embag_algo_t algo,
+                           int64_t padding_index,
+                           bool include_last_offset,
+                           bool is_weights,
+                           int64_t scatter_stride);
+
+/** @fn embag_forced_ref_kernel_test
+ *  @brief Test function for embag reference kernel (forced)
+ *
+ * @return status_t Success or failure status
+ */
+status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
+                                      tensor_t &indices_tensor,
+                                      tensor_t &offsets_tensor,
+                                      tensor_t &weights_tensor,
+                                      tensor_t &output_tensor,
+                                      embag_algo_t algo,
+                                      int64_t padding_index,
+                                      bool include_last_offset,
+                                      bool is_weights,
+                                      int64_t scatter_stride);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

@@ -32,6 +32,24 @@ MatmulType::MatmulType() {
   beta     = dist(gen);
 }
 
+// EmbagType constructor
+EmbagType::EmbagType() {
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_int_distribution<int> algo_dist(1,
+      3);  // sum=1, mean=2, max=3
+
+  num_embeddings = 128 + std::rand() % 2048;
+  embedding_dim = 16 + std::rand() % 512;
+  num_indices = 128 + std::rand() % 2048;
+  num_bags = 16 + std::rand() % 512;
+  algo = static_cast<embag_algo_t>(algo_dist(gen));
+  padding_index = -1;
+  include_last_offset = std::rand() % 2;
+  is_weights = std::rand() % 2;
+  scatter_stride = -1;
+}
+
 BatchMatmulType::BatchMatmulType() {
   batch_size = BATCH_START + rand() % BATCH_END;
 }
@@ -89,7 +107,6 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
   else {
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dist2(-1.0*range_, 1.0*range_);
-
     auto  buf_nelem  = udtensor.get_nelem();
     void *buf_vptr   = udtensor.get_raw_handle_unsafe();
 
@@ -177,6 +194,60 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
   }
 
   return btensor;
+}
+
+// Extended tensor factory implementations
+tensor_t tensor_factory_t::random_indices_tensor(const std::vector<index_type>
+    size_,
+    uint64_t num_embeddings) {
+  auto indices_tensor = tensor_t()
+                        .set_name("indices_tensor")
+                        .set_size(size_)
+                        .set_data_type(data_type_t::s32)
+                        .set_storage()
+                        .create();
+  void *data = indices_tensor.get_raw_handle_unsafe();
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<uint32_t> dist(0,
+      static_cast<uint32_t>(num_embeddings - 1));
+
+  int num_indices = size_[0];
+
+  for (int i = 0; i < num_indices; ++i) {
+    static_cast<uint32_t *>(data)[i] = dist(gen);
+  }
+
+  return indices_tensor;
+}
+
+tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
+    size_,
+    uint64_t num_indices,
+    bool include_last_offset) {
+  auto tensor = tensor_t()
+                .set_name("offsets_tensor")
+                .set_size(size_)
+                .set_data_type(data_type_t::s32)
+                .set_storage()
+                .create();
+  void *data = tensor.get_raw_handle_unsafe();
+
+  int num_offsets = size_[0];
+  if (include_last_offset) {
+    num_offsets--;
+  }
+
+  for (int i = 0; i < num_offsets; ++i) {
+    static_cast<uint32_t *>(data)[i] = (i * num_indices) / num_offsets;
+  }
+
+  if (include_last_offset) {
+    static_cast<uint32_t *>(data)[num_offsets] = num_indices;
+  }
+
+  return tensor;
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
@@ -399,6 +470,138 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     log_verbose(ex.what());
     return std::make_pair(tensor_t(), status_t::failure);
   }
+}
+
+status_t embag_kernel_test(tensor_t &table_tensor,
+                           tensor_t &indices_tensor,
+                           tensor_t &offsets_tensor,
+                           tensor_t &weights_tensor,
+                           tensor_t &output_tensor,
+                           embag_algo_t algo,
+                           int64_t padding_index,
+                           bool include_last_offset,
+                           bool is_weights,
+                           int64_t scatter_stride) {
+  try {
+    status_t status;
+
+    //define embag context
+    auto embedding_bag_context = embag_context_t()
+                                 .set_param("table", table_tensor)
+                                 .set_algo(algo)
+                                 .set_padding_index(padding_index)
+                                 .set_include_last_offset(include_last_offset)
+                                 .set_is_weights(is_weights)
+                                 .set_scatter_stride(scatter_stride)
+                                 .create();
+
+    //define embedding bag operator
+    auto embedding_bag_operator = embag_operator_t()
+                                  .set_name("embedding_bag")
+                                  .set_context(embedding_bag_context)
+                                  .create();
+
+    if (! embedding_bag_operator.check()) {
+      testlog_error(" operator ", embedding_bag_operator.get_name(),
+                    " creation failed.");
+      return status_t::failure;
+    }
+
+    if (is_weights) {
+      // Execute operator
+      status = embedding_bag_operator
+               .set_input("indices", indices_tensor)
+               .set_input("weights", weights_tensor)
+               .set_input("offsets", offsets_tensor)
+               .set_output("output", output_tensor)
+               .execute();
+    }
+    else {
+      status = embedding_bag_operator
+               .set_input("indices", indices_tensor)
+               .set_input("offsets", offsets_tensor)
+               .set_output("output", output_tensor)
+               .execute();
+    }
+
+    if (status != status_t::success) {
+      log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+      return status_t::failure;
+    }
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  return status_t::success;
+}
+
+status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
+                                      tensor_t &indices_tensor,
+                                      tensor_t &offsets_tensor,
+                                      tensor_t &weights_tensor,
+                                      tensor_t &output_tensor,
+                                      embag_algo_t algo,
+                                      int64_t padding_index,
+                                      bool include_last_offset,
+                                      bool is_weights,
+                                      int64_t scatter_stride) {
+  try {
+    status_t status;
+
+    //define embag context
+    auto embedding_bag_context = embag_context_t()
+                                 .set_param("table", table_tensor)
+                                 .set_algo(algo)
+                                 .set_padding_index(padding_index)
+                                 .set_include_last_offset(include_last_offset)
+                                 .set_is_weights(is_weights)
+                                 .set_scatter_stride(scatter_stride)
+                                 .create();
+
+    //define embedding bag operator
+    auto embedding_bag_operator = embag_operator_t()
+                                  .set_name("ref_embedding_bag")
+                                  .set_context(embedding_bag_context)
+                                  .create();
+
+    if (! embedding_bag_operator.check()) {
+      testlog_error(" operator ", embedding_bag_operator.get_name(),
+                    " creation failed.");
+      return status_t::failure;
+    }
+
+    if (is_weights) {
+      // Execute operator
+      status = embedding_bag_operator
+               .set_input("indices", indices_tensor)
+               .set_input("weights", weights_tensor)
+               .set_input("offsets", offsets_tensor)
+               .set_output("output", output_tensor)
+               .set_forced_kernel("reference")
+               .execute();
+    }
+    else {
+      // Execute operator
+      status = embedding_bag_operator
+               .set_input("indices", indices_tensor)
+               .set_input("offsets", offsets_tensor)
+               .set_output("output", output_tensor)
+               .set_forced_kernel("reference")
+               .execute();
+
+    }
+
+    if (status != status_t::success) {
+      log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+      return status_t::failure;
+    }
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  return status_t::success;
 }
 
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
