@@ -19,10 +19,6 @@
 
 using namespace std;
 
-// To pass command line arguments to gtest
-int gtest_argc;
-char **gtest_argv;
-
 const uint32_t po_size = 8; //Supported postop
 vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 
@@ -36,9 +32,10 @@ const float MATMUL_BF16_TOL = 0.01;
 const float EMBAG_F32_TOL = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
 
-//number of testcases and random seed
-const uint32_t TEST_NUM = 100; //ToDo: make it command line argument
-int seed = time(NULL);
+//number of testcases, random seed and empty post_op
+uint32_t test_num = 1000;
+int seed          = time(NULL);
+std::string cmd_post_op {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -50,7 +47,6 @@ std::vector<BatchMatmulType> batchmatmul_test{};
 std::vector<EmbagType> embag_test{};
 
 int main(int argc, char **argv) {
-  //ToDO: Write a Command-line parser to avoid hardcodings in cmd arguments
   //Supported Postop
   po_arr = { {"relu", post_op_type_t::relu},
     {"gelu_tanh", post_op_type_t::gelu_tanh},
@@ -62,27 +58,19 @@ int main(int argc, char **argv) {
     {"binary_mul", post_op_type_t::binary_mul}
   };
 
-  // If Seed is provided as command line argument
-  if (argc==3) {
-    try {
-      seed = stoi(argv[2]);
-    }
-    catch (const invalid_argument &e) {
-      log_verbose("Invalid argument(using default seed): ", e.what());
-    }
-  }
+  // Command line argument parser
+  Parser parse;
+  parse(argc, argv, seed, test_num, cmd_post_op);
   srand(seed);
   std::cout<<"Value "<<seed<<" is used as seed. \n";
 
   //Creating Random parameters for Matmul
-  matmul_test.resize(TEST_NUM);
+  matmul_test.resize(test_num);
   //Creating Random parameters for BatchMatmul
-  batchmatmul_test.resize(TEST_NUM);
+  batchmatmul_test.resize(test_num);
   //Creating Random parameters for Embedding Bag
-  embag_test.resize(TEST_NUM);
+  embag_test.resize(test_num);
 
   ::testing :: InitGoogleTest(&argc, argv);
-  gtest_argc = argc;
-  gtest_argv = argv;
   return RUN_ALL_TESTS();
 }

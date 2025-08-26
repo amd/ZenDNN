@@ -17,12 +17,28 @@
 #include "gtest_utils.hpp"
 
 MatmulType::MatmulType() {
-  matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  matmul_k = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  matmul_n = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  transA   = rand() % 2;
-  transB   = rand() % 2;
-  po_index = rand() % (po_size + 1);
+  large_dim  = rand()%3;
+  if (large_dim==0) {
+    matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
+  }
+  else {
+    matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  }
+  if (large_dim==1) {
+    matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
+  }
+  else {
+    matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  }
+  if (large_dim==2) {
+    matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
+  }
+  else {
+    matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  }
+  transA     = rand() % 2;
+  transB     = rand() % 2;
+  po_index   = rand() % (po_size + 1);
 
   // Use std::random_device and std::mt19937 for random float generation
   std::random_device rd;
@@ -248,6 +264,90 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
   }
 
   return tensor;
+}
+
+void Parser::operator()(const int &argc, char *argv[], int &seed,
+                        uint32_t &tests, std::string &po) {
+  for (int i=1; i<argc; ++i) {
+    std::string arg = argv[i];
+    if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
+      std::string key = arg.substr(2);
+      umap[key] = argv[++i];
+    }
+  }
+  read_from_umap("seed", seed);
+  read_from_umap("test", tests);
+  read_from_umap("postop", po);
+  return;
+}
+
+void Parser::read_from_umap(const std::string &key, int &num) {
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    if (isInteger(val)) {
+      try {
+        num = stoi(val);
+      }
+      catch (const std::out_of_range &e) {
+        log_info("Out-of-range argument for ", key,
+                 ", so using default value i.e. timestamp.");
+      }
+    }
+    else {
+      log_info("Invalid argument for ", key,
+               ", so using default value i.e. timestamp.");
+    }
+  }
+  else {
+    log_info("No argument for ", key, ", so using default value i.e. timestamp.");
+  }
+}
+
+void Parser::read_from_umap(const std::string &key, uint32_t &num) {
+  if (umap.count(key)) {
+    std::string val = umap.at(key);
+    if (isInteger(val) && val[0] != '-') {
+      try {
+        num = static_cast<uint32_t>(stoul(val));
+      }
+      catch (const std::out_of_range &e) {
+        log_info("Out-of-range argument for ", key,
+                 ", so using default value i.e. 1000.");
+      }
+    }
+    else {
+      log_info("Invalid argument for ", key, ", so using default value i.e. 1000.");
+    }
+  }
+  else {
+    log_info("No argument for ", key, ", so using default value i.e. 1000.");
+  }
+}
+
+void Parser::read_from_umap(const std::string &key, std::string &num) {
+  if (umap.count(key)) {
+    num = umap.at(key);
+  }
+  else {
+    log_info("No argument for ", key,
+             ", so using the random postop from supported list.");
+  }
+}
+
+bool Parser::isInteger(const std::string &s) {
+  if (s.empty()) {
+    return false;
+  }
+  size_t i = 0;
+  if (s[0] == '+' || s[0] == '-') {
+    i = 1;
+  }
+  for (; i < s.size(); ++i) {
+    if (!isdigit(s[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,

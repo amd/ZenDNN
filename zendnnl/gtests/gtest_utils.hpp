@@ -33,6 +33,7 @@
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 1000
+#define MATMUL_LARGE_SIZE_END 10000
 #define BATCH_START 1
 #define BATCH_END 256
 
@@ -45,6 +46,7 @@ using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
 /** @brief Matmul Op Parameters Structure */
 struct MatmulType {
+  uint32_t large_dim;
   uint64_t matmul_m;
   uint64_t matmul_k;
   uint64_t matmul_n;
@@ -82,7 +84,7 @@ extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
 extern int seed;
-extern const uint32_t TEST_NUM;
+extern std::string cmd_post_op;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern const float EMBAG_F32_TOL;
@@ -123,6 +125,30 @@ class tensor_factory_t {
   /** @brief Generate random offsets tensor for bag boundaries */
   tensor_t random_offsets_tensor(const std::vector<index_type> size_,
                                  uint64_t num_indices, bool include_last_offset = true);
+};
+
+/**
+ * @class Parser
+ * @brief Command Line Parser Utility for gtest
+ *
+ * This class provides functionality to read command line arguments and properly
+ * handles them.
+ *
+ */
+class Parser {
+  /** @brief Map to store command line arguments as {key,val} pair */
+  std::unordered_map<std::string, std::string> umap {};
+  /** @brief check if string is numeric or not */
+  bool isInteger(const std::string &s);
+  /** @brief read from key if valid or invalid key is given */
+  void read_from_umap(const std::string &key, int &num);
+  void read_from_umap(const std::string &key, uint32_t &num);
+  void read_from_umap(const std::string &key, std::string &num);
+ public:
+  /** @brief to make object callable */
+  void operator()(const int &argc,
+                  char *argv[],
+                  int &seed, uint32_t &test_num, std::string &po);
 };
 
 bool is_binary_postop(const std::string post_op);

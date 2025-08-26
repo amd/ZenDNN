@@ -35,10 +35,10 @@ class TestReorder : public ::testing::TestWithParam<MatmulType> {
     n = params.matmul_n;
     transA   = params.transA;
     transB   = params.transB;
-    if (gtest_argc >= 3) {
+    if (!cmd_post_op.empty()) {
       auto it = find_if(po_arr.begin(), po_arr.end(),
       [&](const std::pair<std::string, post_op_type_t> &po) {
-        return po.first == gtest_argv[2];
+        return po.first == cmd_post_op;
       });
       po_index = it != po_arr.end() ? distance(po_arr.begin(), it) : po_size;
     }

@@ -37,10 +37,10 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     transB   = params.transB;
     alpha    = params.alpha;
     beta     = params.beta;
-    if (gtest_argc >= 3) {
+    if (!cmd_post_op.empty()) {
       auto it = find_if(po_arr.begin(), po_arr.end(),
       [&](const std::pair<std::string, post_op_type_t> &po) {
-        return po.first == gtest_argv[2];
+        return po.first == cmd_post_op;
       });
       po_index = it != po_arr.end() ? distance(po_arr.begin(), it) : po_size;
     }

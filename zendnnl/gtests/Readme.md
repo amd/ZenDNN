@@ -65,7 +65,7 @@ cmake --build .
 
 ### **General Command Structure**
 ```bash
-./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] [<Seed>] [<PostOp>]
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests>
 ```
 
 ## **Parameters**
@@ -83,9 +83,13 @@ cmake --build .
 3. **`<PostOp>`** (Optional):
    - Specifies the post-operation to apply during tests.
 
+4. **`<num_of_tests>`** (Optional):
+   - Specifies the number of tests to be run for test-suite.
+
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
- - If **`<Seed>`** parameter is also not provided, gtest sets the seed based on timestamp for generating test data.
+ - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
+ - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops.
 
 ## **Examples**
@@ -145,11 +149,15 @@ cmake --build .
 ### Example with more Arguments Support
 1. Run the 23rd BF16 Input, BF16 Output matmul test with seed 1245:
 ``` bash
-./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/23 1245
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/23 --seed 1245
 ```
 2. Run the 23rd BF16 Input, BF16 Output matmul test with seed 1245 and relu post-operation:
 ``` bash
-./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/23 1245 relu
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/23 --seed 1245 --postop relu
+```
+3. Run the BF16 Input, BF16 Output matmul test for 10 randomly generated valid tests with random seed and random postop selection:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --test 10
 ```
 
 ### Run All testcases of a TestSuite
