@@ -66,7 +66,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
   if (memory_reorder) {
     if (input_dtype == data_type_t::f32) {
       aocl_reorder_f32f32f32of32(order, trans, reorder_param0, (float *)input,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                  (float *)interim_output, K, N, ldb, nullptr);
 #else
                                  (float *)interim_output, K, N, ldb);
@@ -75,7 +75,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     }
     else if (input_dtype == data_type_t::bf16) {
       aocl_reorder_bf16bf16f32of32(order, trans, reorder_param0,(int16_t *)input,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                    (int16_t *)interim_output, K, N, ldb, nullptr);
 #else
                                    (int16_t *)interim_output, K, N, ldb);
@@ -85,7 +85,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     else if (input_dtype == data_type_t::s8) {
       if (source_dtype == data_type_t::s8) {
         aocl_reorder_s8s8s32os32(order, trans, reorder_param0, (int8_t *)input,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                  (int8_t *)interim_output, K, N, ldb, nullptr);
 #else
                                  (int8_t *)interim_output, K, N, ldb);
@@ -93,7 +93,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
       }
       else if (source_dtype == data_type_t::u8) {
         aocl_reorder_u8s8s32os32(order, trans, reorder_param0, (int8_t *)input,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                  (int8_t *)interim_output, K, N, ldb, nullptr);
 #else
                                  (int8_t *)interim_output, K, N, ldb);
@@ -104,7 +104,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     else if (input_dtype == data_type_t::s4) {
       // WOQ_BF16 api to reorder.
       aocl_reorder_bf16s4f32of32(order, trans, reorder_param0, (int8_t *)input,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                  (int8_t *)interim_output, K, N, ldb, nullptr);
 #else
                                  (int8_t *)interim_output, K, N, ldb);
@@ -116,7 +116,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     if (input_dtype == data_type_t::f32) {
       aocl_unreorder_f32f32f32of32_reference(is_transpose ? 'c' : 'r', reorder_param0,
                                              (float *)input, (float *)interim_output,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                              K, N, ldb, nullptr);
 #else
                                              K, N, ldb);
@@ -126,7 +126,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     else if (input_dtype == data_type_t::bf16) {
       aocl_unreorder_bf16bf16f32of32(is_transpose ? 'c' : 'r', reorder_param0,
                                      (int16_t *)input, (int16_t *)interim_output,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                      K, N, ldb, nullptr);
 #else
                                      K, N, ldb);
@@ -136,7 +136,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     else if (input_dtype == data_type_t::s8) {
       aocl_unreorder_s8s8s32os32_reference(is_transpose ? 'c' : 'r', reorder_param0,
                                            (int8_t *)input, (int8_t *)interim_output,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                                            K, N, ldb, nullptr);
 #else
                                            K, N, ldb);

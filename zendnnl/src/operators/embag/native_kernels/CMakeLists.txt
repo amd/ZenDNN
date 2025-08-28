@@ -24,25 +24,19 @@ set(embag_operator_private_headers
   embag_avx512_fp32_bf16_utils.hpp
   embag_avx512_fp32_bf16_utils.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${embag_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${embag_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${embag_operator_private_headers})
+endif()
 
-target_link_options(zendnnl_archive
-  PUBLIC "-fopenmp")
-target_link_libraries(zendnnl_archive
-  PUBLIC OpenMP::OpenMP_CXX)
-
-target_sources(zendnnl
-  PRIVATE ${embag_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers})
-
-target_link_options(zendnnl
-  PUBLIC "-fopenmp")
-target_link_libraries(zendnnl
-  PUBLIC OpenMP::OpenMP_CXX)
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${embag_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${embag_operator_private_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

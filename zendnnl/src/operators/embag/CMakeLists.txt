@@ -29,19 +29,23 @@ set(embag_operator_private_headers
   embag_kernel_list.hpp
   embag_ref_kernel.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${embag_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${embag_operator_public_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${embag_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${embag_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${embag_operator_public_headers})
+endif()
 
-target_sources(zendnnl
-  PRIVATE ${embag_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${embag_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${embag_operator_public_headers})
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${embag_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${embag_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${embag_operator_public_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

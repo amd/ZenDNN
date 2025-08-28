@@ -27,13 +27,17 @@ set(memory_headers
   tensor.hpp
   memory_utils.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${memory_sources}
-  PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${memory_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${memory_sources}
+    PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${memory_headers})
+endif()
 
-target_sources(zendnnl
-  PRIVATE ${memory_sources}
-  PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${memory_headers})
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${memory_sources}
+    PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${memory_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

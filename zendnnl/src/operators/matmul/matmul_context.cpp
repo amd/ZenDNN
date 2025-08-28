@@ -121,7 +121,7 @@ std::string matmul_context_t::context_info() {
   return ss.str();
 }
 
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if ZENDNNL_DEPENDS_AOCLDLP
 dlp_metadata_t *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
 #else
 aocl_post_op *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {

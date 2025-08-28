@@ -16,10 +16,10 @@
 #include "reorder_operator.hpp"
 #include "reorder_kernel_list.hpp"
 
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
-  #include "aocl_dlp.h"
+#if ZENDNNL_DEPENDS_AOCLDLP
+#include "aocl_dlp.h"
 #else
-  #include "blis.h"
+#include "blis.h"
 #endif
 
 namespace zendnnl {

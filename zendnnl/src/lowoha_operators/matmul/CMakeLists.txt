@@ -22,15 +22,19 @@ set(lowoha_matmul_sources
 set(lowoha_matmul_public_headers
   lowoha_matmul.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${lowoha_matmul_sources}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${lowoha_matmul_sources}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+endif()
 
-target_sources(zendnnl
-  PRIVATE ${lowoha_matmul_sources}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${lowoha_matmul_sources}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

@@ -78,8 +78,6 @@ add_executable(examples ${examples_sources})
 #   OpenMP::OpenMP_CXX
 #   zendnnl::zendnnl_archive)
 
-# target_link_libraries(examples
-#   OpenMP::OpenMP_CXX)
 target_link_libraries(examples
   PUBLIC  OpenMP::OpenMP_CXX
   PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,zendnnl::zendnnl_archive>")

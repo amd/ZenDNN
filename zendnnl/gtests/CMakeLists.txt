@@ -55,17 +55,27 @@ if(ZENDNNL_BUILD_GTEST)
   add_executable(gtests ${gtests_sources})
 
   target_link_libraries(gtests
-    zendnnl_archive
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main)
+    PRIVATE zendnnl_archive
+    PRIVATE OpenMP::OpenMP_CXX
+    PRIVATE GTest::gtest
+    PRIVATE GTest::gtest_main)
 
-    # Link correct AOCL backend and add matching compile defs
-  if (ZENDNNL_DEPENDS_AOCLDLP)
-    target_link_libraries(gtests aocldlp::aocl_dlp_static)
-  elseif(ZENDNNL_DEPENDS_AMDBLIS)
-    target_link_libraries(gtests amdblis::amdblis_archive)
+  # Link correct AOCL backend and add matching compile defs
+  if(ZENDNNL_DEPENDS_AOCLDLP AND ZENDNNL_AOCLDLP_INJECTED)
+      target_link_libraries(gtests
+        PRIVATE aocldlp::aocl_dlp_static)
   endif()
+
+  if(ZENDNNL_DEPENDS_AMDBLIS AND ZENDNNL_AMDBLIS_INJECTED)
+      target_link_libraries(gtests
+        PRIVATE amdblis::amdblis_archive)
+  endif()
+
+  # if (ZENDNNL_DEPENDS_AOCLDLP)
+  #   target_link_libraries(gtests aocldlp::aocl_dlp_static)
+  # elseif(ZENDNNL_DEPENDS_AMDBLIS)
+  #   target_link_libraries(gtests amdblis::amdblis_archive)
+  # endif()
 
   if(ZENDNNL_CODE_COVERAGE)
     message(STATUS "code-coverage enabled for zendnnl gtests")

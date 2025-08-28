@@ -20,58 +20,166 @@ include(CreateIncludeFiles)
 set(zendnnl_src_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(zendnnl_inc_file "${CMAKE_BINARY_DIR}/zendnnl.hpp")
 
-add_library(zendnnl_archive STATIC)
-set_property(TARGET zendnnl_archive
-  PROPERTY POSITION_INDEPENDENT_CODE ON)
-set_property(TARGET zendnnl_archive
-  PROPERTY INTERFACE_POSITION_INDEPENDENT_CODE ON)
-target_sources(zendnnl_archive
-  INTERFACE FILE_SET zendnnl_top_header TYPE HEADERS BASE_DIRS ${CMAKE_BINARY_DIR} FILES ${zendnnl_inc_file}
-  PRIVATE FILE_SET zendnnl_pvt_headers TYPE HEADERS BASE_DIRS ${zendnnl_src_dir}
-  PUBLIC FILE_SET zendnnl_headers TYPE HEADERS BASE_DIRS ${zendnnl_src_dir})
-target_include_directories(zendnnl_archive
-  PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
-  INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
-target_link_libraries(zendnnl_archive
-  PUBLIC OpenMP::OpenMP_CXX
-  PUBLIC ${CMAKE_DL_LIBS}
-  PUBLIC nlohmann_json::nlohmann_json)
+# build archive
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  add_library(zendnnl_archive STATIC)
 
-if (ZENDNNL_DEPENDS_ONEDNN)
+  set_property(TARGET zendnnl_archive
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+  set_property(TARGET zendnnl_archive
+    PROPERTY INTERFACE_POSITION_INDEPENDENT_CODE ON)
+
+  target_sources(zendnnl_archive
+    INTERFACE FILE_SET  zendnnl_top_header
+              TYPE      HEADERS
+              BASE_DIRS ${CMAKE_BINARY_DIR}
+              FILES     ${zendnnl_inc_file}
+    PRIVATE   FILE_SET  zendnnl_pvt_headers
+              TYPE      HEADERS
+              BASE_DIRS ${zendnnl_src_dir}
+    PUBLIC    FILE_SET  zendnnl_headers
+              TYPE      HEADERS
+              BASE_DIRS ${zendnnl_src_dir})
+
+  target_include_directories(zendnnl_archive
+    PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+    INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
+
+  target_link_options(zendnnl_archive
+    PUBLIC "-fopenmp")
+
+  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_JSON=1)
   target_link_libraries(zendnnl_archive
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-else()
+    PUBLIC OpenMP::OpenMP_CXX
+    PUBLIC ${CMAKE_DL_LIBS}
+    PUBLIC nlohmann_json::nlohmann_json)
+
+  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl_archive
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
+  # target_link_libraries(zendnnl_archive
+  #   PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>")
+
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
+    if(ZENDNNL_AOCLDLP_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PRIVATE "$<COMPILE_ONLY:aocldlp::aocl_dlp_static>")
+    else()
+      target_link_libraries(zendnnl_archive
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
+  endif()
+
+  if(ZENDNNL_DEPENDS_AMDBLIS)
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
+    if(ZENDNNL_AMDBLIS_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PRIVATE "$<COMPILE_ONLY:amdblis::amdblis_archive>")
+    else()
+      target_link_libraries(zendnnl_archive
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
+  endif()
+
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+    if(ZENDNNL_ONEDNN_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PRIVATE "$<COMPILE_ONLY:DNNL::dnnl>")
+    else()
+      target_link_libraries(zendnnl_archive
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+  endif()
+
 endif()
 
-# Backend-specific links and compile defs
-if (ZENDNNL_DEPENDS_AOCLDLP)
-  target_link_libraries(zendnnl_archive
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
-elseif(ZENDNNL_DEPENDS_AMDBLIS)
-  target_link_libraries(zendnnl_archive
-    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
-endif()
+# build shared lib
+if(ZENDNNL_LIB_BUILD_SHARED)
+  add_library(zendnnl SHARED)
 
-#  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
-add_library(zendnnl SHARED)
-set_property(TARGET zendnnl
-  PROPERTY POSITION_INDEPENDENT_CODE ON)
-set_property(TARGET zendnnl
-  PROPERTY INTERFACE_POSITION_INDEPENDENT_CODE ON)
-target_sources(zendnnl
-  INTERFACE FILE_SET zendnnl_top_header TYPE HEADERS BASE_DIRS ${CMAKE_BINARY_DIR} FILES ${zendnnl_inc_file}
-  PRIVATE FILE_SET zendnnl_pvt_headers TYPE HEADERS BASE_DIRS ${zendnnl_src_dir}
-  PUBLIC FILE_SET zendnnl_headers TYPE HEADERS BASE_DIRS ${zendnnl_src_dir})
-target_include_directories(zendnnl
-  PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
-  INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
-target_link_libraries(zendnnl
-  PUBLIC OpenMP::OpenMP_CXX
-  PUBLIC ${CMAKE_DL_LIBS})
+  set_property(TARGET zendnnl
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+  set_property(TARGET zendnnl
+    PROPERTY INTERFACE_POSITION_INDEPENDENT_CODE ON)
+
+  target_sources(zendnnl
+    INTERFACE FILE_SET  zendnnl_top_header
+              TYPE      HEADERS
+              BASE_DIRS ${CMAKE_BINARY_DIR}
+              FILES     ${zendnnl_inc_file}
+    PRIVATE   FILE_SET  zendnnl_pvt_headers
+              TYPE      HEADERS
+              BASE_DIRS ${zendnnl_src_dir}
+    PUBLIC    FILE_SET  zendnnl_headers
+              TYPE      HEADERS
+              BASE_DIRS ${zendnnl_src_dir})
+
+  target_include_directories(zendnnl
+    PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+    INTERFACE "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/zendnnl/include>")
+
+  target_link_options(zendnnl
+    PUBLIC "-fopenmp")
+
+  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_JSON=1)
+  target_link_libraries(zendnnl
+    PUBLIC OpenMP::OpenMP_CXX
+    PUBLIC ${CMAKE_DL_LIBS}
+    PUBLIC nlohmann_json::nlohmann_json)
+
+  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
+  target_link_libraries(zendnnl
+    PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
+  #  PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::au_cpuid>"
+
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
+    if(ZENDNNL_AOCLDLP_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PUBLIC aocldlp::aocl_dlp_static)
+    else()
+      target_link_libraries(zendnnl
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,aocldlp::aocl_dlp_static>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=0)
+  endif()
+
+  if(ZENDNNL_DEPENDS_AMDBLIS)
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=1)
+    if(ZENDNNL_AMDBLIS_INJECTED)
+      target_link_libraries(zendnnl
+        PUBLIC amdblis::amdblis_archive)
+    else()
+      target_link_libraries(zendnnl
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
+  endif()
+
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+    if(ZENDNNL_ONEDNN_INJECTED)
+      target_link_libraries(zendnnl
+        PUBLIC DNNL::dnnl)
+    else()
+      target_link_libraries(zendnnl
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl")
+    endif()
+  else()
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+  endif()
+
+endif()
 
 # Propagate backend compile defs to shared library
 if (ZENDNNL_DEPENDS_AOCLDLP)
@@ -104,17 +212,31 @@ endif()
 
 
 # install zendnnl and create package config files
-install(TARGETS zendnnl_archive zendnnl EXPORT zendnnl_targets
-  DESTINATION zendnnl/lib
-  FILE_SET zendnnl_top_header DESTINATION zendnnl/include
-  FILE_SET zendnnl_headers DESTINATION zendnnl/include)
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  install(TARGETS zendnnl_archive EXPORT zendnnl_targets
+    DESTINATION zendnnl/lib
+    FILE_SET zendnnl_top_header DESTINATION zendnnl/include
+    FILE_SET zendnnl_headers DESTINATION zendnnl/include)
+endif()
+
+if(ZENDNNL_LIB_BUILD_SHARED)
+  install(TARGETS zendnnl EXPORT zendnnl_targets
+    DESTINATION zendnnl/lib
+    FILE_SET zendnnl_top_header DESTINATION zendnnl/include
+    FILE_SET zendnnl_headers DESTINATION zendnnl/include)
+endif()
+
 
 install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlDependenciesOptions.cmake"
-  RENAME zendnnl_dependencies_options.cmake
+  DESTINATION zendnnl/lib/cmake)
+
+install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlComponentsOptions.cmake"
+  DESTINATION zendnnl/lib/cmake)
+
+install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlIntegrationOptions.cmake"
   DESTINATION zendnnl/lib/cmake)
 
 install(FILES "${CMAKE_MODULE_PATH}/ZenDnnlMacros.cmake"
-  RENAME zendnnl_macros.cmake
   DESTINATION zendnnl/lib/cmake)
 
 install(FILES "${CMAKE_MODULE_PATH}/FindZLAMDBLIS.cmake"

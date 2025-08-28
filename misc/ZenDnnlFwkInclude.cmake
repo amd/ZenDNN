@@ -15,22 +15,30 @@
 # *******************************************************************************/
 include_guard(GLOBAL)
 
-if(ZENDNNL_BUILD_DEPS)
-  include(ExternProjJSON)
-  include(ExternProjAOCLUTILS)
-  include(ExternProjAOCLDLP)
-  include(ExternProjAMDBLIS)
-  include(ExternProjONEDNN)
-  include(ExternProjGTEST)
-else()
-  message(STATUS
-    "${ZENDNNL_MSG_PREFIX}Skipping building dependencies. Build will fail if they are not pre-built.")
-endif()
+# integration framework
+set(ZENDNNL_ZENTORCH_BUILD ON)
 
-# add a custom target to build only dependencies
-add_custom_target(zendnnl-deps
-  DEPENDS ${ZENDNNL_DEPS}
-)
+# dependencis and their injections
+set(ZENDNNL_DEPENDS_AMDBLIS ON)
+#set(ZENDNNL_AMDBLIS_FWK_TGT <framework target>)
+#set(ZENDNNL_AMDBLIS_FWK_INSTALL_DIR <framework install dir>)
 
+set(ZENDNNL_DEPENDS_ONEDNN  OFF)
+#set(ZENDNNL_ONEDNN_FWK_TGT <framework target>)
+#set(ZENDNNL_ONEDNN_FWL_INSTALL_DIR <framework install dir>)
 
+# zendnnl components
+set(ZENDNNL_BUILD_EXAMPLES OFF)
+set(ZENDNNL_BUILD_GTEST OFF)
+set(ZENDNNL_BUILD_DOXYGEN OFF)
+set(ZENDNNL_BUILD_BENCHDNN OFF)
+set(ZENDNNL_CODE_COVERAGE OFF)
+
+# configuration variables
+set(ZENDNNL_VERBOSE_MAKEFILE ON)
+set(ZENDNNL_MESSAGE_LOG_LEVEL "DEBUG")
+set(ZENDNNL_BUILD_TYPE "Release")
+#set(ZENDNNL_INSTALL_PREFIX <zendnnl_install_prefix>)
+
+add_subdirectory(ZenDNN)
 

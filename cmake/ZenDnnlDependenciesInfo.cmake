@@ -25,8 +25,7 @@ if(NOT DEFINED ZENDNNL_SOURCE_DIR)
 endif()
 
 # dependencies directory
-set(ZENDNNL_DEPS_DIR "${ZENDNNL_SOURCE_DIR}/dependencies")
-message(DEBUG "ZENDNNL_DEPS_DIR=${ZENDNNL_DEPS_DIR}")
+#set(ZENDNNL_DEPS_DIR "${ZENDNNL_SOURCE_DIR}/dependencies")
 
 # aocl-dlp repo information
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"

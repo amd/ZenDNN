@@ -18,14 +18,17 @@ include_guard(GLOBAL)
 include(ZenDnnlOptions)
 
 if(ZENDNNL_DEPENDS_JSON)
+
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig JSON...")
+
   list(APPEND JSON_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-  message(DEBUG "JSON_CMAKE_ARGS=${JSON_CMAKE_ARGS}")
-  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}JSON_CMAKE_ARGS=${JSON_CMAKE_ARGS}")
 
+  set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
   if(ZENDNNL_LOCAL_JSON)
 
-    message(DEBUG "Using local JSON from ${JSON_ROOT_DIR}")
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local JSON from ${JSON_ROOT_DIR}")
 
     ExternalProject_ADD(zendnnl-deps-json
       SOURCE_DIR "${JSON_ROOT_DIR}"
@@ -35,6 +38,9 @@ if(ZENDNNL_DEPENDS_JSON)
       BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
       INSTALL_COMMAND cmake --build . --config release --target install)
   else()
+
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download JSON with tag ${JSON_GIT_TAG}")
+
     ExternalProject_ADD(zendnnl-deps-json
       SOURCE_DIR "${JSON_ROOT_DIR}"
       BINARY_DIR "${CMAKE_BINARY_DIR}/json"
@@ -72,19 +78,23 @@ if(ZENDNNL_DEPENDS_JSON)
   #
   # UNCOMMENT the code below for manual interface.
 
-  set(ZENDNNL_JSON_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/json/include")
+  # set(ZENDNNL_JSON_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/json/include")
 
-  file(MAKE_DIRECTORY ${ZENDNNL_JSON_INC_DIR})
-  add_library(zendnnl_json_deps INTERFACE IMPORTED GLOBAL)
-  add_dependencies(zendnnl_json_deps zendnnl-deps-json)
-  set_target_properties(zendnnl_json_deps PROPERTIES
-    INTERFACE_COMPILE_DEFINITIONS "\$<\$<NOT:\$<BOOL:ON>>:JSON_USE_GLOBAL_UDLS=0>;\$<\$<NOT:\$<BOOL:ON>>:JSON_USE_IMPLICIT_CONVERSIONS=0>;\$<\$<BOOL:OFF>:JSON_DISABLE_ENUM_SERIALIZATION=1>;\$<\$<BOOL:OFF>:JSON_DIAGNOSTICS=1>;\$<\$<BOOL:OFF>:JSON_DIAGNOSTIC_POSITIONS=1>;\$<\$<BOOL:OFF>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>"
-    INTERFACE_COMPILE_FEATURES "cxx_std_11"
-    INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_JSON_INC_DIR};${ZENDNNL_JSON_INC_DIR}")
+  # if(NOT EXISTS ${ZENDNNL_JSON_INC_DIR})
+  #   file(MAKE_DIRECTORY ${ZENDNNL_JSON_INC_DIR})
+  # endif()
 
-  add_library(nlohmann_json::nlohmann_json ALIAS zendnnl_json_deps)
-  list(APPEND ZENDNNL_LINK_LIBS "nlohmann_json::nlohmann_json")
+  # add_library(zendnnl_json_deps INTERFACE IMPORTED GLOBAL)
+  # add_dependencies(zendnnl_json_deps zendnnl-deps-json)
+  # set_target_properties(zendnnl_json_deps PROPERTIES
+  #   INTERFACE_COMPILE_DEFINITIONS "\$<\$<NOT:\$<BOOL:ON>>:JSON_USE_GLOBAL_UDLS=0>;\$<\$<NOT:\$<BOOL:ON>>:JSON_USE_IMPLICIT_CONVERSIONS=0>;\$<\$<BOOL:OFF>:JSON_DISABLE_ENUM_SERIALIZATION=1>;\$<\$<BOOL:OFF>:JSON_DIAGNOSTICS=1>;\$<\$<BOOL:OFF>:JSON_DIAGNOSTIC_POSITIONS=1>;\$<\$<BOOL:OFF>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>"
+  #   INTERFACE_COMPILE_FEATURES "cxx_std_11"
+  #   INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_JSON_INC_DIR};${ZENDNNL_JSON_INC_DIR}")
 
+  # add_library(nlohmann_json::nlohmann_json ALIAS zendnnl_json_deps)
+  # list(APPEND ZENDNNL_LINK_LIBS "nlohmann_json::nlohmann_json")
+
+  # list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_JSON_INC_DIR})
 else()
-  message(DEBUG "skipping building json...")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Building JSON will be skipped.")
 endif()

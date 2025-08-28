@@ -19,61 +19,179 @@ include_guard(GLOBAL)
 macro(zendnnl_required_packages)
   message(DEBUG "finding required packages...")
   # find openmp
-  find_package(OpenMP REQUIRED)
+  find_package(OpenMP REQUIRED GLOBAL)
   # pthreads
-  find_package(Threads REQUIRED)
+  find_package(Threads REQUIRED GLOBAL)
 endmacro()
 
 # dependencies
-macro(find_dependencies  _install_prefix)
-  # find amdblis
-  if(ZENDNNL_DEPENDS_AMDBLIS)
-    set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
-    find_package(ZLAMDBLIS REQUIRED)
-  endif()
-
-  # find aocl dlp
-  if(ZENDNNL_DEPENDS_AOCLDLP)
-    set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
-    find_package(AOCLDLP REQUIRED)
-  endif()
-
-  if(ZENDNNL_DEPENDS_ONEDNN)
-    set(dnnl_INSTALL_DIR "${_install_prefix}/deps/onednn")
-    set(dnnl_ROOT "${dnnl_INSTALL_DIR}")
-    set(dnnl_DIR "${dnnl_ROOT}/lib/cmake/dnnl")
-    find_package(dnnl REQUIRED)
-    if (dnnl_FOUND)
-      message(STATUS "Found ONEDNN at ${dnnl_ROOT}")
-      include_directories(${dnnl_ROOT}/include)
-    else()
-      message(FATAL_ERROR "ONEDNN not found at ${dnnl_INSTALL_DIR}")
-    endif()
-  endif()
-
+macro(find_build_dependencies  _install_prefix)
   # find aocl utils
   if(ZENDNNL_DEPENDS_AOCLUTILS)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presencce...")
     set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
     set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
-    set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
-    find_package(aocl-utils REQUIRED)
+    #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
+    find_package(aocl-utils REQUIRED GLOBAL CONFIG
+      PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
     if(aocl-utils_FOUND)
-      message(STATUS "Found AOCL UTILS at ${aocl-utils_ROOT}")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${aocl-utils_ROOT}")
+      if(TARGET au::aoclutils)
+        target_include_directories(au::aoclutils
+          INTERFACE ${aocl-utils_ROOT}/include)
+      endif()
       include_directories(${aocl-utils_ROOT}/include)
+    else()
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
     endif()
   endif()
 
   # find json
   if(ZENDNNL_DEPENDS_JSON)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presencce...")
     set(JSON_INSTALL_DIR "${_install_prefix}/deps/json")
     set(nlohmann_json_ROOT "${JSON_INSTALL_DIR}")
     set(nlohmann_json_DIR "${json_ROOT}/share/cmake/nlohmann_json")
-    find_package(nlohmann_json REQUIRED)
+    find_package(nlohmann_json REQUIRED GLOBAL)
     if(nlohmann_json_FOUND)
-      message(STATUS "Found JSON at ${nlohmann_json_ROOT}")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found JSON at ${nlohmann_json_ROOT}")
       include_directories(${nlohmann_json_ROOT}/include)
+    else()
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
+    endif()
+  endif()
+
+  # find amdblis
+  if(ZENDNNL_DEPENDS_AMDBLIS)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AMD-BLIS presencce...")
+    set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
+    find_package(ZLAMDBLIS REQUIRED GLOBAL)
+  endif()
+
+  # find aocl dlp
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presencce...")
+    set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
+    find_package(AOCLDLP REQUIRED GLOBAL)
+  endif()
+
+  # find onednn
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presencce...")
+    set(dnnl_INSTALL_DIR "${_install_prefix}/deps/onednn")
+    set(dnnl_ROOT "${dnnl_INSTALL_DIR}")
+    set(dnnl_DIR "${dnnl_ROOT}/lib/cmake/dnnl")
+    find_package(dnnl REQUIRED GLOBAL)
+    if (dnnl_FOUND)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found ONEDNN at ${dnnl_ROOT}")
+      if(TARGET DNNL::dnnl)
+        target_include_directories(DNNL::dnnl
+          INTERFACE ${dnnl_ROOT}/include)
+      endif()
+      include_directories(${dnnl_ROOT}/include)
+    else()
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}ONEDNN not found at ${dnnl_INSTALL_DIR}")
     endif()
   endif()
 
 endmacro()
 
+# dependencies
+macro(find_install_dependencies  _install_prefix)
+  # find aocl utils
+  if(ZENDNNL_DEPENDS_AOCLUTILS)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-UTILS presencce...")
+    set(AOCLUTILS_INSTALL_DIR "${_install_prefix}/deps/aoclutils")
+    set(aocl-utils_ROOT "${AOCLUTILS_INSTALL_DIR}")
+    #set(aocl-utils_DIR "${aocl-utils_ROOT}/lib/CMake")
+    find_package(aocl-utils REQUIRED GLOBAL CONFIG
+      PATH_SUFFIXES "lib" "lib/CMake" "lib64" "lib64/CMake")
+    if(aocl-utils_FOUND)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found AOCL-UTILS at ${aocl-utils_ROOT}")
+      if(TARGET au::aoclutils)
+        target_include_directories(au::aoclutils
+          INTERFACE ${aocl-utils_ROOT}/include)
+      endif()
+      include_directories(${aocl-utils_ROOT}/include)
+    else()
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
+    endif()
+  endif()
+
+  # find json
+  if(ZENDNNL_DEPENDS_JSON)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking JSON presencce...")
+    set(JSON_INSTALL_DIR "${_install_prefix}/deps/json")
+    set(nlohmann_json_ROOT "${JSON_INSTALL_DIR}")
+    set(nlohmann_json_DIR "${json_ROOT}/share/cmake/nlohmann_json")
+    find_package(nlohmann_json REQUIRED GLOBAL)
+    if(nlohmann_json_FOUND)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Found JSON at ${nlohmann_json_ROOT}")
+      include_directories(${nlohmann_json_ROOT}/include)
+    else()
+      message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}AOCL-UTILS dependency not found.")
+    endif()
+  endif()
+
+  # find amdblis
+  if(ZENDNNL_DEPENDS_AMDBLIS)
+    if(NOT ZENDNNL_AMDBLIS_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AMD-BLIS presencce...")
+      set(AMDBLIS_INSTALL_DIR "${_install_prefix}/deps/amdblis")
+      find_package(ZLAMDBLIS REQUIRED GLOBAL)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}AMD-BLIS seems injected, will not check its presence...")
+    endif()
+  endif()
+
+  # find aocl dlp
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    if(NOT ZENDNNL_AOCLDLP_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking AOCL-DLP presencce...")
+      set(AOCLDLP_INSTALL_DIR "${_install_prefix}/deps/aocldlp")
+      find_package(AOCLDLP REQUIRED GLOBAL)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}AOCL-DLP seems injected, will not check its presence...")
+    endif()
+  endif()
+
+  # find onednn
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    if(NOT ZENDNNL_ONEDNN_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking ONEDNN presencce...")
+      set(dnnl_INSTALL_DIR "${_install_prefix}/deps/onednn")
+      set(dnnl_ROOT "${dnnl_INSTALL_DIR}")
+      set(dnnl_DIR "${dnnl_ROOT}/lib/cmake/dnnl")
+      find_package(dnnl REQUIRED GLOBAL)
+      if (dnnl_FOUND)
+        message(STATUS "${ZENDNNL_MSG_PREFIX}Found ONEDNN at ${dnnl_ROOT}")
+        if(TARGET DNNL::dnnl)
+          target_include_directories(DNNL::dnnl
+            INTERFACE ${dnnl_ROOT}/include)
+        endif()
+        include_directories(${dnnl_ROOT}/include)
+      else()
+        message(FATAL_ERROR "${ZENDNNL_MSG_PREFIX}ONEDNN not found at ${dnnl_INSTALL_DIR}")
+      endif()
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}ONEDNN seems injected, will not check its presence...")
+    endif()
+  endif()
+
+endmacro()
+
+# dependency injection
+macro(enable_dependency_injection _dep _fwk_build_option)
+  set(ZENDNNL_${_dep}_FWK_DIR ""
+    CACHE PATH "Fwk ${_dep} install path")
+  set(ZENDNNL_${_dep}_INJECTED OFF
+    CACHE BOOL "${_dep} injected by fwk" FORCE)
+
+  if (${_fwk_build_option})
+    if ("${ZENDNNL_${_dep}_FWK_DIR}" STREQUAL "")
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Framework ${_dep} install path not given, if needed ${_dep} will be built.")
+    else()
+      set(ZENDNNL_${_dep}_INJECTED ON)
+    endif()
+  endif()
+endmacro()

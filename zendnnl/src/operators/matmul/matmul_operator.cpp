@@ -397,14 +397,14 @@ std::string matmul_operator_t::op_execute_info() {
 
   if (forced_kernel.empty()) {
     if (weights.get_layout() & uint8_t(tensor_layout_t::blocked)) {
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if ZENDNNL_DEPENDS_AOCLDLP
       ss << "kernel:aocl_dlp_blocked" << ",";
 #else
       ss << "kernel:aocl_blis_blocked" << ",";
 #endif
     }
     else {
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if ZENDNNL_DEPENDS_AOCLDLP
       ss << "kernel:aocl_dlp" << ",";
 #else
       ss << "kernel:aocl_blis" << ",";

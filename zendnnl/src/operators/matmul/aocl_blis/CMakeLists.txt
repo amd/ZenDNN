@@ -32,34 +32,22 @@ set(aocl_blis_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
   matmul_bf16_avx512_kernel.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${aocl_blis_matmul_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
-target_link_options(zendnnl_archive
-  PUBLIC "-fopenmp")
-# target_link_libraries(zendnnl_archive
-#   PUBLIC OpenMP::OpenMP_CXX
-#   PUBLIC amdblis::amdblis_archive)
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${aocl_blis_matmul_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
+endif()
 
-target_sources(zendnnl
-  PRIVATE ${aocl_blis_matmul_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
-target_link_options(zendnnl
-  PUBLIC "-fopenmp")
-if (ZENDNNL_DEPENDS_AOCLDLP)
-  target_link_libraries(zendnnl
-    PUBLIC OpenMP::OpenMP_CXX
-    PUBLIC aocldlp::aocl_dlp)
-elseif(ZENDNNL_DEPENDS_AMDBLIS)
-  target_link_libraries(zendnnl
-    PUBLIC OpenMP::OpenMP_CXX
-    PUBLIC amdblis::amdblis)
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${aocl_blis_matmul_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
 endif()
 
 # append header files to top level include file

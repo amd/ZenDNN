@@ -17,30 +17,44 @@ include_guard(GLOBAL)
 
 include(ZenDnnlOptions)
 
-find_package(OpenMP REQUIRED)
+find_package(OpenMP REQUIRED QUIET)
 
-message(STATUS "building zendnnl library")
+message(DEBUG "${ZENDNNL_MSG_PREFIX}Configuring ZENDNNL LIBRARY")
 
-set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
-
-message(DEBUG "ZENDNNL_DEPS=${ZENDNNL_DEPS}")
-
+# project options
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_SOURCE_DIR=${ZENDNNL_SOURCE_DIR}")
 list(APPEND ZL_CMAKE_ARGS "-DPROJECT_VERSION=${PROJECT_VERSION}")
-list(APPEND ZL_CMAKE_ARGS "-DCMAKE_MESSAGE_LOG_LEVEL=${CMAKE_MESSAGE_LOG_LEVEL}")
-list(APPEND ZL_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
-list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_BUILD_GTEST=${ZENDNNL_BUILD_GTEST}")
+
+# dependencies
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AOCLUTILS=${ZENDNNL_DEPENDS_AOCLUTILS}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_JSON=${ZENDNNL_DEPENDS_JSON}")
+
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AOCLDLP=${ZENDNNL_DEPENDS_AOCLDLP}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_AMDBLIS=${ZENDNNL_DEPENDS_AMDBLIS}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_DEPENDS_ONEDNN=${ZENDNNL_DEPENDS_ONEDNN}")
+
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_AOCLDLP_INJECTED=${ZENDNNL_AOCLDLP_INJECTED}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_AMDBLIS_INJECTED=${ZENDNNL_AMDBLIS_INJECTED}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_ONEDNN_INJECTED=${ZENDNNL_ONEDNN_INJECTED}")
+
+# library components
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_LIB_BUILD_ARCHIVE=${ZENDNNL_LIB_BUILD_ARCHIVE}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_LIB_BUILD_SHARED=${ZENDNNL_LIB_BUILD_SHARED}")
+list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_BUILD_GTEST=${ZENDNNL_BUILD_GTEST}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_CODE_COVERAGE=${ZENDNNL_CODE_COVERAGE}")
 list(APPEND ZL_CMAKE_ARGS "-DZENDNNL_BUILD_ASAN=${ZENDNNL_BUILD_ASAN}")
+
+# cmake variables
+list(APPEND ZL_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=${CMAKE_VERBOSE_MAKEFILE}")
+list(APPEND ZL_CMAKE_ARGS "-DCMAKE_MESSAGE_LOG_LEVEL=${CMAKE_MESSAGE_LOG_LEVEL}")
+list(APPEND ZL_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+list(APPEND ZL_CMAKE_ARGS "-DCMAKE_MODULE_PATH=${CMAKE_MODULE_PATH}")
 list(APPEND ZL_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-message(DEBUG "ZL_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
-cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
+message(DEBUG "${ZENDNNL_MSG_PREFIX}ZENDNNL_LIB_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
 
-# cmake install prefix need to be same as projects install prefix, as all the
-# paths will be computed relative to it.
-
+set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
+set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
 ExternalProject_ADD(zendnnl
   DEPENDS "zendnnl-deps"
   SOURCE_DIR "${ZENDNNL_ROOT}"
@@ -76,59 +90,58 @@ set_target_properties(zendnnl
 #
 # UNCOMMENT the code below for manual interface.
 
-set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
-set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
-set(ZENDNNL_JSON_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/json/include")
+# if(NOT ZENDNNL_STANDALONE_BUILD)
+#   set(ZENDNNL_LIBRARY_INC_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/include")
+#   set(ZENDNNL_LIBRARY_LIB_DIR "${CMAKE_INSTALL_PREFIX}/zendnnl/lib")
+#   set(ZENDNNL_JSON_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/json/include")
 
-file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
-add_library(zendnnl_library STATIC IMPORTED GLOBAL)
+#   file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
+#   add_library(zendnnl_library STATIC IMPORTED GLOBAL)
 
-add_dependencies(zendnnl_library
-  zendnnl zendnnl-deps)
+#   add_dependencies(zendnnl_library
+#     zendnnl zendnnl-deps)
 
-set_target_properties(zendnnl_library
-  PROPERTIES
-  IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
-  INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-  INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR};${ZENDNNL_JSON_INC_DIR}")
+#   set_target_properties(zendnnl_library
+#     PROPERTIES
+#     IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+#     INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+#     INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR};${ZENDNNL_INCLUDE_DIRECTORIES}")
 
-# if (ZENDNNL_DEPENDS_ONEDNN)
+#   target_link_options(zendnnl_library INTERFACE "-fopenmp")
+
 #   target_link_libraries(zendnnl_library
 #     INTERFACE ${CMAKE_DL_LIBS}
 #     INTERFACE OpenMP::OpenMP_CXX
-#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>"
-#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
-# else()
+#     INTERFACE nlohmann_json::nlohmann_json)
+
 #   target_link_libraries(zendnnl_library
-#     INTERFACE ${CMAKE_DL_LIBS}
-#     INTERFACE OpenMP::OpenMP_CXX
-#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>"
-#     INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,amdblis::amdblis_archive>")
+#     INTERFACE au::aoclutils
+#     INTERFACE au::au_cpuid)
+
+#   if(ZENDNNL_DEPENDS_AMDBLIS)
+#     if(NOT ZENDNNL_AMDBLIS_INJECTED)
+#       target_link_libraries(zendnnl_library
+#         INTERFACE amdblis::amdblis_archive)
+#     endif()
+#   endif()
+
+#   if(ZENDNNL_DEPENDS_AOCLDLP)
+#     if(NOT ZENDNNL_AOCLDLP_INJECTED)
+#       target_link_libraries(zendnnl_library
+#         INTERFACE aocldlp::aocl_dlp_static)
+#     endif()
+#   endif()
+
+#   if(ZENDNNL_DEPENDS_ONEDNN)
+#     if(NOT ZENDNNL_ONEDNN_INJECTED)
+#       target_link_libraries(zendnnl_library
+#         INTERFACE DNNL::dnnl)
+#     endif()
+#   endif()
+
+#   add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
+
+#   list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
+#   list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
 # endif()
-
-if (ZENDNNL_DEPENDS_ONEDNN)
-  target_link_libraries(zendnnl_library
-    INTERFACE ${CMAKE_DL_LIBS}
-    INTERFACE OpenMP::OpenMP_CXX
-    INTERFACE au::aoclutils
-    INTERFACE au::au_cpuid
-    INTERFACE DNNL::dnnl
-    INTERFACE amdblis::amdblis_archive)
-else()
-  target_link_libraries(zendnnl_library
-    INTERFACE ${CMAKE_DL_LIBS}
-    INTERFACE OpenMP::OpenMP_CXX
-    INTERFACE au::aoclutils
-    INTERFACE au::au_cpuid
-    INTERFACE amdblis::amdblis_archive)
-endif()
-
-target_link_options(zendnnl_library INTERFACE "-fopenmp")
-
-add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
-
-list(APPEND ZENDNNL_LINK_LIBS "zendnnl_library")
-list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_LIBRARY_INC_DIR})
-
 # !!!

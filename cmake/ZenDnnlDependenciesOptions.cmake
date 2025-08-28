@@ -14,15 +14,63 @@
 # * limitations under the License.
 # *******************************************************************************/
 include_guard(GLOBAL)
+include(CMakeDependentOption)
 
-set(ZENDNNL_DEPENDS_AOCLDLP   OFF CACHE BOOL "Add AOCL DLP as a dependency")
-set(ZENDNNL_DEPENDS_AMDBLIS   ON CACHE BOOL "Add AMD BLIS as a dependency")
-set(ZENDNNL_DEPENDS_ONEDNN    OFF CACHE BOOL "Add ONEDNN as a dependency")
-set(ZENDNNL_DEPENDS_AOCLUTILS ON CACHE BOOL "Use aocl utils for hardware identification")
-set(ZENDNNL_DEPENDS_JSON      ON CACHE BOOL "Use JSON script for configuration")
+set(ZENDNNL_DEPENDS_AMDBLIS ON CACHE BOOL "Add AMD BLIS as a dependency")
+set(ZENDNNL_DEPENDS_ONEDNN  OFF CACHE BOOL "Add ONEDNN as a dependency")
 
-set(ZENDNNL_LOCAL_AOCLDLP     OFF  CACHE BOOL "use local AOCLDLP")
-set(ZENDNNL_LOCAL_AMDBLIS     OFF CACHE BOOL "use local AMDBLIS")
-set(ZENDNNL_LOCAL_ONEDNN      OFF CACHE BOOL "use local ONEDNN")
-set(ZENDNNL_LOCAL_AOCLUTILS   OFF CACHE BOOL "use local AOCLUTILS")
-set(ZENDNNL_LOCAL_JSON        OFF CACHE BOOL "use local JSON")
+set(ZENDNNL_DEPENDS_AOCLUTILS ON
+  CACHE BOOL "Use aocl utils for hardware identification" FORCE)
+set(ZENDNNL_DEPENDS_JSON ON
+  CACHE BOOL "Use JSON script for configuration" FORCE)
+
+cmake_dependent_option(ZENDNNL_DEPENDS_AOCLDLP "Add AOCL_DLP as a dependency" OFF
+  "ZENDNNL_DEPENDS_AMDBLIS" ON)
+
+cmake_dependent_option(ZENDNNL_LOCAL_AMDBLIS "use local AMDBLIS" OFF
+  "ZENDNNL_DEPENDS_AMDBLIS" OFF)
+cmake_dependent_option(ZENDNNL_LOCAL_AOCLDLP "use local AOCLDLP" OFF
+  "ZENDNNL_DEPENDS_AOCLDLP" OFF)
+cmake_dependent_option(ZENDNNL_LOCAL_ONEDNN "use local ONEDNN" OFF
+  "ZENDNNL_DEPENDS_ONEDNN" OFF)
+
+set(ZENDNNL_LOCAL_AOCLUTILS   OFF CACHE BOOL "use local AOCLUTILS" FORCE)
+set(ZENDNNL_LOCAL_JSON        OFF CACHE BOOL "use local JSON" FORCE)
+
+# sanity check on dependencies
+if((NOT ZENDNNL_DEPENDS_AMDBLIS) AND (NOT ZENDNNL_DEPENDS_AOCLDLP))
+  message(FATAL_ERROR "ZenDNNL has a hard dependency on amd-blis or aocl-dlp.")
+endif()
+
+if(ZENDNNL_DEPENDS_AMDBLIS AND ZENDNNL_DEPENDS_AOCLDLP)
+  message(FATAL_ERROR "Either aocl-dlp or amd-blis can be enabled but not both.")
+endif()
+
+if(NOT ZENDNNL_DEPENDS_AOCLUTILS)
+  message(FATAL_ERROR "ZenDNNL has a hard dependency on aocl-utils.")
+endif()
+
+if(NOT ZENDNNL_DEPENDS_JSON)
+  message(FATAL_ERROR "ZenDNNL has a hard dependency on nlohmann-json.")
+endif()
+
+# informative messages
+set(ZENDNNL_MSG_DEPS "")
+if(ZENDNNL_DEPENDS_AMDBLIS)
+  list(APPEND ZENDNNL_MSG_DEPS "amd-blis")
+endif()
+if(ZENDNNL_DEPENDS_AOCLDLP)
+  list(APPEND ZENDNNL_MSG_DEPS "aocl-dlp")
+endif()
+if(ZENDNNL_DEPENDS_ONEDNN)
+  list(APPEND ZENDNNL_MSG_DEPS "onednn")
+endif()
+if(ZENDNNL_DEPENDS_AOCLUTILS)
+  list(APPEND ZENDNNL_MSG_DEPS "aocl-utils")
+endif()
+if(ZENDNNL_DEPENDS_JSON)
+  list(APPEND ZENDNNL_MSG_DEPS "nlohmann-json")
+endif()
+
+message(STATUS "${ZENDNNL_MSG_PREFIX}Dependencies : ${ZENDNNL_MSG_DEPS}")
+

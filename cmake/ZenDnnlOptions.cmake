@@ -15,5 +15,7 @@
 # *******************************************************************************/
 include_guard(GLOBAL)
 
+include(ZenDnnlProjectOptions)
 include(ZenDnnlComponentsOptions)
-include(ZenDnnlDependenciesInfo)
+include(ZenDnnlDependenciesOptions)
+include(ZenDnnlIntegrationOptions)

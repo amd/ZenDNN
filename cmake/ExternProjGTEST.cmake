@@ -18,12 +18,13 @@ include_guard(GLOBAL)
 include(ZenDnnlOptions)
 
 if(ZENDNNL_BUILD_GTEST)
-  message(STATUS "Building zendnnl gtests")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig GTEST...")
+
   list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-  message(DEBUG "GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
-  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
 
+  set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
   ExternalProject_ADD(zendnnl-deps-gtest
     SOURCE_DIR "${GTEST_ROOT_DIR}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/gtest"
@@ -45,5 +46,5 @@ if(ZENDNNL_BUILD_GTEST)
 
   list(APPEND ZENDNNL_DEPS "zendnnl-deps-gtest")
 else()
-  message(DEBUG "skipping building gtests...")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Building GTEST will be skipped.")
 endif()

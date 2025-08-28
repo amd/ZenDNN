@@ -25,15 +25,34 @@ set(ZENDNNL_LIBRARY_VERSION "1.0.0")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 
-# cmake verbose mode
-set(CMAKE_VERBOSE_MAKEFILE ON)
+# library components
+set(ZENDNNL_LIB_BUILD_ARCHIVE ON CACHE BOOL "build zendnnl archive")
+set(ZENDNNL_LIB_BUILD_SHARED OFF CACHE BOOL "build zendnnl shared lib")
+
+# library dependencies
+set(ZENDNNL_AMDBLIS_INJECTED OFF CACHE BOOL "amdblis injected")
+set(ZENDNNL_AOCLDLP_INJECTED OFF CACHE BOOL "amdblis injected")
+set(ZENDNNL_ONEDNN_INJECTED  OFF CACHE BOOL "onednn injected")
 
 # cmake variables
+set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "verbose makefile")
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
+set(CMAKE_MESSAGE_LOG_LEVEL "DEBUG")
 set(CMAKE_MODULE_PATH "${ZENDNNL_SOURCE_DIR}/cmake")
 set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH} ${CMAKE_MODULE_PATH}")
 
-message(DEBUG "ZENDNNL_LIBRARY_INSTALL_PREFIX = ${CMAKE_INSTALL_PREFIX}")
-message(DEBUG "ZENDNNL_LIBRARY_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
+# informative messages
+message(STATUS
+  "${ZENDNNL_MSG_PREFIX} ZENDNNL_LIBRARY_INSTALL_PREFIX = ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "ZENDNNL_LIBRARY_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  message(STATUS "building zendnnl library archive")
+endif()
+
+if(ZENDNNL_LIB_BUILD_SHARED)
+  message(STATUS "building zendnnl library shared lib")
+endif()
 
 # include zendnnl files
 include(ZenDnnlMacros)
@@ -47,7 +66,7 @@ set(CMAKE_CXX_FLAGS "-Wall -Werror ${CMAKE_CXX_FLAGS}")
 zendnnl_required_packages()
 
 # find required dependencies
-find_dependencies(${CMAKE_INSTALL_PREFIX})
+find_build_dependencies(${CMAKE_INSTALL_PREFIX})
 
 # build library
 add_subdirectory(src)

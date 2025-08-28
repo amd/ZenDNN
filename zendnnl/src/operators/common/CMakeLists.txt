@@ -23,13 +23,17 @@ set(ops_common_headers
   operator_config.hpp
   post_op.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${ops_common_sources}
-  PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${ops_common_sources}
+    PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
+endif()
 
-target_sources(zendnnl
-  PRIVATE ${ops_common_sources}
-  PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${ops_common_sources}
+    PUBLIC  FILE_SET zendnnl_headers TYPE HEADERS FILES ${ops_common_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})

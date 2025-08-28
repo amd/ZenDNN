@@ -18,19 +18,24 @@ include_guard(GLOBAL)
 include(ZenDnnlOptions)
 
 if(ZENDNNL_DEPENDS_AOCLUTILS)
+
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig AOCL-UTILS...")
+
+  # adding pthread to cxx flags is a manylinux docker requirement.
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_EXAMPLES=ON")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_DOCS=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_TESTS=OFF")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_STATIC_LIBS=ON")
   list(APPEND AU_CMAKE_ARGS "-DAU_BUILD_SHARED_LIBS=ON")
+  list(APPEND AU_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-lpthread")
   list(APPEND AU_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-  message(DEBUG "AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
-  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}AU_CMAKE_ARGS=${AU_CMAKE_ARGS}")
 
+  set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
   if (ZENDNNL_LOCAL_AOCLUTILS)
 
-    message(DEBUG "Using local AOCLUTILS from ${AOCLUTILS_ROOT_DIR}")
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-UTILS from ${AOCLUTILS_ROOT_DIR}")
 
     ExternalProject_ADD(zendnnl-deps-aoclutils
       SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
@@ -42,6 +47,9 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
       BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaoclutils.a
                        <INSTALL_DIR>/lib/libau_cpuid.a)
   else()
+
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download AOCL-UTILS with tag ${AOCLUTILS_GIT_TAG}")
+
     ExternalProject_ADD(zendnnl-deps-aoclutils
       SOURCE_DIR "${AOCLUTILS_ROOT_DIR}"
       BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aoclutils"
@@ -81,35 +89,38 @@ if(ZENDNNL_DEPENDS_AOCLUTILS)
   #
   # UNCOMMENT the code below for manual interface.
 
-  set(ZENDNNL_AOCLUTILS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/include")
-  set(ZENDNNL_AOCLUTILS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/lib")
+  # set(ZENDNNL_AOCLUTILS_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/include")
+  # set(ZENDNNL_AOCLUTILS_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aoclutils/lib")
 
-  file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
-  add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
-  add_dependencies(zendnnl_aoclutils_deps zendnnl-deps-aoclutils)
-  set_target_properties(zendnnl_aoclutils_deps
-    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
-               INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
-               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+  # if(NOT EXISTS ${ZENDNNL_AOCLUTILS_INC_DIR})
+  #   file(MAKE_DIRECTORY ${ZENDNNL_AOCLUTILS_INC_DIR})
+  # endif()
 
-  add_library(au::aoclutils ALIAS zendnnl_aoclutils_deps)
-  list(APPEND ZENDNNL_LINK_LIBS "au::aoclutils")
+  # add_library(zendnnl_aoclutils_deps STATIC IMPORTED GLOBAL)
+  # add_dependencies(zendnnl_aoclutils_deps zendnnl-deps-aoclutils)
+  # set_target_properties(zendnnl_aoclutils_deps
+  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libaoclutils.a"
+  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
 
-  add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
-  add_dependencies(zendnnl_aucpuid_deps zendnnl-deps-aoclutils)
-  set_target_properties(zendnnl_aucpuid_deps
-    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
-               INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
-               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+  # add_library(au::aoclutils ALIAS zendnnl_aoclutils_deps)
+  # list(APPEND ZENDNNL_LINK_LIBS "au::aoclutils")
 
-  add_library(au::au_cpuid ALIAS zendnnl_aucpuid_deps)
-  list(APPEND ZENDNNL_LINK_LIBS "au::au_cpuid")
-  list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
+  # add_library(zendnnl_aucpuid_deps STATIC IMPORTED GLOBAL)
+  # add_dependencies(zendnnl_aucpuid_deps zendnnl-deps-aoclutils)
+  # set_target_properties(zendnnl_aucpuid_deps
+  #   PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLUTILS_LIB_DIR}/libau_cpuid.a"
+  #              INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}"
+  #              INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLUTILS_INC_DIR}")
+
+  # add_library(au::au_cpuid ALIAS zendnnl_aucpuid_deps)
+  # list(APPEND ZENDNNL_LINK_LIBS "au::au_cpuid")
+  # list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLUTILS_INC_DIR})
 
   # !!!
 
 else()
-  message(DEBUG "skipping building aocl-utils.")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Building AOCL-UTILS will be skipped.")
 endif()
 
 

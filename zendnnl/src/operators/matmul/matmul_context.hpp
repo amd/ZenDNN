@@ -23,7 +23,7 @@
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_context.hpp"
 
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if ZENDNNL_DEPENDS_AOCLDLP
 #include "operators/matmul/aocl_blis/matmul_aocl_dlp_utils.hpp"
 #else
 #include "operators/matmul/aocl_blis/matmul_aocl_blis_utils.hpp"
@@ -51,7 +51,7 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
 
   /** TODO: Add a interface to support different backends */
   /** @brief get post op pointer */
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *get_aocl_dlp_post_op_ptr_unsafe() const;
 #else
   aocl_post_op *get_aocl_dlp_post_op_ptr_unsafe() const;

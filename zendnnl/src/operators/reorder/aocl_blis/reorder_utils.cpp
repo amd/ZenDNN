@@ -39,7 +39,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
     if (reorder_dtype == data_type_t::f32) {
       reorder_size = aocl_get_reorder_buf_size_f32f32f32of32(order, trans,
                      reorder_param0,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                      reorder_param1, reorder_param2, nullptr);
 #else
                      reorder_param1, reorder_param2);
@@ -48,7 +48,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
     else if (reorder_dtype == data_type_t::bf16) {
       reorder_size = aocl_get_reorder_buf_size_bf16bf16f32of32(order, trans,
                      reorder_param0,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                      reorder_param1, reorder_param2, nullptr);
 #else
                      reorder_param1, reorder_param2);
@@ -58,7 +58,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
       if (source_dtype == data_type_t::s8) {
         reorder_size = aocl_get_reorder_buf_size_s8s8s32os32(order, trans,
                        reorder_param0,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                        reorder_param1, reorder_param2, nullptr);
 #else
                        reorder_param1, reorder_param2);
@@ -67,7 +67,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
       else if (source_dtype == data_type_t::u8) {
         reorder_size = aocl_get_reorder_buf_size_u8s8s32os32(order, trans,
                        reorder_param0,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                        reorder_param1, reorder_param2, nullptr);
 #else
                        reorder_param1, reorder_param2);
@@ -78,7 +78,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
       // WOQ_BF16 api to extract the size.
       reorder_size = aocl_get_reorder_buf_size_bf16s4f32of32(order, trans,
                      reorder_param0,
-#if defined(ZENDNNL_DEPENDS_AOCLDLP)
+#if (ZENDNNL_DEPENDS_AOCLDLP)
                      reorder_param1, reorder_param2, nullptr);
 #else
                      reorder_param1, reorder_param2);

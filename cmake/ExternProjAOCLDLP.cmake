@@ -18,79 +18,97 @@ include_guard(GLOBAL)
 include(ZenDnnlOptions)
 
 if(ZENDNNL_DEPENDS_AOCLDLP)
-  list(APPEND AD_CMAKE_ARGS "-DDLP_THREADING_MODEL=openmp")
-  #list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp") //optional, if openmp is not at default place.
-  list(APPEND AD_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-  message(DEBUG "AD_CMAKE_ARGS=${AD_CMAKE_ARGS}")
-  cmake_host_system_information(RESULT NPROC QUERY NUMBER_OF_PHYSICAL_CORES)
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig AOCL-DLP...")
 
-  if (ZENDNNL_LOCAL_AOCLDLP)
+  if (NOT ZENDNNL_AMDBLIS_INJECTED)
+    list(APPEND AD_CMAKE_ARGS "-DDLP_THREADING_MODEL=openmp")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_BUILD_TYPE=Release")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_VERBOSE_MAKEFILE=OFF")
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
-    message(DEBUG "Using local AOCL-DLP from ${AOCLDLP_ROOT_DIR}")
+    # uncoment if openmp root need to be given
+    # list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp")
 
-    ExternalProject_ADD(zendnnl-deps-aocldlp
-      SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
-      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
-      INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
-      CMAKE_ARGS ${AD_CMAKE_ARGS}
-      BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      INSTALL_COMMAND cmake --build . --config release --target install
-      BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaocl_dlp.a)
+    message(DEBUG "${ZENDNNL_MSG_PREFIX}AOCLDLP_CMAKE_ARGS=${AD_CMAKE_ARGS}")
+
+    set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+    if (ZENDNNL_LOCAL_AOCLDLP)
+
+      message(DEBUG "${ZENDNNL_MSG_PREFIX}Will use local AOCL-DLP from ${AOCLDLP_ROOT_DIR}")
+
+      ExternalProject_ADD(zendnnl-deps-aocldlp
+        SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
+        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
+        INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
+        CMAKE_ARGS ${AD_CMAKE_ARGS}
+        BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+        INSTALL_COMMAND cmake --build . --config release --target install)
+    else()
+      message(FATAL_ERROR "Public aocl-dlp is not available yet.")
+      # ExternalProject_ADD(zendnnl-deps-aocldlp
+      #   SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
+      #   BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
+      #   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
+      #   GIT_REPOSITORY ${AOCLDLP_GIT_REPO}
+      #   GIT_TAG ${AOCLDLP_GIT_TAG}
+      #   GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
+      #   CMAKE_ARGS ${AD_CMAKE_ARGS}
+      #   BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+      #   INSTALL_COMMAND cmake --build . --config release --target install
+      #   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaocl_dlp.a
+      #   UPDATE_DISCONNECTED TRUE)
+    endif()
+
+    list(APPEND AOCLDLP_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/aocldlp")
+    list(APPEND AOCLDLP_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/aocldlp")
+
+    set_target_properties(zendnnl-deps-aocldlp
+      PROPERTIES
+      ADDITIONAL_CLEAN_FILES "${AOCLDLP_CLEAN_FILES}")
   else()
-      message(DEBUG "Public aocl-dlp is not available yet.")
-    # ExternalProject_ADD(zendnnl-deps-aocldlp
-    #   SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
-    #   BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
-    #   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
-    #   GIT_REPOSITORY ${AOCLDLP_GIT_REPO}
-    #   GIT_TAG ${AOCLDLP_GIT_TAG}
-    #   GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
-    #   CMAKE_ARGS ${AD_CMAKE_ARGS}
-    #   BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-    #   INSTALL_COMMAND cmake --build . --config release --target install
-    #   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaocl_dlp.a
-    #   UPDATE_DISCONNECTED TRUE)
+    #add a custom target that create a soft link
+    set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/aocldlp")
+    set(SYMLNK_SRC "${ZENDNNL_AOCLDLP_FWK_DIR}")
+
+    message(DEBUG
+      "${ZENDNNL_MSG_PREFIX}AOCL-DLP symlink from ${SYMLNK_SRC} to ${SYMLNK_DST} will be created.")
+
+    if(EXISTS ${SYMLNK_DST})
+      ADD_CUSTOM_TARGET(zendnnl-deps-aocldlp ALL
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    else()
+      ADD_CUSTOM_TARGET(zendnnl-deps-aocldlp ALL
+        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    endif()
   endif()
-
-  list(APPEND AOCLDLP_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/aocldlp")
-  list(APPEND AOCLDLP_CLEAN_FILES "${CMAKE_INSTALL_PREFIX}/deps/aocldlp")
-
-  set_target_properties(zendnnl-deps-aocldlp
-    PROPERTIES
-    ADDITIONAL_CLEAN_FILES "${AOCLDLP_CLEAN_FILES}")
 
   list(APPEND ZENDNNL_DEPS "zendnnl-deps-aocldlp")
 
   # Manual interface for AOCL-DLP libraries
-  set(ZENDNNL_AOCLDLP_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/include")
-  set(ZENDNNL_AOCLDLP_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/lib")
+  # if (NOT ZENDNNL_STANDALONE_BUILD)
+  #   if(NOT ZENDNNL_AOCLDLP_INJECTED)
+  #     set(ZENDNNL_AOCLDLP_INC_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/include")
+  #     set(ZENDNNL_AOCLDLP_LIB_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp/lib")
 
-  file(MAKE_DIRECTORY ${ZENDNNL_AOCLDLP_INC_DIR})
-  
-#   # Shared library target
-#   add_library(zendnnl_aocldlp_deps SHARED IMPORTED GLOBAL)
-#   add_dependencies(zendnnl_aocldlp_deps zendnnl-deps-aocldlp)
-#   set_target_properties(zendnnl_aocldlp_deps
-#     PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLDLP_LIB_DIR}/libaocl_dlp.so"
-#                INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}"
-#                INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}")
+  #     if(NOT EXISTS ${ZENDNNL_AMDBLIS_INC_DIR})
+  #       file(MAKE_DIRECTORY ${ZENDNNL_AOCLDLP_INC_DIR})
+  #     endif()
 
-#   add_library(aocldlp::aocl_dlp ALIAS zendnnl_aocldlp_deps)
-#   list(APPEND ZENDNNL_LINK_LIBS "aocldlp::aocl_dlp")
+  #     add_library(zendnnl_aocldlp_static_deps STATIC IMPORTED GLOBAL)
+  #     add_dependencies(zendnnl_aocldlp_static_deps zendnnl-deps-aocldlp)
+  #     set_target_properties(zendnnl_aocldlp_static_deps
+  #       PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLDLP_LIB_DIR}/libaocl_dlp.a"
+  #                  INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}"
+  #                  INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}")
 
-  # Static library target
-  add_library(zendnnl_aocldlp_static_deps STATIC IMPORTED GLOBAL)
-  add_dependencies(zendnnl_aocldlp_static_deps zendnnl-deps-aocldlp)
-  set_target_properties(zendnnl_aocldlp_static_deps
-    PROPERTIES IMPORTED_LOCATION "${ZENDNNL_AOCLDLP_LIB_DIR}/libaocl_dlp.a"
-               INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}"
-               INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_AOCLDLP_INC_DIR}")
+  #     add_library(aocldlp::aocl_dlp_static ALIAS zendnnl_aocldlp_static_deps)
 
-  add_library(aocldlp::aocl_dlp_static ALIAS zendnnl_aocldlp_static_deps)
-  list(APPEND ZENDNNL_LINK_LIBS "aocldlp::aocl_dlp_static")
-  list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLDLP_INC_DIR})
-
+  #     list(APPEND ZENDNNL_LINK_LIBS "aocldlp::aocl_dlp_static")
+  #     list(APPEND ZENDNNL_INCLUDE_DIRECTORIES ${ZENDNNL_AOCLDLP_INC_DIR})
+  #   endif()
+  # endif()
 else()
-  message(DEBUG "skipping building aocl-dlp.")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Building AOCL-DLP will be skipped.")
 endif()

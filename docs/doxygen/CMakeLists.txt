@@ -13,10 +13,11 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
+include(FetchContent)
 
 if(ZENDNNL_BUILD_DOXYGEN)
-  message(DEBUG "adding doxygen-awesome-css ")
-  include(FetchContent)
+
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Configuring ZENDNNL DOXYGEN DOCUMENTATION...")
 
   FetchContent_Declare(
   doxygen-awesome-css
@@ -30,9 +31,8 @@ if(ZENDNNL_BUILD_DOXYGEN)
 
   #set(DOXYGEN_AWESOME_CSS_DIR ${doxygen-awesome-css_SOURCE_DIR})
 
-  find_package(Doxygen)
+  find_package(Doxygen QUIET)
   if(DOXYGEN_FOUND)
-    message(DEBUG "building doxygen documentation...")
     set(DOXYFILE_IN "${CMAKE_CURRENT_SOURCE_DIR}/doxyfile.in")
     set(DOXYFILE_OUT "${CMAKE_CURRENT_BINARY_DIR}/doxyfile.out")
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_INSTALL_PREFIX}/doxygen")
@@ -48,8 +48,8 @@ if(ZENDNNL_BUILD_DOXYGEN)
     ADDITIONAL_CLEAN_FILES "${DOXYGEN_CLEAN_FILES}")
 
   else()
-    message(WARNING "Doxygen not found, unable to build documentation.")
+    message(WARNING "Doxygen NOT FOUND, doxygen-docs willnot be built.")
   endif()
 else()
-  message(STATUS "doxygen documentation build is disabled...")
+  message(DEBUG "${ZENDNNL_MSG_PREFIX}Building ZENDNNL DOXYGEN-DOCS will be skipped.")
 endif()

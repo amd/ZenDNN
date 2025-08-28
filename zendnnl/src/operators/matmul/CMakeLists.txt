@@ -17,14 +17,6 @@
 add_subdirectory(aocl_blis)
 add_subdirectory(onednn)
 
-if(ZENDNNL_DEPENDS_ONEDNN)
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-else()
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
-  target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
-endif()
-
 set(matmul_operator_sources
   matmul_context.cpp
   matmul_operator.cpp
@@ -40,19 +32,33 @@ set(matmul_operator_private_headers
   matmul_kernel_list.hpp
   matmul_ref_kernel.hpp)
 
-target_sources(zendnnl_archive
-  PRIVATE ${matmul_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${matmul_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${matmul_operator_public_headers})
+# if(ZENDNNL_DEPENDS_ONEDNN)
+#   list (APPEND matmul_operator_sources matmul_onednn_kernel.cpp)
+#   list (APPEND matmul_operator_private_headers matmul_onednn_kernel.hpp)
+#   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+#   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+# else()
+#   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+#   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+# endif()
 
-target_sources(zendnnl
-  PRIVATE ${matmul_operator_sources}
-  PRIVATE FILE_SET zendnnl_pvt_headers
-          TYPE HEADERS FILES ${matmul_operator_private_headers}
-  PUBLIC  FILE_SET zendnnl_headers
-          TYPE HEADERS FILES ${matmul_operator_public_headers})
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${matmul_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${matmul_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${matmul_operator_public_headers})
+endif()
+
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${matmul_operator_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${matmul_operator_private_headers}
+    PUBLIC  FILE_SET zendnnl_headers
+            TYPE HEADERS FILES ${matmul_operator_public_headers})
+endif()
 
 # append header files to top level include file
 set(inc_subdir ${CMAKE_CURRENT_SOURCE_DIR})
