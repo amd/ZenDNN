@@ -28,7 +28,7 @@
 #define ZENDNN_VERSION_MAJOR 5
 
 /// Minor version
-#define ZENDNN_VERSION_MINOR 1
+#define ZENDNN_VERSION_MINOR 2
 
 /// Patch version
 #define ZENDNN_VERSION_PATCH 0

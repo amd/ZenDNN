@@ -38,14 +38,14 @@ AOCL-BLAS is a required dependency for ZenDNN, whereas the AMD Composable Kernel
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.19 (Plugin), and PyTorch v2.7 (Plugin).
+* ZenDNN library is integrated with TensorFlow v2.19 (Plugin), and PyTorch v2.8 (Plugin).
 * Python v3.9-v3.12 has been used to generate the TensorFlow v2.19 (Plugin) wheel files (*.whl).
-* Python v3.9-v3.13 has been used to generate the PyTorch v2.7 (Plugin) wheel files (*.whl).
+* Python v3.9-v3.13 has been used to generate the PyTorch v2.8 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -179,7 +179,7 @@ ZenDNN has the following runtime dependencies:
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
 * Python v3.9-v3.12 for TensorFlow v2.19(Plugin)
-* Python v3.9-v3.13 for PyTorch v2.7 (Plugin)
+* Python v3.9-v3.13 for PyTorch v2.8 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
