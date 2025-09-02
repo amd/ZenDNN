@@ -170,7 +170,7 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
 
 int matmul_benchdnn(std::vector<MatmulConfig> configs,
                     std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>>
-                    &matmul_results) {
+                    &matmul_results, const global_options &options) {
 
   bool skip;
   for (const auto &cfg:configs) {
@@ -181,7 +181,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
       tensor_t input_tensor;
       std::vector<tensor_t> weights, bias, output_tensor;
 
-      int ret = create_weights_tensor(tensor_factory, cfg, weights);
+      int ret = create_weights_tensor(tensor_factory, cfg, weights, options);
       if (ret != OK) {
         testlog_error("create_bias_tensor failed");
         log_benchmark_failure(cfg);
@@ -195,14 +195,14 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      ret = create_input_tensor(tensor_factory, cfg, input_tensor);
+      ret = create_input_tensor(tensor_factory, cfg, input_tensor, options);
       if (ret != OK) {
         testlog_error("create_input_tensor failed");
         log_benchmark_failure(cfg);
         continue;
       }
 
-      ret = create_output_tensor(tensor_factory, cfg, output_tensor);
+      ret = create_output_tensor(tensor_factory, cfg, output_tensor, options);
       if (ret != OK) {
         testlog_error("create_output_tensor failed");
         log_benchmark_failure(cfg);
@@ -309,7 +309,8 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
   return OK;
 }
 
-int bench(const std::string &in_filename, const std::string &out_filename) {
+int bench(const std::string &in_filename, const std::string &out_filename,
+          const global_options &options) {
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
   if (!infile.is_open()) {
@@ -318,11 +319,11 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   }
   std::vector<MatmulConfig> matmulConfig;
   bool isPipeline = false;
-  inputParser(infile, matmulConfig, isPipeline);
+  inputParser(infile, matmulConfig, isPipeline, options);
 
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> matmul_results;
   // Run the matmul benchmark with the provided configurations
-  int status = matmul_benchdnn(matmulConfig, matmul_results);
+  int status = matmul_benchdnn(matmulConfig, matmul_results, options);
   if (status != OK) {
     testlog_error("Matmul benchmark failed.");
     return NOT_OK;
@@ -343,7 +344,7 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   }
   else {
     // Print results to console for each configuration
-    print_results(matmul_results, std::cout);
+    print_results(matmul_results, std::cout, options);
 
     // Export results to CSV file
     std::ofstream outfile(out_filename);
@@ -351,7 +352,7 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
       return 1;
     }
-    log_results(matmul_results, outfile);
+    log_results(matmul_results, outfile, options);
     outfile.close();
   }
 

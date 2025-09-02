@@ -33,10 +33,11 @@ struct MatmulConfig;
  * @param tensor_factory Factory object for tensor creation.
  * @param cfg MatmulConfig structure specifying tensor dimensions and data types.
  * @param weights Vector to store created weight tensors.
+ * @param options Global options for command-line configuration.
  * @return int OK (0) on success, NOT_OK (1) on failure.
  */
 int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
-                          std::vector<tensor_t> &weights);
+                          std::vector<tensor_t> &weights, const global_options &options);
 
 /**
  * @brief Creates bias tensors for each layer if bias is enabled.
@@ -59,10 +60,11 @@ int create_bias_tensor(tensor_factory_t tensor_factory, const MatmulConfig &cfg,
  * @param tensor_factory Factory object for tensor creation.
  * @param cfg MatmulConfig structure specifying tensor dimensions and data types.
  * @param input Reference to input tensor to be created.
+ * @param options Global options for command-line configuration.
  * @return int OK (0) on success, NOT_OK (1) on failure.
  */
 int create_input_tensor(tensor_factory_t &tensor_factory,
-                        const MatmulConfig &cfg, tensor_t &input);
+                        const MatmulConfig &cfg, tensor_t &input, const global_options &options);
 
 /**
  * @brief Creates output tensors for each layer in the matmul benchmark.
@@ -72,10 +74,12 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
  * @param tensor_factory Factory object for tensor creation.
  * @param cfg MatmulConfig structure specifying tensor dimensions and data types.
  * @param output Vector to store created output tensors.
+ * @param options Global options for command-line configuration.
  * @return int OK (0) on success, NOT_OK (1) on failure.
  */
 int create_output_tensor(tensor_factory_t &tensor_factory,
-                         const MatmulConfig &cfg, std::vector<tensor_t> &output);
+                         const MatmulConfig &cfg, std::vector<tensor_t> &output,
+                         const global_options &options);
 
 /**
  * @brief Creates tensors for binary post-operations for each layer.

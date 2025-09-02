@@ -21,7 +21,7 @@ namespace benchdnn {
 namespace matmul {
 
 void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
-                 bool &isPipeline) {
+                 bool &isPipeline, const global_options &options) {
   std::string line;
 
   // Parse each line of the input file into a MatmulConfig object
@@ -32,27 +32,42 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
 
     // Split the line into fields and validate
     auto fields = split(line, ',');
-    if (fields.size() < 9) {
+    int fields_size = fields.size();
+    // If last field starts with a digit, decrease fields_size
+    if (!fields.empty() && std::isdigit(fields.back()[0])) {
+      fields_size--;
+    }
+    if (fields_size != (options.ndims + 1 + 6)) {
       commonlog_error(
-        "Invalid line (expected 9 fields): [m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, kernel name, warmup iterations (optional)]");
+        "Invalid line (expected ", (options.ndims + 1 + 6), " fields): [",
+        (options.ndims > 2) ? "bs, " : "",
+        "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, ",
+        "kernel name, warmup iterations (optional)]");
       continue;
     }
     MatmulConfig cfg;
     try {
+      int id = 0;
+      if (options.ndims > 2) {
+        cfg.bs = std::stoi(fields[id++]);
+      }
+      else {
+        cfg.bs = 1;
+      }
       // Parse matrix dimensions and iteration count
-      cfg.m = std::stoi(fields[0]);
-      cfg.k = std::stoi(fields[1]);
+      cfg.m = std::stoi(fields[id++]);
+      cfg.k = std::stoi(fields[id++]);
       // Parse n values (colon-separated for multi-layer)
-      auto n_values = split(fields[2], ':');
+      auto n_values = split(fields[id++], ':');
       for (const auto &n : n_values) {
         cfg.n_values.push_back(std::stoi(n));
       }
       // Set isPipeline to true if more than one n value is present
       isPipeline = (n_values.size() > 1) ? true : isPipeline;
-      cfg.iters = std::stoi(fields[3]);
+      cfg.iters = std::stoi(fields[id++]);
       // Parse data types (input:weights:output)
-      auto dt = split(fields[4], ':');
-      if (fields[4].size() > 0) {
+      auto dt = split(fields[id++], ':');
+      if (fields[id - 1].size() > 0) {
         auto i = 0;
         for (; i < dt.size(); i++) {
           cfg.dt.push_back(strToDatatype(dt[i]));
@@ -71,18 +86,23 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         commonlog_warning("No data types specified. Defaulting all to f32.");
       }
       // Parse bias flag and bias data type
-      cfg.isBiasEnabled = (fields[5] == "true");
+      cfg.isBiasEnabled = ((fields[id] == "true") ||
+                           (fields[id] == "1")) ? true : false;
+      id++;
       if (cfg.isBiasEnabled) {
-        if (!fields[6].empty()) {
-          cfg.bias_dt = strToDatatype(fields[6]);
+        if (!fields[id++].empty()) {
+          cfg.bias_dt = strToDatatype(fields[id - 1]);
         }
         else {
           commonlog_warning("No data type specified for bias. Defaulting it to f32.");
           cfg.bias_dt = data_type_t::f32;
         }
       }
+      else {
+        id++; // Skip bias data type field if bias is not enabled
+      }
       // Parse post-operations (e.g., relu, gelu, binary ops)
-      auto postOps = split(fields[7], ':');
+      auto postOps = split(fields[id++], ':');
       auto binary_post_op_pos = 0;
       for (auto i = 0; i < postOps.size(); i++) {
         if (!postOps[i].empty()) {
@@ -95,16 +115,20 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         }
       }
       // Parse kernel name (default to 'aocl_blis' if empty)
-      if (fields[8].empty()) {
+      if (fields[id++].empty()) {
         commonlog_warning("No kernel name specified. Defaulting to 'aocl_blis'.");
         cfg.kernel_name = "aocl_blis";
       }
       else {
-        cfg.kernel_name = fields[8];
+        cfg.kernel_name = fields[id - 1];
+        if (options.ndims > 2 && cfg.kernel_name != "aocl_blis") {
+          commonlog_error("For BMM, kernel name should be 'aocl_blis'.");
+          continue;
+        }
       }
       // Parse warmup iterations if provided, otherwise use 20% of main iterations
-      if (fields.size() == 10) {
-        cfg.warmup_iters = std::stoi(fields[9]);
+      if (id < fields.size() && !(fields[id].empty())) {
+        cfg.warmup_iters = std::stoi(fields[id]);
       }
       else {
         cfg.warmup_iters = 0.2 * cfg.iters;
@@ -144,7 +168,8 @@ void write_each_config_result(const MatmulConfig &config,
   size_t m = config.m;
   size_t k = (layer_num == 0) ? config.k : config.n_values[layer_num - 1];
   size_t n = config.n_values[layer_num];
-  double gops = (2 * m * k * n * 0.000000001);
+  size_t bs = config.bs;
+  double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = (gops / (stat[layer_num].total_time_ms / config.iters)) *
                       1000;
   if (isPipeline) {
@@ -195,7 +220,8 @@ void cal_column_width(const MatmulConfig &config,
   size_t m = config.m;
   size_t k = ((layer_num == 0) ? config.k : config.n_values[layer_num - 1]);
   size_t n = config.n_values[layer_num];
-  double gops = (2 * m * k * n * 0.000000001);
+  size_t bs = config.bs;
+  double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = (gops / (stat[layer_num].total_time_ms / config.iters)) *
                       1000;
   if (isPipeline) {
@@ -276,7 +302,8 @@ void fill_row(const MatmulConfig &config,
   size_t m = config.m;
   size_t k = ((layer_num == 0) ? config.k : config.n_values[layer_num - 1]);
   size_t n = config.n_values[layer_num];
-  double gops = (2 * m * k * n * 0.000000001);
+  size_t bs = config.bs;
+  double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = ((gops / (stat[layer_num].total_time_ms / config.iters)) *
                        1000);
   if (isPipeline) {
@@ -550,9 +577,12 @@ void print_pipeline_results(
 
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile) {
+  std::ostream &outfile,  const global_options &options) {
 
   outfile << std::fixed << std::setprecision(2);
+  if (options.ndims > 2) {
+    outfile << "BS, ";
+  }
   outfile <<
           "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, Warmup iterations, Total time (ms) (all iters), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -565,19 +595,25 @@ void log_results(
   for (const auto &result : matmul_results) {
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
+    if (options.ndims > 2) {
+      outfile << config.bs << ", ";
+    }
     write_each_config_result(config, stat, outfile);
   }
 }
 
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile) {
+  std::ostream &outfile, const global_options &options) {
 
   // Dynamic column widths calculation
   std::vector<std::string> headers = {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS"
   };
+  if (options.ndims > 2) {
+    headers.insert(headers.begin(), "BS");
+  }
 #if MEASURE_INDIVIDUAL_TIMINGS
   headers.push_back("Ctx_Creation(ms_%)");
   headers.push_back("Op_Creation(ms_%)");
@@ -593,6 +629,10 @@ void print_results(
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
     int st_index = 0;
+    if (options.ndims > 2) {
+      col_widths[0] = std::max(col_widths[0], std::to_string(config.bs).size() + 2);
+      st_index++;
+    }
     cal_column_width(config, stat, col_widths, st_index);
   }
 
@@ -614,6 +654,9 @@ void print_results(
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
     std::vector<std::string> row;
+    if (options.ndims > 2) {
+      row.push_back(std::to_string(config.bs));
+    }
     fill_row(config, stat, row);
     print_row(row);
   }

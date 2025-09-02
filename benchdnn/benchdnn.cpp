@@ -44,6 +44,8 @@
 int main(int argc, char **argv) {
   // Parse command-line arguments for operator type and input file
   std::string op, input_file;
+  benchdnn::global_options options;
+  options.ndims = 2;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     // Parse operator argument
@@ -53,6 +55,13 @@ int main(int argc, char **argv) {
     // Parse input file argument
     else if (arg.find("--input_file=") == 0) {
       input_file = arg.substr(13);
+    }
+    else if (arg.find("--ndims=") == 0) {
+      options.ndims = std::stoi(arg.substr(8));
+    }
+    else {
+      commonlog_error("Unknown argument: ", arg);
+      return NOT_OK;
     }
   }
 
@@ -78,7 +87,8 @@ int main(int argc, char **argv) {
 
   // Dispatch to the appropriate benchmark based on operator type
   if (op == "matmul") {
-    benchdnn::matmul::bench(in_filename, out_filename); ///< Run matmul benchmark
+    benchdnn::matmul::bench(in_filename, out_filename,
+                            options); ///< Run matmul benchmark
   }
   else if (op == "reorder") {
     benchdnn::reorder::bench(in_filename, out_filename); ///< Run reorder benchmark

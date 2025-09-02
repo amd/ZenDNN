@@ -30,6 +30,7 @@ namespace matmul {
  * benchmark, including matrix dimensions, number of iterations, data types, bias, post-operations,
  * kernel selection, and warmup iterations.
  *
+ * @var bs Batch size (for batched matmul; default 1 for non-batched).
  * @var m Number of rows in matrix A (output rows).
  * @var k Number of columns in matrix A / rows in matrix B (inner dimension).
  * @var n_values Vector of output columns for each layer (multi-layer support).
@@ -43,7 +44,7 @@ namespace matmul {
  * @var warmup_iters Number of warmup iterations to run before actual benchmarking.
  */
 struct MatmulConfig {
-  // TODO: Extend support to BMM for 3D tensors
+  size_t bs; /**< Batch size (for batched matmul; default 1 for non-batched). */
   size_t m; /**< Number of rows in matrix A (output rows). */
   size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
   std::vector<size_t> n_values; /**< Vector of output columns
@@ -77,7 +78,7 @@ struct MatmulConfig {
  * @param isPipeline Reference to a boolean flag that will be set to true if the input describes a pipeline configuration.
  */
 void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
-                 bool &isPipeline);
+                 bool &isPipeline, const global_options &options);
 
 /**
 * @brief Logs a detailed error message for a failed benchmark configuration.
@@ -176,10 +177,11 @@ void print_pipeline_results(
  *
  * @param matmul_results Vector of pairs of MatmulConfig and TimingStats.
  * @param outfile Output stream to write CSV results to (e.g., std::ofstream).
+ * @param options Global options for command-line configuration.
  */
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile);
+  std::ostream &outfile, const global_options &options);
 
 /**
  * @brief Prints single-layer matmul benchmark results as a formatted table.
@@ -189,10 +191,11 @@ void log_results(
  *
  * @param matmul_results Vector of pairs of MatmulConfig and TimingStats.
  * @param outfile Output stream to print table results to (e.g., std::cout).
+ * @param options Global options for command-line configuration.
  */
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile);
+  std::ostream &outfile, const global_options &options);
 
 } // namespace matmul
 } // namespace benchdnn

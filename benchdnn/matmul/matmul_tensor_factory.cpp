@@ -21,7 +21,7 @@ namespace benchdnn {
 namespace matmul {
 
 int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
-                          std::vector<tensor_t> &weights) {
+                          std::vector<tensor_t> &weights, const global_options &options) {
 
   zendnnl::common::data_type_t dt = cfg.dt[1];
 
@@ -71,7 +71,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         StorageParam buffer_params = input_tensor;
 
         // Blocked Tensor creation with seperate view for input tensor.
-        weights_tensor = tensor_factory.blocked_tensor({k, n},
+        weights_tensor = tensor_factory.blocked_tensor({cfg.bs, k, n},
                          dt,
                          buffer_params,
                          "weights_" + std::to_string(i));
@@ -85,16 +85,23 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
 
         // Blocked Tensor creation with seperate view for input tensor.
-        weights_tensor = tensor_factory.blocked_tensor({k, n},
+        weights_tensor = tensor_factory.blocked_tensor({cfg.bs, k, n},
                          dt,
                          buffer_params,
                          "weights_" + std::to_string(i));
       }
     }
     else {
-      weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
-                       dt,
-                       1.0, "weights_" + std::to_string(i));
+      if (options.ndims > 2) {
+        weights_tensor = tensor_factory.uniform_dist_tensor({cfg.bs, k, n},
+                         dt,
+                         1.0, "weights_" + std::to_string(i));
+      }
+      else {
+        weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
+                         dt,
+                         1.0, "weights_" + std::to_string(i));
+      }
     }
     weights.push_back(weights_tensor);
   }
@@ -117,23 +124,38 @@ int create_bias_tensor(tensor_factory_t tensor_factory, const MatmulConfig &cfg,
 }
 
 int create_input_tensor(tensor_factory_t &tensor_factory,
-                        const MatmulConfig &cfg, tensor_t &input) {
-  input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
-          cfg.dt[0],
-          1.0, "matmul_input");
+                        const MatmulConfig &cfg, tensor_t &input, const global_options &options) {
+  if (options.ndims > 2) {
+    input = tensor_factory.uniform_dist_tensor({cfg.bs, cfg.m, cfg.k},
+            cfg.dt[0],
+            1.0, "matmul_input");
+  }
+  else {
+    input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
+            cfg.dt[0],
+            1.0, "matmul_input");
+  }
   input.set_name("matmul_input");
   return OK;
 }
 
 int create_output_tensor(tensor_factory_t &tensor_factory,
-                         const MatmulConfig &cfg, std::vector<tensor_t> &output) {
+                         const MatmulConfig &cfg, std::vector<tensor_t> &output,
+                         const global_options &options) {
   // Create output tensor with zero initialization.
   size_t m = cfg.m;
   zendnnl::common::data_type_t dt = cfg.dt[2];
   for (auto i = 0; i < cfg.n_values.size(); i++) {
     size_t n = cfg.n_values[i];
-    tensor_t output_tensor = tensor_factory.zero_tensor({m, n},
-                             dt, "matmul_output_" + std::to_string(i));
+    tensor_t output_tensor;
+    if (options.ndims > 2) {
+      output_tensor = tensor_factory.zero_tensor({cfg.bs, m, n},
+                      dt, "matmul_output_" + std::to_string(i));
+    }
+    else {
+      output_tensor = tensor_factory.zero_tensor({m, n},
+                      dt, "matmul_output_" + std::to_string(i));
+    }
     output_tensor.set_name("matmul_output_" + std::to_string(i));
     output.push_back(output_tensor);
   }

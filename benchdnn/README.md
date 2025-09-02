@@ -33,6 +33,7 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 | Timing Modes         | end-to-end, detailed timing breakdowns  |
 | Cache Modes          | hot cache, cold cache                   |
 | Warmup Iterations    | Supported (configurable)                |
+| Batched Matmul (BMM) | Supported (via 'bs' field and --ndims=3)         |
 
 ## Flow Diagram
 
@@ -83,6 +84,8 @@ The flow is split into two main sections:
 - **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`).
 - **Flexible Input File**: Use `--input_file=<filename>` to provide a configuration file tailored to the selected operator.
 - **Matmul Benchmarking**: For `--op=matmul`, the input file should contain one configuration per line with the following fields:
+  - `bs` (Batch Size) : The first field in each input line for batched matmul (BMM). For standard matmul, `bs` can be omitted
+    - **BMM (Batched Matmul)**: When `bs` is specified and `--ndims=3` is used, the benchmark runs batched matmul (BMM), processing multiple matrices in parallel
   - `m`: Rows in matrix A
   - `k`: Columns in matrix A / rows in matrix B
   - `n`: Columns in matrix B (for multi-layer matmul, specify as colon-separated values, e.g., `512:256:128`)
@@ -138,11 +141,12 @@ cmake --build .
 Run the benchmark by passing the operator and input file as command-line arguments (from the build directory):
 
 ```sh
-./benchdnn/benchdnn --op=<operator> --input_file=input.txt
+./benchdnn/benchdnn --op=<operator> --input_file=input.txt [--ndims=3] 
 ```
 
 - `<operator>`: The operator to benchmark (e.g., `matmul`, `reorder`).
 - `input.txt`: Path to the input file containing benchmark configurations (see below).
+- Use `--ndims=3` for batched matmul (BMM) benchmarks.
 
 Both the input file (`input.txt`) and the output CSV files (`timings_<timestamp>.csv`) are located in the `build` directory by default.
 
@@ -163,6 +167,11 @@ For `--op=matmul`, each line should be:
   ```
   768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, 30
   4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, 30
+  ```
+
+- **Batched matmul (BMM):**
+  ```
+  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_blis, 20
   ```
 
 ### Reorder Operator
@@ -211,6 +220,15 @@ M     K     N     Iters  Data_type       Bias_Enabled  Bias_dt  PostOp      Kern
 128   9216  4096  100    f32:f32:f32     1             f32      relu        aocl_blis_blocked  30            1364.92                    708.00   0.84 (0.06 %)       0.20 (0.01 %)      1363.89 (99.92 %)
 ```
 
+### Matmul Output: Batched Matmul (BMM) (Console & CSV)
+
+For batched matmul, the output includes a `BS` column for batch size.
+#### Example (batched matmul, console/CSV)
+```
+BS    M     K     N     Iterations  Data_type    Bias_Enabled  Bias_dt  PostOp                              Kernel_Name        Warmup_iters  Total_time(ms, all iters)  GFLOPS  %_of_Total  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
+100   100   3456  512   100         f32:f32:f32  1                      gelu_erf:binary_add                 aocl_blis          20            20710.60                   170.88  100.00 %   0.12 (0.00 %)       0.03 (0.00 %)      20710.45 (99.94 %)   
+```
+
 ### Notes
 - All timing columns are in milliseconds.
 - GFLOPS is calculated per layer for matmul.
@@ -239,7 +257,6 @@ Rows  Cols  Iterations  Data_type  Kernel_Name  In-place  Warmup_iters  Total_ti
 
 ## Extending
 - Add new post-operations or data types by updating enums and parsing logic in the utility and parser modules.
-- For 3D tensor (BMM) support, see the TODO in the `MatmulConfig` struct.
 - Follow Doxygen-style documentation and project code style for contributions.
 
 ## Documentation & Diagrams
