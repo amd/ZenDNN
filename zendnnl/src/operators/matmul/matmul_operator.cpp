@@ -217,10 +217,12 @@ status_t matmul_operator_t::validate() {
     return status_t::failure;
   }
 
-  // Update forced kernel if env/config is set.
-  if (update_matmul_kernel() == status_t::failure) {
-    log_error("Invalid matmul kernel algo is set");
-    return status_t::failure;
+  // Update forced kernel if forced kernel is empty and env/config is provided.
+  if (forced_kernel.empty()) {
+    if (update_matmul_kernel() == status_t::failure) {
+      log_error("Invalid matmul kernel algo is set");
+      return status_t::failure;
+    }
   }
 
   //Hard Force to Reference Kernel if 2D Matrix is broadcasted from user-side
