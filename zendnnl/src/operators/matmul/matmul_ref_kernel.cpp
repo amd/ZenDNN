@@ -237,6 +237,9 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
       else {
         if (apply_post_op(output_tensor, zen_po,
                           output_buff_f32) != status_t::success) {
+          if (output_buff_f32) {
+            free(output_buff_f32);
+          }
           return status_t::failure;
         }
       }

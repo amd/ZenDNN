@@ -253,6 +253,9 @@ TEST_P(TestReorder,F32_F32_Stride) {
   }
 
   EXPECT_TRUE(is_test_successful);
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn TEST_P
@@ -313,6 +316,9 @@ TEST_P(TestReorder,BF16_F32_Stride) {
   }
 
   EXPECT_TRUE(is_test_successful);
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn TEST_P
@@ -373,6 +379,9 @@ TEST_P(TestReorder,BF16_BF16_Stride) {
   }
 
   EXPECT_TRUE(is_test_successful);
+  if (weights_buff) {
+    free(weights_buff);
+  }
 }
 
 /** @fn INSTANTIATE_TEST_SUITE_P
