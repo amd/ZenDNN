@@ -32,8 +32,8 @@ message(DEBUG "ZENDNNL_DEPS_DIR=${ZENDNNL_DEPS_DIR}")
 set(AMDBLIS_ROOT_DIR "${ZENDNNL_DEPS_DIR}/amdblis"
   CACHE PATH "AMD BLIS root dir")
 set(AMDBLIS_GIT_REPO "https://github.com/amd/blis.git")
-# amdblis tag AOCL-Aug2025-b1
-set(AMDBLIS_GIT_TAG "c96e7eb197c6860338ff76bb6631b60b3e3644de")
+# amdblis tag AOCL-Sep2025-b1
+set(AMDBLIS_GIT_TAG "fb2a682725bdb56cdacb31d4ab7430c42b2eb24b")
 option(AMDBLIS_GIT_PROGRESS ON)
 
 # aocl-utils repo information
