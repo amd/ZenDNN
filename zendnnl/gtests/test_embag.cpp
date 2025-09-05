@@ -131,7 +131,7 @@ TEST_P(TestEmbag, F32_BF16) {
 
   if (is_test_successful) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
-                      EMBAG_F32_TOL, is_test_successful);
+                      EMBAG_BF16_TOL, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
