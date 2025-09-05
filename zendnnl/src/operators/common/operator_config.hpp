@@ -21,7 +21,7 @@
 #include "common/error_status.hpp"
 
 using json = nlohmann::json;
-using namespace zendnnl::error_handling;
+using status_t = zendnnl::error_handling::status_t;
 
 namespace zendnnl {
 namespace ops {

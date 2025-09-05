@@ -156,11 +156,11 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
     bias_dtype                 = bias_tensor.get_data_type();
   }
 
-  #pragma omp parallel for num_threads(batch_size)
+  #pragma omp parallel for collapse(3)
   for (auto bs = 0; bs < batch_size; ++bs) {
     for (auto i = 0; i < M; ++i) {
       for (auto j = 0; j < N; ++j) {
-        float sum = 0.0f;
+        float sum = 0.0;
         size_t op_idx = bs*offset_out + i*ldc + j;
         for (auto k = 0; k < K; ++k) {
           size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j*ldb + k) :

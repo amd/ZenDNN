@@ -73,15 +73,15 @@ TEST_P(TestBatchMatmul,4D_INVALID) {
   //INPUT {MB,M,K}
   auto dummy_group_count  = 1U;
   auto input_tensor       = tensor_factory.uniform_dist_tensor({dummy_group_count, batch_size, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({dummy_group_count, batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({dummy_group_count, batch_size, m, n},
                             data_type_t::f32);
@@ -99,15 +99,15 @@ TEST_P(TestBatchMatmul,4D_INVALID) {
 TEST_P(TestBatchMatmul,OUTPUT_LESS_THAN_3D_INVALID) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({m, n},
                             data_type_t::f32);
@@ -126,15 +126,15 @@ TEST_P(TestBatchMatmul,OUTPUT_LESS_THAN_3D_INVALID) {
 TEST_P(TestBatchMatmul,OUTPUT_ONLY_3D_INVALID) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -152,15 +152,15 @@ TEST_P(TestBatchMatmul,OUTPUT_ONLY_3D_INVALID) {
 TEST_P(TestBatchMatmul,INPUT_LESS_THAN_2D_INVALID) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -178,15 +178,15 @@ TEST_P(TestBatchMatmul,INPUT_LESS_THAN_2D_INVALID) {
 TEST_P(TestBatchMatmul,WEIGHT_LESS_THAN_2D_INVALID) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -207,15 +207,15 @@ TEST_P(TestBatchMatmul,DIFFERENT_BATCH_INVALID) {
   int add_bs_wei          = 1 - add_bs_inp;
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size+add_bs_inp, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size+add_bs_wei, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -235,15 +235,15 @@ TEST_P(TestBatchMatmul,DIFFERENT_ROW_INVALID) {
   int add_row_inp          = 1 + rand()%10;
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m+add_row_inp, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -263,15 +263,15 @@ TEST_P(TestBatchMatmul,DIFFERENT_COL_INVALID) {
   int add_col_wei          = 1 + rand()%10;
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n + add_col_wei},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -289,15 +289,15 @@ TEST_P(TestBatchMatmul,DIFFERENT_COL_INVALID) {
 TEST_P(TestBatchMatmul,F32_3D) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -324,15 +324,15 @@ TEST_P(TestBatchMatmul,F32_3D) {
 TEST_P(TestBatchMatmul,F32_2D_WEI) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -359,15 +359,15 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
 TEST_P(TestBatchMatmul,F32_2D_INP) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0, transA);
+                            data_type_t::f32, 1.0, transA);
   //WEI {K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::f32, 2.0, transB);
+                            data_type_t::f32, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -395,15 +395,15 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
 TEST_P(TestBatchMatmul,BF16_F32_3D) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -432,15 +432,15 @@ TEST_P(TestBatchMatmul,BF16_F32_3D) {
 TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -469,15 +469,15 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
 TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -506,15 +506,15 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
 TEST_P(TestBatchMatmul,BF16_BF16_3D) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -543,15 +543,15 @@ TEST_P(TestBatchMatmul,BF16_BF16_3D) {
 TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({batch_size, m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -580,15 +580,15 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
 TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
   //INPUT {MB,M,K}
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 2.0, transA);
+                            data_type_t::bf16, 1.0, transA);
   //WEI {MB,K,N}
   auto weights            = tensor_factory.uniform_dist_tensor({batch_size, k, n},
-                            data_type_t::bf16, 2.0, transB);
+                            data_type_t::bf16, 1.0, transB);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);

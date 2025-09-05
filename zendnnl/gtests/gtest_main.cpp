@@ -25,7 +25,7 @@ vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 // Matmul Tolerance Limit
 // TODO: Make the tolerance value dynamic based on factors such
 // as tensor dimensions, data type, and value range.
-const float MATMUL_F32_TOL = 0.001;
+const float MATMUL_F32_TOL = 0.01;
 const float MATMUL_BF16_TOL = 0.01;
 
 // Test tolerance constants

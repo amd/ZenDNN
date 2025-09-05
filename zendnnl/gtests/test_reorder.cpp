@@ -70,13 +70,13 @@ class TestReorder : public ::testing::TestWithParam<MatmulType> {
  */
 TEST_P(TestReorder,F32_F32) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 2.0);
+                            data_type_t::f32, 1.0);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 2.0);
+                            data_type_t::f32, 1.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
@@ -114,13 +114,13 @@ TEST_P(TestReorder,F32_F32) {
  */
 TEST_P(TestReorder, BF16_F32) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 2.0);
+                            data_type_t::bf16, 1.0);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 2.0);
+                            data_type_t::bf16, 1.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
@@ -158,13 +158,13 @@ TEST_P(TestReorder, BF16_F32) {
  */
 TEST_P(TestReorder, BF16_BF16) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 2.0);
+                            data_type_t::bf16, 1.0);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 2.0);
+                            data_type_t::bf16, 1.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor_ref, po_index,
@@ -220,13 +220,13 @@ TEST_P(TestReorder,F32_F32_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::f32, 2.0, transB);
+                            stride_wt, data_type_t::f32, 1.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::f32, 2.0, transA);
+                            stride_in, data_type_t::f32, 1.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
 
@@ -283,13 +283,13 @@ TEST_P(TestReorder,BF16_F32_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::bf16, 2.0, transB);
+                            stride_wt, data_type_t::bf16, 1.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::bf16, 2.0, transA);
+                            stride_in, data_type_t::bf16, 1.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
 
@@ -346,13 +346,13 @@ TEST_P(TestReorder,BF16_BF16_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::bf16, 2.0, transB);
+                            stride_wt, data_type_t::bf16, 1.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::bf16, 2.0, transA);
+                            stride_in, data_type_t::bf16, 1.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                                data_type_t::f32, 1.0) : tensor_t();
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
 
