@@ -141,6 +141,49 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
   return udtensor;
 }
 
+tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
+    data_type dtype_, float val_,
+    std::string tensor_name_) {
+
+  auto utensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size(size_)
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
+
+  if (! utensor.check()) {
+    log_warning("tensor creation of ", utensor.get_name(), " failed.");
+  }
+  else {
+    auto  buf_nelem  = utensor.get_nelem();
+    void *buf_vptr   = utensor.get_raw_handle_unsafe();
+
+    if (dtype_ == data_type::f32) {
+      float *buf_ptr = static_cast<float *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = val_;
+      }
+    }
+    else if (dtype_ == data_type::bf16) {
+      bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = bfloat16_t(val_);
+      }
+    }
+    else if (dtype_ == data_type::s8) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = static_cast<int8_t>(val_);
+      }
+    }
+    else {
+      log_warning("tensor ", utensor.get_name(), " unsupported data type.");
+    }
+  }
+  return utensor;
+}
+
 tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     std::vector<index_type> size_, const std::vector<index_type> aligned_size_,
     data_type dtype_, float range_, bool trans) {
@@ -350,61 +393,159 @@ bool Parser::isInteger(const std::string &s) {
   return true;
 }
 
-status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
+status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias, tensor_t &output_tensor,
                             uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
   try {
-    // default postop relu
-    post_op_t post_op = post_op_t{po_arr[0].second};
-    // postop update according to the index
-    if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
-    weights.set_name("weights");
-    bias.set_name("bias");
 
-    //define matmul context
-    auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights)
-                          .set_param("bias", bias)
-                          .set_alpha(alpha)
-                          .set_beta(beta);
-    if (index != po_size) {
-      matmul_context = matmul_context.set_post_op(post_op).create();
+    if (LOWOHA && index == po_size) {
+      // Call LOWOHA matmul for basic matmul only
+      try {
+
+        // Validate input tensors
+        if (!input_tensor.check() || !weight_tensor.check() || !output_tensor.check()) {
+          log_error("LOWOHA: Invalid tensor state detected");
+          return status_t::failure;
+        }
+        auto input_dim              = input_tensor.get_dim();
+        auto weight_dim             = weight_tensor.get_dim();
+        auto output_dim             = output_tensor.get_dim();
+        bool transA       = (input_dim == 2)  ? (input_tensor.get_order() ==
+                            "ba") : (input_tensor.get_order() == "acb");
+        bool transB   = (weight_dim == 2) ? (weight_tensor.get_order() ==
+                                             "ba") : (weight_tensor.get_order() == "acb");
+
+        const int   lda             = transA ?
+                                      input_tensor.get_stride(input_dim-1) :
+                                      input_tensor.get_stride(input_dim-2);
+        const int   ldb             = transB ?
+                                      weight_tensor.get_stride(weight_dim-1):
+                                      weight_tensor.get_stride(weight_dim-2);
+        const int   ldc             = output_tensor.get_stride(output_dim-2);
+
+
+        // Extract tensor dimensions
+        const int batchA        = (input_dim==3) ? input_tensor.get_size(
+                                    input_dim-3) : 1;
+        const int batchB        = (weight_dim==3) ? weight_tensor.get_size(
+                                    weight_dim-3) : 1;
+
+        const int M                 = output_tensor.get_size(output_dim-2);
+        const int K                 = input_tensor.get_size(input_dim-1);
+        const int N                 = output_tensor.get_size(output_dim-1);
+        // Validate dimensions
+        if (M == 0 || K == 0 || N == 0) {
+          log_error("LOWOHA: Invalid tensor dimensions - M:", M, " K:", K, " N:", N);
+          return status_t::failure;
+        }
+
+        // Get tensor data pointers (no bias needed)
+        void *A_data = input_tensor.get_raw_handle_unsafe();
+        void *B_data = weight_tensor.get_raw_handle_unsafe();
+        void *C_data = output_tensor.get_raw_handle_unsafe();
+
+        // Validate data pointers (no bias validation needed)
+        if (!A_data || !B_data || !C_data) {
+          log_error("LOWOHA: Null data pointer detected");
+          return status_t::failure;
+        }
+
+        // Get data types
+        data_type_t src_data_type = input_tensor.get_data_type();
+        data_type_t out_data_type = output_tensor.get_data_type();
+
+        // Validate data types
+        if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16) {
+          log_error("LOWOHA: Unsupported source data type");
+          return status_t::failure;
+        }
+        if (out_data_type != data_type_t::f32 && out_data_type != data_type_t::bf16) {
+          log_error("LOWOHA: Unsupported output data type");
+          return status_t::failure;
+        }
+
+        log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
+                 batchB, " M:", M, " N:", N, " K:", K,
+                 " alpha:", alpha, " beta:", beta);
+
+        matmul_direct(
+          A_data, B_data, C_data, nullptr,  // No bias
+          alpha, beta,
+          static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+          transA, transB,
+          lda, ldb, ldc,
+          src_data_type, out_data_type,
+          post_op_type_t::none,  // No post-ops
+          nullptr,  // No post-op buffer
+          batchA, batchB  // Batch_A, Batch_B
+        );
+
+        log_info("LOWOHA matmul_direct execution completed successfully (basic matmul only)");
+      }
+      catch (const std::exception &e) {
+        log_error("LOWOHA matmul_direct execution failed: ", e.what());
+        return status_t::failure;
+      }
+      catch (...) {
+        log_error("LOWOHA matmul_direct execution failed with unknown exception");
+        return status_t::failure;
+      }
     }
     else {
-      matmul_context = matmul_context.create();//No Postop case
-    }
+      // default postop relu
+      post_op_t post_op = post_op_t{po_arr[0].second};
+      // postop update according to the index
+      if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
+      weight_tensor.set_name("weights");
+      bias.set_name("bias");
 
-    //define matmul operator
-    auto matmul_operator = matmul_operator_t()
-                           .set_name("matmul_operator")
-                           .set_context(matmul_context)
-                           .create();
-
-    if (! matmul_operator.check()) {
-      log_error("operator ", matmul_operator.get_name(), " creation failed.");
-      return status_t::failure;
-    }
-
-    input_tensor.set_name("matmul_input");
-    output_tensor.set_name("matmul_output");
-    // Set binary tensor for binary postops
-    if (index < po_size) {
-      if (po_arr[index].second == post_op_type_t::binary_add) {
-        matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+      //define matmul context
+      auto matmul_context = matmul_context_t()
+                            .set_param("weights", weight_tensor)
+                            .set_param("bias", bias)
+                            .set_alpha(alpha)
+                            .set_beta(beta);
+      if (index != po_size) {
+        matmul_context = matmul_context.set_post_op(post_op).create();
       }
-      else if (po_arr[index].second == post_op_type_t::binary_mul) {
-        matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+      else {
+        matmul_context = matmul_context.create();//No Postop case
       }
-    }
-    status_t status = matmul_operator
-                      .set_input("matmul_input", input_tensor)
-                      .set_output("matmul_output", output_tensor)
-                      .execute();
 
-    if (status != status_t::success) {
-      log_info("operator ", matmul_operator.get_name(), " execution failed.");
-      return status_t::failure;
+      //define matmul operator
+      auto matmul_operator = matmul_operator_t()
+                             .set_name("matmul_operator")
+                             .set_context(matmul_context)
+                             .create();
+
+      if (! matmul_operator.check()) {
+        log_error("operator ", matmul_operator.get_name(), " creation failed.");
+        return status_t::failure;
+      }
+
+      input_tensor.set_name("matmul_input");
+      output_tensor.set_name("matmul_output");
+      // Set binary tensor for binary postops
+      if (index < po_size) {
+        if (po_arr[index].second == post_op_type_t::binary_add) {
+          matmul_operator.set_input(post_op.binary_add_params.tensor_name, binary_tensor);
+        }
+        else if (po_arr[index].second == post_op_type_t::binary_mul) {
+          matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
+        }
+      }
+      status_t status = matmul_operator
+                        .set_input("matmul_input", input_tensor)
+                        .set_output("matmul_output", output_tensor)
+                        .execute();
+
+      if (status != status_t::success) {
+        log_info("operator ", matmul_operator.get_name(), " execution failed.");
+        return status_t::failure;
+      }
+
     }
+
   }
   catch (const exception_t &ex) {
     log_verbose(ex.what());

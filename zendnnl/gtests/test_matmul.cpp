@@ -47,10 +47,18 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     else {
       po_index = params.po_index;
     }
+#ifdef LOWOHA
+    po_index = 8;
+#endif
     log_info("m: ",m, " k: ",k, " n: ", n, " TransA: ", transA, " TransB: ", transB,
              " po_index: ",po_index);
-    bias     = tensor_factory.uniform_dist_tensor({n}, rand() % 2 == 0 ?
-               data_type_t::bf16 : data_type_t::f32, 2.0);
+#ifdef LOWOHA
+    bias     = tensor_factory.uniform_tensor({n}, rand() % 2 == 0 ?
+               data_type_t::bf16 : data_type_t::f32, 0.0);
+#else
+    bias = tensor_factory.uniform_dist_tensor({n}, rand() % 2 == 0 ?
+           data_type_t::bf16 : data_type_t::f32, 2.0);
+#endif
     bias.set_name("bias");
   }
 

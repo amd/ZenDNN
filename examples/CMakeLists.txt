@@ -56,6 +56,7 @@ set(examples_sources
   tensor_example.cpp
   sample_example.cpp
   matmul_example.cpp
+  lowoha_matmul_example.cpp
   batchmatmul_example.cpp
   compare_op_example.cpp
   reorder_example.cpp
@@ -66,6 +67,7 @@ set(example_headers
   tensor_example.hpp
   sample_example.hpp
   matmul_example.hpp
+  lowoha_matmul_example.hpp
   batchmatmul_example.hpp
   compare_op_example.hpp
   reorder_example.hpp

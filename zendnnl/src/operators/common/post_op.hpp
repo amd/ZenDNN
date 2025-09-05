@@ -34,6 +34,7 @@ namespace ops {
  *  @brief Supported post_op types.
  */
 enum class post_op_type_t {
+  none, /*!< none*/
   elu, /*!< eltwise elu*/
   relu,/*!< eltwise relu */
   leaky_relu,/*!< eltwise leaky relu */

@@ -29,7 +29,9 @@
 #include "operators/reorder/reorder_operator.hpp"
 #include "operators/embag/embag_context.hpp"
 #include "operators/embag/embag_operator.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
+#define LOWOHA 0
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 1000
@@ -41,6 +43,7 @@ using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
 using namespace zendnnl::ops;
+using namespace zendnnl::lowoha;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
@@ -113,6 +116,10 @@ class tensor_factory_t {
   tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
                                        const std::vector<index_type> stride_,
                                        data_type dtype_, float range_, bool trans);
+
+  /** @brief uniform tensor */
+  tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
+                          float val_, std::string tensor_name_="uniform");
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,

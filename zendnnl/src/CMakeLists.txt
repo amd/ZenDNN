@@ -84,6 +84,7 @@ prolog_header_file(${zendnnl_inc_file})
 add_subdirectory(common)
 add_subdirectory(memory)
 add_subdirectory(operators)
+add_subdirectory(lowoha_operators)
 
 epilog_header_file(${zendnnl_inc_file})
 
