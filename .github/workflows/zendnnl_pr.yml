@@ -13,6 +13,7 @@ jobs:
     
     env:
       PYTHON_VERSION: "3.10"
+      CMAKE_VERSION: "4.0.0"  # Specifying a version higher than 3.25
     
     steps:
     - name: Verify user account
@@ -36,7 +37,7 @@ jobs:
         echo "Current directory: $(pwd)"
         echo "Directory contents: $(ls -la)"
       
-    - name: Setup Conda environment
+    - name: Setup Conda environment with CMake
       run: |
         # Source miniforge profile
         source ~/.miniforge_profile
@@ -50,8 +51,12 @@ jobs:
         # Activate the environment
         conda activate $CONDA_ENV_NAME
         
-        # Verify Python version
+        # Install newer CMake in the conda environment
+        conda install -y cmake=$CMAKE_VERSION
+        
+        # Verify Python and CMake versions
         python --version
+        cmake --version
       shell: bash
       
     - name: Build ZenDNNL
@@ -64,8 +69,11 @@ jobs:
         echo "Current directory: $(pwd)"
         echo "Directory contents: $(ls -la)"
         
-        # Build ZenDNNL - using correct path
-        # Just use the current directory as we're already in the repo root after checkout
+        # Ensure we're using the conda-installed cmake
+        which cmake
+        cmake --version
+        
+        # Build ZenDNNL
         mkdir -p build && cd build
         cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
         cmake --build . --target=all |& tee $WORKSPACE/build_output.log
