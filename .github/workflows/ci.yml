@@ -26,6 +26,7 @@ jobs:
         shell: bash
 
       - name: clean zendnn
+        if: always()
         run: | 
           parent_dir=$(dirname $GITHUB_WORKSPACE)
           echo "parent_dir, $parent_dir"
