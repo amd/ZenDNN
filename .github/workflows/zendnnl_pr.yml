@@ -31,6 +31,10 @@ jobs:
         echo "WORKSPACE=$GITHUB_WORKSPACE" >> $GITHUB_ENV
         # Create a unique env name using workflow run ID and job ID to avoid conflicts
         echo "CONDA_ENV_NAME=zendnnl_build_${GITHUB_RUN_ID}_${GITHUB_JOB}" >> $GITHUB_ENV
+        
+        # Debug path information
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
       
     - name: Setup Conda environment
       run: |
@@ -56,8 +60,12 @@ jobs:
         source ~/.miniforge_profile
         conda activate $CONDA_ENV_NAME
         
-        # Build ZenDNNL
-        cd ${WORKSPACE}/ZenDNN
+        # Debug directory structure
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Build ZenDNNL - using correct path
+        # Just use the current directory as we're already in the repo root after checkout
         mkdir -p build && cd build
         cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
         cmake --build . --target=all |& tee $WORKSPACE/build_output.log
