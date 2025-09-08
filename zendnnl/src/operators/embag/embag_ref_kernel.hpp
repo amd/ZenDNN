@@ -36,7 +36,7 @@ class embag_ref_kernel_t final : public op_kernel_t<embag_context_t> {
 };
 
 extern "C" {
-  std::shared_ptr<embag_ref_kernel_t> get_embag_ref_kernel();
+  embag_ref_kernel_t *get_embag_ref_kernel();
 }
 
 } //namespace ops

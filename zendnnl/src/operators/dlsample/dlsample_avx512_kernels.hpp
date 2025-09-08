@@ -27,27 +27,29 @@ namespace ops {
 
 using namespace zendnnl::error_handling;
 
-class dlsample_f32_avx512_kernel_t final : public op_kernel_t<dlsample_context_t> {
-public:
+class dlsample_f32_avx512_kernel_t final : public
+  op_kernel_t<dlsample_context_t> {
+ public:
   ~dlsample_f32_avx512_kernel_t() = default;
 
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
-class dlsample_bf16_avx512_kernel_t final : public op_kernel_t<dlsample_context_t> {
-public:
+class dlsample_bf16_avx512_kernel_t final : public
+  op_kernel_t<dlsample_context_t> {
+ public:
   ~dlsample_bf16_avx512_kernel_t() = default;
 
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
 extern "C" {
-  std::shared_ptr<dlsample_f32_avx512_kernel_t> get_dlsample_f32_avx512_kernel();
-  std::shared_ptr<dlsample_bf16_avx512_kernel_t> get_dlsample_bf16_avx512_kernel();
+  dlsample_f32_avx512_kernel_t *get_dlsample_f32_avx512_kernel();
+  dlsample_bf16_avx512_kernel_t *get_dlsample_bf16_avx512_kernel();
 }
 
 } //namespace ops

@@ -64,8 +64,8 @@ status_t compare_operator_t::validate() {
 
   //nonzero layout is non-contiguous
   if ((expec_layout) ||
-      (test_layout ) ||
-      (diff_layout )) {
+      (test_layout) ||
+      (diff_layout)) {
     apilog_error("<", get_name(), "> compare kernel needs contiguous tensors.");
     return status_t::failure;
   }
@@ -115,7 +115,7 @@ std::string compare_operator_t::op_execute_info() {
 status_t compare_operator_t::kernel_factory() {
   LOG_DEBUG_INFO("Executing compare operator");
 
-  kernel = get_compare_kernel();
+  kernel = std::shared_ptr<compare_ref_kernel_t>(get_compare_kernel());
 
   kernel->create();
   if (! kernel->check()) {

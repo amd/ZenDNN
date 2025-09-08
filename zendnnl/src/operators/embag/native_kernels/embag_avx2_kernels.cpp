@@ -190,12 +190,11 @@ template void embag_avx2_kernel<uint16_t, float>(
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
 extern "C" {
-  std::shared_ptr<embag_f32_avx2_kernel_t> get_embag_f32_avx2_kernel() {
-    return std::make_shared<embag_f32_avx2_kernel_t>();
+  embag_f32_avx2_kernel_t *get_embag_f32_avx2_kernel() {
+    return new embag_f32_avx2_kernel_t();
   }
-
-  std::shared_ptr<embag_bf16_avx2_kernel_t> get_embag_bf16_avx2_kernel() {
-    return std::make_shared<embag_bf16_avx2_kernel_t>();
+  embag_bf16_avx2_kernel_t *get_embag_bf16_avx2_kernel() {
+    return new embag_bf16_avx2_kernel_t();
   }
 }
 

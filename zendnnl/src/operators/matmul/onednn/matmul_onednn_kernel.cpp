@@ -76,8 +76,7 @@ status_t matmul_onednn_kernel_t::execute(const context_type &context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t>
-  get_matmul_onednn_kernel() {
-    return std::make_shared<zendnnl::ops::matmul_onednn_kernel_t>();
+  zendnnl::ops::matmul_onednn_kernel_t *get_matmul_onednn_kernel() {
+    return new zendnnl::ops::matmul_onednn_kernel_t();
   }
 }

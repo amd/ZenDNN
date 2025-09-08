@@ -66,7 +66,7 @@ extern "C" {
    * @c operator_t::load_module(), this function is searched using
    * @c operator_t::load_symbol(), and executed to get kernel pointer.
    */
-  std::shared_ptr<zendnnl::ops::reorder_kernel_t> get_reorder_aocl_kernel();
+  zendnnl::ops::reorder_kernel_t *get_reorder_aocl_kernel();
 }
 
 #endif

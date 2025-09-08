@@ -139,12 +139,11 @@ void embag_avx512_kernel(
     float wt_sum = 0.0f;
 
     // Accumulator registers for SIMD blocks
-    __m512 acc[full_blocks + 1];
-    for (int b = 0; b < full_blocks; ++b) {
-      acc[b] = _mm512_setzero_ps();
-    }
-    if (tail > 0) {
-      acc[full_blocks] = _mm512_setzero_ps();
+    int acc_size = full_blocks + (tail > 0 ? 1 : 0);
+    __m512 *acc = (__m512 *)_mm_malloc(sizeof(__m512) * acc_size, 64);
+
+    for (int i = 0; i < acc_size; ++i) {
+      acc[i] = _mm512_setzero_ps();
     }
 
     for (int i = start; i < end; ++i) {

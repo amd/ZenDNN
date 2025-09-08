@@ -45,7 +45,8 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
   bool is_transpose_weights   = (weight_dim == 2) ? (weight_tensor.get_order() ==
                                 "ba") : (weight_tensor.get_order() == "acb");
 
-  bool is_blocked = weight_tensor.get_layout() & uint8_t(tensor_layout_t::blocked);
+  bool is_blocked = weight_tensor.get_layout() & uint8_t(
+                      tensor_layout_t::blocked);
 
   auto reorder_weights        = (int16_t *)
                                 context_.get_aocl_dlp_reordered_weights_ptr_unsafe();
@@ -117,8 +118,8 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_bf16_avx512_kernel_t>
+  zendnnl::ops::matmul_bf16_avx512_kernel_t *
   get_matmul_bf16_avx512_kernel() {
-    return std::make_shared<zendnnl::ops::matmul_bf16_avx512_kernel_t>();
+    return new zendnnl::ops::matmul_bf16_avx512_kernel_t();
   }
 }

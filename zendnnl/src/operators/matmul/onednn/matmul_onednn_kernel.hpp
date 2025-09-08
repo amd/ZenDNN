@@ -44,8 +44,7 @@ class matmul_onednn_kernel_t final : public op_kernel_t<matmul_context_t> {
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_onednn_kernel_t>
-  get_matmul_onednn_kernel();
+  zendnnl::ops::matmul_onednn_kernel_t *get_matmul_onednn_kernel();
 }
 
 #endif

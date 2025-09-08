@@ -43,8 +43,8 @@ class embag_bf16_avx512_kernel_t final : public op_kernel_t<embag_context_t> {
 };
 
 extern "C" {
-  std::shared_ptr<embag_f32_avx512_kernel_t> get_embag_f32_avx512_kernel();
-  std::shared_ptr<embag_bf16_avx512_kernel_t> get_embag_bf16_avx512_kernel();
+  embag_f32_avx512_kernel_t *get_embag_f32_avx512_kernel();
+  embag_bf16_avx512_kernel_t *get_embag_bf16_avx512_kernel();
 }
 
 } //namespace ops

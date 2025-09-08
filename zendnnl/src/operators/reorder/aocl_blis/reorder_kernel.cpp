@@ -153,7 +153,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::reorder_kernel_t> get_reorder_aocl_kernel() {
-    return std::make_shared<zendnnl::ops::reorder_kernel_t>();
+  zendnnl::ops::reorder_kernel_t *get_reorder_aocl_kernel() {
+    return new zendnnl::ops::reorder_kernel_t();
   }
 }

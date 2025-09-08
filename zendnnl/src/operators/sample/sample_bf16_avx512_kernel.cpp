@@ -19,9 +19,9 @@
 namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
-status_t sample_bf16_avx512_kernel_t::execute(const context_type& context_,
-                                              tensor_map_type& inputs_,
-                                              tensor_map_type& outputs_) {
+status_t sample_bf16_avx512_kernel_t::execute(const context_type &context_,
+    tensor_map_type &inputs_,
+    tensor_map_type &outputs_) {
 
   log_info("sample_bf16_avx512_kernel");
 
@@ -32,8 +32,7 @@ status_t sample_bf16_avx512_kernel_t::execute(const context_type& context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::sample_bf16_avx512_kernel_t> get_sample_bf16_avx512_kernel() {
-    return std::make_shared<zendnnl::ops::sample_bf16_avx512_kernel_t>();
+  zendnnl::ops::sample_bf16_avx512_kernel_t *get_sample_bf16_avx512_kernel() {
+    return new zendnnl::ops::sample_bf16_avx512_kernel_t();
   }
 }
-

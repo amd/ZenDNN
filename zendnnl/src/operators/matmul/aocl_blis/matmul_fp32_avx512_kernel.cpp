@@ -98,8 +98,8 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_f32_avx512_kernel_t>
+  zendnnl::ops::matmul_f32_avx512_kernel_t *
   get_matmul_f32_avx512_kernel() {
-    return std::make_shared<zendnnl::ops::matmul_f32_avx512_kernel_t>();
+    return new zendnnl::ops::matmul_f32_avx512_kernel_t();
   }
 }

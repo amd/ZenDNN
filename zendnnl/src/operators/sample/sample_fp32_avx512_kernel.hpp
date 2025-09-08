@@ -30,14 +30,14 @@ namespace ops {
  * It is invoked if input data type is @c data_type_t::f32.
  */
 class sample_f32_avx512_kernel_t final : public op_kernel_t<sample_context_t> {
-public:
+ public:
   /** @brief Default destructor */
   ~sample_f32_avx512_kernel_t() = default;
 
   /** @brief Execute */
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
 } //namespace ops
@@ -52,7 +52,7 @@ extern "C" {
    * @c operator_t::load_module(), this function is searched using
    * @c operator_t::load_symbol(), and executed to get kernel pointer.
    */
-  std::shared_ptr<zendnnl::ops::sample_f32_avx512_kernel_t> get_sample_f32_avx512_kernel();
+  zendnnl::ops::sample_f32_avx512_kernel_t *get_sample_f32_avx512_kernel();
 }
 
 #endif

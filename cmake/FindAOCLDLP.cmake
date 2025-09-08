@@ -63,5 +63,4 @@ if(AOCLDLP_FOUND)
     INTERFACE_INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR}
     INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR})
   mark_as_advanced(aocldlp::aocl_dlp_static)
-
 endif()

@@ -141,19 +141,19 @@ void matmul_ref_kernel_t::store_output(uint64_t nelem, float *accum_buff_f32,
   if (output_dtype == data_type_t::u8) {
     for (uint64_t i = 0; i < nelem; ++i) {
       ((uint8_t *)output)[i] = (uint8_t)std::nearbyint(
-                                 clip_fwd(accum_buff_f32[i], 0.0, UINT8_MAX));
+                                 clip_fwd(accum_buff_f32[i], 0.0, (float)UINT8_MAX));
     }
   }
   else if (output_dtype == data_type_t::s8) {
     for (uint64_t i = 0; i < nelem; ++i) {
       ((int8_t *)output)[i] = (int8_t)std::nearbyint(
-                                clip_fwd(accum_buff_f32[i], INT8_MIN, INT8_MAX));
+                                clip_fwd(accum_buff_f32[i], (float)INT8_MIN, (float)INT8_MAX));
     }
   }
   else if (output_dtype == data_type_t::s32) {
     for (uint64_t i = 0; i < nelem; ++i) {
       ((int32_t *)output)[i] = (int32_t)std::nearbyint(
-                                 clip_fwd(accum_buff_f32[i], INT32_MIN, INT32_MAX));
+                                 clip_fwd(accum_buff_f32[i], (float)INT32_MIN, (float)INT32_MAX));
     }
   }
   else if (output_dtype == data_type_t::bf16) {
@@ -669,8 +669,7 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_ref_kernel_t>
-  get_matmul_ref_kernel() {
-    return std::make_shared<zendnnl::ops::matmul_ref_kernel_t>();
+  zendnnl::ops::matmul_ref_kernel_t *get_matmul_ref_kernel() {
+    return new zendnnl::ops::matmul_ref_kernel_t();
   }
 }

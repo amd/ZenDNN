@@ -77,7 +77,7 @@ status_t embag_operator_t::validate() {
     auto offsets_sizes       = get_input("offsets")->get_size();
     auto offsets_tensor      = get_input("offsets").value();
     [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-      (offsets_tensor.get_raw_handle_const());
+        (offsets_tensor.get_raw_handle_const());
     [[maybe_unused]] size_t batch_size = output_sizes[0];
     [[maybe_unused]] size_t num_indices = indices_sizes[0];
 
@@ -164,7 +164,7 @@ status_t embag_operator_t::validate_forced_kernel() {
       auto offsets_sizes       = get_input("offsets")->get_size();
       auto offsets_tensor      = get_input("offsets").value();
       [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-        (offsets_tensor.get_raw_handle_const());
+          (offsets_tensor.get_raw_handle_const());
       [[maybe_unused]] size_t batch_size = output_sizes[0];
       [[maybe_unused]] size_t num_indices = indices_sizes[0];
 
@@ -291,23 +291,27 @@ status_t embag_operator_t::kernel_factory() {
 
       if (table_dtype == data_type_t::f32) {
         if (platform_info.get_avx512f_status()) {
-          kernel = get_embag_f32_avx512_kernel();
+          kernel = std::shared_ptr<embag_f32_avx512_kernel_t>
+                   (get_embag_f32_avx512_kernel());
         }
         else {
-          kernel = get_embag_f32_avx2_kernel();
+          kernel = std::shared_ptr<embag_f32_avx2_kernel_t>(get_embag_f32_avx2_kernel());
         }
       }
       else if (table_dtype == data_type_t::bf16) {
         if (platform_info.get_avx512f_status()) {
 //TODO:To implement BF16 kernel for gcc<12
 #if __GNUC__ >= 12
-          kernel = get_embag_bf16_avx512_kernel();
+          kernel = std::shared_ptr<embag_bf16_avx512_kernel_t>
+                   (get_embag_bf16_avx512_kernel());
 #else
-          kernel = get_embag_bf16_avx2_kernel();
+          kernel = std::shared_ptr<embag_bf16_avx2_kernel_t>
+                   (get_embag_bf16_avx2_kernel());
 #endif
         }
         else {
-          kernel = get_embag_bf16_avx2_kernel();
+          kernel = std::shared_ptr<embag_bf16_avx2_kernel_t>
+                   (get_embag_bf16_avx2_kernel());
         }
       }
       else {
@@ -317,7 +321,7 @@ status_t embag_operator_t::kernel_factory() {
     }
     else {
       if (forced_kernel == "reference") {
-        kernel = get_embag_ref_kernel();
+        kernel = std::shared_ptr<embag_ref_kernel_t>(get_embag_ref_kernel());
       }
       else {
         apilog_error("<", name, "> kernel unimplemented using forced kernel ",

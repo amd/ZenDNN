@@ -270,8 +270,8 @@ template void embag_ref_kernel<uint16_t, float>(
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
 extern "C" {
-  std::shared_ptr<embag_ref_kernel_t> get_embag_ref_kernel() {
-    return std::make_shared<embag_ref_kernel_t>();
+  embag_ref_kernel_t *get_embag_ref_kernel() {
+    return new embag_ref_kernel_t();
   }
 }
 

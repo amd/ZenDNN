@@ -29,9 +29,9 @@ status_t compare_ref_kernel_t::execute(const context_type &context_,
   auto     test_tensor   = input_.at("test_tensor");
   auto     diff_tensor   = output_.at("diff_tensor");
 
-  float*   expec_ptr  = (float *)expec_tensor.get_raw_handle_unsafe();
-  float*   test_ptr   = (float *)test_tensor.get_raw_handle_unsafe();
-  float*   diff_ptr   = (float *)diff_tensor.get_raw_handle_unsafe();
+  float   *expec_ptr  = (float *)expec_tensor.get_raw_handle_unsafe();
+  float   *test_ptr   = (float *)test_tensor.get_raw_handle_unsafe();
+  float   *diff_ptr   = (float *)diff_tensor.get_raw_handle_unsafe();
 
   auto stats        = context_.get_compare_stats();
   auto tolerance    = context_.get_tolerance();
@@ -69,11 +69,10 @@ status_t compare_ref_kernel_t::execute(const context_type &context_,
   return status_t::success;
 }
 
-} //namespace ops
-} //namespace zendnnl
-
 extern "C" {
-  std::shared_ptr<zendnnl::ops::compare_ref_kernel_t> get_compare_kernel() {
-    return std::make_shared<zendnnl::ops::compare_ref_kernel_t>();
+  zendnnl::ops::compare_ref_kernel_t *get_compare_kernel() {
+    return new zendnnl::ops::compare_ref_kernel_t();
   }
 }
+} //namespace ops
+} //namespace zendnnl

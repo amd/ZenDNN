@@ -65,10 +65,12 @@ status_t sample_operator_t::kernel_factory() {
   auto input_dtype = get_input("sample_input")->get_data_type();
 
   if (input_dtype == data_type_t::f32) {
-    kernel = get_sample_f32_avx512_kernel();
+    kernel = std::shared_ptr<sample_f32_avx512_kernel_t>
+             (get_sample_f32_avx512_kernel());
   }
   else if (input_dtype == data_type_t::bf16) {
-    kernel = get_sample_bf16_avx512_kernel();
+    kernel = std::shared_ptr<sample_bf16_avx512_kernel_t>
+             (get_sample_bf16_avx512_kernel());
   }
   else {
     return status_t::unimplemented;

@@ -28,22 +28,22 @@ namespace ops {
 using namespace zendnnl::error_handling;
 
 class embag_f32_avx2_kernel_t final : public op_kernel_t<embag_context_t> {
-public:
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
 class embag_bf16_avx2_kernel_t final : public op_kernel_t<embag_context_t> {
-public:
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
 extern "C" {
-  std::shared_ptr<embag_f32_avx2_kernel_t> get_embag_f32_avx2_kernel();
-  std::shared_ptr<embag_bf16_avx2_kernel_t> get_embag_bf16_avx2_kernel();
+  embag_f32_avx2_kernel_t *get_embag_f32_avx2_kernel();
+  embag_bf16_avx2_kernel_t *get_embag_bf16_avx2_kernel();
 }
 
 

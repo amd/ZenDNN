@@ -27,7 +27,8 @@ set(ZENDNNL_LIBRARY_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 # specify c++ standard
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED true)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # library components
 set(ZENDNNL_LIB_BUILD_ARCHIVE ON CACHE BOOL "build zendnnl archive")
@@ -65,8 +66,11 @@ include(ZenDnnlMacros)
 include(ZenDnnlDependenciesInfo)
 
 # global cxx flags
-set(CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=1 ${CMAKE_CXX_FLAGS}")
-set(CMAKE_CXX_FLAGS "-Wall -Werror ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mavx512f -mavx512vl -mavx512bf16")
+endif()
 
 # find common packages
 zendnnl_required_packages()
@@ -90,9 +94,6 @@ create_version_header_file(${ZENDNNL_VERSION_FILE}
 # install config file
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/config/zendnnl_user_config.json"
   DESTINATION zendnnl/config)
-
 # install version file
 install(FILES "${ZENDNNL_VERSION_FILE}"
   DESTINATION zendnnl/include)
-
-

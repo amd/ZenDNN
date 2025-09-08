@@ -30,17 +30,17 @@ namespace ops {
 using namespace zendnnl::error_handling;
 
 class compare_ref_kernel_t final : public op_kernel_t<compare_context_t> {
-public:
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
+
+extern "C" {
+  zendnnl::ops::compare_ref_kernel_t *get_compare_kernel();
+}
 
 } //namespace ops
 } //namespace zendnnl
-
-extern "C" {
-  std::shared_ptr<zendnnl::ops::compare_ref_kernel_t> get_compare_kernel();
-}
 
 #endif

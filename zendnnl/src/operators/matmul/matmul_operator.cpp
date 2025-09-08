@@ -477,13 +477,15 @@ status_t matmul_operator_t::kernel_factory() {
     if ((weight_dtype == data_type_t::f32) &&
         (input_dtype  == data_type_t::f32) &&
         (output_dtype == data_type_t::f32)) {
-      kernel = get_matmul_f32_avx512_kernel();
+      kernel = std::shared_ptr<matmul_f32_avx512_kernel_t>
+               (get_matmul_f32_avx512_kernel());
     }
     else if ((weight_dtype == data_type_t::bf16) &&
              (input_dtype  == data_type_t::bf16) &&
              (output_dtype == data_type_t::f32 ||
               output_dtype == data_type_t::bf16)) {
-      kernel = get_matmul_bf16_avx512_kernel();
+      kernel = std::shared_ptr<matmul_bf16_avx512_kernel_t>
+               (get_matmul_bf16_avx512_kernel());
     }
     else {
       apilog_error("<", name, "> kernel unimplemented.");
@@ -492,10 +494,10 @@ status_t matmul_operator_t::kernel_factory() {
   }
   else {
     if (forced_kernel == "reference") {
-      kernel = get_matmul_ref_kernel();
+      kernel = std::shared_ptr<matmul_ref_kernel_t>(get_matmul_ref_kernel());
     }
     else if (forced_kernel == "onednn") {
-      kernel = get_matmul_onednn_kernel();
+      kernel = std::shared_ptr<matmul_onednn_kernel_t>(get_matmul_onednn_kernel());
     }
     else {
       apilog_error("<", name, "> kernel unimplemented using forced kernel ",

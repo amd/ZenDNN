@@ -17,9 +17,9 @@
 #include "reorder_kernel_list.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-#include "aocl_dlp.h"
+  #include "aocl_dlp.h"
 #else
-#include "blis.h"
+  #include "blis.h"
 #endif
 
 namespace zendnnl {
@@ -135,7 +135,7 @@ status_t reorder_operator_t::kernel_factory() {
   auto algo_format = context.get_algo_format();
 
   if (algo_format == "aocl") {
-    kernel = get_reorder_aocl_kernel();
+    kernel = std::shared_ptr<reorder_kernel_t>(get_reorder_aocl_kernel());
   }
   else if (algo_format == "onednn") {
     apilog_error("onednn kernel is not supported");

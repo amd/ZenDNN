@@ -20,9 +20,9 @@
 namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
-status_t dlsample_f32_avx512_kernel_t::execute(const context_type& context_,
-                                               tensor_map_type& inputs_,
-                                               tensor_map_type& outputs_) {
+status_t dlsample_f32_avx512_kernel_t::execute(const context_type &context_,
+    tensor_map_type &inputs_,
+    tensor_map_type &outputs_) {
 
   log_info("dlsample_fp32_avx512_kernel");
 
@@ -30,9 +30,9 @@ status_t dlsample_f32_avx512_kernel_t::execute(const context_type& context_,
 }
 
 using namespace zendnnl::error_handling;
-status_t dlsample_bf16_avx512_kernel_t::execute(const context_type& context_,
-                                               tensor_map_type& inputs_,
-                                               tensor_map_type& outputs_) {
+status_t dlsample_bf16_avx512_kernel_t::execute(const context_type &context_,
+    tensor_map_type &inputs_,
+    tensor_map_type &outputs_) {
 
   log_info("dlsample_bf16_avx512_kernel");
 
@@ -40,12 +40,12 @@ status_t dlsample_bf16_avx512_kernel_t::execute(const context_type& context_,
 }
 
 extern "C" {
-  std::shared_ptr<dlsample_f32_avx512_kernel_t> get_dlsample_f32_avx512_kernel() {
-    return std::make_shared<dlsample_f32_avx512_kernel_t>();
+  dlsample_f32_avx512_kernel_t *get_dlsample_f32_avx512_kernel() {
+    return new dlsample_f32_avx512_kernel_t();
   }
 
-  std::shared_ptr<dlsample_bf16_avx512_kernel_t> get_dlsample_bf16_avx512_kernel() {
-    return std::make_shared<dlsample_bf16_avx512_kernel_t>();
+  dlsample_bf16_avx512_kernel_t *get_dlsample_bf16_avx512_kernel() {
+    return new dlsample_bf16_avx512_kernel_t();
   }
 }
 

@@ -19,11 +19,20 @@ cmake_minimum_required(VERSION 3.25)
 # project information
 project(ZENDNNL VERSION 1.0.0
   DESCRIPTION "Accelerated Deep Learning Inference on AMD Zen Architecture"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 # specify c++ standard
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED true)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# C and C++ Compiler Information
+message(STATUS "${ZENDNNL_MSG_PREFIX}C_COMPILER_ID=${CMAKE_C_COMPILER_ID}")
+message(STATUS "${ZENDNNL_MSG_PREFIX}C_COMPILER_VERSION=${CMAKE_C_COMPILER_VERSION}")
+message(STATUS "${ZENDNNL_MSG_PREFIX}C_COMPILER_PATH=${CMAKE_C_COMPILER}")
+message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_VERSION=${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "${ZENDNNL_MSG_PREFIX}CXX_COMPILER_PATH=${CMAKE_CXX_COMPILER}")
 
 # project version
 set(ZENDNNL_PROJECT_VERSION ${PROJECT_VERSION})
@@ -63,4 +72,3 @@ include(ExternProjZenDnnlBenchDNN)
 
 # build doxygen docs
 add_subdirectory(docs/doxygen)
-

@@ -409,8 +409,7 @@ class matmul_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_ref_kernel_t>
-  get_matmul_ref_kernel();
+  zendnnl::ops::matmul_ref_kernel_t *get_matmul_ref_kernel();
 }
 
 #endif

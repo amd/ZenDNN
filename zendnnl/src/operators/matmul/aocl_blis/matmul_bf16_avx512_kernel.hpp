@@ -27,26 +27,26 @@
 #include "operators/matmul/matmul_context.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-#include "aocl_dlp.h"
+  #include "aocl_dlp.h"
 #else
-#include "blis.h"
+  #include "blis.h"
 #endif
 
 namespace zendnnl {
 namespace ops {
 
 class matmul_bf16_avx512_kernel_t final : public op_kernel_t<matmul_context_t> {
-public:
-  status_t execute(const context_type& context_,
-                   tensor_map_type& inputs_,
-                   tensor_map_type& outputs_) override;
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
 };
 
 } //namespace ops
 } //namespace zendnnl
 
 extern "C" {
-  std::shared_ptr<zendnnl::ops::matmul_bf16_avx512_kernel_t> get_matmul_bf16_avx512_kernel();
+  zendnnl::ops::matmul_bf16_avx512_kernel_t *get_matmul_bf16_avx512_kernel();
 }
 
 #endif
