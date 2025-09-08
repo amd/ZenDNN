@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     name: Build ZenDNNL PR
-    runs-on: zendnnl_presub_server,
+    runs-on: zendnnl_presub_server
     
     env:
       PYTHON_VERSION: "3.10"
