@@ -9,5 +9,5 @@ jobs:
   hello_world:
     runs-on: zendnn_presub_server
     steps:
-      - name: Say Hello
-        run: echo "Hello, world!"
+      - name: checkout repository
+        uses: actions/checkout@v3
