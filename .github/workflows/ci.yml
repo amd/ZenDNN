@@ -6,8 +6,13 @@ on:
       - main
 
 jobs:
-  hello_world:
+  zendnn_build:
     runs-on: zendnn_presub_server
     steps:
       - name: checkout repository
         uses: actions/checkout@v3
+
+    steps:
+      - name: build zendnn
+        run: | 
+          cmake -D_GLIBCXX_USE_CXX11_ABI=1 -DBUILD_SHARED_LIBS=ON -DAMDBLIS_LOCAL_SOURCE=/scratch/blis -DAMDBLIS_ENABLE_BLAS=ON -DLPGEMM_V5_0=1 -DFBGEMM_ENABLE=0 -DBLIS_API=1 -DCMAKE_BUILD_TYPE=Release -DFBGEMM_BUILD_TESTS=0 -B build .
