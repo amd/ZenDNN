@@ -14,4 +14,7 @@ jobs:
 
       - name: build zendnn
         run: | 
+          echo "WORKSPACE, $GITHUB_WORKSPACE"
+          parent_dir=$(dirname $GITHUB_WORKSPACE)
+          echo "parent_dir, $parent_dir"
           cmake -D_GLIBCXX_USE_CXX11_ABI=1 -DBUILD_SHARED_LIBS=ON -DAMDBLIS_LOCAL_SOURCE=/scratch/blis -DAMDBLIS_ENABLE_BLAS=ON -DLPGEMM_V5_0=1 -DFBGEMM_ENABLE=0 -DBLIS_API=1 -DCMAKE_BUILD_TYPE=Release -DFBGEMM_BUILD_TESTS=0 -B build .
