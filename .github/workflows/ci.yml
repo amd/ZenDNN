@@ -7,7 +7,7 @@ on:
 
 jobs:
   hello_world:
-    runs-on: xcoaigvm246239
+    runs-on: zendnn_presub_server
     steps:
       - name: Say Hello
         run: echo "Hello, world!"
