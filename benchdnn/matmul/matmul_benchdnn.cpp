@@ -187,7 +187,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      ret = create_bias_tensor(tensor_factory, cfg, bias);
+      ret = create_bias_tensor(tensor_factory, cfg, bias, options);
       if (ret != OK) {
         testlog_error("create_bias_tensor failed");
         log_benchmark_failure(cfg);

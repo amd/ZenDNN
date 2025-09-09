@@ -81,9 +81,16 @@ status_t matmul_context_t::validate() {
 
   if (bias) {
     auto bias_size = bias->get_size();
-    if (weights_size.at(weights_size.size()-1) != bias_size.at(0)) {
+    if (weights_size.at(weights_size.size()-1) != bias_size.at(
+          bias_size.size()-1)) {
       apilog_error("Bias size mismatch with weights. weights size=",
-                   weights_size.at(weights_size.size()-1), " bias size=", bias_size.at(0));
+                   weights_size.at(weights_size.size()-1), " bias size=",
+                   bias_size.at(bias_size.size()-1));
+      return status_t::failure;
+    }
+
+    if (bias->get_nelem() != bias_size.at(bias_size.size()-1)) {
+      apilog_error("Bias size does not match the expected number of elements");
       return status_t::failure;
     }
   }

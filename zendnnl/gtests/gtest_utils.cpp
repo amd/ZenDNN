@@ -442,7 +442,7 @@ bool Parser::isInteger(const std::string &s) {
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
-                            tensor_t &bias, tensor_t &output_tensor,
+                            tensor_t &bias_tensor, tensor_t &output_tensor,
                             uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
   try {
 
@@ -499,7 +499,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         data_type_t src_data_type = input_tensor.get_data_type();
         data_type_t wei_data_type = weight_tensor.get_data_type();
         data_type_t out_data_type = output_tensor.get_data_type();
-        data_type_t bias_data_type = bias.get_data_type();
+        data_type_t bias_data_type = bias_tensor.get_data_type();
         data_types matmul_dtypes;
         matmul_dtypes.src = src_data_type;
         matmul_dtypes.wei = wei_data_type;
@@ -553,12 +553,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       // postop update according to the index
       if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
       weight_tensor.set_name("weights");
-      bias.set_name("bias");
+      bias_tensor.set_name("bias");
 
       //define matmul context
       auto matmul_context = matmul_context_t()
                             .set_param("weights", weight_tensor)
-                            .set_param("bias", bias)
+                            .set_param("bias", bias_tensor)
                             .set_alpha(alpha)
                             .set_beta(beta);
       if (index != po_size) {
@@ -611,23 +611,27 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 }
 
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
-                                       tensor_t &weights,
-                                       tensor_t &bias, tensor_t &output_tensor,
+                                       tensor_t &weight_tensor,
+                                       tensor_t &bias_tensor, tensor_t &output_tensor,
                                        uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
   try {
     // Default postop relu
     post_op_t post_op = post_op_t{po_arr[0].second};
     // postop update according to the index
     if (index != po_size && index != 0) post_op = post_op_t{po_arr[index].second};
-    weights.set_name("weights");
-    bias.set_name("bias");
+    weight_tensor.set_name("weights");
+    bias_tensor.set_name("bias");
 
     //define matmul context
     auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights)
-                          .set_param("bias", bias)
+                          .set_param("weights", weight_tensor)
                           .set_alpha(alpha)
                           .set_beta(beta);
+
+#if !LOWOHA
+    matmul_context.set_param("bias", bias_tensor);
+#endif
+
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();
     }

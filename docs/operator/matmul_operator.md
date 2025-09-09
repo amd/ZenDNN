@@ -367,7 +367,7 @@ This example performs matrix multiplication with `float32 (f32)` data types, app
 
 - **Weights and Bias Initialization** 
   - Weights: Uniform tensor with dimensions `{MATMUL_K, MATMUL_N}`
-  - Bias: Uniform tensor with dimensions `{MATMUL_N}`
+  - Bias: Uniform tensor with dimensions `{1, MATMUL_N}`
 
 - **Post-Operation**
   - Applies the ReLU operation on the result.
@@ -391,9 +391,9 @@ int matmul_relu_f32_kernel_example() {
                                                  data_type_t::f32,
                                                  1.0, "weights");
 
-    // Create a bias tensor with dimensions [N], data type float32,
+    // Create a bias tensor with dimensions [1, N], data type float32,
     // initialized with uniform values of -10.0, and named "bias"
-    auto bias = tensor_factory.uniform_tensor({MATMUL_N},
+    auto bias = tensor_factory.uniform_tensor({1, MATMUL_N},
                                               data_type_t::f32,
                                               -10.0, "bias");
 
@@ -485,8 +485,8 @@ int matmul_mul_silu_mul_f32_kernel_example() {
                                                  data_type_t::f32,
                                                  1.0, "weights");
 
-    // Create a bias tensor with shape {N}, data type f32
-    auto bias = tensor_factory.uniform_tensor({MATMUL_N},
+    // Create a bias tensor with shape {1, N}, data type f32
+    auto bias = tensor_factory.uniform_tensor({1, MATMUL_N},
                                               data_type_t::f32,
                                               3.0, "bias");
 
@@ -586,8 +586,8 @@ int batch_matmul_relu_bf16_kernel_example() {
     auto weights = tensor_factory.uniform_tensor({BATCH_SIZE, BATCH_MATMUL_K, BATCH_MATMUL_N},
                    data_type_t::bf16,
                    1.0, "weights");
-    // Create a bias tensor with shape {N}, data type f32
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    // Create a bias tensor with shape {1, 1, N}, data type f32
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 
@@ -679,8 +679,8 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    // Create a bias tensor with shape {N}, data type float32
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    // Create a bias tensor with shape {1, 1, N}, data type float32
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
 

@@ -113,7 +113,7 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
 

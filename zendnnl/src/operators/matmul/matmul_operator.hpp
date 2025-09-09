@@ -29,7 +29,7 @@ namespace ops {
  *
  * @par Synopsys
  *
- * Given a KxN weight matrix, (optional) Nx1 bias vector, and MxK input, it computes
+ * Given a KxN weight matrix, (optional) 1xN bias vector, and MxK input, it computes
  * MxN output = weight*input + bias. Matrix multiplication is generally implemented
  * by using a BLAS library for GEMM. This implementation uses AMD AOCL BLIS library
  * for GEMM.
@@ -51,7 +51,7 @@ namespace ops {
  * The operator has following parameters and input/outputs
  * - Parameter(s)
  *   1. (mandatory) weights : A KxN 2D tensor.
- *   1. (optional) bias     : A Nx1 1D tensor.
+ *   1. (optional) bias     : A 1xN 1D tensor.
  * - Inputs
  *   1. (mandatory) matmul_input  : A MxK 2D tensor.
  * - Output(s)

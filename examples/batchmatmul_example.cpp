@@ -30,7 +30,7 @@ int batch_matmul_relu_f32_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
 
@@ -101,7 +101,7 @@ int batch_matmul_wei2d_relu_f32_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
 
@@ -172,7 +172,7 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    -10.0, "bias");
 
@@ -243,7 +243,7 @@ int batch_matmul_relu_bf16_kernel_example() {
                    data_type_t::bf16,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 
@@ -316,7 +316,7 @@ int batch_matmul_mul_silu_mul_f32_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 
@@ -407,7 +407,7 @@ int batch_matmul_silu_mul_bf16_kernel_example() {
                    data_type_t::bf16,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 
@@ -487,7 +487,7 @@ int batch_matmul_relu_forced_ref_kernel_example() {
                    data_type_t::f32,
                    1.0, "weights");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 
@@ -558,7 +558,7 @@ int batchmatmul_broadcast_example() {
     auto weights = tensor_factory.broadcast_uniform_tensor({BATCH_SIZE, BATCH_MATMUL_K, BATCH_MATMUL_N}, {0,BATCH_MATMUL_N, 1},
                    data_type_t::f32, 1.0, "broadcasted_weight");
 
-    auto bias    = tensor_factory.uniform_tensor({BATCH_MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, 1, BATCH_MATMUL_N},
                    data_type_t::f32,
                    3.0, "bias");
 

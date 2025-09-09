@@ -52,14 +52,6 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
 #endif
     log_info("m: ",m, " k: ",k, " n: ", n, " TransA: ", transA, " TransB: ", transB,
              " po_index: ",po_index);
-#if LOWOHA
-    bias     = tensor_factory.uniform_tensor({n}, rand() % 2 == 0 ?
-               data_type_t::bf16 : data_type_t::f32, 0.0);
-#else
-    bias = tensor_factory.uniform_dist_tensor({n}, rand() % 2 == 0 ?
-           data_type_t::bf16 : data_type_t::f32, 2.0f);
-#endif
-    bias.set_name("bias");
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -68,7 +60,6 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   uint32_t po_index;
   bool     transA, transB;
   tensor_factory_t tensor_factory{};
-  tensor_t bias;
   float alpha, beta;
 };
 
@@ -78,10 +69,12 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
  *  @brief Test to validate matmul F32 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul,F32_F32) {
-  auto weights            = tensor_factory.uniform_dist_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::f32, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 2.0);
 
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
@@ -92,15 +85,11 @@ TEST_P(TestMatmul,F32_F32) {
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
 
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
-                            bias,
-                            output_tensor_ref,
-                            po_index,
-                            binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -119,10 +108,12 @@ TEST_P(TestMatmul,F32_F32) {
  *  @brief Test to validate matmul BF16outputF32 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, BF16_F32) {
-  auto weights            = tensor_factory.uniform_dist_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::bf16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                            == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -131,13 +122,11 @@ TEST_P(TestMatmul, BF16_F32) {
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weights, bias,
-                            output_tensor_ref, po_index, binary_tensor, alpha, beta);
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -156,10 +145,12 @@ TEST_P(TestMatmul, BF16_F32) {
  */
 TEST_P(TestMatmul, BF16_BF16) {
   // TODO: Extend support for test cases with a wider range of values.
-  auto weights            = tensor_factory.uniform_dist_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             data_type_t::bf16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                            == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -168,13 +159,11 @@ TEST_P(TestMatmul, BF16_BF16) {
                             data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::bf16, 2.0);
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weights, bias,
-                            output_tensor_ref, po_index, binary_tensor, alpha, beta);
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -210,10 +199,12 @@ TEST_P(TestMatmul,F32_F32_Stride) {
   else {
     stride_in[1] += stride_in_inc;
   }
-  auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_strided_tensor({k, n},
                             stride_wt, data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
                             stride_in, data_type_t::f32, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 2.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -225,14 +216,11 @@ TEST_P(TestMatmul,F32_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
-                            bias,
-                            output_tensor_ref,
-                            po_index, binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -268,10 +256,12 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
   else {
     stride_in[1] += stride_in_inc;
   }
-  auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_strided_tensor({k, n},
                             stride_wt, data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
                             stride_in, data_type_t::bf16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                            == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -283,14 +273,11 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
-                            bias,
-                            output_tensor_ref,
-                            po_index, binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -326,10 +313,12 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
   else {
     stride_in[1] += stride_in_inc;
   }
-  auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
+  auto weight_tensor      = tensor_factory.uniform_dist_strided_tensor({k, n},
                             stride_wt, data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
                             stride_in, data_type_t::bf16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                            == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
@@ -341,14 +330,11 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  status_t status         = matmul_kernel_test(input_tensor, weights, bias,
-                            output_tensor,
-                            po_index,
-                            binary_tensor, alpha, beta);
-  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
-                            bias,
-                            output_tensor_ref,
-                            po_index, binary_tensor, alpha, beta);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

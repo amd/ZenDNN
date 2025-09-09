@@ -147,25 +147,25 @@ status_t matmul_operator_t::validate() {
   auto output       = get_output("matmul_output");
 
   auto weights      = context.get_param("weights");
-  auto weights_size = weights->get_size();
-  auto bias_tensor  = context.get_param("bias");
+  auto bias         = context.get_param("bias");
 
   if (!input || !output) {
     apilog_error("Invalid input or output tensor.");
     return status_t::failure;
   }
 
-  auto input_size  = input->get_size();
-  auto output_size = output->get_size();
-  auto out_order   = output->get_order();
+  auto input_size   = input->get_size();
+  auto weights_size = weights->get_size();
+  auto output_size  = output->get_size();
+  auto out_order    = output->get_order();
 
   if (out_order == "ba") {
     apilog_error("<", get_name(), "> kernel needs non-transposed output tensors.");
     return status_t::failure;
   }
 
-  bool is_mm_sizes = (input_size.size() == 2 && weights_size.size() == 2 &&
-                      output_size.size() == 2);
+  bool is_mm_sizes  = (input_size.size() == 2 && weights_size.size() == 2 &&
+                       output_size.size() == 2);
   bool is_bmm_sizes = (((input_size.size() == 3 && (weights_size.size() == 2 ||
                          weights_size.size() == 3)) ||
                         ((input_size.size() == 2 || input_size.size() == 3) &&
@@ -183,7 +183,6 @@ status_t matmul_operator_t::validate() {
                  input_size.at(0), " Output size= ",output_size.at(0));
     return status_t::failure;
   }
-
 
   if (input_size.at(input_size.size()-2) != output_size.at(
         output_size.size()-2)) {
@@ -256,9 +255,17 @@ status_t matmul_operator_t::validate() {
       }
     }
   }
-  //Hard Force to Reference Kernel if input or weights are F32 whereas bias is BF16
-  if (bias_tensor) {
-    auto bias_dt    = bias_tensor->get_data_type();
+
+  if (bias) {
+    auto bias_size  = bias->get_size();
+    if (bias_size.size() != output_size.size()) {
+      apilog_error("Mismatch in bias and output size. Bias size = ",
+                   bias_size.size(), " Output size= ", output_size.size());
+      return status_t::failure;
+    }
+
+    // Hard Force to Reference Kernel if input or weights are F32 whereas bias is BF16
+    auto bias_dt    = bias->get_data_type();
     auto weights_dt = weights->get_data_type();
     auto input_dt   = input->get_data_type();
     if (bias_dt == data_type_t::bf16 && (input_dt == data_type_t::f32 ||

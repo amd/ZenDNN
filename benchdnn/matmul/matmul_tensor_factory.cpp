@@ -109,14 +109,22 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
 }
 
 int create_bias_tensor(tensor_factory_t tensor_factory, const MatmulConfig &cfg,
-                       std::vector<tensor_t> &bias) {
+                       std::vector<tensor_t> &bias, const global_options &options) {
   if (cfg.isBiasEnabled) {
     zendnnl::common::data_type_t dt = cfg.bias_dt;
     for (auto i = 0; i < cfg.n_values.size(); i++) {
-      tensor_t bias_tensor = tensor_factory.uniform_dist_tensor({cfg.n_values[i]},
-                             dt,
-                             -10.0, "bias_" + std::to_string(i));
-      bias_tensor.set_name("bias_" + std::to_string(i));
+      tensor_t bias_tensor;
+      if (options.ndims > 2) {
+        bias_tensor = tensor_factory.uniform_dist_tensor({1, 1, cfg.n_values[i]},
+                      dt,
+                      -10.0, "bias_" + std::to_string(i));
+      }
+      else {
+        bias_tensor = tensor_factory.uniform_dist_tensor({1, cfg.n_values[i]},
+                      dt,
+                      -10.0, "bias_" + std::to_string(i));
+
+      }
       bias.push_back(bias_tensor);
     }
   }

@@ -258,7 +258,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
     reorder_weights_tensor.set_name("weights");
 
     // Create Bias tensor with contigious layout.
-    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, MATMUL_N},
                    data_type_t::f32,
                    10.0, "bias");
 
@@ -480,7 +480,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
     }
 
     // Create Bias tensor with contigious layout.
-    auto bias    = tensor_factory.uniform_tensor({MATMUL_N},
+    auto bias    = tensor_factory.uniform_tensor({1, MATMUL_N},
                    data_type_t::bf16,
                    10.0, "bias");
 
