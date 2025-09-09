@@ -1,0 +1,96 @@
+name: ZenDNNL PR Build
+
+on:
+  push:
+    branches: [ zendnnl ]
+  pull_request:
+    branches: [ zendnnl ]
+
+jobs:
+  build:
+    name: Build ZenDNNL PR
+    runs-on: zendnnl_presub_server
+    
+    env:
+      PYTHON_VERSION: "3.10"
+      CMAKE_VERSION: "4.0.0"  # Specifying a version higher than 3.25
+    
+    steps:
+    - name: Verify user account
+      run: |
+        echo "Running as user: $(whoami)"
+        if [ "$(whoami)" != "z1aiebuild" ]; then
+          echo "::warning::Running as $(whoami) instead of expected z1aiebuild user"
+        fi
+      
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Set up build environment
+      run: |
+        echo "Setting up build environment"
+        echo "WORKSPACE=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+        # Create a unique env name using workflow run ID and job ID to avoid conflicts
+        echo "CONDA_ENV_NAME=zendnnl_build_${GITHUB_RUN_ID}_${GITHUB_JOB}" >> $GITHUB_ENV
+        
+        # Debug path information
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+      
+    - name: Setup Conda environment with CMake
+      run: |
+        # Source miniforge profile
+        source ~/.miniforge_profile
+        
+        # Print Python version being used
+        echo "Creating Conda environment with Python $PYTHON_VERSION"
+        
+        # Create a fresh conda environment
+        conda create -n $CONDA_ENV_NAME python=$PYTHON_VERSION -y
+        
+        # Activate the environment
+        conda activate $CONDA_ENV_NAME
+        
+        # Install newer CMake in the conda environment
+        conda install -y cmake=$CMAKE_VERSION
+        
+        # Verify Python and CMake versions
+        python --version
+        cmake --version
+      shell: bash
+      
+    - name: Build ZenDNNL
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Debug directory structure
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Ensure we're using the conda-installed cmake
+        which cmake
+        cmake --version
+        
+        # Build ZenDNNL
+        mkdir -p build && cd build
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
+        cmake --build . --target=all |& tee $WORKSPACE/build_output.log
+      shell: bash
+      
+    - name: Upload build logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: ${{ env.WORKSPACE }}/build_output.log
+        retention-days: 7
+        
+    - name: Cleanup Conda environment
+      if: always()  # Run even if previous steps fail
+      run: |
+        source ~/.miniforge_profile
+        conda deactivate
+        conda env remove -n $CONDA_ENV_NAME -y
+        echo "Removed conda environment: $CONDA_ENV_NAME"
+      shell: bash
