@@ -5,6 +5,28 @@ on:
     branches: [ zendnnl ]
   pull_request:
     branches: [ zendnnl ]
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python version'
+        required: false
+        default: '3.10'
+        type: string
+      cmake_version:
+        description: 'CMake version'
+        required: false
+        default: '4.0.0'
+        type: string
+      gtest_filter:
+        description: 'GTest filter pattern (e.g. Matmul/*)'
+        required: false
+        default: 'Matmul/*'
+        type: string
+      test_iterations:
+        description: 'Number of test iterations'
+        required: false
+        default: '100'
+        type: string
 
 jobs:
   build:
@@ -12,8 +34,10 @@ jobs:
     runs-on: zendnnl_presub_server
     
     env:
-      PYTHON_VERSION: "3.10"
-      CMAKE_VERSION: "4.0.0"  # Specifying a version higher than 3.25
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
+      CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '100' }}
     
     steps:
     - name: Verify user account
@@ -36,6 +60,12 @@ jobs:
         # Debug path information
         echo "Current directory: $(pwd)"
         echo "Directory contents: $(ls -la)"
+        
+        # Display build configuration
+        echo "Using Python version: ${{ env.PYTHON_VERSION }}"
+        echo "Using CMake version: ${{ env.CMAKE_VERSION }}"
+        echo "Using GTest filter: ${{ env.GTEST_FILTER }}"
+        echo "Using test iterations: ${{ env.TEST_ITERATIONS }}"
       
     - name: Setup Conda environment with CMake
       run: |
@@ -51,7 +81,7 @@ jobs:
         # Activate the environment
         conda activate $CONDA_ENV_NAME
         
-        # Install newer CMake in the conda environment
+        # Install specified CMake version in the conda environment
         conda install -y cmake=$CMAKE_VERSION
         
         # Verify Python and CMake versions
@@ -79,11 +109,52 @@ jobs:
         cmake --build . --target=all |& tee $WORKSPACE/build_output.log
       shell: bash
       
+    - name: Verify build output
+      run: |
+        echo "Verifying build output..."
+        if grep -F "Completed 'zendnnl'" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target gtests" "$WORKSPACE/build_output.log"; then
+          echo "✅ ZenDNNL build passed!"
+        else
+          echo "❌ ZenDNNL build failed!"
+          cat "$WORKSPACE/build_output.log"
+          exit 1
+        fi
+      shell: bash
+      
+    - name: Run gtests
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Move to the build directory
+        cd $WORKSPACE/build
+        
+        echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
+        
+        # Run the gtests with configurable parameters
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS |& tee $WORKSPACE/gtest_output.log
+        
+        # Check for test failures
+        if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
+          echo "❌ ZenDNNL gtests failed!"
+          cat "$WORKSPACE/gtest_output.log"
+          exit 1
+        else
+          echo "✅ ZenDNNL gtests passed!"
+        fi
+      shell: bash
+
     - name: Upload build logs
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: build-logs
-        path: ${{ env.WORKSPACE }}/build_output.log
+        path: |
+          ${{ env.WORKSPACE }}/build_output.log
+          ${{ env.WORKSPACE }}/gtest_output.log
         retention-days: 7
         
     - name: Cleanup Conda environment
@@ -93,4 +164,14 @@ jobs:
         conda deactivate
         conda env remove -n $CONDA_ENV_NAME -y
         echo "Removed conda environment: $CONDA_ENV_NAME"
+      shell: bash
+      
+    - name: Cleanup workspace
+      if: always()
+      run: |
+        echo "Cleaning up workspace..."
+        rm -rf $WORKSPACE/build
+        rm -f $WORKSPACE/build_output.log
+        rm -f $WORKSPACE/gtest_output.log
+        echo "Workspace cleanup completed"
       shell: bash
