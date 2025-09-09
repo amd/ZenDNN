@@ -399,9 +399,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
   try {
 
     if (LOWOHA && index == po_size) {
-      // Call LOWOHA matmul for basic matmul only
       try {
-
         // Validate input tensors
         if (!input_tensor.check() || !weight_tensor.check() || !output_tensor.check()) {
           log_error("LOWOHA: Invalid tensor state detected");
@@ -412,8 +410,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         auto output_dim             = output_tensor.get_dim();
         bool transA       = (input_dim == 2)  ? (input_tensor.get_order() ==
                             "ba") : (input_tensor.get_order() == "acb");
-        bool transB   = (weight_dim == 2) ? (weight_tensor.get_order() ==
-                                             "ba") : (weight_tensor.get_order() == "acb");
+        bool transB       = (weight_dim == 2) ? (weight_tensor.get_order() ==
+                            "ba") : (weight_tensor.get_order() == "acb");
 
         const int   lda             = transA ?
                                       input_tensor.get_stride(input_dim-1) :
@@ -423,12 +421,11 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                                       weight_tensor.get_stride(weight_dim-2);
         const int   ldc             = output_tensor.get_stride(output_dim-2);
 
-
         // Extract tensor dimensions
-        const int batchA        = (input_dim==3) ? input_tensor.get_size(
-                                    input_dim-3) : 1;
-        const int batchB        = (weight_dim==3) ? weight_tensor.get_size(
-                                    weight_dim-3) : 1;
+        const int batchA            = (input_dim==3) ? input_tensor.get_size(
+                                        input_dim-3) : 1;
+        const int batchB            = (weight_dim==3) ? weight_tensor.get_size(
+                                        weight_dim-3) : 1;
 
         const int M                 = output_tensor.get_size(output_dim-2);
         const int K                 = input_tensor.get_size(input_dim-1);
@@ -479,8 +476,6 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           nullptr,  // No post-op buffer
           batchA, batchB  // Batch_A, Batch_B
         );
-
-        log_info("LOWOHA matmul_direct execution completed successfully (basic matmul only)");
       }
       catch (const std::exception &e) {
         log_error("LOWOHA matmul_direct execution failed: ", e.what());

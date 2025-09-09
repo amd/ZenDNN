@@ -46,11 +46,16 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     else {
       po_index = params.mat.po_index;
     }
-
+#if LOWOHA
+    po_index = 8;
+#endif
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
-             transA, " TransB: ", transB,
-             " po_index: ",po_index);
+             transA, " TransB: ", transB, " po_index: ",po_index);
+#if LOWOHA
+    bias     = tensor_factory.uniform_tensor({n}, data_type_t::f32, 0.0);
+#else
     bias     = tensor_factory.uniform_dist_tensor({n}, data_type_t::f32, 2.0);
+#endif
     bias.set_name("bias");
   }
 

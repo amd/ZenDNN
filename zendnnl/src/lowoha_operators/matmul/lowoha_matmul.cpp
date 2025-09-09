@@ -17,7 +17,6 @@
 #include "lowoha_matmul.hpp"
 #include <cmath>
 #include <cstring>
-#include <iostream>
 
 namespace zendnnl {
 namespace lowoha {
@@ -115,7 +114,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
                                 beta, static_cast<float *>(C), ldc, nullptr);
     }
     else {
-      log_info("Unsupported data type combination for BLIS, Redirecting it to native\n");
+      log_info("Unsupported data type combination for BLIS, Redirecting it to native");
       matmul_direct_native(layout, transA, transB, M, N, K, alpha,
                            A, lda, B, ldb, beta, C, ldc, src_data_type, out_data_type);
     }
@@ -144,18 +143,21 @@ void *get_output_block(void *base, int row_start, int col_start,
                        int ldc, size_t type_size) {
   return static_cast<uint8_t *>(base) + (row_start * ldc + col_start) * type_size;
 }
+
 int get_batch_index(int b, int batch_size) {
   return (batch_size == 1) ? 0 : (b % batch_size);
 }
+
 void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                    float alpha, float beta, int M, int N, int K,
                    bool transA, bool transB, int lda, int ldb, int ldc,
                    data_type_t src_data_type, data_type_t out_data_type,
                    post_op_type_t post_op, void *post_op_buff,
                    int Batch_A, int Batch_B) {
+  log_info("Executing matmul LOWOHA kernel");
 
   if (!src || !weight || !dst) {
-    std::cerr << "Error: Null pointer input to matmul_direct\n";
+    log_error("Error: Null pointer input to matmul_direct");
     return;
   }
 
@@ -165,7 +167,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
   const bool is_bf16_out = (out_data_type == data_type_t::bf16);
 
   if ((!is_f32_src && !is_bf16_src) || (!is_f32_out && !is_bf16_out)) {
-    std::cerr << "Error: Unsupported data type combination\n";
+    log_error("Error: Unsupported data type combination");
     return;
   }
 
