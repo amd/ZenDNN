@@ -130,21 +130,29 @@ jobs:
         # Move to the build directory
         cd $WORKSPACE/build
         
-        # Prepare the gtest command with optional arguments
-        GTEST_CMD="./install/gtests/gtests"
+        # Construct gtest command based on parameters
+        cmd="./install/gtests/gtests"
         
-        if [ ! -z "$GTEST_FILTER" ]; then
-          GTEST_CMD="$GTEST_CMD --gtest_filter=$GTEST_FILTER"
+        # Only add gtest_filter if it's not empty
+        if [ -n "$GTEST_FILTER" ]; then
+          echo "Using GTest filter: $GTEST_FILTER"
+          cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
+        else
+          echo "No GTest filter specified, running all tests"
         fi
         
-        if [ ! -z "$TEST_ITERATIONS" ]; then
-          GTEST_CMD="$GTEST_CMD --test $TEST_ITERATIONS"
+        # Only add test iterations if it's not empty
+        if [ -n "$TEST_ITERATIONS" ]; then
+          echo "Running $TEST_ITERATIONS test iterations"
+          cmd="${cmd} --test ${TEST_ITERATIONS}"
+        else
+          echo "Using default test iterations"
         fi
         
-        echo "Running gtests command: $GTEST_CMD"
+        echo "Running command: ${cmd}"
         
-        # Run the gtests with configurable parameters
-        $GTEST_CMD |& tee $WORKSPACE/gtest_output.log
+        # Execute the command
+        eval ${cmd} |& tee $WORKSPACE/gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
@@ -289,21 +297,29 @@ jobs:
         # Move to the build directory
         cd $WORKSPACE/build
         
-        # Prepare the gtest command with optional arguments
-        GTEST_CMD="./install/gtests/gtests"
+        # Construct gtest command based on parameters
+        cmd="./install/gtests/gtests"
         
-        if [ ! -z "$GTEST_FILTER" ]; then
-          GTEST_CMD="$GTEST_CMD --gtest_filter=$GTEST_FILTER"
+        # Only add gtest_filter if it's not empty
+        if [ -n "$GTEST_FILTER" ]; then
+          echo "Using GTest filter: $GTEST_FILTER"
+          cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
+        else
+          echo "No GTest filter specified, running all tests"
         fi
         
-        if [ ! -z "$TEST_ITERATIONS" ]; then
-          GTEST_CMD="$GTEST_CMD --test $TEST_ITERATIONS"
+        # Only add test iterations if it's not empty
+        if [ -n "$TEST_ITERATIONS" ]; then
+          echo "Running $TEST_ITERATIONS test iterations"
+          cmd="${cmd} --test ${TEST_ITERATIONS}"
+        else
+          echo "Using default test iterations"
         fi
         
-        echo "Running ASAN gtests command: $GTEST_CMD"
+        echo "Running command: ${cmd}"
         
-        # Run the gtests with configurable parameters
-        $GTEST_CMD |& tee $WORKSPACE/asan_gtest_output.log
+        # Execute the command
+        eval ${cmd} |& tee $WORKSPACE/asan_gtest_output.log
         
         # Check for test failures or ASAN errors
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/asan_gtest_output.log" || \
