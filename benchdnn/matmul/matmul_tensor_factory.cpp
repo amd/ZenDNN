@@ -71,7 +71,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         StorageParam buffer_params = input_tensor;
 
         // Blocked Tensor creation with seperate view for input tensor.
-        weights_tensor = tensor_factory.blocked_tensor({cfg.bs, k, n},
+        weights_tensor = tensor_factory.blocked_tensor({k, n},
                          dt,
                          buffer_params,
                          "weights_" + std::to_string(i));
@@ -85,7 +85,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         StorageParam buffer_params = std::make_pair(reorder_size, reorder_weights);
 
         // Blocked Tensor creation with seperate view for input tensor.
-        weights_tensor = tensor_factory.blocked_tensor({cfg.bs, k, n},
+        weights_tensor = tensor_factory.blocked_tensor({k, n},
                          dt,
                          buffer_params,
                          "weights_" + std::to_string(i));
