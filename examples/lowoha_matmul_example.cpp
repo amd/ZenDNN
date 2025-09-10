@@ -41,17 +41,20 @@ int run_lowoha_matmul_fp32_test() {
     std::vector<float> C(M * N, 0); // Output matrix 2x3
     std::vector<float> bias = {1, 1, 1}; // Bias for each output column
 
+    data_types matmul_dtype = {data_type_t::f32, data_type_t::f32, data_type_t::f32, data_type_t::none};
+
+    lowoha_post_op postop;
+    postop.postop_.push_back({post_op_type_t::none, nullptr, data_type_t::none});
+    postop.postop_.push_back({post_op_type_t::relu, nullptr, data_type_t::none});
+
     // Call the low-overhead matmul API
     matmul_direct(
-      A.data(), B.data(), C.data(), bias.data(),
+      A.data(), B.data(), C.data(), nullptr,
       1.0f, 0.0f,  // alpha, beta
       M, N, K,
       false, false,  // transA, transB
       lda, ldb, ldc,
-      data_type_t::f32,
-      data_type_t::f32,
-      post_op_type_t::none,
-      NULL,
+      matmul_dtype, postop,
       1, 1  // Batch_A, Batch_B
     );
 

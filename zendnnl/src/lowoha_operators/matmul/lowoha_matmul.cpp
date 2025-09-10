@@ -21,7 +21,6 @@
 namespace zendnnl {
 namespace lowoha {
 
-
 inline float bf16_to_float(int16_t val) {
   uint32_t temp = static_cast<uint16_t>(val) << 16;
   float result;
@@ -37,13 +36,12 @@ inline int16_t float_to_bf16(float val) {
 
 void matmul_direct_native(char layout, char transA, char transB, int M, int N,
                           int K, float alpha, const void *A, int lda,
-                          const void *B, int ldb, float beta, void *C, int ldc, data_type_t src_data_type,
-                          data_type_t out_data_type) {
+                          const void *B, int ldb, float beta, void *C, int ldc, data_types dtypes) {
 
-  const bool is_f32_src  = (src_data_type == data_type_t::f32);
-  const bool is_bf16_src = (src_data_type == data_type_t::bf16);
-  const bool is_f32_out  = (out_data_type == data_type_t::f32);
-  const bool is_bf16_out = (out_data_type == data_type_t::bf16);
+  const bool is_f32_src  = (dtypes.src == data_type_t::f32);
+  const bool is_bf16_src = (dtypes.src == data_type_t::bf16);
+  const bool is_f32_out  = (dtypes.dst == data_type_t::f32);
+  const bool is_bf16_out = (dtypes.dst == data_type_t::bf16);
 
   const float *A_f32    = is_f32_src ? static_cast<const float *>(A) : nullptr;
   const float *B_f32    = is_f32_src ? static_cast<const float *>(B) : nullptr;
@@ -88,26 +86,26 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
 }
 
 void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
-                           int K, float alpha,
-                           const void *A, int lda, const void *B, int ldb, float beta, void *C, int ldc,
-                           data_type_t src_data_type, data_type_t out_data_type, bool use_blis) {
+                           int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
+                           void *C, int ldc, data_types &dtypes, bool use_blis) {
 
   if (use_blis) {
-    if (src_data_type == data_type_t::f32 && out_data_type == data_type_t::f32) {
+    if (dtypes.src == data_type_t::f32 &&
+        dtypes.dst == data_type_t::f32) {
       aocl_gemm_f32f32f32of32(layout, transA, transB, M, N, K, alpha,
                               static_cast<const float *>(A), lda, 'n',
                               static_cast<const float *>(B), ldb, 'n',
                               beta, static_cast<float *>(C), ldc, nullptr);
     }
-    else if (src_data_type == data_type_t::bf16 &&
-             out_data_type == data_type_t::bf16) {
+    else if (dtypes.src == data_type_t::bf16 &&
+             dtypes.dst == data_type_t::bf16) {
       aocl_gemm_bf16bf16f32obf16(layout, transA, transB, M, N, K, alpha,
                                  static_cast<const int16_t *>(A), lda, 'n',
                                  static_cast<const int16_t *>(B), ldb, 'n',
                                  beta, static_cast<int16_t *>(C), ldc, nullptr);
     }
-    else if (src_data_type == data_type_t::bf16 &&
-             out_data_type == data_type_t::f32) {
+    else if (dtypes.src == data_type_t::bf16 &&
+             dtypes.dst == data_type_t::f32) {
       aocl_gemm_bf16bf16f32of32(layout, transA, transB, M, N, K, alpha,
                                 static_cast<const int16_t *>(A), lda, 'n',
                                 static_cast<const int16_t *>(B), ldb, 'n',
@@ -116,18 +114,19 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
     else {
       log_info("Unsupported data type combination for BLIS, Redirecting it to native");
       matmul_direct_native(layout, transA, transB, M, N, K, alpha,
-                           A, lda, B, ldb, beta, C, ldc, src_data_type, out_data_type);
+                           A, lda, B, ldb, beta, C, ldc, dtypes);
     }
   }
   else {
     // Native kernel call
     matmul_direct_native(layout, transA, transB, M, N, K, alpha,
-                         A, lda, B, ldb, beta, C, ldc, src_data_type, out_data_type);
+                         A, lda, B, ldb, beta, C, ldc, dtypes);
   }
 }
 
-const void *get_matrix_block(const void *base, int row_start, int col_start,
-                             int lda, bool trans, size_t type_size) {
+inline const void *get_matrix_block(const void *base, int row_start,
+                                    int col_start,
+                                    int lda, bool trans, size_t type_size) {
   if (trans) {
     // Accessing column-major layout when transposed
     return static_cast<const uint8_t *>(base) + (col_start * lda + row_start) *
@@ -139,35 +138,94 @@ const void *get_matrix_block(const void *base, int row_start, int col_start,
   }
 }
 
-void *get_output_block(void *base, int row_start, int col_start,
-                       int ldc, size_t type_size) {
+inline void *get_output_block(void *base, int row_start, int col_start,
+                              int ldc, size_t type_size) {
   return static_cast<uint8_t *>(base) + (row_start * ldc + col_start) * type_size;
 }
 
-int get_batch_index(int b, int batch_size) {
+inline int get_batch_index(int b, int batch_size) {
   return (batch_size == 1) ? 0 : (b % batch_size);
 }
+
+inline bool may_i_use_blis_partition(int batch_count, int M, int N,
+                                     int num_threads, data_type_t dtype) {
+
+  // Set thresholds based on thread count and data type (powers of 2 only)
+  int M_threshold = 0, N_threshold = 0, work_threshold = 0;
+
+  /*BLIS performs better when M and N are large and thread count is moderate to high.
+   It uses internal tiling and cache-aware scheduling,
+   where each 8-core cluster shares a 32MB L3 cache. Manual OpenMP partitioning
+   can disrupt BLIS's optimized workload distribution, leading to contention.
+   Delegating to BLIS ensures better throughput and efficient hardware utilization.*/
+  // TODO: Tune it more based on heuristics (threshold relies on problem size and data type)
+  if (num_threads <= 16) {
+    M_threshold    = 512;
+    N_threshold    = 256;
+    work_threshold = 128;
+  }
+  else if (num_threads <= 32) {
+    M_threshold    = 1024;
+    N_threshold    = 512;
+    work_threshold = 256;
+  }
+  else {
+    M_threshold    = 2048;
+    N_threshold    = 1024;
+    work_threshold = 512;
+  }
+  // Estimate effective workload per thread
+  int work_per_thread = (batch_count * M) / num_threads;
+
+  // Allow BLIS if batch size is small and M is reasonably large
+  bool small_batch_override = (batch_count <= 8 && M >= 1024);
+
+  return ((M >= M_threshold &&
+           N >= N_threshold &&
+           work_per_thread >= work_threshold)
+          || small_batch_override);
+}
+
 
 void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                    float alpha, float beta, int M, int N, int K,
                    bool transA, bool transB, int lda, int ldb, int ldc,
-                   data_type_t src_data_type, data_type_t out_data_type,
-                   post_op_type_t post_op, void *post_op_buff,
+                   data_types &dtypes, lowoha_post_op post_op,
                    int Batch_A, int Batch_B) {
   log_info("Executing matmul LOWOHA kernel");
 
   if (!src || !weight || !dst) {
-    log_error("Error: Null pointer input to matmul_direct");
+    log_error("Null pointer input to matmul_direct");
     return;
   }
 
-  const bool is_f32_src  = (src_data_type == data_type_t::f32);
-  const bool is_bf16_src = (src_data_type == data_type_t::bf16);
-  const bool is_f32_out  = (out_data_type == data_type_t::f32);
-  const bool is_bf16_out = (out_data_type == data_type_t::bf16);
+  if (M <= 0 || N <= 0 || K <= 0 || Batch_A <= 0 || Batch_B <= 0) {
+    log_error("Invalid matrix dimensions/Batch size");
+    return;
+  }
+
+  const bool is_f32_src  = (dtypes.src == data_type_t::f32);
+  const bool is_bf16_src = (dtypes.src == data_type_t::bf16);
+  const bool is_f32_out  = (dtypes.dst == data_type_t::f32);
+  const bool is_bf16_out = (dtypes.dst == data_type_t::bf16);
 
   if ((!is_f32_src && !is_bf16_src) || (!is_f32_out && !is_bf16_out)) {
-    log_error("Error: Unsupported data type combination");
+    log_error("Unsupported data type combination");
+    return;
+  }
+
+  if (bias) {
+    log_error("Bias is not supported in LOWOHA matmul_direct");
+    return;
+  }
+
+  if (post_op.postop_.size()) {
+    log_error("Post-op is not supported in LOWOHA matmul_direct");
+    return;
+  }
+
+  if (std::max(Batch_A, Batch_B) % std::min(Batch_A, Batch_B) != 0) {
+    log_error("Broadcasting is not compatible with given Batch_A and Batch_B");
     return;
   }
 
@@ -187,7 +245,8 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
   const int num_threads = omp_get_max_threads();
   const bool use_blis   = true;
 
-  if (num_threads > 1) {
+  if (num_threads > 1 &&
+      !may_i_use_blis_partition(batch_count, M, N, num_threads, dtypes.src)) {
     /*
     * Parallel partitioning strategy:
     * The total number of available threads is divided across batches to compute `threads_per_batch`,
@@ -200,7 +259,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
     int threads_per_batch = std::max(1, num_threads / batch_count);
     int M_block = std::max(1, (M + threads_per_batch - 1) / threads_per_batch);
 
-    #pragma omp parallel for collapse(2) schedule(dynamic)
+    #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_count; ++b) {
       for (int m_start = 0; m_start < M; m_start += M_block) {
         int m_len = std::min(M_block, M - m_start);
@@ -219,7 +278,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                               m_len, N, K, alpha,
                               A, lda, weight_ptr, ldb,
                               beta, C, ldc,
-                              src_data_type, out_data_type, use_blis);
+                              dtypes, use_blis);
       }
     }
   }
@@ -235,7 +294,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr, ldb,
                             beta, dst_ptr, ldc,
-                            src_data_type, out_data_type, use_blis);
+                            dtypes, use_blis);
     }
   }
 }

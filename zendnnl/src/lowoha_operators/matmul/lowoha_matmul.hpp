@@ -25,11 +25,27 @@ namespace lowoha {
 using namespace zendnnl::common;
 using namespace zendnnl::ops;
 
+struct data_types {
+  data_type_t src;
+  data_type_t wei;
+  data_type_t dst;
+  data_type_t bias;
+};
+
+struct postop {
+  post_op_type_t po_type;
+  void *buff;
+  data_type_t dtype;
+};
+
+struct lowoha_post_op {
+  std::vector<postop> postop_;
+};
+
 void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
-                   float alpha,
-                   float beta, int M, int N, int K, bool transA, bool transB, int lda, int ldb,
-                   int ldc, data_type_t src_data_type, data_type_t out_data_type,
-                   post_op_type_t post_op, void *post_op_buff, int Batch_A = 1, int Batch_B = 1);
+                   float alpha, float beta, int M, int N, int K, bool transA, bool transB, int lda,
+                   int ldb, int ldc, data_types &dtypes, lowoha_post_op post_op, int Batch_A = 1,
+                   int Batch_B = 1);
 
 } // namespace lowoha
 } // namespace zendnnl

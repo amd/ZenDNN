@@ -449,7 +449,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
         // Get data types
         data_type_t src_data_type = input_tensor.get_data_type();
+        data_type_t wei_data_type = weight_tensor.get_data_type();
         data_type_t out_data_type = output_tensor.get_data_type();
+        data_type_t bias_data_type = bias.get_data_type();
+        data_types matmul_dtypes = {src_data_type, wei_data_type, out_data_type, bias_data_type};
 
         // Validate data types
         if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16) {
@@ -465,15 +468,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                  batchB, " M:", M, " N:", N, " K:", K,
                  " alpha:", alpha, " beta:", beta);
 
+        lowoha_post_op postop;
+
         matmul_direct(
           A_data, B_data, C_data, nullptr,  // No bias
           alpha, beta,
           static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
           transA, transB,
           lda, ldb, ldc,
-          src_data_type, out_data_type,
-          post_op_type_t::none,  // No post-ops
-          nullptr,  // No post-op buffer
+          matmul_dtypes, postop,
           batchA, batchB  // Batch_A, Batch_B
         );
       }
