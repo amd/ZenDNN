@@ -18,7 +18,7 @@ on:
       gtest_filter:
         description: 'GTest filter pattern (e.g. Matmul/*)'
         required: false
-        default: ''
+        default: '*'
         type: string
       test_iterations:
         description: 'Number of test iterations'
@@ -34,7 +34,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
-      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '' }}
     
     steps:
@@ -133,13 +133,9 @@ jobs:
         # Construct gtest command based on parameters
         cmd="./install/gtests/gtests"
         
-        # Only add gtest_filter if it's not empty
-        if [ -n "$GTEST_FILTER" ]; then
-          echo "Using GTest filter: $GTEST_FILTER"
-          cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
-        else
-          echo "No GTest filter specified, running all tests"
-        fi
+        # Always add gtest_filter (use * for all tests if not specified)
+        echo "Using GTest filter: $GTEST_FILTER"
+        cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
         
         # Only add test iterations if it's not empty
         if [ -n "$TEST_ITERATIONS" ]; then
@@ -154,9 +150,13 @@ jobs:
         # Execute the command
         eval ${cmd} |& tee $WORKSPACE/gtest_output.log
         
-        # Check for test failures
+        # Check for test failures and warnings about no tests run
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
           echo "❌ ZenDNNL gtests failed!"
+          cat "$WORKSPACE/gtest_output.log"
+          exit 1
+        elif grep -F -q "WARNING: filter \"\" did not match any test" "$WORKSPACE/gtest_output.log"; then
+          echo "⚠️ No tests were run, please check your filter pattern"
           cat "$WORKSPACE/gtest_output.log"
           exit 1
         else
@@ -201,7 +201,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
-      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '' }}
     
     steps:
@@ -300,13 +300,9 @@ jobs:
         # Construct gtest command based on parameters
         cmd="./install/gtests/gtests"
         
-        # Only add gtest_filter if it's not empty
-        if [ -n "$GTEST_FILTER" ]; then
-          echo "Using GTest filter: $GTEST_FILTER"
-          cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
-        else
-          echo "No GTest filter specified, running all tests"
-        fi
+        # Always add gtest_filter (use * for all tests if not specified)
+        echo "Using GTest filter: $GTEST_FILTER"
+        cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
         
         # Only add test iterations if it's not empty
         if [ -n "$TEST_ITERATIONS" ]; then
@@ -321,10 +317,14 @@ jobs:
         # Execute the command
         eval ${cmd} |& tee $WORKSPACE/asan_gtest_output.log
         
-        # Check for test failures or ASAN errors
+        # Check for test failures, ASAN errors, and warnings about no tests run
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/asan_gtest_output.log" || \
            grep -F -q "AddressSanitizer" "$WORKSPACE/asan_gtest_output.log"; then
           echo "❌ ZenDNNL ASAN gtests failed or detected memory issues!"
+          cat "$WORKSPACE/asan_gtest_output.log"
+          exit 1
+        elif grep -F -q "WARNING: filter \"\" did not match any test" "$WORKSPACE/asan_gtest_output.log"; then
+          echo "⚠️ No tests were run, please check your filter pattern"
           cat "$WORKSPACE/asan_gtest_output.log"
           exit 1
         else
