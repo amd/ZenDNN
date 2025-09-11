@@ -38,7 +38,7 @@ AOCL-BLAS is a required dependency for ZenDNN, whereas the AMD Composable Kernel
 - [Technical Support](#technical-support)
 
 # Scope
-The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.2 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
+The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenDNN v5.1 offers optimized primitives, such as Convolution, MatMul, Elementwise, and Pool (Max and Average), Gelu, LayerNorm that improve performance of many convolutional neural networks, recurrent neural networks, transformer-based models, and recommender system models. For the primitives not supported by ZenDNN, execution will fall back to the  native path of the framework.
 
 
 # Release Highlights
