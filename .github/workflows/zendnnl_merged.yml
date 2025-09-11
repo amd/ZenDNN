@@ -23,7 +23,7 @@ on:
       test_iterations:
         description: 'Number of test iterations'
         required: false
-        default: ''
+        default: '100'
         type: string
 
 jobs:
