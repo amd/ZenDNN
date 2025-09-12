@@ -14,14 +14,7 @@
 #  * limitations under the License.
 #  *******************************************************************************
 
-if(DEFINED ENV{ZENDNN_BLIS_PATH})
-    set(AMDBLIS_ROOT "$ENV{ZENDNN_BLIS_PATH}"
-        CACHE STRING "amd blis root path")
-else()
-    message(FATAL_ERROR "Environment variable ZENDNN_BLIS_PATH not set.")
-    return()
-endif()
-
+set(AMDBLIS_ROOT ${ZENDNN_BLIS_PATH})
 
 set(AMDBLIS_LIB_ROOT "${AMDBLIS_ROOT}/lib")
 find_library(AMDBLIS_LIB

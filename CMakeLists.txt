@@ -105,6 +105,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 #AMDBLIS_LOCAL_SOURCE is not defined then download frm Github repositiory with the defined tag
 
+#when ZENDNN_BLIS_PATH environment variable is not set, set internally to <ZENDNN_DIR>/_blis_install
+#using ZENDNN_BLIS_PATH cmake variable instead of using directly ENV{ZENDNN_BLIS_PATH}
+
+if(DEFINED ENV{ZENDNN_BLIS_PATH})
+   if(NOT IS_DIRECTORY "$ENV{ZENDNN_BLIS_PATH}")
+      message(FATAL_ERROR "ZENDNN_BLIS_PATH Directory, $ENV{ZENDNN_BLIS_PATH}, doesn't exist")
+   endif()
+   message(STATUS, "ZENDNN_BLIS_PATH Directory, $ENV{ZENDNN_BLIS_PATH}, exists and is a valid directory")
+   set(ZENDNN_BLIS_PATH "$ENV{ZENDNN_BLIS_PATH}")
+else()
+   message(STATUS, "ZENDNN_BLIS_PATH is not set, setting to ${ZENDNN_DIR}/_blis_install")
+   file(MAKE_DIRECTORY ${ZENDNN_DIR}/_blis_install)
+   set(ZENDNN_BLIS_PATH ${ZENDNN_DIR}/_blis_install)
+endif()
+message(STATUS, "ZENDNN_BLIS_PATH is ${ZENDNN_BLIS_PATH}")
+
+
 find_package(AMDBLIS)
 if(NOT AMDBLIS_FOUND)
 
@@ -128,7 +145,7 @@ if(NOT AMDBLIS_FOUND)
     set(BLIS_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/amdblis-build")
 
     execute_process(
-        COMMAND bash -c "rm -rf ${BLIS_BINARY_DIR} && mkdir -p ${BLIS_BINARY_DIR} && export CXXFLAGS=\"-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}\" && cmake -B ${BLIS_BINARY_DIR} -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBLIS_CONFIG_FAMILY=${AMDBLIS_BLIS_CONFIG_FAMILY} -DENABLE_ADDON=${AMDBLIS_ENABLE_ADDON} -DENABLE_THREADING=${AMDBLIS_ENABLE_THREADING} -DENABLE_BLAS=${AMDBLIS_ENABLE_BLAS} -DENABLE_CBLAS=${AMDBLIS_ENABLE_CBLAS} -DCMAKE_INSTALL_PREFIX=$ENV{ZENDNN_BLIS_PATH} ."
+        COMMAND bash -c "rm -rf ${BLIS_BINARY_DIR} && mkdir -p ${BLIS_BINARY_DIR} && export CXXFLAGS=\"-D_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}\" && cmake -B ${BLIS_BINARY_DIR} -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBLIS_CONFIG_FAMILY=${AMDBLIS_BLIS_CONFIG_FAMILY} -DENABLE_ADDON=${AMDBLIS_ENABLE_ADDON} -DENABLE_THREADING=${AMDBLIS_ENABLE_THREADING} -DENABLE_BLAS=${AMDBLIS_ENABLE_BLAS} -DENABLE_CBLAS=${AMDBLIS_ENABLE_CBLAS} -DCMAKE_INSTALL_PREFIX=${ZENDNN_BLIS_PATH} ."
         WORKING_DIRECTORY ${AMDBLIS_LOCAL_OR_GIT_SOURCE_DIR}
         RESULT_VARIABLE BASH_COMMAND_RESULT)
 
@@ -155,7 +172,7 @@ if(NOT AMDBLIS_FOUND)
     endif()
 
     execute_process(
-            COMMAND bash -c "mkdir -p $ENV{ZENDNN_BLIS_PATH}/include/LP64 && cp $ENV{ZENDNN_BLIS_PATH}/include/*.h $ENV{ZENDNN_BLIS_PATH}/include/LP64"
+            COMMAND bash -c "mkdir -p ${ZENDNN_BLIS_PATH}/include/LP64 && cp ${ZENDNN_BLIS_PATH}/include/*.h ${ZENDNN_BLIS_PATH}/include/LP64"
             WORKING_DIRECTORY ${ZENDNN_DIR}
             RESULT_VARIABLE BASH_COMMAND_RESULT)
 
@@ -164,7 +181,7 @@ if(NOT AMDBLIS_FOUND)
     endif()
 
     execute_process(
-            COMMAND bash -c "cp $ENV{ZENDNN_BLIS_PATH}/include/*.hh $ENV{ZENDNN_BLIS_PATH}/include/LP64"
+            COMMAND bash -c "cp ${ZENDNN_BLIS_PATH}/include/*.hh ${ZENDNN_BLIS_PATH}/include/LP64"
             WORKING_DIRECTORY ${ZENDNN_DIR}
             RESULT_VARIABLE BASH_COMMAND_RESULT)
 
@@ -173,7 +190,7 @@ if(NOT AMDBLIS_FOUND)
     endif()
 
     execute_process(
-            COMMAND bash -c "mkdir -p $ENV{ZENDNN_BLIS_PATH}/lib/LP64 && cp $ENV{ZENDNN_BLIS_PATH}/lib/libblis* $ENV{ZENDNN_BLIS_PATH}/lib/LP64"
+            COMMAND bash -c "mkdir -p ${ZENDNN_BLIS_PATH}/lib/LP64 && cp ${ZENDNN_BLIS_PATH}/lib/libblis* ${ZENDNN_BLIS_PATH}/lib/LP64"
             WORKING_DIRECTORY ${ZENDNN_DIR}
             RESULT_VARIABLE BASH_COMMAND_RESULT)
 
