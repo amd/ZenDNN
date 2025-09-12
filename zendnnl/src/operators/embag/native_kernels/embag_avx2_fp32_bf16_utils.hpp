@@ -212,13 +212,7 @@ void embag_avx2_kernel(
         }
 
         if (algo == embag_algo_t::max) {
-          if (is_weights) {
-            __m256 weighted_vec = _mm256_mul_ps(in_vec, wt_vec);
-            acc[b] = _mm256_max_ps(acc[b], weighted_vec);
-          }
-          else {
-            acc[b] = _mm256_max_ps(acc[b], in_vec);
-          }
+         acc[b] = _mm256_max_ps(acc[b], in_vec);
         }
         else {
           acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
@@ -251,12 +245,7 @@ void embag_avx2_kernel(
         // Process tail elements
         for (int t = 0; t < tail; ++t) {
           if (algo == embag_algo_t::max) {
-            if (is_weights) {
-              tail_acc[t] = std::max(tail_acc[t], wt * tail_input[t]);
-            }
-            else {
               tail_acc[t] = std::max(tail_acc[t], tail_input[t]);
-            }
           }
           else {
             tail_acc[t] += wt * tail_input[t];
