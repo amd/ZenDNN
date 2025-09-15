@@ -1285,6 +1285,148 @@ PostOpConfig AITestUtils::create_elu_config() {
   return cfg;
 }
 
+// Random number generation for parameter generation
+static std::mt19937 param_rng(
+  std::chrono::steady_clock::now().time_since_epoch().count());
+
+// Helper function to generate random dimensions within a range
+static uint64_t generate_random_dim(uint64_t min_dim, uint64_t max_dim) {
+  std::uniform_int_distribution<uint64_t> dist(min_dim, max_dim);
+  return dist(param_rng);
+}
+
+MatmulParamsAI
+ParameterGenerator::generate_random_params_for_accuracy_subcategory(
+  const std::string &category,
+  DataTypeCombination data_combo,
+  const PostOpConfig &post_op_config,
+  bool expect_success) {
+
+  // Initialize with default values
+  uint64_t m = 1, n = 1, k = 1;
+
+  // Helper to ensure values are initialized
+  auto generate_dims = [&](uint64_t min_m, uint64_t max_m,
+                           uint64_t min_n, uint64_t max_n,
+                           uint64_t min_k, uint64_t max_k,
+  bool square = false) {
+    m = generate_random_dim(min_m, max_m);
+    n = square ? m : generate_random_dim(min_n, max_n);
+    k = generate_random_dim(min_k, max_k);
+  };
+
+  if (category == "tiny_square") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      true);
+  }
+  else if (category == "tiny_rectangular") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MAX),
+      false);
+  }
+  else if (category == "small_square") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      true);
+  }
+  else if (category == "medium_square") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MIN),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MAX),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MIN),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MAX),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MIN),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_MAX),
+      true);
+  }
+  else if (category == "large_square") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MIN),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MAX),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MIN),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MAX),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MIN),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_MAX),
+      true);
+  }
+  else if (category == "rectangular") {
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::RECT_MIN),
+      static_cast<uint64_t>(MatrixDimensions::RECT_MAX),
+      static_cast<uint64_t>(MatrixDimensions::RECT_MIN),
+      static_cast<uint64_t>(MatrixDimensions::RECT_MAX),
+      static_cast<uint64_t>(MatrixDimensions::RECT_MIN),
+      static_cast<uint64_t>(MatrixDimensions::RECT_MAX),
+      false);
+  }
+  else if (category == "skinny") {
+    // Randomly choose between tall, wide, or deep
+    int shape_type = generate_random_dim(0, 2);
+    if (shape_type == 0) {  // tall
+      generate_dims(
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        false);
+    }
+    else if (shape_type == 1) {  // wide
+      generate_dims(
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        false);
+    }
+    else {  // deep
+      generate_dims(
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MIN),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_SMALL),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        static_cast<uint64_t>(MatrixDimensions::SKINNY_MAX_LARGE),
+        false);
+    }
+  }
+  else {
+    // Default case - use small matrix dimensions from enum
+    generate_dims(
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      static_cast<uint64_t>(MatrixDimensions::TINY_MIN),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_MAX),
+      false);
+  }
+
+  return create_param(m, n, k,
+                      data_combo,
+                      TestCategory::ACCURACY,
+                      post_op_config,
+                      expect_success);
+}
 
 // Static member definitions for ParameterGenerator
 std::vector<DataTypeCombination> ParameterGenerator::supported_combinations = {
@@ -1330,10 +1472,14 @@ ParameterGenerator::generate_comprehensive_test_suite() {
 std::vector<MatmulParamsAI> ParameterGenerator::generate_minimal_test_suite() {
   std::vector<MatmulParamsAI> minimal_params;
   auto post_op_configs = AITestUtils::get_all_post_op_configs();
-  minimal_params.push_back(create_param(32, 32, 32,
-                                        DataTypeCombination::F32_F32_F32, TestCategory::ACCURACY, post_op_configs[0]));
+
+  // Add fixed dim accuracy params for minimal testing
+  add_minimal_accuracy_params(minimal_params);
+
+  // Add a minimal boundary test
   minimal_params.push_back(create_param(1, 1, 1, DataTypeCombination::F32_F32_F32,
                                         TestCategory::BOUNDARY, post_op_configs[0]));
+  // Add a minimal invalid test
   minimal_params.push_back(create_param(0, 32, 32,
                                         DataTypeCombination::F32_F32_F32, TestCategory::INVALID, post_op_configs[0],
                                         false));
@@ -1398,35 +1544,164 @@ ParameterGenerator::generate_category_specific_params(TestCategory category) {
 //   - Ensures that all supported kernel and post-op combinations are validated
 //     for correctness on a wide range of input shapes.
 // -----------------------------------------------------------------------------
-void ParameterGenerator::add_accuracy_params(std::vector<MatmulParamsAI>
+
+// New function: add_minimal_accuracy_params
+void ParameterGenerator::add_minimal_accuracy_params(std::vector<MatmulParamsAI>
     &params) {
   auto post_op_configs = AITestUtils::get_all_post_op_configs();
-  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> accuracy_dims
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t, std::string>> fixed_dims
   = {
-    {4, 4, 4, "tiny_square"},
-    {4, 3, 2, "tiny_rectangular"},
-    {32, 32, 32, "small_square"},
-    {64, 64, 64, "medium_square"},
-    {128, 128, 128, "large_square"},
-    {32, 64, 32, "rectangular_1"},
-    {64, 32, 64, "rectangular_2"},
-    {96, 96, 96, "non_power_of_2"},
-    // Skinny matrix cases (very tall or very wide)
-    {256, 4, 4, "skinny_tall"},
-    {4, 256, 4, "skinny_wide"},
-    {4, 4, 256, "skinny_deep"},
-    {512, 8, 8, "very_skinny_tall"},
-    {8, 512, 8, "very_skinny_wide"},
-    {8, 8, 512, "very_skinny_deep"}
+    {
+      static_cast<uint64_t>(MatrixDimensions::TINY_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::TINY_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::TINY_SQUARE_FIXED),
+      "tiny_square"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::TINY_RECT_M_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::TINY_RECT_N_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::TINY_RECT_K_FIXED),
+      "tiny_rectangular"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::SMALL_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SMALL_SQUARE_FIXED),
+      "small_square"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::MEDIUM_SQUARE_FIXED),
+      "medium_square"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::LARGE_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_SQUARE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::LARGE_SQUARE_FIXED),
+      "large_square"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::RECT1_M_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::RECT1_N_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::RECT1_K_FIXED),
+      "rectangular_1"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::RECT2_M_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::RECT2_N_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::RECT2_K_FIXED),
+      "rectangular_2"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::NON_POW2_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::NON_POW2_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::NON_POW2_FIXED),
+      "non_power_of_2"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_LARGE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      "skinny_tall"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_LARGE_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      "skinny_wide"
+    },
+
+    {
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_SMALL_FIXED),
+      static_cast<uint64_t>(MatrixDimensions::SKINNY_LARGE_FIXED),
+      "skinny_deep"
+    }
   };
   for (auto data_combo : supported_combinations) {
     for (const auto &post_op_config : post_op_configs) {
-      for (const auto& [m, n, k, desc] : accuracy_dims) {
+      for (const auto& [m, n, k, desc] : fixed_dims) {
         if (AITestUtils::is_aocl_kernel_supported(AITestUtils::get_input_dtype(
               data_combo), AITestUtils::get_weight_dtype(data_combo),
             AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
           params.push_back(create_param(m, n, k, data_combo, TestCategory::ACCURACY,
                                         post_op_config, true));
+        }
+      }
+    }
+  }
+}
+
+void ParameterGenerator::add_accuracy_params(std::vector<MatmulParamsAI>
+    &params) {
+
+
+  auto post_op_configs = AITestUtils::get_all_post_op_configs();
+  // Define test categories and their counts
+  const std::vector<std::string> categories = {
+    "tiny_square",
+    "tiny_rectangular",
+    "small_square",
+    "medium_square",
+    "large_square",
+    "rectangular",
+    "skinny"
+  };
+
+  // Enum for maximum test cases per category
+  enum class MaxTestCases {
+    MAX_NUM_TINY_MATRIX = 10,       // Fewer cases for tiny matrices
+    MAX_NUM_SMALL_MATRIX = 10,      // Medium number for small matrices
+    MAX_NUM_MEDIUM_LARGE_MATRIX = 30, // Fewer cases for large matrices due to compute time
+    MAX_NUM_RECTANGULAR_MATRIX = 30,  // Medium number for rectangular cases
+    MAX_NUM_SKINNY_MATRIX = 20,      // Fewer cases for skinny matrices
+    MAX_NUM_DEFAULT = 5            // Default case
+  };
+
+  // Helper function to get max test cases based on category
+  auto get_max_cases_for_category = [](const std::string& category) -> int {
+    if (category == "tiny_square" || category == "tiny_rectangular") {
+      return static_cast<int>(MaxTestCases::MAX_NUM_TINY_MATRIX);
+    }
+    else if (category == "small_square") {
+      return static_cast<int>(MaxTestCases::MAX_NUM_SMALL_MATRIX);
+    }
+    else if (category == "medium_square" || category == "large_square") {
+      return static_cast<int>(MaxTestCases::MAX_NUM_MEDIUM_LARGE_MATRIX);
+    }
+    else if (category == "rectangular") {
+      return static_cast<int>(MaxTestCases::MAX_NUM_RECTANGULAR_MATRIX);
+    }
+    else if (category == "skinny") {
+      return static_cast<int>(MaxTestCases::MAX_NUM_SKINNY_MATRIX);
+    }
+    return static_cast<int>(MaxTestCases::MAX_NUM_DEFAULT);
+  };
+
+  // Add randomly generated test cases for each category
+  for (const auto &category : categories) {
+    const int max_cases = get_max_cases_for_category(category);
+    for (auto data_combo : supported_combinations) {
+      for (const auto &post_op_config : post_op_configs) {
+        if (AITestUtils::is_aocl_kernel_supported(AITestUtils::get_input_dtype(
+              data_combo), AITestUtils::get_weight_dtype(data_combo),
+            AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
+
+          // Generate random test cases for this category/data_combo/post_op combination
+          for (int i = 0; i < max_cases; i++) {
+            params.push_back(generate_random_params_for_accuracy_subcategory(
+                               category, data_combo, post_op_config, true));
+          }
         }
       }
     }

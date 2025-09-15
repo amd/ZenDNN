@@ -59,6 +59,53 @@ using namespace zendnnl::ops;
 
 namespace ai_gtests {
 
+enum class MatrixDimensions : uint64_t {
+  // Fixed dimensions
+  TINY_SQUARE_FIXED = 4,
+  TINY_RECT_M_FIXED = 3,
+  TINY_RECT_N_FIXED = 5,
+  TINY_RECT_K_FIXED = 4,
+
+  SMALL_SQUARE_FIXED = 32,
+
+  MEDIUM_SQUARE_FIXED = 64,
+
+  LARGE_SQUARE_FIXED = 128,
+
+  RECT1_M_FIXED = 64,
+  RECT1_N_FIXED = 32,
+  RECT1_K_FIXED = 48,
+
+  RECT2_M_FIXED = 32,
+  RECT2_N_FIXED = 64,
+  RECT2_K_FIXED = 48,
+
+  NON_POW2_FIXED = 42,
+
+  SKINNY_SMALL_FIXED = 4,
+  SKINNY_LARGE_FIXED = 512,
+
+  // Range values for random generation
+  TINY_MIN = 1,
+  TINY_MAX = 8,
+
+  SMALL_MIN = 16,
+  SMALL_MAX = 48,
+
+  MEDIUM_MIN = 49,
+  MEDIUM_MAX = 96,
+
+  LARGE_MIN = 97,
+  LARGE_MAX = 512,
+
+  RECT_MIN = 32,
+  RECT_MAX = 128,
+
+  SKINNY_MIN = 4,
+  SKINNY_MAX_SMALL = 16,
+  SKINNY_MAX_LARGE = 512
+};
+
 /** @brief Test categories for comprehensive coverage */
 enum class TestCategory {
   ACCURACY,      // Standard accuracy tests
@@ -235,8 +282,14 @@ class ParameterGenerator {
   static std::vector<MatmulParamsAI> generate_category_specific_params(
     TestCategory category);
  private:
+  static MatmulParamsAI generate_random_params_for_accuracy_subcategory(
+    const std::string &category,
+    DataTypeCombination data_combo,
+    const PostOpConfig &post_op_config,
+    bool expect_success);
   static void generate_reference_kernel_exhaustive_params(
     std::vector<MatmulParamsAI> &params);
+  static void add_minimal_accuracy_params(std::vector<MatmulParamsAI> &params);
   static void add_accuracy_params(std::vector<MatmulParamsAI> &params);
   static void add_boundary_params(std::vector<MatmulParamsAI> &params);
   static void add_edge_case_params(std::vector<MatmulParamsAI> &params);
