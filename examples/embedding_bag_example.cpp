@@ -190,5 +190,72 @@ int embedding_bag_f32_forced_ref_kernel_example() {
   return OK;
 }
 
+// This example demonstrates creating an embedding lookup operator for f32 data type
+// using the same underlying embedding bag operator infrastructure.
+// Unlike embedding bag operations, this performs direct index-to-embedding lookups
+// without offsets or reduction operations (no sum/mean/max aggregation).
+int embedding_f32_kernel_example() {
+
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+
+    auto table = tensor_factory.uniform_tensor({EMB_ROW, EMB_DIM},
+                 data_type_t::f32,
+                 1.0, "table");
+
+    //define embedding context
+    auto embedding_context = embag_context_t()
+                             .set_param("table", table)
+                             .create();
+
+    if (! embedding_context.check()) {
+      testlog_error("embedding context creation failed");
+      return NOT_OK;
+    }
+
+    //define embedding operator
+    auto embedding_operator = embag_operator_t()
+                              .set_name("embedding_f32")
+                              .set_context(embedding_context)
+                              .create();
+
+    if (! embedding_operator.check()) {
+      testlog_error(" operator ", embedding_operator.get_name(),
+                    " creation failed.");
+      return NOT_OK;
+    }
+
+    auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
+                          data_type_t::s32,
+                          indices, "indices");
+
+    auto output_tensor = tensor_factory.zero_tensor({indices.size(), EMB_DIM},
+                         data_type_t::f32, "output");
+
+    status = embedding_operator
+             .set_input("indices", indices_tensor)
+             .set_output("output", output_tensor)
+             .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<",embedding_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",embedding_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
 } // namespace examples
 } // namespace zendnnl

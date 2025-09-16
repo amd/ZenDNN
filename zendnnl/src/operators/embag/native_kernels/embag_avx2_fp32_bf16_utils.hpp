@@ -26,9 +26,7 @@
 #include <type_traits>
 
 #include "embag_avx2_kernels.hpp"
-
 #define ENABLE_PREFETCH
-
 #ifdef ENABLE_PREFETCH
   #include <xmmintrin.h>
 #endif
@@ -155,22 +153,18 @@ void embag_avx2_kernel(
   const int full_blocks = width / simd_width;
   const int tail = width % simd_width;
   constexpr int prefetch_distance = 8;
+  bool is_embedding = (offsets == nullptr) ? true : false;
+  int outer_loop = is_embedding ? indsz : offsz;
 
   #pragma omp parallel for
-  for (int oi = 0; oi < offsz; ++oi) {
-    int32_t start = offsets[oi];
-    int32_t end = 0;
-    if (include_last_offset==0) {
-      end = oi < (offsz -1) ? offsets[oi+1] : indsz;
-    }
-    else {
-      end = offsets[oi+1];
-    }
-
+  for (int oi = 0; oi < outer_loop; ++oi) {
+    int32_t start = is_embedding ? oi : offsets[oi];
+    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+                                           (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
     float wt_sum = 0.0f;
 
-    // Accumulator registers for SIMD blocks (AVX2 uses __m256)
+    // Accumulator registers for SIMD blocks
     __m256 acc[full_blocks + 1];
     for (int b = 0; b < full_blocks; ++b) {
       acc[b] = _mm256_setzero_ps();
@@ -211,15 +205,20 @@ void embag_avx2_kernel(
                                        &input[input_offset + b * simd_width]));
         }
 
-        if (algo == embag_algo_t::max) {
-         acc[b] = _mm256_max_ps(acc[b], in_vec);
+        if (is_embedding) {
+          acc[b] = in_vec;
         }
         else {
-          acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
+          if (algo == embag_algo_t::max) {
+            acc[b] = _mm256_max_ps(acc[b], in_vec);
+          }
+          else {
+            acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
+          }
         }
       }
 
-      // Process tail elements (manual loop for AVX2)
+      // Process tail elements
       if (tail > 0) {
         float tail_acc[simd_width] = {0};
         float tail_input[simd_width] = {0};
@@ -239,36 +238,44 @@ void embag_avx2_kernel(
           }
         }
 
-        // Extract current accumulator values
-        _mm256_storeu_ps(tail_acc, acc[full_blocks]);
+        if (is_embedding) {
+          // Load back to accumulator
+          acc[full_blocks] = _mm256_loadu_ps(tail_input);
+        }
+        else {
+          // Extract current accumulator values
+          _mm256_storeu_ps(tail_acc, acc[full_blocks]);
 
-        // Process tail elements
-        for (int t = 0; t < tail; ++t) {
-          if (algo == embag_algo_t::max) {
+          for (int t = 0; t < tail; ++t) {
+            if (algo == embag_algo_t::max) {
               tail_acc[t] = std::max(tail_acc[t], tail_input[t]);
+            }
+            else {
+              tail_acc[t] += wt * tail_input[t];
+            }
           }
-          else {
-            tail_acc[t] += wt * tail_input[t];
-          }
+
+          // Load back to accumulator
+          acc[full_blocks] = _mm256_loadu_ps(tail_acc);
         }
 
-        // Load back to accumulator
-        acc[full_blocks] = _mm256_loadu_ps(tail_acc);
       }
     }
 
-    // Normalize for mean reduction
-    if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
-      __m256 div_vec = _mm256_set1_ps(1.0f / wt_sum);
-      for (int b = 0; b < full_blocks; ++b) {
-        acc[b] = _mm256_mul_ps(acc[b], div_vec);
-      }
-      if (tail > 0) {
-        acc[full_blocks] = _mm256_mul_ps(acc[full_blocks], div_vec);
+    if (!is_embedding) {
+      // Normalize for mean reduction
+      if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
+        __m256 div_vec = _mm256_set1_ps(1.0f / wt_sum);
+        for (int b = 0; b < full_blocks; ++b) {
+          acc[b] = _mm256_mul_ps(acc[b], div_vec);
+        }
+        if (tail > 0) {
+          acc[full_blocks] = _mm256_mul_ps(acc[full_blocks], div_vec);
+        }
       }
     }
 
-    // Store results
+    // Store full block elements
     for (int b = 0; b < full_blocks; ++b) {
       if constexpr(std::is_same_v<OutType, float>) {
         _mm256_storeu_ps(&dst[dst_offset + b * simd_width], acc[b]);

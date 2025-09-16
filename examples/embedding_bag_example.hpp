@@ -23,9 +23,9 @@
 #define  NOT_OK      (1)
 
 #define  EMB_ROW 100
-#define  EMB_DIM 256
-#define  EMB_BATCH_SIZE 10
-#define  INDICES_SIZE 20
+#define  EMB_DIM 16
+#define  EMB_BATCH_SIZE 5
+#define  INDICES_SIZE 10
 
 namespace zendnnl {
 namespace examples {
@@ -50,6 +50,19 @@ int embedding_bag_f32_kernel_example();
  *  This example demonstrates how an operator kernel can be forced by the user.
  */
 int embedding_bag_f32_forced_ref_kernel_example();
+
+/** @fn embedding_f32_kernel_example
+ *  @brief Demonstrates embedding operator on fp32 inputs.
+ *
+ * This example demonstrates creating an embedding lookup operator for f32 data type
+ * using the same underlying embedding bag operator infrastructure.
+ * Unlike embedding bag operations, this performs direct index-to-embedding lookups
+ * without offsets or reduction operations (no sum/mean/max aggregation).
+ *
+ *  This example demonstrates embedding operator creation and execution of
+ *  one of its fp32 computation based kernel.
+ */
+int embedding_f32_kernel_example();
 
 } // namespace examples
 } // namespace zendnnl

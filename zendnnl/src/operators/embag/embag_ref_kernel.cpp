@@ -55,17 +55,14 @@ void embag_ref_kernel(
   if constexpr(output_is_bf16) {
     temp_output_row.resize(static_cast<size_t>(width));
   }
+  bool is_embedding = (offsets == nullptr) ? true : false;
+  int outer_loop = is_embedding ? indsz : offsz;
 
   // Iterate over the offsets
-  for (int oi = 0; oi < offsz; ++oi) {
-    int32_t start = offsets[oi];
-    int32_t end = 0;
-    if (include_last_offset==0) {
-      end = oi < (offsz -1) ? offsets[oi+1] : indsz;
-    }
-    else {
-      end = offsets[oi+1];
-    }
+  for (int oi = 0; oi < outer_loop; ++oi) {
+    int32_t start = is_embedding ? oi : offsets[oi];
+    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+                                           (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     auto dst_offset = oi * dst_stride;
     float wt_sum = 0;
     bool first_valid_index = true;
@@ -101,42 +98,51 @@ void embag_ref_kernel(
           input_row = reinterpret_cast<const float *>(&input[input_offset]);
         }
 
-        if (first_valid_index) {
-          wt_sum = wt;
-          // Initialize with first valid embedding
+        if (is_embedding) {
           for (auto j = 0; j < width; ++j) {
-            if (algo != embag_algo_t::max) {
-              output_row[j] = wt * input_row[j];
-            }
-            else {
-              output_row[j] = input_row[j];
-            }
+            output_row[j] = input_row[j];
           }
-          first_valid_index = false;
         }
         else {
-          // Compute embedding bags as per the algorithm
-          if (algo == embag_algo_t::max) {
+          if (first_valid_index) {
+            wt_sum = wt;
+            // Initialize with first valid embedding
             for (auto j = 0; j < width; ++j) {
-              if (output_row[j] < input_row[j]) {
+              if (algo != embag_algo_t::max) {
+                output_row[j] = wt * input_row[j];
+              }
+              else {
                 output_row[j] = input_row[j];
               }
             }
+            first_valid_index = false;
           }
           else {
-            wt_sum += wt;
-            for (auto j = 0; j < width; ++j) {
-              output_row[j] += wt * input_row[j];
+            // Compute embedding bags as per the algorithm
+            if (algo == embag_algo_t::max) {
+              for (auto j = 0; j < width; ++j) {
+                if (output_row[j] < input_row[j]) {
+                  output_row[j] = input_row[j];
+                }
+              }
+            }
+            else {
+              wt_sum += wt;
+              for (auto j = 0; j < width; ++j) {
+                output_row[j] += wt * input_row[j];
+              }
             }
           }
         }
       }
     }
 
-    // Apply mean normalization if required
-    if (algo == embag_algo_t::mean && wt_sum > 0) {
-      for (auto j = 0; j < width; ++j) {
-        output_row[j] /= wt_sum;
+    if (!is_embedding) {
+      // Apply mean normalization if required
+      if (algo == embag_algo_t::mean && wt_sum > 0) {
+        for (auto j = 0; j < width; ++j) {
+          output_row[j] /= wt_sum;
+        }
       }
     }
 
@@ -157,25 +163,24 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
 
   auto table_tensor   = context_.get_param("table").value();
   auto indices_tensor = inputs_.find("indices")->second;
-  auto weights_iter   = inputs_.find("weights");
-  auto offsets_tensor = inputs_.find("offsets")->second;
   auto dst_tensor     = outputs_.find("output")->second;
+  auto offsets_iter   = inputs_.find("offsets");
+  auto weights_iter   = inputs_.find("weights");
 
-  void const  *input    = (const float *)table_tensor.get_raw_handle_const();
-  float const *weights  = nullptr;
+  float const *input    = (const float *)table_tensor.get_raw_handle_const();
   int32_t     *indices  = (int32_t *)indices_tensor.get_raw_handle_unsafe();
-  int32_t     *offsets  = (int32_t *)offsets_tensor.get_raw_handle_unsafe();
   void        *dst      = dst_tensor.get_raw_handle_unsafe();
+  int32_t     *offsets  = nullptr;
+  float       *weights  = nullptr;
 
-  const int64_t  width             = table_tensor.get_size(1);
-  const int64_t  indsz             = indices_tensor.get_size(0);
-  int64_t        offsz             = offsets_tensor.get_size(0);
-  const int64_t  padidx            = context_.get_padding_index();
-  // const uint32_t scatter_offset = context_.get_scatter_offset();
-  int64_t stride                   = context_.get_scatter_stride();
-  const bool include_last_offset   = context_.get_include_last_offset();
-  const embag_algo_t algo          = context_.get_algo();
-  const bool is_weights            = context_.get_is_weights();
+  const int64_t  width            = table_tensor.get_size(1);
+  const int64_t  indsz            = indices_tensor.get_size(0);
+  const int64_t  padidx           = context_.get_padding_index();
+  int64_t stride                  = context_.get_scatter_stride();
+  const embag_algo_t algo         = context_.get_algo();
+  const bool include_last_offset  = context_.get_include_last_offset();
+  const bool is_weights           = context_.get_is_weights();
+  int64_t offsz                   = 0;
 
   // Get data types
   auto table_dtype = table_tensor.get_data_type();
@@ -187,12 +192,18 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
     weights = (float *)weights_tensor.get_raw_handle_unsafe();
   }
 
-  if (stride==-1) {
-    stride=width;
+  // Offsets tensor is optional - when not provided,
+  // operates as simple embedding lookup rather than embedding bag aggregation
+  if (offsets_iter != inputs_.end()) {
+    offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+    offsz              = offsets_iter->second.get_size(0);
+    if (include_last_offset==1) {
+      offsz -= 1;
+    }
   }
 
-  if (include_last_offset==1) {
-    offsz -= 1;
+  if (stride==-1) {
+    stride=width;
   }
 
   // Dispatch to appropriate template instantiation based on data types

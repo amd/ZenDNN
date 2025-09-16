@@ -22,7 +22,7 @@ namespace ops {
 
 embag_context_t::embag_context_t()
   : op_context_t(),
-    algo{embag_algo_t::sum},
+    algo{embag_algo_t::none},
     padding_index{-1},
     scatter_stride{-1},
     scatter_offset{0},
@@ -114,18 +114,24 @@ status_t embag_context_t::validate() {
 std::string embag_context_t::context_info() {
   std::stringstream ss;
   auto table = get_param("table").value();
-  ss << "Embedding bag context create - " << table.tensor_info();
 
-  if (algo == embag_algo_t::mean) {
-     ss << ",algo:mean" ;
-  }
-  else if (algo == embag_algo_t::max) {
-     ss << ",algo:max" ;
+  if (algo == embag_algo_t::none) {
+    ss << "Embedding context create - " << table.tensor_info();
   }
   else {
-     ss << ",algo:sum" ;
+    ss << "Embedding bag context create - " << table.tensor_info();
+    if (algo == embag_algo_t::sum) {
+      ss << ",algo:sum" ;
+    }
+    else if (algo == embag_algo_t::mean) {
+      ss << ",algo:mean" ;
+    }
+    else {
+      ss << ",algo:max" ;
+    }
+    ss << ",include_last_offset:" << std::boolalpha
+       << include_last_offset;
   }
-
   return ss.str();
 }
 

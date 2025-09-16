@@ -29,7 +29,7 @@ namespace ops {
 using namespace zendnnl::memory;
 
 enum class embag_algo_t : uint8_t {
-  sum = 1, mean = 2, max = 3
+  none = 0, sum = 1, mean = 2, max = 3
 };
 
 /** @class embag_context_t

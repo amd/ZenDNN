@@ -29,30 +29,21 @@ status_t embag_operator_t::preprocess() {
 
 status_t embag_operator_t::validate() {
   LOG_DEBUG_INFO("<", get_name(), "> Validating kernel input/output");
-  if (!get_input("indices") || !get_input("offsets") ||
-      !get_output("output")) {
+  if (!get_input("indices") || !get_output("output")) {
     apilog_error(name, " required input/output missing.");
     return status_t::failure;
   }
 
-  // get offset tensor
-  auto offsets_tensor = get_input("offsets").value();
-  [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-      (offsets_tensor.get_raw_handle_const());
-
-  //input output dimensions
+  //Get input-output dimensions
   auto table_sizes         = context.get_param("table")->get_size();
   auto is_weights          = context.get_is_weights();
-  auto include_last_offset = context.get_include_last_offset();
 
   auto indices_sizes       = get_input("indices")->get_size();
-  auto offsets_sizes       = get_input("offsets")->get_size();
   auto output_sizes        = get_output("output")->get_size();
 
-  //input output data type
+  //Get input-output data type
   auto table_data_type   = context.get_param("table")->get_data_type();
   auto indices_data_type = get_input("indices")->get_data_type();
-  auto offsets_data_type = get_input("offsets")->get_data_type();
   auto output_data_type  = get_output("output")->get_data_type();
 
   if (output_sizes[1] != table_sizes[1]) {
@@ -69,10 +60,35 @@ status_t embag_operator_t::validate() {
     return status_t::failure;
   }
 
-  if ((indices_data_type != data_type_t::s32) ||
-      (offsets_data_type != data_type_t::s32)) {
-    apilog_error(name, ": indices or offsets datatype must be int32");
+  if (indices_data_type != data_type_t::s32) {
+    apilog_error(name, ": indices datatype must be int32");
     return status_t::failure;
+  }
+
+  // Validate optional offset tensor
+  if (get_input("offsets")) {
+    auto offsets_data_type = get_input("offsets")->get_data_type();
+    if (offsets_data_type != data_type_t::s32) {
+      apilog_error(name, ": offsets datatype must be int32");
+      return status_t::failure;
+    }
+
+    auto include_last_offset = context.get_include_last_offset();
+    auto offsets_sizes       = get_input("offsets")->get_size();
+    auto offsets_tensor      = get_input("offsets").value();
+    [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
+      (offsets_tensor.get_raw_handle_const());
+    [[maybe_unused]] size_t batch_size = output_sizes[0];
+    [[maybe_unused]] size_t num_indices = indices_sizes[0];
+
+    if (include_last_offset) {
+      assert(offsets_data[batch_size] <= static_cast<int32_t>(num_indices) &&
+             "offsets[batch_size] must be <= indices_sizes");
+    }
+    else {
+      assert(offsets_data[batch_size - 1] <= static_cast<int32_t>(num_indices) &&
+             "offsets[batch_size-1] must be <= indices_sizes");
+    }
   }
 
   if (get_input("weights")) {
@@ -89,18 +105,6 @@ status_t embag_operator_t::validate() {
     return status_t::failure;
   }
 
-  [[maybe_unused]] size_t batch_size = output_sizes[0];
-  [[maybe_unused]] size_t num_indices = indices_sizes[0];
-
-  if (include_last_offset) {
-    assert(offsets_data[batch_size] <= static_cast<int32_t>(num_indices) &&
-           "offsets[batch_size] must be <= indices_sizes");
-  }
-  else {
-    assert(offsets_data[batch_size - 1] <= static_cast<int32_t>(num_indices) &&
-           "offsets[batch_size-1] must be <= indices_sizes");
-  }
-
   return status_t::success;
 }
 
@@ -112,33 +116,26 @@ status_t embag_operator_t::validate_forced_kernel() {
   }
 
   if (forced_kernel == "reference") {
-    if (!get_input("indices") || !get_input("offsets") ||
-        !get_output("output")) {
+    if (!get_input("indices") || !get_output("output")) {
       apilog_error(name, " required input/output missing.");
       return status_t::failure;
     }
 
-    // get offset tensor
-    auto offsets_tensor = get_input("offsets").value();
-    [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
-        (offsets_tensor.get_raw_handle_const());
-
-    //input output dimensions
+    //Get input-output dimensions
     auto table_sizes         = context.get_param("table")->get_size();
-    auto include_last_offset = context.get_include_last_offset();
+    auto is_weights          = context.get_is_weights();
+
     auto indices_sizes       = get_input("indices")->get_size();
-    auto offsets_sizes       = get_input("offsets")->get_size();
     auto output_sizes        = get_output("output")->get_size();
 
+    //Get input-output data type
     auto table_data_type   = context.get_param("table")->get_data_type();
     auto indices_data_type = get_input("indices")->get_data_type();
-    auto offsets_data_type = get_input("offsets")->get_data_type();
     auto output_data_type  = get_output("output")->get_data_type();
 
     if (output_sizes[1] != table_sizes[1]) {
-      apilog_error(name, ": size mismatch in input/output/params. ", name,
-                   " output_size=", output_sizes[1],
-                   " table_size=", table_sizes[1]);
+      log_error(name, ": size mismatch in input/output/params. ", name,
+                " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
       return status_t::failure;
     }
 
@@ -150,10 +147,35 @@ status_t embag_operator_t::validate_forced_kernel() {
       return status_t::failure;
     }
 
-    if ((indices_data_type != data_type_t::s32) ||
-        (offsets_data_type != data_type_t::s32)) {
-      apilog_error(name, ": indices or offsets datatype is not int32");
+    if (indices_data_type != data_type_t::s32) {
+      apilog_error(name, ": indices datatype must be int32");
       return status_t::failure;
+    }
+
+    // Validate optional offset tensor
+    if (get_input("offsets")) {
+      auto offsets_data_type = get_input("offsets")->get_data_type();
+      if (offsets_data_type != data_type_t::s32) {
+        apilog_error(name, ": offsets datatype must be int32");
+        return status_t::failure;
+      }
+
+      auto include_last_offset = context.get_include_last_offset();
+      auto offsets_sizes       = get_input("offsets")->get_size();
+      auto offsets_tensor      = get_input("offsets").value();
+      [[maybe_unused]] const int32_t *offsets_data = static_cast<const int32_t *>
+        (offsets_tensor.get_raw_handle_const());
+      [[maybe_unused]] size_t batch_size = output_sizes[0];
+      [[maybe_unused]] size_t num_indices = indices_sizes[0];
+
+      if (include_last_offset) {
+        assert(offsets_data[batch_size] <= static_cast<int32_t>(num_indices) &&
+               "offsets[batch_size] must be <= indices_sizes");
+      }
+      else {
+        assert(offsets_data[batch_size - 1] <= static_cast<int32_t>(num_indices) &&
+               "offsets[batch_size-1] must be <= indices_sizes");
+      }
     }
 
     if (get_input("weights")) {
@@ -164,17 +186,13 @@ status_t embag_operator_t::validate_forced_kernel() {
       }
     }
 
-    [[maybe_unused]] size_t batch_size = output_sizes[0];
-    [[maybe_unused]] size_t num_indices = indices_sizes[0];
+    if ((is_weights && !get_input("weights")) ||
+        (!is_weights && get_input("weights"))) {
+      apilog_error(name, ": weights input is missing or is_weights is not enabled.");
+      return status_t::failure;
+    }
 
-    if (include_last_offset) {
-      assert(offsets_data[batch_size] <= static_cast<int32_t>(num_indices) &&
-             "offsets[batch_size] must be <= indices_sizes");
-    }
-    else {
-      assert(offsets_data[batch_size - 1] <= static_cast<int32_t>(num_indices) &&
-             "offsets[batch_size-1] must be <= indices_sizes");
-    }
+    return status_t::success;
   }
   else {
     apilog_error("<", get_name(), "> ", forced_kernel,
@@ -187,23 +205,30 @@ status_t embag_operator_t::validate_forced_kernel() {
 std::string embag_operator_t::op_create_info() {
   std::stringstream ss;
 
-  ss << "Embedding bag operator create - ";
-  if (!(get_name().empty())) {
-    ss << get_name() << ",";
-  }
   auto table = context.get_param("table").value();
   auto algo  = context.get_algo();
 
+  if (algo == embag_algo_t::none) {
+    ss << "Embedding operator create - ";
+  }
+  else {
+    ss << "Embedding bag operator create - ";
+  }
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
   ss << table.tensor_info();
-
-  if (algo == embag_algo_t::mean) {
+  if (algo == embag_algo_t::sum) {
+    ss << ",algo:sum" ;
+  }
+  else if (algo == embag_algo_t::mean) {
     ss << ",algo:mean" ;
   }
   else if (algo == embag_algo_t::max) {
     ss << ",algo:max" ;
   }
   else {
-    ss << ",algo:sum" ;
+    ss << "" ;
   }
 
   return ss.str();
@@ -212,15 +237,20 @@ std::string embag_operator_t::op_create_info() {
 std::string embag_operator_t::op_execute_info() {
   std::stringstream ss;
 
-  ss << "Embedding bag operator execute - ";
-  if (!(get_name().empty())) {
-    ss << get_name() << ",";
-  }
-
   auto indices  = get_input("indices");
   auto offsets  = get_input("offsets");
   auto output   = get_output("output");
   auto algo     = context.get_algo();
+
+  if (!offsets && algo == embag_algo_t::none) {
+    ss << "Embedding operator execute - ";
+  }
+  else {
+    ss << "Embedding bag operator execute - ";
+  }
+  if (!(get_name().empty())) {
+    ss << get_name() << ",";
+  }
 
   if (forced_kernel.empty()) {
     ss << "kernel:native" << ",";
@@ -229,18 +259,23 @@ std::string embag_operator_t::op_execute_info() {
     ss << "kernel:" << forced_kernel << ",";
   }
 
-  ss << indices.value().tensor_info() << ","
-     << offsets.value().tensor_info() << ","
-     << output.value().tensor_info();
+  ss << indices.value().tensor_info() << ",";
+  if (offsets) {
+    ss << offsets.value().tensor_info() << ",";
+  }
+  ss << output.value().tensor_info();
 
-  if (algo == embag_algo_t::mean) {
+  if (algo == embag_algo_t::sum) {
+    ss << ",algo:sum" ;
+  }
+  else if (algo == embag_algo_t::mean) {
     ss << ",algo:mean" ;
   }
   else if (algo == embag_algo_t::max) {
     ss << ",algo:max" ;
   }
   else {
-    ss << ",algo:sum" ;
+    ss << "" ;
   }
 
   return ss.str();

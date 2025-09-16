@@ -26,9 +26,7 @@
 #include <type_traits>
 
 #include "embag_avx512_kernels.hpp"
-
 #define ENABLE_PREFETCH
-
 #ifdef ENABLE_PREFETCH
   #include <xmmintrin.h>
 #endif
@@ -128,18 +126,14 @@ void embag_avx512_kernel(
   const int full_blocks = width / simd_width;
   const int tail = width % simd_width;
   constexpr int prefetch_distance = 8;
+  bool is_embedding = (offsets == nullptr) ? true : false;
+  int outer_loop = is_embedding ? indsz : offsz;
 
   #pragma omp parallel for
-  for (int oi = 0; oi < offsz; ++oi) {
-    int32_t start = offsets[oi];
-    int32_t end = 0;
-    if (include_last_offset==0) {
-      end = oi < (offsz -1) ? offsets[oi+1] : indsz;
-    }
-    else {
-      end = offsets[oi+1];
-    }
-
+  for (int oi = 0; oi < outer_loop; ++oi) {
+    int32_t start = is_embedding ? oi : offsets[oi];
+    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+                                           (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
     float wt_sum = 0.0f;
 
@@ -170,6 +164,7 @@ void embag_avx512_kernel(
       int64_t input_offset = idx * width;
       __m512 wt_vec = _mm512_set1_ps(wt);
 
+      // Process full SIMD blocks
       for (int b = 0; b < full_blocks; ++b) {
         __m512 in_vec;
 //TODO:To implement BF16 kernel for gcc<12
@@ -185,11 +180,16 @@ void embag_avx512_kernel(
 #else
         in_vec = _mm512_loadu_ps(&input[input_offset + b * simd_width]);
 #endif
-        if (algo == embag_algo_t::max) {
-          acc[b] = _mm512_max_ps(acc[b], in_vec);
+        if (is_embedding) {
+          acc[b] = in_vec;
         }
         else {
-          acc[b] = _mm512_fmadd_ps(in_vec, wt_vec, acc[b]);
+          if (algo == embag_algo_t::max) {
+            acc[b] = _mm512_max_ps(acc[b], in_vec);
+          }
+          else {
+            acc[b] = _mm512_fmadd_ps(in_vec, wt_vec, acc[b]);
+          }
         }
       }
 
@@ -213,23 +213,30 @@ void embag_avx512_kernel(
         in_vec = _mm512_maskz_loadu_ps(tail_mask,
                                        &input[input_offset + full_blocks * simd_width]);
 #endif
-        if (algo == embag_algo_t::max) {
-          acc[full_blocks] = _mm512_max_ps(acc[full_blocks], in_vec);
+        if (is_embedding) {
+          acc[full_blocks] = in_vec;
         }
         else {
-          acc[full_blocks] = _mm512_fmadd_ps(in_vec, wt_vec, acc[full_blocks]);
+          if (algo == embag_algo_t::max) {
+            acc[full_blocks] = _mm512_max_ps(acc[full_blocks], in_vec);
+          }
+          else {
+            acc[full_blocks] = _mm512_fmadd_ps(in_vec, wt_vec, acc[full_blocks]);
+          }
         }
       }
     }
 
-    // Normalize for mean reduction
-    if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
-      __m512 div_vec = _mm512_set1_ps(wt_sum);
-      for (int b = 0; b < full_blocks; ++b) {
-        acc[b] = _mm512_div_ps(acc[b], div_vec);
-      }
-      if (tail > 0) {
-        acc[full_blocks] = _mm512_div_ps(acc[full_blocks], div_vec);
+    if (!is_embedding) {
+      // Normalize for mean reduction
+      if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
+        __m512 div_vec = _mm512_set1_ps(wt_sum);
+        for (int b = 0; b < full_blocks; ++b) {
+          acc[b] = _mm512_div_ps(acc[b], div_vec);
+        }
+        if (tail > 0) {
+          acc[full_blocks] = _mm512_div_ps(acc[full_blocks], div_vec);
+        }
       }
     }
 
@@ -241,7 +248,7 @@ void embag_avx512_kernel(
       else {
         __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[b]);
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
-                                       simd_width]), (__m256i)bf16_vec);
+                            simd_width]), (__m256i)bf16_vec);
       }
     }
 
@@ -260,7 +267,6 @@ void embag_avx512_kernel(
       }
     }
   }
-
 }
 
 } //namespace ops

@@ -39,25 +39,24 @@ status_t embag_f32_avx512_kernel_t::execute(const context_type &context_,
 
   auto table_tensor   = context_.get_param("table").value();
   auto indices_tensor = inputs_.find("indices")->second;
-  auto weights_iter   = inputs_.find("weights");
-  auto offsets_tensor = inputs_.find("offsets")->second;
   auto dst_tensor     = outputs_.find("output")->second;
+  auto offsets_iter   = inputs_.find("offsets");
+  auto weights_iter   = inputs_.find("weights");
 
   float const *input    = (const float *)table_tensor.get_raw_handle_const();
-  float       *weights  = nullptr;
   int32_t     *indices  = (int32_t *)indices_tensor.get_raw_handle_unsafe();
-  int32_t     *offsets  = (int32_t *)offsets_tensor.get_raw_handle_unsafe();
+  int32_t     *offsets  = nullptr;
+  float       *weights  = nullptr;
 
-  const int64_t  width              = table_tensor.get_size(1);
-  const int64_t  indsz              = indices_tensor.get_size(0);
-  int64_t        offsz              = offsets_tensor.get_size(0);
-  auto output_data_type             = dst_tensor.get_data_type();
-  const int64_t  padidx             = context_.get_padding_index();
-  // const uint32_t scatter_offset  = context_.get_scatter_offset();
-  int64_t stride                    = context_.get_scatter_stride();
-  const embag_algo_t algo           = context_.get_algo();
-  const bool include_last_offset    = context_.get_include_last_offset();
-  const bool is_weights             = context_.get_is_weights();
+  const int64_t  width            = table_tensor.get_size(1);
+  const int64_t  indsz            = indices_tensor.get_size(0);
+  auto output_data_type           = dst_tensor.get_data_type();
+  const int64_t  padidx           = context_.get_padding_index();
+  int64_t stride                  = context_.get_scatter_stride();
+  const embag_algo_t algo         = context_.get_algo();
+  const bool include_last_offset  = context_.get_include_last_offset();
+  const bool is_weights           = context_.get_is_weights();
+  int64_t offsz                   = 0;
 
   // weights tensor is present
   if ((weights_iter != inputs_.end()) && is_weights) {
@@ -65,12 +64,19 @@ status_t embag_f32_avx512_kernel_t::execute(const context_type &context_,
     weights = (float *)weights_tensor.get_raw_handle_unsafe();
   }
 
-  if (stride==-1) {
-    stride=width;
+  // Offsets tensor is optional - when not provided,
+  // operates as simple embedding lookup rather than embedding bag aggregation
+  if (offsets_iter != inputs_.end()) {
+    auto offsets_tensor = offsets_iter->second;
+    offsets = (int32_t *)offsets_tensor.get_raw_handle_unsafe();
+    offsz = offsets_tensor.get_size(0);
+    if (include_last_offset==1) {
+      offsz -= 1;
+    }
   }
 
-  if (include_last_offset==1) {
-    offsz -= 1;
+  if (stride==-1) {
+    stride=width;
   }
 
   if (output_data_type == data_type_t::f32) {
@@ -103,25 +109,24 @@ status_t embag_bf16_avx512_kernel_t::execute(const context_type &context_,
 
   auto table_tensor   = context_.get_param("table").value();
   auto indices_tensor = inputs_.find("indices")->second;
-  auto weights_iter   = inputs_.find("weights");
-  auto offsets_tensor = inputs_.find("offsets")->second;
   auto dst_tensor     = outputs_.find("output")->second;
+  auto offsets_iter   = inputs_.find("offsets");
+  auto weights_iter   = inputs_.find("weights");
 
-  uint16_t const *input = (const uint16_t *)table_tensor.get_raw_handle_const();
-  float      *weights   = nullptr;
-  int32_t     *indices  = (int32_t *)indices_tensor.get_raw_handle_unsafe();
-  int32_t     *offsets  = (int32_t *)offsets_tensor.get_raw_handle_unsafe();
+  uint16_t const *input   = (const uint16_t *)table_tensor.get_raw_handle_const();
+  int32_t        *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+  int32_t        *offsets = nullptr;
+  float          *weights = nullptr;
 
-  const int64_t  width              = table_tensor.get_size(1);
-  const int64_t  indsz              = indices_tensor.get_size(0);
-  int64_t        offsz              = offsets_tensor.get_size(0);
-  auto output_data_type             = dst_tensor.get_data_type();
-  const int64_t  padidx             = context_.get_padding_index();
-  // const uint32_t scatter_offset  = context_.get_scatter_offset();
-  int64_t stride                    = context_.get_scatter_stride();
-  const embag_algo_t algo           = context_.get_algo();
-  const bool include_last_offset    = context_.get_include_last_offset();
-  const bool is_weights             = context_.get_is_weights();
+  const int64_t  width            = table_tensor.get_size(1);
+  const int64_t  indsz            = indices_tensor.get_size(0);
+  auto output_data_type           = dst_tensor.get_data_type();
+  const int64_t  padidx           = context_.get_padding_index();
+  int64_t stride                  = context_.get_scatter_stride();
+  const embag_algo_t algo         = context_.get_algo();
+  const bool include_last_offset  = context_.get_include_last_offset();
+  const bool is_weights           = context_.get_is_weights();
+  int64_t offsz                   = 0;
 
   // weights tensor is present
   if ((weights_iter != inputs_.end()) && is_weights) {
@@ -129,12 +134,19 @@ status_t embag_bf16_avx512_kernel_t::execute(const context_type &context_,
     weights = (float *)weights_tensor.get_raw_handle_unsafe();
   }
 
-  if (stride==-1) {
-    stride=width;
+  // Offsets tensor is optional - when not provided,
+  // operates as simple embedding lookup rather than embedding bag aggregation
+  if (offsets_iter != inputs_.end()) {
+    auto offsets_tensor = offsets_iter->second;
+    offsets = (int32_t *)offsets_tensor.get_raw_handle_unsafe();
+    offsz = offsets_tensor.get_size(0);
+    if (include_last_offset==1) {
+      offsz -= 1;
+    }
   }
 
-  if (include_last_offset==1) {
-    offsz -= 1;
+  if (stride==-1) {
+    stride=width;
   }
 
   if (output_data_type == data_type_t::f32) {
