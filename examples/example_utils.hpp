@@ -66,7 +66,8 @@ class tensor_factory_t {
   /** @brief uniform distributed tensor */
   tensor_t uniform_dist_tensor(const std::vector<index_type> size_,
                                data_type dtype_, float range_,
-                               std::string tensor_name_="uniform dist", tensor_t scale = tensor_t(),
+                               std::string tensor_name_="uniform dist", bool trans = false,
+                               tensor_t scale = tensor_t(),
                                tensor_t zp = tensor_t());
 
   /** @brief uniform distributed strided tensor */

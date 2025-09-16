@@ -55,7 +55,7 @@ gtests/
 ## **Configure and build GTest with ZenDNN***
 - Configure:
 ```bash
-cmake -ZENDNNL_BUILD_GTEST=ON ..
+cmake -DZENDNNL_BUILD_GTEST=ON ..
 ```
 - Build:
 ```bash

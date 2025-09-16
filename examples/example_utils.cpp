@@ -248,9 +248,8 @@ tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type>
 }
 
 tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
-    size_, data_type dtype_, float range_, std::string tensor_name_,
+    size_, data_type dtype_, float range_, std::string tensor_name_, bool trans,
     tensor_t scale, tensor_t zp) {
-
   auto udtensor = tensor_t()
                   .set_name(tensor_name_)
                   .set_size(size_)
@@ -264,6 +263,15 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
     udtensor.set_quant_zero_point(zp);
   }
 
+  auto tensor_dim = udtensor.get_dim();
+  if (trans && tensor_dim >=2) {
+    std::string tag;
+    for (size_t i=0; i<tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    udtensor.set_order(tag);
+  }
   udtensor.create();
 
   if (! udtensor.check()) {

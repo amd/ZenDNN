@@ -64,16 +64,20 @@ int run_lowoha_matmul_fp32_test() {
     postop.postop_.push_back(op2);
 
     // Call the low-overhead matmul API
-    matmul_direct(
-      A.data(), B.data(), C.data(), nullptr,
-      1.0f, 0.0f,  // alpha, beta
-      M, N, K,
-      false, false,  // transA, transB
-      lda, ldb, ldc,
-      matmul_dtype, postop,
-      lowoha_quantization_params_t(),
-      1, 1  // Batch_A, Batch_B
-    );
+    status_t status = matmul_direct(
+                        A.data(), B.data(), C.data(), nullptr,
+                        1.0f, 0.0f,  // alpha, beta
+                        M, N, K,
+                        false, false,  // transA, transB
+                        lda, ldb, ldc,
+                        matmul_dtype, postop,
+                        lowoha_quantization_params_t(),
+                        1, 1  // Batch_A, Batch_B
+                      );
+    if (status != status_t::success) {
+      log_error("LOWOHA: Execution failed");
+      return NOT_OK;
+    }
 
   }
   catch (const exception_t &ex) {

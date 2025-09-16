@@ -539,16 +539,20 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
         lowoha_post_op postop;
 
-        matmul_direct(
-          A_data, B_data, C_data, nullptr,  // No bias
-          alpha, beta,
-          static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
-          transA, transB,
-          lda, ldb, ldc,
-          matmul_dtypes, postop,
-          lowoha_quantization_params_t(),
-          batchA, batchB  // Batch_A, Batch_B
-        );
+        status_t status = matmul_direct(
+                            A_data, B_data, C_data, nullptr,  // No bias
+                            alpha, beta,
+                            static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                            transA, transB,
+                            lda, ldb, ldc,
+                            matmul_dtypes, postop,
+                            lowoha_quantization_params_t(),
+                            batchA, batchB  // Batch_A, Batch_B
+                          );
+        if (status != status_t::success) {
+          log_error("LOWOHA matmul_direct execution failed.");
+          return status_t::failure;
+        }
       }
       catch (const std::exception &e) {
         log_error("LOWOHA matmul_direct execution failed: ", e.what());

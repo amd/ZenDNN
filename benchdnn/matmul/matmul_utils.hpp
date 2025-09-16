@@ -18,6 +18,9 @@
 
 #include "benchdnn.hpp"
 
+// Number of extra fields in each matmul input line (beyond ndims)
+#define MATMUL_EXTRA_INPUT_FIELD_COUNT 8
+
 namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
@@ -41,6 +44,8 @@ namespace matmul {
  * @var post_ops List of post-operations to apply after matmul (e.g., relu, gelu). Parsed from a colon-separated string (e.g., "relu:gelu").
  * @var binary_post_ops_pos List of positions for binary post-operations (indices in the post_ops list where binary ops are applied).
  * @var kernel_name Name of the kernel backend to invoke (e.g., aocl_blis, aocl_blis_blocked).
+ * @var isTransA Transpose flag for input matrix.
+ * @var isTransB Transpose flag for weight matrix.
  * @var warmup_iters Number of warmup iterations to run before actual benchmarking.
  */
 struct MatmulConfig {
@@ -61,6 +66,8 @@ struct MatmulConfig {
                                         binary post-operations. */
   std::string kernel_name; /**< Name of the kernel backend
                             to invoke (e.g., aocl_blis, aocl_blis_blocked). */
+  bool isTransA; /** Transpose flag for input matrix */
+  bool isTransB; /** Transpose flag for weight matrix */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 };
 
@@ -98,12 +105,15 @@ void log_benchmark_failure(const MatmulConfig &cfg);
  * @param config      The matmul configuration for the current run/layer.
  * @param stat        The vector of timing statistics for all layers (per configuration).
  * @param outfile     The output stream to write the CSV row to.
+ * @param isLOWOHA       Whether this is a Low Overhead API result.
  * @param layer_num   The index of the layer to extract results for (default: 0).
  * @param percentage  The percentage of total time this layer took (used in pipeline mode, default: 0.0).
  * @param isPipeline  Whether this is a pipeline (multi-layer) result (default: false).
  */
 void write_each_config_result(const MatmulConfig &config,
-                              const std::vector<TimingStats> &stat, std::ostream &outfile, int layer_num = 0,
+                              const std::vector<TimingStats> &stat, std::ostream &outfile,
+                              const bool isLOWOHA,
+                              int layer_num = 0,
                               double percentage = 0.0, bool isPipeline = false);
 
 /**
@@ -116,13 +126,14 @@ void write_each_config_result(const MatmulConfig &config,
  * @param stat        The vector of timing statistics for all layers (per configuration).
  * @param col_widths  The vector of column widths to update.
  * @param st_index    The starting index in col_widths for this row.
+ * @param isLOWOHA       Whether this is a Low Overhead API result.
  * @param layer_num   The index of the layer to extract results for (default: 0).
  * @param percentage  The percentage of total time this layer took (used in pipeline mode, default: 0.0).
  * @param isPipeline  Whether this is a pipeline (multi-layer) result (default: false).
  */
 void cal_column_width(const MatmulConfig &config,
                       const std::vector<TimingStats> &stat, std::vector<size_t> &col_widths,
-                      int st_index, int layer_num = 0, double percentage = 0.0,
+                      int st_index, const bool isLOWOHA, int layer_num = 0, double percentage = 0.0,
                       bool isPipeline = false);
 
 /**
@@ -134,12 +145,14 @@ void cal_column_width(const MatmulConfig &config,
  * @param config      The matmul configuration for the current run/layer.
  * @param stat        The vector of timing statistics for all layers (per configuration).
  * @param row         The vector to be filled with formatted result strings for this layer.
+ * @param isLOWOHA       Whether this is a Low Overhead API result.
  * @param layer_num   The index of the layer to extract results for (default: 0).
  * @param percentage  The percentage of total time this layer took (used in pipeline mode, default: 0.0).
  * @param isPipeline  Whether this is a pipeline (multi-layer) result (default: false).
  */
 void fill_row(const MatmulConfig &config,
               const std::vector<TimingStats> &stat, std::vector<std::string> &row,
+              const bool isLOWOHA,
               int layer_num = 0, double percentage = 0.0,
               bool isPipeline = false);
 
@@ -178,10 +191,11 @@ void print_pipeline_results(
  * @param matmul_results Vector of pairs of MatmulConfig and TimingStats.
  * @param outfile Output stream to write CSV results to (e.g., std::ofstream).
  * @param options Global options for command-line configuration.
+ * @param isLOWOHA Whether this is a Low Overhead API result.
  */
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options);
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA);
 
 /**
  * @brief Prints single-layer matmul benchmark results as a formatted table.
@@ -192,11 +206,11 @@ void log_results(
  * @param matmul_results Vector of pairs of MatmulConfig and TimingStats.
  * @param outfile Output stream to print table results to (e.g., std::cout).
  * @param options Global options for command-line configuration.
+ * @param isLOWOHA Whether this is a Low Overhead API result.
  */
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options);
-
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA);
 } // namespace matmul
 } // namespace benchdnn
 } // namespace zendnnl

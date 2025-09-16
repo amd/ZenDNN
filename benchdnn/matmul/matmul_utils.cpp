@@ -37,12 +37,13 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
     if (!fields.empty() && std::isdigit(fields.back()[0])) {
       fields_size--;
     }
-    if (fields_size != (options.ndims + 1 + 6)) {
+    int expected_fields_cnt = options.ndims + 1 + MATMUL_EXTRA_INPUT_FIELD_COUNT;
+    if (fields_size != expected_fields_cnt) {
       commonlog_error(
-        "Invalid line (expected ", (options.ndims + 1 + 6), " fields): [",
+        "Invalid line (expected ", expected_fields_cnt, " fields): [",
         (options.ndims > 2) ? "bs, " : "",
         "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, ",
-        "kernel name, warmup iterations (optional)]");
+        "kernel name, isTransA, isTransB, warmup iterations (optional)]");
       continue;
     }
     MatmulConfig cfg;
@@ -86,8 +87,19 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         commonlog_warning("No data types specified. Defaulting all to f32.");
       }
       // Parse bias flag and bias data type
-      cfg.isBiasEnabled = ((fields[id] == "true") ||
-                           (fields[id] == "1")) ? true : false;
+      std::string bias_flag = fields[id];
+      std::transform(bias_flag.begin(), bias_flag.end(), bias_flag.begin(),
+                     ::tolower);
+      if (bias_flag == "true" || bias_flag == "1") {
+        cfg.isBiasEnabled = true;
+      }
+      else if (bias_flag == "false" || bias_flag == "0") {
+        cfg.isBiasEnabled = false;
+      }
+      else {
+        commonlog_error("Invalid value for isBiasEnabled. Use true/false or 1/0.");
+        continue;
+      }
       id++;
       if (cfg.isBiasEnabled) {
         if (!fields[id++].empty()) {
@@ -126,6 +138,36 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
           continue;
         }
       }
+
+      std::string transA_flag = fields[id];
+      std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
+                     ::tolower);
+      if (transA_flag == "true" || transA_flag == "1") {
+        cfg.isTransA = true;
+      }
+      else if (transA_flag == "false" || transA_flag == "0") {
+        cfg.isTransA = false;
+      }
+      else {
+        commonlog_error("Invalid value for isTransA. Use true/false or 1/0.");
+        continue;
+      }
+      id++;
+
+      std::string transB_flag = fields[id];
+      std::transform(transB_flag.begin(), transB_flag.end(), transB_flag.begin(),
+                     ::tolower);
+      if (transB_flag == "true" || transB_flag == "1") {
+        cfg.isTransB = true;
+      }
+      else if (transB_flag == "false" || transB_flag == "0") {
+        cfg.isTransB = false;
+      }
+      else {
+        commonlog_error("Invalid value for isTransB. Use true/false or 1/0.");
+        continue;
+      }
+      id++;
       // Parse warmup iterations if provided, otherwise use 20% of main iterations
       if (id < fields.size() && !(fields[id].empty())) {
         cfg.warmup_iters = std::stoi(fields[id]);
@@ -162,7 +204,9 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
 }
 
 void write_each_config_result(const MatmulConfig &config,
-                              const std::vector<TimingStats> &stat, std::ostream &outfile, int layer_num,
+                              const std::vector<TimingStats> &stat, std::ostream &outfile,
+                              const bool isLOWOHA,
+                              int layer_num,
                               double percentage, bool isPipeline) {
 
   size_t m = config.m;
@@ -190,32 +234,36 @@ void write_each_config_result(const MatmulConfig &config,
   }
   outfile << ", ";
   outfile << config.kernel_name << ", "
+          << config.isTransA << ", "
+          << config.isTransB << ", "
           << config.warmup_iters << ", " << stat[layer_num].total_time_ms
           << ", " << gflops_val;
   if (isPipeline) {
     outfile << ", " << percentage;
   }
 #if MEASURE_INDIVIDUAL_TIMINGS
-  double ctx_creation_percentage = (stat[layer_num].context_creation_ms /
-                                    stat[layer_num].total_time_ms) * 100;
-  double op_creation_percentage = (stat[layer_num].operator_creation_ms /
-                                   stat[layer_num].total_time_ms) * 100;
-  double op_execution_percentage = (stat[layer_num].operator_execution_ms /
-                                    stat[layer_num].total_time_ms) * 100;
-  outfile << ", "
-          << stat[layer_num].context_creation_ms << " ("
-          << ctx_creation_percentage << " %), "
-          << stat[layer_num].operator_creation_ms << " ("
-          << op_creation_percentage << " %), "
-          << stat[layer_num].operator_execution_ms << " ("
-          << op_execution_percentage << " %)";
+  if (!isLOWOHA) {
+    double ctx_creation_percentage = (stat[layer_num].context_creation_ms /
+                                      stat[layer_num].total_time_ms) * 100;
+    double op_creation_percentage = (stat[layer_num].operator_creation_ms /
+                                     stat[layer_num].total_time_ms) * 100;
+    double op_execution_percentage = (stat[layer_num].operator_execution_ms /
+                                      stat[layer_num].total_time_ms) * 100;
+    outfile << ", "
+            << stat[layer_num].context_creation_ms << " ("
+            << ctx_creation_percentage << " %), "
+            << stat[layer_num].operator_creation_ms << " ("
+            << op_creation_percentage << " %), "
+            << stat[layer_num].operator_execution_ms << " ("
+            << op_execution_percentage << " %)";
+  }
 #endif
   outfile << std::endl;
 }
 
 void cal_column_width(const MatmulConfig &config,
                       const std::vector<TimingStats> &stat, std::vector<size_t> &col_widths,
-                      int st_index, int layer_num, double percentage,
+                      int st_index, const bool isLOWOHA, int layer_num, double percentage,
                       bool isPipeline) {
   size_t m = config.m;
   size_t k = ((layer_num == 0) ? config.k : config.n_values[layer_num - 1]);
@@ -224,28 +272,24 @@ void cal_column_width(const MatmulConfig &config,
   double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = (gops / (stat[layer_num].total_time_ms / config.iters)) *
                       1000;
+  int col = st_index;
   if (isPipeline) {
     std::string layer_str = "Layer_" + std::to_string(layer_num);
-    col_widths[0] = std::max(col_widths[0], layer_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col], layer_str.size() + 2);
   }
-  col_widths[st_index] = std::max(col_widths[st_index],
-                                  std::to_string(m).size() + 2);
-  col_widths[st_index + 1] = std::max(col_widths[st_index + 1],
-                                      std::to_string(k).size() + 2);
-  col_widths[st_index + 2] = std::max(col_widths[st_index + 2],
-                                      std::to_string(n).size() + 2);
-  col_widths[st_index + 3] = std::max(col_widths[st_index + 3],
-                                      std::to_string(config.iters).size() + 2);
-  std::string dt_str = datatypeToStr(config.dt[0]) + ":" +
-                       datatypeToStr(config.dt[1]) + ":" + datatypeToStr(config.dt[2]);
-  col_widths[st_index + 4] = std::max(col_widths[st_index + 4],
-                                      dt_str.size() + 2);
-  col_widths[st_index + 5] = std::max(col_widths[st_index + 5],
-                                      std::to_string(config.isBiasEnabled).size() + 2);
-  std::string bias_dt_str = config.isBiasEnabled ?
-                            datatypeToStr(config.bias_dt) : "";
-  col_widths[st_index + 6] = std::max(col_widths[st_index + 6],
-                                      bias_dt_str.size() + 2);
+  col_widths[col++] = std::max(col_widths[col], std::to_string(m).size() + 2);
+  col_widths[col++] = std::max(col_widths[col], std::to_string(k).size() + 2);
+  col_widths[col++] = std::max(col_widths[col], std::to_string(n).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.iters).size() + 2);
+  std::string dt_str = datatypeToStr(config.dt[0]) + ":" + datatypeToStr(
+                         config.dt[1]) + ":" + datatypeToStr(config.dt[2]);
+  col_widths[col++] = std::max(col_widths[col], dt_str.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.isBiasEnabled).size() + 2);
+  std::string bias_dt_str = config.isBiasEnabled ? datatypeToStr(
+                              config.bias_dt) : "";
+  col_widths[col++] = std::max(col_widths[col], bias_dt_str.size() + 2);
   std::string postop_str;
   if (!config.post_ops.empty()) {
     postop_str += postOpsToStr(config.post_ops[0]);
@@ -253,51 +297,49 @@ void cal_column_width(const MatmulConfig &config,
       postop_str += ":" + postOpsToStr(config.post_ops[j]);
     }
   }
-  col_widths[st_index + 7] = std::max(col_widths[st_index + 7],
-                                      postop_str.size() + 2);
-  col_widths[st_index + 8] = std::max(col_widths[st_index + 8],
-                                      config.kernel_name.size() + 2);
-  col_widths[st_index + 9] = std::max(col_widths[st_index + 9],
-                                      std::to_string(config.warmup_iters).size() + 2);
-  col_widths[st_index + 10] = std::max(col_widths[st_index + 10],
-                                       std::to_string((int)stat[0].total_time_ms).size() + 2);
+  col_widths[col++] = std::max(col_widths[col], postop_str.size() + 2);
+  col_widths[col++] = std::max(col_widths[col], config.kernel_name.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.isTransA).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.isTransB).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.warmup_iters).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string((int)stat[0].total_time_ms).size() + 2);
   std::ostringstream gflops_ss;
   gflops_ss << std::fixed << std::setprecision(2) << gflops_val;
-  col_widths[st_index + 11] = std::max(col_widths[st_index + 11],
-                                       gflops_ss.str().size() + 2);
+  col_widths[col++] = std::max(col_widths[col], gflops_ss.str().size() + 2);
   if (isPipeline) {
     std::ostringstream perc_ss;
     perc_ss << std::fixed << std::setprecision(2) << percentage << " %";
-    col_widths[st_index + 12] = std::max(col_widths[st_index + 12],
-                                         perc_ss.str().size() + 2);
-    st_index++;
+    col_widths[col++] = std::max(col_widths[col], perc_ss.str().size() + 2);
   }
 #if MEASURE_INDIVIDUAL_TIMINGS
-  std::ostringstream ctx_str, op_create_str, op_exec_str;
-  double ctx_creation_percentage = (stat[0].context_creation_ms /
-                                    stat[0].total_time_ms) * 100;
-  double op_creation_percentage = (stat[0].operator_creation_ms /
-                                   stat[0].total_time_ms) * 100;
-  double op_execution_percentage = (stat[0].operator_execution_ms /
-                                    stat[0].total_time_ms) * 100;
-  ctx_str << std::fixed << std::setprecision(2)
-          << stat[0].context_creation_ms << " (" << ctx_creation_percentage << " %)";
-  op_create_str << std::fixed << std::setprecision(2)
-                << stat[0].operator_creation_ms << " (" << op_creation_percentage << " %)";
-  op_exec_str << std::fixed << std::setprecision(2)
-              << stat[0].operator_execution_ms << " (" << op_execution_percentage << " %)";
-  col_widths[st_index + 12] = std::max(col_widths[st_index + 12],
-                                       ctx_str.str().size() + 2);
-  col_widths[st_index + 13] = std::max(col_widths[st_index + 13],
-                                       op_create_str.str().size() + 2);
-  col_widths[st_index + 14] = std::max(col_widths[st_index + 14],
-                                       op_exec_str.str().size() + 2);
+  if (!isLOWOHA) {
+    std::ostringstream ctx_str, op_create_str, op_exec_str;
+    double ctx_creation_percentage = (stat[0].context_creation_ms /
+                                      stat[0].total_time_ms) * 100;
+    double op_creation_percentage = (stat[0].operator_creation_ms /
+                                     stat[0].total_time_ms) * 100;
+    double op_execution_percentage = (stat[0].operator_execution_ms /
+                                      stat[0].total_time_ms) * 100;
+    ctx_str << std::fixed << std::setprecision(2)
+            << stat[0].context_creation_ms << " (" << ctx_creation_percentage << " %)";
+    op_create_str << std::fixed << std::setprecision(2)
+                  << stat[0].operator_creation_ms << " (" << op_creation_percentage << " %)";
+    op_exec_str << std::fixed << std::setprecision(2)
+                << stat[0].operator_execution_ms << " (" << op_execution_percentage << " %)";
+    col_widths[col++] = std::max(col_widths[col], ctx_str.str().size() + 2);
+    col_widths[col++] = std::max(col_widths[col], op_create_str.str().size() + 2);
+    col_widths[col++] = std::max(col_widths[col], op_exec_str.str().size() + 2);
+  }
 #endif
 }
 
 void fill_row(const MatmulConfig &config,
               const std::vector<TimingStats> &stat, std::vector<std::string> &row,
-              int layer_num, double percentage,
+              const bool isLOWOHA, int layer_num, double percentage,
               bool isPipeline) {
   size_t m = config.m;
   size_t k = ((layer_num == 0) ? config.k : config.n_values[layer_num - 1]);
@@ -326,6 +368,8 @@ void fill_row(const MatmulConfig &config,
   }
   row.push_back(postop_str);
   row.push_back(config.kernel_name);
+  row.push_back(config.isTransA ? "true" : "false");
+  row.push_back(config.isTransB ? "true" : "false");
   row.push_back(std::to_string(config.warmup_iters));
   std::ostringstream total_time_ss;
   total_time_ss << std::fixed << std::setprecision(2) <<
@@ -340,25 +384,27 @@ void fill_row(const MatmulConfig &config,
     row.push_back(perc_ss.str());
   }
 #if MEASURE_INDIVIDUAL_TIMINGS
-  std::ostringstream ctx_str, op_create_str, op_exec_str;
-  double ctx_creation_percentage = (stat[layer_num].context_creation_ms /
-                                    stat[layer_num].total_time_ms) * 100;
-  double op_creation_percentage = (stat[layer_num].operator_creation_ms /
-                                   stat[layer_num].total_time_ms) * 100;
-  double op_execution_percentage = (stat[layer_num].operator_execution_ms /
-                                    stat[layer_num].total_time_ms) * 100;
-  ctx_str << std::fixed << std::setprecision(2)
-          << stat[layer_num].context_creation_ms << " ("
-          << ctx_creation_percentage << " %)";
-  op_create_str << std::fixed << std::setprecision(2)
-                << stat[layer_num].operator_creation_ms << " ("
-                << op_creation_percentage << " %)";
-  op_exec_str << std::fixed << std::setprecision(2)
-              << stat[layer_num].operator_execution_ms << " ("
-              << op_execution_percentage << " %)";
-  row.push_back(ctx_str.str());
-  row.push_back(op_create_str.str());
-  row.push_back(op_exec_str.str());
+  if (!isLOWOHA) {
+    std::ostringstream ctx_str, op_create_str, op_exec_str;
+    double ctx_creation_percentage = (stat[layer_num].context_creation_ms /
+                                      stat[layer_num].total_time_ms) * 100;
+    double op_creation_percentage = (stat[layer_num].operator_creation_ms /
+                                     stat[layer_num].total_time_ms) * 100;
+    double op_execution_percentage = (stat[layer_num].operator_execution_ms /
+                                      stat[layer_num].total_time_ms) * 100;
+    ctx_str << std::fixed << std::setprecision(2)
+            << stat[layer_num].context_creation_ms << " ("
+            << ctx_creation_percentage << " %)";
+    op_create_str << std::fixed << std::setprecision(2)
+                  << stat[layer_num].operator_creation_ms << " ("
+                  << op_creation_percentage << " %)";
+    op_exec_str << std::fixed << std::setprecision(2)
+                << stat[layer_num].operator_execution_ms << " ("
+                << op_execution_percentage << " %)";
+    row.push_back(ctx_str.str());
+    row.push_back(op_create_str.str());
+    row.push_back(op_exec_str.str());
+  }
 #endif
 }
 
@@ -368,7 +414,7 @@ void log_pipeline_results(
 
   outfile << std::fixed << std::setprecision(2);
   outfile <<
-          "Layer Number, M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
+          "Layer Number, M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
@@ -407,13 +453,15 @@ void log_pipeline_results(
       }
     }
     outfile << ", ";
-    outfile << config.kernel_name << ", " <<
-            config.warmup_iters << ", " << total_time;
+    outfile << config.kernel_name << ", "
+            << config.isTransA << ", "
+            << config. isTransB << ", "
+            << config.warmup_iters << ", " << total_time;
     outfile << std::endl;
 
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
-      write_each_config_result(config, stat, outfile, i, percentage, true);
+      write_each_config_result(config, stat, outfile, false, i, percentage, true);
     }
   }
 }
@@ -425,6 +473,7 @@ void print_pipeline_results(
   // Dynamic column widths calculation
   std::vector<std::string> headers = {
     "Layer", "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
+    "isTransA", "isTransB",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS", "%_of_Total"
   };
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -446,9 +495,13 @@ void print_pipeline_results(
       total_time += stat[i].total_time_ms;
     }
     // Update column widths for summary and per-layer rows
-    col_widths[0] = std::max(col_widths[0], std::string("Summary").size() + 2);
-    col_widths[1] = std::max(col_widths[1], std::to_string(config.m).size() + 2);
-    col_widths[2] = std::max(col_widths[2], std::to_string(config.k).size() + 2);
+    int col = 0;
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::string("Summary").size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.m).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.k).size() + 2);
     // N field (colon separated)
     std::string n_str;
     if (!config.n_values.empty()) {
@@ -457,18 +510,17 @@ void print_pipeline_results(
         n_str += ":" + std::to_string(config.n_values[i]);
       }
     }
-    col_widths[3] = std::max(col_widths[3], n_str.size() + 2);
-    col_widths[4] = std::max(col_widths[4],
-                             std::to_string(config.iters).size() + 2);
-    std::string dt_str = datatypeToStr(config.dt[0]) + ":" +
-                         datatypeToStr(config.dt[1]) + ":" +
-                         datatypeToStr(config.dt[2]);
-    col_widths[5] = std::max(col_widths[5], dt_str.size() + 2);
-    col_widths[6] = std::max(col_widths[6],
-                             std::to_string(config.isBiasEnabled).size() + 2);
-    std::string bias_dt_str = config.isBiasEnabled ?
-                              datatypeToStr(config.bias_dt) : "";
-    col_widths[7] = std::max(col_widths[7], bias_dt_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col], n_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.iters).size() + 2);
+    std::string dt_str = datatypeToStr(config.dt[0]) + ":" + datatypeToStr(
+                           config.dt[1]) + ":" + datatypeToStr(config.dt[2]);
+    col_widths[col++] = std::max(col_widths[col], dt_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.isBiasEnabled).size() + 2);
+    std::string bias_dt_str = config.isBiasEnabled ? datatypeToStr(
+                                config.bias_dt) : "";
+    col_widths[col++] = std::max(col_widths[col], bias_dt_str.size() + 2);
     std::string postop_str;
     if (!config.post_ops.empty()) {
       postop_str += postOpsToStr(config.post_ops[0]);
@@ -476,29 +528,33 @@ void print_pipeline_results(
         postop_str += ":" + postOpsToStr(config.post_ops[j]);
       }
     }
-    col_widths[8] = std::max(col_widths[8], postop_str.size() + 2);
-    col_widths[9] = std::max(col_widths[9], config.kernel_name.size() + 2);
-    col_widths[10] = std::max(col_widths[10],
-                              std::to_string(config.warmup_iters).size() + 2);
-    col_widths[11] = std::max(col_widths[11],
-                              std::to_string((int)total_time).size() + 2);
-    col_widths[12] = std::max(col_widths[12],
-                              std::string("GFLOPS").size() + 2);
-    col_widths[13] = std::max(col_widths[13],
-                              std::string("%_of_Total").size() + 2);
+    col_widths[col++] = std::max(col_widths[col], postop_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col], config.kernel_name.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.isTransA).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.isTransB).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.warmup_iters).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string((int)total_time).size() + 2);
+    col_widths[col++] = std::max(col_widths[col], std::string("GFLOPS").size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::string("%_of_Total").size() + 2);
 #if MEASURE_INDIVIDUAL_TIMINGS
-    col_widths[14] = std::max(col_widths[14],
-                              std::string("Ctx_Creation(ms_%)").size() + 2);
-    col_widths[15] = std::max(col_widths[15],
-                              std::string("Op_Creation(ms_%)").size() + 2);
-    col_widths[16] = std::max(col_widths[16],
-                              std::string("Op_Execution(ms_%)").size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::string("Ctx_Creation(ms_%)").size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::string("Op_Creation(ms_%)").size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::string("Op_Execution(ms_%)").size() + 2);
 #endif
     // Per-layer rows
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
       int st_index = 1;
-      cal_column_width(config, stat, col_widths, st_index, i, percentage, true);
+      cal_column_width(config, stat, col_widths, st_index, false, i, percentage,
+                       true);
     }
   }
 
@@ -552,6 +608,8 @@ void print_pipeline_results(
     }
     summary_row.push_back(postop_str);
     summary_row.push_back(config.kernel_name);
+    summary_row.push_back(std::to_string(config.isTransA));
+    summary_row.push_back(std::to_string(config.isTransB));
     summary_row.push_back(std::to_string(config.warmup_iters));
     std::ostringstream total_time_oss;
     total_time_oss << std::fixed << std::setprecision(2) << total_time;
@@ -569,7 +627,7 @@ void print_pipeline_results(
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
       std::vector<std::string> layer_row;
-      fill_row(config, stat, layer_row, i, percentage, true);
+      fill_row(config, stat, layer_row, false, i, percentage, true);
       print_row(layer_row);
     }
   }
@@ -577,17 +635,19 @@ void print_pipeline_results(
 
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile,  const global_options &options) {
+  std::ostream &outfile,  const global_options &options, const bool isLOWOHA) {
 
   outfile << std::fixed << std::setprecision(2);
   if (options.ndims > 2) {
     outfile << "BS, ";
   }
   outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, Warmup iterations, Total time (ms) (all iters), GFLOPS";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
-  outfile <<
-          ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
+  if (!isLOWOHA) {
+    outfile <<
+            ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
+  }
 #endif
   outfile << std::endl;
 
@@ -598,26 +658,29 @@ void log_results(
     if (options.ndims > 2) {
       outfile << config.bs << ", ";
     }
-    write_each_config_result(config, stat, outfile);
+    write_each_config_result(config, stat, outfile, isLOWOHA);
   }
 }
 
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options) {
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA) {
 
   // Dynamic column widths calculation
   std::vector<std::string> headers = {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
+    "isTransA", "isTransB",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS"
   };
   if (options.ndims > 2) {
     headers.insert(headers.begin(), "BS");
   }
 #if MEASURE_INDIVIDUAL_TIMINGS
-  headers.push_back("Ctx_Creation(ms_%)");
-  headers.push_back("Op_Creation(ms_%)");
-  headers.push_back("Op_Execution(ms_%)");
+  if (!isLOWOHA) {
+    headers.push_back("Ctx_Creation(ms_%)");
+    headers.push_back("Op_Creation(ms_%)");
+    headers.push_back("Op_Execution(ms_%)");
+  }
 #endif
   std::vector<size_t> col_widths(headers.size());
   // Initialize with header lengths
@@ -628,12 +691,14 @@ void print_results(
   for (const auto &result : matmul_results) {
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
+    // Column index offset for dynamic table formatting.
+    // For BMM (ndims > 2), the first column is batch size (BS), so st_index is incremented.
     int st_index = 0;
     if (options.ndims > 2) {
       col_widths[0] = std::max(col_widths[0], std::to_string(config.bs).size() + 2);
       st_index++;
     }
-    cal_column_width(config, stat, col_widths, st_index);
+    cal_column_width(config, stat, col_widths, st_index, isLOWOHA);
   }
 
   // Helper lambda to print a row for the table
@@ -657,7 +722,7 @@ void print_results(
     if (options.ndims > 2) {
       row.push_back(std::to_string(config.bs));
     }
-    fill_row(config, stat, row);
+    fill_row(config, stat, row, isLOWOHA);
     print_row(row);
   }
 }

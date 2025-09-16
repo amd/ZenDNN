@@ -118,7 +118,7 @@ struct lowoha_post_op {
   std::vector<postop> postop_;
 };
 
-void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
+status_t matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                    float alpha, float beta, int M, int N, int K, bool transA, bool transB, int lda,
                    int ldb, int ldc, data_types &dtypes, lowoha_post_op post_op,
                    const lowoha_quantization_params_t &quant_params = lowoha_quantization_params_t(),

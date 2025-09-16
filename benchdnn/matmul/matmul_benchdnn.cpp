@@ -51,7 +51,6 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
     auto matmul_operator = matmul_operator_t()
                            .set_name("matmul")
                            .set_context(matmul_context)
-                           .set_forced_kernel(cfg.kernel_name)
                            .create();
 
     if (! matmul_operator.check()) {
@@ -78,7 +77,7 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
       }
     }
     matmul_operator.set_output("matmul_output", output_tensor);
-    status = matmul_operator.execute();
+    status = matmul_operator.set_forced_kernel(cfg.kernel_name).execute();
     if (status == status_t::success) {
       testlog_info("<",matmul_operator.get_name(),">",
                    " operator execution successful.");
@@ -116,7 +115,6 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
     auto matmul_operator = matmul_operator_t()
                            .set_name("matmul")
                            .set_context(matmul_context)
-                           .set_forced_kernel(cfg.kernel_name)
                            .create();
     auto end_operator_creation = std::chrono::high_resolution_clock::now();
 
@@ -145,6 +143,7 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
       }
     }
     status = matmul_operator.set_output("matmul_output", output_tensor)
+             .set_forced_kernel(cfg.kernel_name)
              .execute();
     auto end_operator_execution = std::chrono::high_resolution_clock::now();
 
@@ -232,6 +231,9 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
             break;
           }
         }
+        if (skip) {
+          break;
+        }
       }
       if (skip) {
         log_benchmark_failure(cfg);
@@ -288,6 +290,9 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
                                    (end_total - start_total).count());
 #endif
       }
+      if (skip) {
+        continue;
+      }
 
 #if !MEASURE_INDIVIDUAL_TIMINGS
       // Store total time for each layer
@@ -310,7 +315,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const global_options &options) {
+          const global_options &options, const bool isLOWOHA) {
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
   if (!infile.is_open()) {
@@ -321,12 +326,27 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   bool isPipeline = false;
   inputParser(infile, matmulConfig, isPipeline, options);
 
-  std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> matmul_results;
-  // Run the matmul benchmark with the provided configurations
-  int status = matmul_benchdnn(matmulConfig, matmul_results, options);
-  if (status != OK) {
-    testlog_error("Matmul benchmark failed.");
+  if (isLOWOHA && isPipeline) {
+    testlog_error("Error: LOWOHA and pipeline mode are not compatible.");
     return NOT_OK;
+  }
+
+  std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> matmul_results;
+  if (!isLOWOHA) {
+    // Run the matmul benchmark with the provided configurations
+    int status = matmul_benchdnn(matmulConfig, matmul_results, options);
+    if (status != OK) {
+      testlog_error("Matmul benchmark failed.");
+      return NOT_OK;
+    }
+  }
+  else {
+    // Run the LOWOHA benchmark with the provided configurations
+    int status = matmul_lowoha_benchdnn(matmulConfig, matmul_results, options);
+    if (status != OK) {
+      testlog_error("LOWOHA Matmul benchmark failed.");
+      return NOT_OK;
+    }
   }
 
   if (isPipeline) {
@@ -344,7 +364,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   }
   else {
     // Print results to console for each configuration
-    print_results(matmul_results, std::cout, options);
+    print_results(matmul_results, std::cout, options, isLOWOHA);
 
     // Export results to CSV file
     std::ofstream outfile(out_filename);
@@ -352,7 +372,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
       return 1;
     }
-    log_results(matmul_results, outfile, options);
+    log_results(matmul_results, outfile, options, isLOWOHA);
     outfile.close();
   }
 

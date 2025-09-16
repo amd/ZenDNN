@@ -35,7 +35,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
       // Create input tensor with contigious layout.
       auto input_tensor = tensor_factory.uniform_dist_tensor({k, n},
                           dt,
-                          1.0, "reorder_input");
+                          1.0, "reorder_input", cfg.isTransB);
 
       // Reorder context creation with backend aocl.
       auto reorder_context = reorder_context_t()
@@ -95,12 +95,12 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
       if (options.ndims > 2) {
         weights_tensor = tensor_factory.uniform_dist_tensor({cfg.bs, k, n},
                          dt,
-                         1.0, "weights_" + std::to_string(i));
+                         1.0, "weights_" + std::to_string(i), cfg.isTransB);
       }
       else {
         weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
                          dt,
-                         1.0, "weights_" + std::to_string(i));
+                         1.0, "weights_" + std::to_string(i), cfg.isTransB);
       }
     }
     weights.push_back(weights_tensor);
@@ -128,12 +128,12 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
   if (options.ndims > 2) {
     input = tensor_factory.uniform_dist_tensor({cfg.bs, cfg.m, cfg.k},
             cfg.dt[0],
-            1.0, "matmul_input");
+            1.0, "matmul_input", cfg.isTransA);
   }
   else {
     input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
             cfg.dt[0],
-            1.0, "matmul_input");
+            1.0, "matmul_input", cfg.isTransA);
   }
   input.set_name("matmul_input");
   return OK;

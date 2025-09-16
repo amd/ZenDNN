@@ -46,6 +46,7 @@ int main(int argc, char **argv) {
   std::string op, input_file;
   benchdnn::global_options options;
   options.ndims = 2;
+  bool isLOWOHA = false;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     // Parse operator argument
@@ -58,6 +59,9 @@ int main(int argc, char **argv) {
     }
     else if (arg.find("--ndims=") == 0) {
       options.ndims = std::stoi(arg.substr(8));
+    }
+    else if (arg.find("--lowoha") == 0) {
+      isLOWOHA = true;
     }
     else {
       commonlog_error("Unknown argument: ", arg);
@@ -88,7 +92,7 @@ int main(int argc, char **argv) {
   // Dispatch to the appropriate benchmark based on operator type
   if (op == "matmul") {
     benchdnn::matmul::bench(in_filename, out_filename,
-                            options); ///< Run matmul benchmark
+                            options, isLOWOHA); ///< Run matmul benchmark
   }
   else if (op == "reorder") {
     benchdnn::reorder::bench(in_filename, out_filename); ///< Run reorder benchmark

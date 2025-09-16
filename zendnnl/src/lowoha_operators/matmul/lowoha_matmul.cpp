@@ -229,7 +229,7 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
 }
 
 
-void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
+status_t matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                    float alpha, float beta, int M, int N, int K,
                    bool transA, bool transB, int lda, int ldb, int ldc,
                    data_types &dtypes, lowoha_post_op post_op,
@@ -239,12 +239,12 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
 
   if (!src || !weight || !dst) {
     log_error("Null pointer input to matmul_direct");
-    return;
+    return status_t::failure;
   }
 
   if (M <= 0 || N <= 0 || K <= 0 || Batch_A <= 0 || Batch_B <= 0) {
     log_error("Invalid matrix dimensions/Batch size");
-    return;
+    return status_t::failure;
   }
 
   if (quant_params.src_scale.buff || quant_params.wei_scale.buff ||
@@ -252,7 +252,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
       quant_params.src_zp.buff || quant_params.wei_zp.buff ||
       quant_params.dst_zp.buff) {
     log_error("Quantization parameters are not supported in LOWOHA matmul_direct yet");
-    return;
+    return status_t::failure;
   }
 
   const bool is_f32_src  = (dtypes.src == data_type_t::f32);
@@ -262,22 +262,22 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
 
   if ((!is_f32_src && !is_bf16_src) || (!is_f32_out && !is_bf16_out)) {
     log_error("Unsupported data type combination");
-    return;
+    return status_t::failure;
   }
 
   if (bias) {
     log_error("Bias is not supported in LOWOHA matmul_direct");
-    return;
+    return status_t::failure;
   }
 
   if (post_op.postop_.size()) {
     log_error("Post-op is not supported in LOWOHA matmul_direct");
-    return;
+    return status_t::failure;
   }
 
   if (std::max(Batch_A, Batch_B) % std::min(Batch_A, Batch_B) != 0) {
     log_error("Broadcasting is not compatible with given Batch_A and Batch_B");
-    return;
+    return status_t::failure;
   }
 
   const char trans_input  = transA ? 't' : 'n';
@@ -381,6 +381,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                             dtypes, use_blis);
     }
   }
+  return status_t::success;
 }
 
 } // namespace lowoha

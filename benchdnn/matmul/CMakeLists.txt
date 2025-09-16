@@ -17,7 +17,8 @@
 set(matmul_sources
 matmul_benchdnn.cpp
 matmul_utils.cpp
-matmul_tensor_factory.cpp)
+matmul_tensor_factory.cpp
+matmul_lowoha.cpp)
 
 add_library(matmul_benchdnn STATIC ${matmul_sources})
 
