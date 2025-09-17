@@ -26,9 +26,6 @@ if(ZENDNNL_BUILD_GTEST)
 
   message(DEBUG "building gtests...")
 
-  # Option to include AI gtests
-  option(ZENDNNL_BUILD_AI_GTESTS "Build AI-specific Google Tests" ON)
-
   set(gtests_sources
     gtest_main.cpp
     gtest_utils.cpp

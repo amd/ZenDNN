@@ -20,6 +20,15 @@ include(ZenDnnlOptions)
 if(ZENDNNL_BUILD_GTEST)
   message(DEBUG "${ZENDNNL_MSG_PREFIX}Configurig GTEST...")
 
+  # Option to include AI gtests
+  option(ZENDNNL_BUILD_AI_GTESTS "Build AI-specific Google Tests" ON)
+
+  if(ZENDNNL_BUILD_AI_GTESTS)
+    message(STATUS "AI gtests will be included in the build")
+  else()
+    message(STATUS "AI gtests will be excluded from the build")
+  endif()
+
   list(APPEND GTEST_CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
 
   message(DEBUG "${ZENDNNL_MSG_PREFIX}GTEST_CMAKE_ARGS=${GTEST_CMAKE_ARGS}")
