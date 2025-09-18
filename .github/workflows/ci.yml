@@ -9,17 +9,23 @@ on:
 
 jobs:
   jira-id-check:
+    if: ${{ github.event_name == 'pull_request' }}
     name: Check JIRA ID in Commits
     uses: AMD-Zenai/ZenDNN/.github/workflows/jira_check.yml@main
 
   license-header-check:
+    if: ${{ github.event_name == 'pull_request' }}
     name: Check License Headers
     uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
 
   zendnn_build:
     runs-on: zendnn_presub_server
     needs: [jira-id-check, license-header-check]
-    if: ${{ needs.jira-id-check.outputs.result == 'success' && needs.license-header-check.outputs.result == 'success' }}
+    if: |
+      (github.event_name == 'push') ||
+      (github.event_name == 'pull_request' &&
+       needs.jira-id-check.outputs.result == 'success' &&
+       needs.license-header-check.outputs.result == 'success')
     steps:
       - name: basic_debug
         run: |
@@ -33,7 +39,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
           path: ZenDNN
           fetch-depth: 1
           clean: true
