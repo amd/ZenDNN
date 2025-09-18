@@ -16,6 +16,7 @@
 
 #include "lowoha_matmul.hpp"
 #include "matmul_kernel_bf16_avx512.hpp"
+#include "lowoha_matmul_utils.hpp"
 #include <cmath>
 #include <cstring>
 #if ZENDNNL_DEPENDS_LIBXSMM
@@ -135,28 +136,43 @@ static inline void run_blis(char        layout,
                             char        mem_format_a,
                             char        mem_format_b,
                             const void *A, const void *B, void *C,
-                            const data_types &dtypes) {
+                            const data_types &dtypes,
+                            const lowoha_params &post_op, const void *bias) {
+
+  // Create aocl_post_op structure for bias and post-ops
+#if ZENDNNL_DEPENDS_AOCLDLP
+  dlp_metadata_t *aocl_po = create_dlp_post_op(post_op, bias, dtypes, N);
+#else
+  aocl_post_op *aocl_po = create_blis_post_op(post_op, bias, dtypes, N);
+#endif
+
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     aocl_gemm_f32f32f32of32(layout,transA,transB,M,N,K,alpha,
                             static_cast<const float *>(A),lda,mem_format_a,
                             static_cast<const float *>(B),ldb,mem_format_b,
-                            beta,static_cast<float *>(C),ldc,nullptr);
+                            beta,static_cast<float *>(C),ldc,aocl_po);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
     aocl_gemm_bf16bf16f32obf16(layout,transA,transB,M,N,K,alpha,
                                static_cast<const int16_t *>(A),lda,mem_format_a,
                                static_cast<const int16_t *>(B),ldb,mem_format_b,
-                               beta,static_cast<int16_t *>(C),ldc,nullptr);
+                               beta,static_cast<int16_t *>(C),ldc,aocl_po);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
     aocl_gemm_bf16bf16f32of32(layout,transA,transB,M,N,K,alpha,
                               static_cast<const int16_t *>(A),lda,mem_format_a,
                               static_cast<const int16_t *>(B),ldb,mem_format_b,
-                              beta,static_cast<float *>(C),ldc,nullptr);
+                              beta,static_cast<float *>(C),ldc,aocl_po);
   }
   else {
     log_info("Data type not supported");
   }
+  // Clean up aocl_post_op structure
+#if ZENDNNL_DEPENDS_AOCLDLP
+  cleanup_dlp_post_op(aocl_po, post_op);
+#else
+  cleanup_blis_post_op(aocl_po, post_op);
+#endif
 }
 
 #if ZENDNNL_DEPENDS_ONEDNN
@@ -326,7 +342,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            void *C, int ldc,
                            data_types &dtypes,
                            zendnnl::ops::matmul_algo_t kernel,
-                           char mem_format_a, char mem_format_b) {
+                           char mem_format_a, char mem_format_b,
+                           const lowoha_params &post_op, const void *bias) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
       log_info("Using libxsmm kernel");
@@ -335,10 +352,10 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
   }
 #endif
 
-  log_info("Using BLIS/AOCL kernel");
+  apilog_info("Using BLIS/AOCL kernel");
   run_blis(layout,transA,transB,M,N,K,alpha,beta,
-           lda,ldb,ldc,mem_format_a,mem_format_b,
-           A,B,C,dtypes);
+            lda,ldb,ldc,mem_format_a,mem_format_b,
+            A,B,C,dtypes,post_op,bias);
   return;
 
 //   TODO: To implement native AVX512 BF16 kernel
@@ -357,27 +374,26 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N,
                                int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                                void *C, int ldc, data_types &dtypes, int batch_count,
-                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride) {
-
+                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride, size_t dst_stride,
+                               const lowoha_params &post_op, const void *bias) {
 
 #if ZENDNNL_DEPENDS_AOCLDLP
+  dlp_metadata_t *metadata_array = create_dlp_post_op(post_op, bias, dtypes, N);
   md_t m_ = M;
   md_t n_ = N;
   md_t k_ = K;
   md_t lda_ = lda;
   md_t ldb_ = ldb;
   md_t ldc_ = ldc;
-  dlp_metadata_t *metadata_array = nullptr;
   md_t group_size = batch_count;
 #else
+  aocl_post_op *metadata_array = create_blis_post_op(post_op, bias, dtypes, N);
   dim_t m_ = M;
   dim_t n_ = N;
   dim_t k_ = K;
   dim_t lda_ = lda;
   dim_t ldb_ = ldb;
   dim_t ldc_ = ldc;
-  aocl_post_op *metadata_array = nullptr;
   dim_t group_size = batch_count;
 #endif
 
@@ -446,9 +462,16 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
     for (int b = 0; b < batch_count; ++b) {
       matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
                             a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
-                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b);
+                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b, post_op, bias);
     }
   }
+
+  // Clean up aocl_post_op structure
+#if ZENDNNL_DEPENDS_AOCLDLP
+  cleanup_dlp_post_op(metadata_array, post_op);
+#else
+  cleanup_blis_post_op(metadata_array, post_op);
+#endif
 }
 
 inline const void *get_matrix_block(const void *base, int row_start,
@@ -595,16 +618,6 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     return status_t::failure;
   }
 
-  if (bias) {
-    log_error("Bias is not supported in LOWOHA matmul_direct");
-    return status_t::failure;
-  }
-
-  if (params.postop_.size()) {
-    log_error("Post-op is not supported in LOWOHA matmul_direct");
-    return status_t::failure;
-  }
-
   if (std::max(Batch_A, Batch_B) % std::min(Batch_A, Batch_B) != 0) {
     log_error("Broadcasting is not compatible with given Batch_A and Batch_B");
     return status_t::failure;
@@ -639,6 +652,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       (kernel >= matmul_algo_t::algo_count)) {
     kernel = matmul_algo_t::aocl_blis;
   }
+  //TODO: Remove (params.postop_.size() > 0 || bias!=nullptr) condition when libxsmm and oneDNN supports bias and post_ops.
+  if(params.postop_.size() > 0 || bias!=nullptr){
+    kernel = matmul_algo_t::aocl_blis;
+  }
 
   if (kernel == matmul_algo_t::batched_sgemm && batch_count > 1) {
     // Use batch GEMM for multiple batches
@@ -649,7 +666,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               src, lda, weight, ldb, beta, dst, ldc,
                               params.dtypes, batch_count,
                               params.mem_format_a, params.mem_format_b,
-                              src_stride, weight_stride, dst_stride);
+                              src_stride, weight_stride, dst_stride,
+                              params, bias);
   }
 #if ZENDNNL_DEPENDS_ONEDNN
   else if (kernel == matmul_algo_t::onednn ||
@@ -732,12 +750,25 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                                            src_type_size);
           void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
+        // Create a modified post_op with offset binary tensor buffers
+        lowoha_params thread_post_op = params;
+        for (auto &po : thread_post_op.postop_) {
+          if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
+            if (po.buff != nullptr) {
+              // Calculate offset based on m_start and data type
+              size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+              size_t row_offset = m_start * N * element_size;
+              po.buff = static_cast<uint8_t*>(const_cast<void*>(po.buff)) + row_offset;
+            }
+          }
+        }
+
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_len, N, K, alpha,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b);
+                                params.mem_format_a, params.mem_format_b, thread_post_op, bias);
         }
       });
     }
@@ -758,12 +789,25 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                                            src_type_size);
           void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
+        // Create a modified post_op with offset binary tensor buffers
+        lowoha_params thread_post_op = params;
+        for (auto &po : thread_post_op.postop_) {
+          if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
+            if (po.buff != nullptr) {
+              // Calculate offset based on m_start and data type
+              size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+              size_t row_offset = m_start * N * element_size;
+              po.buff = static_cast<uint8_t*>(const_cast<void*>(po.buff)) + row_offset;
+            }
+          }
+        }
+
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_len, N, K, alpha,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b);
+                                params.mem_format_a, params.mem_format_b, thread_post_op, bias);
         }
       }
     }
@@ -788,7 +832,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                             src_ptr, lda, weight_ptr, ldb,
                             beta, dst_ptr, ldc,
                             params.dtypes, kernel,
-                            params.mem_format_a, params.mem_format_b);
+                            params.mem_format_a, params.mem_format_b, params, bias);
     }
   }
   return status_t::success;

@@ -17,10 +17,12 @@
 #add_subdirectory(native_kernels)
 
 set(lowoha_matmul_sources
-  lowoha_matmul.cpp)
+  lowoha_matmul.cpp
+  lowoha_matmul_utils.cpp)
 
 set(lowoha_matmul_public_headers
-  lowoha_matmul.hpp)
+  lowoha_matmul.hpp
+  lowoha_matmul_utils.hpp)
 
 set(lowoha_matmul_private_headers
   matmul_kernel_bf16_avx512.hpp)

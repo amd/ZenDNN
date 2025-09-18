@@ -31,23 +31,30 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   alpha    = dist(gen);
   beta     = dist(gen);
 
-  // Control use_LOWOHA and use_LIBXSMM based on test index
+  // Control LOWOHA and LIBXSMM based on test index
   // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
   uint32_t third = total_tests / TEST_PARTITIONS;
 
   if (test_index < third) {
     use_LOWOHA = false;
-    use_LIBXSMM = false;
   }
   else if (test_index < 2 * third) {
     use_LOWOHA = true;
-    use_LIBXSMM = false;
+    algo = matmul_algo_t::aocl_blis;
   }
   else {
     use_LOWOHA = true;
-    use_LIBXSMM = true;
+#if ZENDNNL_DEPENDS_ONEDNN
+    algo = rand() % 2 == 0 ? matmul_algo_t::onednn : matmul_algo_t::libxsmm;
+    if(algo == matmul_algo_t::libxsmm){
+        alpha = 1;
+        beta = 0;
+    }
+#else
     alpha = 1;
     beta = 0;
+    algo = matmul_algo_t::libxsmm;
+#endif
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   output_dtype = dtype_arr[rand() % dtype_size];
@@ -515,7 +522,7 @@ bool Parser::isInteger(const std::string &s) {
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias_tensor, tensor_t &output_tensor,
-                            uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha,
+                            uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha,
                             float beta) {
   try {
 
@@ -581,12 +588,16 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           return status_t::failure;
         }
 
-        // Get tensor data pointers (no bias needed)
+        // Get tensor data pointers
         void *A_data = input_tensor.get_raw_handle_unsafe();
         void *B_data = weight_tensor.get_raw_handle_unsafe();
         void *C_data = output_tensor.get_raw_handle_unsafe();
+        void *bias_data = nullptr;
+        if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::onednn){
+            bias_data = bias_tensor.get_raw_handle_unsafe();
+        }
 
-        // Validate data pointers (no bias validation needed)
+        // Validate data pointers
         if (!A_data || !B_data || !C_data) {
           log_error("LOWOHA: Null data pointer detected");
           return status_t::failure;
@@ -618,14 +629,33 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                  batchB, " M:", M, " N:", N, " K:", K,
                  " alpha:", alpha, " beta:", beta);
 
+        // Create lowoha_post_op structure
         lowoha_params params;
+        params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
 
+        // Add post-ops based on index
+        if (index < po_size) {
+          postop postop_item;
+          postop_item.po_type = po_arr[index].second;
+
+          // For binary operations, set the buffer to binary_tensor
+          if (po_arr[index].second == post_op_type_t::binary_add ||
+              po_arr[index].second == post_op_type_t::binary_mul) {
+            postop_item.buff = binary_tensor.get_raw_handle_unsafe();
+            postop_item.dtype = binary_tensor.get_data_type();
+          } else {
+            postop_item.buff = nullptr; // For element-wise operations
+            postop_item.dtype = out_data_type;
+          }
+
+          params.postop_.push_back(postop_item);
+        }
         status_t status = matmul_direct(
                             'r',  // layout: row-major
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
-                            alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                            alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
                             beta, C_data, ldc,
                             params,
                             batchA, batchB  // Batch_A, Batch_B
@@ -710,7 +740,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weight_tensor,
                                        tensor_t &bias_tensor, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha,
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha,
                                        float beta) {
   try {
     // Default postop relu
@@ -725,8 +755,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                           .set_param("weights", weight_tensor)
                           .set_alpha(alpha)
                           .set_beta(beta);
-
-    if (!use_LOWOHA) {
+    if (!((algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::onednn) && use_LOWOHA)) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);
     }
 

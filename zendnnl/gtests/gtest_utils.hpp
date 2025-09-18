@@ -58,7 +58,7 @@ struct MatmulType {
   float    alpha;
   float    beta;
   bool     use_LOWOHA;
-  bool     use_LIBXSMM;
+  matmul_algo_t algo = matmul_algo_t::none;
   data_type_t source_dtype;
   data_type_t output_dtype;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
@@ -210,7 +210,7 @@ extern std::vector<data_type_t> dtype_arr;
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor, uint32_t index,
-                            tensor_t &binary_tensor, bool use_LOWOHA, float alpha = 1.0f,
+                            tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha = 1.0f,
                             float beta = 0.0f);
 
 /** @fn matmul_forced_ref_kernel_test
@@ -225,7 +225,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha = 1.0f,
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha = 1.0f,
                                        float beta = 0.0f);
 
 /** @fn reorder_kernel_test
