@@ -42,6 +42,16 @@
 #define AI_MATMUL_TOLERANCE_S8 1e-2f
 #define AI_MATMUL_TOLERANCE_DEFAULT 1e-5f
 
+#define AI_MATMUL_REL_TOLERANCE_F32 1e-5f
+#define AI_MATMUL_REL_TOLERANCE_BF16 1e-2f
+#define AI_MATMUL_REL_TOLERANCE_S8 1e-2f
+#define AI_MATMUL_REL_TOLERANCE_DEFAULT 1e-5f
+
+#define AI_MATMUL_EPSILON_F32     1.19e-7
+#define AI_MATMUL_EPSILON_BF16    9.76e-4
+#define AI_MATMUL_EPSILON_S8      9.76e-4
+#define AI_MATMUL_EPSILON_DEFAULT 9.76e-4
+
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
@@ -111,7 +121,13 @@ class AITestUtils {
       size_t max_samples = AI_MAX_VALIDATION_ELEMENTS);
   static bool compare_sampled_tensors(const tensor_t &tensor1,
                                       const tensor_t &tensor2,
-                                      float tolerance = 1e-5f);
+                                      float abs_tolerance = 1e-3f,
+                                      float rel_tolerance = 1e-3f);
+  static bool compare_sampled_tensors_matmul(const tensor_t &test_tensor,
+      const tensor_t &ref_tensor,
+      uint64_t k,
+      float rel_tolerance,
+      float epsilon);
   // Kernel support utilities
   static bool is_aocl_kernel_supported(data_type_t input_dtype,
                                        data_type_t weight_dtype,

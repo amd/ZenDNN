@@ -448,6 +448,43 @@ void AITestUtils::log_tensor_info(const tensor_t &tensor,
   }
   std::cout << ", dtype: " << static_cast<int>(tensor.get_data_type()) <<
             std::endl;
+
+  // Print values for 2D tensors (row-major)
+  if (size_vec.size() == 2) {
+    size_t rows = size_vec[0];
+    size_t cols = size_vec[1];
+    if (tensor.get_data_type() == data_type_t::f32) {
+      const float *data = static_cast<const float *>(tensor.get_raw_handle_const());
+      for (size_t i = 0; i < rows; ++i) {
+        std::cout << "  [";
+        for (size_t j = 0; j < cols; ++j) {
+          std::cout << data[i * cols + j];
+          if (j < cols - 1) {
+            std::cout << ", ";
+          }
+        }
+        std::cout << "]" << std::endl;
+      }
+    }
+    else if (tensor.get_data_type() == data_type_t::bf16) {
+      const bfloat16_t *data = static_cast<const bfloat16_t *>
+                               (tensor.get_raw_handle_const());
+      for (size_t i = 0; i < rows; ++i) {
+        std::cout << "  [";
+        for (size_t j = 0; j < cols; ++j) {
+          std::cout << static_cast<float>(data[i * cols + j]);
+          if (j < cols - 1) {
+            std::cout << ", ";
+          }
+        }
+        std::cout << "]" << std::endl;
+      }
+    }
+    else {
+      std::cout << "  [Tensor value printing not implemented for dtype " <<
+                static_cast<int>(tensor.get_data_type()) << "]" << std::endl;
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -615,33 +652,201 @@ std::vector<size_t> AITestUtils::get_sample_indices(size_t total_elements,
 // Usage:
 //   Used in output validation and test result checks for matmul tests.
 // -----------------------------------------------------------------------------
-bool AITestUtils::compare_sampled_tensors(const tensor_t &tensor1,
-    const tensor_t &tensor2,
-    float tolerance) {
-  if (tensor1.get_nelem() != tensor2.get_nelem()) {
+bool AITestUtils::compare_sampled_tensors(const tensor_t &test_tensor,
+    const tensor_t &ref_tensor,
+    float abs_tolerance,
+    float rel_tolerance) {
+  if (test_tensor.get_nelem() != ref_tensor.get_nelem()) {
     return false;
   }
 
-  if (tensor1.get_data_type() != tensor2.get_data_type()) {
+  if (test_tensor.get_data_type() != ref_tensor.get_data_type()) {
     return false;
   }
 
-  size_t total_elements = tensor1.get_nelem();
+  size_t total_elements = test_tensor.get_nelem();
   auto sample_indices = get_sample_indices(total_elements,
                         AI_MAX_VALIDATION_ELEMENTS);
 
-  if (tensor1.get_data_type() == data_type_t::f32) {
-    const float *data1 = static_cast<const float *>(tensor1.get_raw_handle_const());
-    const float *data2 = static_cast<const float *>(tensor2.get_raw_handle_const());
-
-    for (size_t idx : sample_indices) {
-      float diff = std::abs(data1[idx] - data2[idx]);
-      if (diff > tolerance) {
-        return false;
-      }
+  // Generic comparison for all supported datatypes
+  auto dtype = test_tensor.get_data_type();
+  for (size_t idx : sample_indices) {
+    float v1 = 0.0f, v2 = 0.0f;
+    switch (dtype) {
+    case data_type_t::f32: {
+      const float *data1 = static_cast<const float *>
+                           (test_tensor.get_raw_handle_const());
+      const float *data2 = static_cast<const float *>
+                           (ref_tensor.get_raw_handle_const());
+      v1 = data1[idx];
+      v2 = data2[idx];
+      break;
+    }
+    case data_type_t::bf16: {
+      const bfloat16_t *data1 = static_cast<const bfloat16_t *>
+                                (test_tensor.get_raw_handle_const());
+      const bfloat16_t *data2 = static_cast<const bfloat16_t *>
+                                (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s8: {
+      const int8_t *data1 = static_cast<const int8_t *>
+                            (test_tensor.get_raw_handle_const());
+      const int8_t *data2 = static_cast<const int8_t *>
+                            (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s4: {
+      const int8_t *data1 = static_cast<const int8_t *>
+                            (test_tensor.get_raw_handle_const());
+      const int8_t *data2 = static_cast<const int8_t *>
+                            (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::u8: {
+      const uint8_t *data1 = static_cast<const uint8_t *>
+                             (test_tensor.get_raw_handle_const());
+      const uint8_t *data2 = static_cast<const uint8_t *>
+                             (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s32: {
+      const int32_t *data1 = static_cast<const int32_t *>
+                             (test_tensor.get_raw_handle_const());
+      const int32_t *data2 = static_cast<const int32_t *>
+                             (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    default:
+      // Unknown/unsupported type, treat as mismatch
+      return false;
+    }
+    float diff = std::abs(v1 - v2);
+    float tol = abs_tolerance + rel_tolerance * std::abs(
+                  v2); // PyTorch formula: atol + rtol * |b|
+    if (!(diff <= tol || (std::isnan(diff) && std::isnan(v2)))) {
+      return false;
     }
   }
 
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// compare_sampled_tensors_matmul
+//
+// Compares two tensors by sampling a subset of their elements and checking if
+// the absolute difference for each sampled element is within a calculated bound
+// (abs_bound) plus a relative tolerance, using the logic from compare_tensor_2D_matrix.
+// Returns false if any sampled element pair exceeds the tolerance or if tensor shapes/types mismatch.
+// -----------------------------------------------------------------------------
+bool AITestUtils::compare_sampled_tensors_matmul(const tensor_t &test_tensor,
+    const tensor_t &ref_tensor,
+    uint64_t k,
+    float rel_tolerance,
+    float epsilon) {
+  if (test_tensor.get_nelem() != ref_tensor.get_nelem()) {
+    return false;
+  }
+
+  if (test_tensor.get_data_type() != ref_tensor.get_data_type()) {
+    return false;
+  }
+
+  size_t total_elements = test_tensor.get_nelem();
+  auto sample_indices = get_sample_indices(total_elements,
+                        AI_MAX_VALIDATION_ELEMENTS);
+
+  constexpr int C = 20; // Margin for F32:: tolerance
+  // ToDo: Add P value according to the postop currently, same value is used for all.
+  constexpr int P = 15; // to handle postop accumulation error
+  constexpr int scale_factor = 4; // scale factor
+  float abs_bound = 0.0f;
+  auto dtype = test_tensor.get_data_type();
+  if (dtype == data_type_t::bf16) {
+    abs_bound = k * epsilon;
+  }
+  else {
+    abs_bound = ((C + std::log2(static_cast<float>(k))/scale_factor) * k + P) *
+                epsilon;
+  }
+
+  for (size_t idx : sample_indices) {
+    float v1 = 0.0f, v2 = 0.0f;
+    switch (dtype) {
+    case data_type_t::f32: {
+      const float *data1 = static_cast<const float *>
+                           (test_tensor.get_raw_handle_const());
+      const float *data2 = static_cast<const float *>
+                           (ref_tensor.get_raw_handle_const());
+      v1 = data1[idx];
+      v2 = data2[idx];
+      break;
+    }
+    case data_type_t::bf16: {
+      const bfloat16_t *data1 = static_cast<const bfloat16_t *>
+                                (test_tensor.get_raw_handle_const());
+      const bfloat16_t *data2 = static_cast<const bfloat16_t *>
+                                (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s8: {
+      const int8_t *data1 = static_cast<const int8_t *>
+                            (test_tensor.get_raw_handle_const());
+      const int8_t *data2 = static_cast<const int8_t *>
+                            (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s4: {
+      const int8_t *data1 = static_cast<const int8_t *>
+                            (test_tensor.get_raw_handle_const());
+      const int8_t *data2 = static_cast<const int8_t *>
+                            (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::u8: {
+      const uint8_t *data1 = static_cast<const uint8_t *>
+                             (test_tensor.get_raw_handle_const());
+      const uint8_t *data2 = static_cast<const uint8_t *>
+                             (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    case data_type_t::s32: {
+      const int32_t *data1 = static_cast<const int32_t *>
+                             (test_tensor.get_raw_handle_const());
+      const int32_t *data2 = static_cast<const int32_t *>
+                             (ref_tensor.get_raw_handle_const());
+      v1 = static_cast<float>(data1[idx]);
+      v2 = static_cast<float>(data2[idx]);
+      break;
+    }
+    default:
+      return false;
+    }
+    float abs_err = std::fabs(v2 - v1);
+    float tol = abs_bound + rel_tolerance * std::fabs(v2);
+    if (abs_err > tol) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -1538,8 +1743,36 @@ MatmulParamsAI ai_gtests::ParameterGenerator::create_param(
   param.post_op_config = post_op_config;
   param.expect_success = expect_success;
   static std::atomic<uint64_t> param_counter{0};
-  param.test_name = "param_" + std::to_string(m) + "x" + std::to_string(
-                      n) + "x" + std::to_string(k)
+
+  // Add data type info to param name
+  auto dtype_to_str = [](data_type_t dt) {
+    switch (dt) {
+    case data_type_t::f32:
+      return "f32";
+    case data_type_t::bf16:
+      return "bf16";
+    case data_type_t::s8:
+      return "s8";
+    case data_type_t::s4:
+      return "s4";
+    case data_type_t::u8:
+      return "u8";
+    case data_type_t::s32:
+      return "s32";
+    default:
+      return "unk";
+    }
+  };
+  std::string input_dtype_str = dtype_to_str(AITestUtils::get_input_dtype(combo));
+  std::string weight_dtype_str = dtype_to_str(AITestUtils::get_weight_dtype(
+                                   combo));
+  std::string output_dtype_str = dtype_to_str(AITestUtils::get_output_dtype(
+                                   combo));
+  // Always use the new format for test_name
+  param.test_name = "m" + std::to_string(m) + "_n" + std::to_string(
+                      n) + "_k" + std::to_string(k)
+                    + "_in_" + input_dtype_str + "_wt_" + weight_dtype_str + "_out_" +
+                    output_dtype_str
                     + "_" + post_op_config.config_name + "_" + std::to_string(
                       param_counter.fetch_add(1));
   return param;

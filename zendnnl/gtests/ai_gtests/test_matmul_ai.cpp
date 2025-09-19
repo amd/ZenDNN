@@ -199,6 +199,38 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
     }
   }
 
+  float get_relative_tolerance(data_type_t output_dtype) const {
+    switch (output_dtype) {
+    case data_type_t::f32:
+      return AI_MATMUL_REL_TOLERANCE_F32;
+    case data_type_t::bf16:
+      return AI_MATMUL_REL_TOLERANCE_BF16;
+    case data_type_t::s8:
+      return AI_MATMUL_REL_TOLERANCE_S8;
+    default:
+      return AI_MATMUL_REL_TOLERANCE_DEFAULT;
+    }
+  }
+
+// -----------------------------------------------------------------------------
+// get_epsilon_value
+//
+// Returns the epsilon value for the given data type, used for floating-point comparison.
+// Uses AI_MATMUL_EPSILON_F32, AI_MATMUL_EPSILON_BF16, etc.
+// -----------------------------------------------------------------------------
+  float get_epsilon_value(data_type_t dtype) {
+    switch (dtype) {
+    case data_type_t::f32:
+      return AI_MATMUL_EPSILON_F32;
+    case data_type_t::bf16:
+      return AI_MATMUL_EPSILON_BF16;
+    case data_type_t::s8:
+      return AI_MATMUL_EPSILON_S8;
+    default:
+      return AI_MATMUL_EPSILON_DEFAULT;
+    }
+  }
+
   // -----------------------------------------------------------------------------
   // run_accuracy_test
   //
@@ -276,11 +308,14 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
             << "Reference implementation must succeed for supported data types";
         if (ref_status == status_t::success) {
           // Compare ZenDNNL output with reference implementation
-          float tolerance = get_accuracy_tolerance(output_dtype);
-          bool comparison_result = AITestUtils::compare_sampled_tensors(
-                                     tensors.output, tensors.reference_output, tolerance);
+          float rel_tolerance = get_relative_tolerance(output_dtype);
+          float epsilon = get_epsilon_value(output_dtype);
+          bool comparison_result = AITestUtils::compare_sampled_tensors_matmul(
+                                     tensors.output, tensors.reference_output, params.k, rel_tolerance, epsilon);
           EXPECT_TRUE(comparison_result)
-              << "ZenDNNL output must match reference within tolerance: " << tolerance;
+              << "ZenDNNL output must match reference within abs_bound + rtol*|ref|, where abs_bound (epsilon-based) = "
+              << epsilon
+              << ", rel tolerance: " << rel_tolerance;
         }
       }
     }
