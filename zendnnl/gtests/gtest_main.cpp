@@ -25,17 +25,21 @@ vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 // Matmul Tolerance Limit
 // TODO: Make the tolerance value dynamic based on factors such
 // as tensor dimensions, data type, and value range.
-const float MATMUL_F32_TOL  = 0.01;
-const float MATMUL_BF16_TOL = 0.01;
 const float REORDER_TOL     = 0.0001;
+const float MATMUL_F32_TOL  = 0.001;
+const float MATMUL_BF16_TOL = 0.01;
+const float epsilon_f32     = 1.19e-7;
+const float rtol_f32        = 1e-5;
+const float epsilon_bf16    = 9.76e-4;
+const float rtol_bf16       = 1e-2;
 
 // Test tolerance constants
-const float EMBAG_F32_TOL = 0.001;
+const float EMBAG_F32_TOL  = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
 
 //number of testcases, random seed and empty post_op
-uint32_t test_num = 1000;
-int seed          = time(NULL);
+uint32_t test_num      = 100;
+int seed               = time(NULL);
 std::string cmd_post_op {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */

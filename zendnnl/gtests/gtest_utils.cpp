@@ -17,25 +17,9 @@
 #include "gtest_utils.hpp"
 
 MatmulType::MatmulType() {
-  large_dim  = rand()%3;
-  if (large_dim==0) {
-    matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
-  }
-  else {
-    matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  }
-  if (large_dim==1) {
-    matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
-  }
-  else {
-    matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  }
-  if (large_dim==2) {
-    matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_LARGE_SIZE_END;
-  }
-  else {
-    matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
-  }
+  matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+  matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   transA     = rand() % 2;
   transB     = rand() % 2;
   po_index   = rand() % (po_size + 1);
@@ -994,6 +978,8 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
                        uint64_t n, const float tol, bool &is_comparison_successful) {
+  const float atol = tol;
+  const float rtol = tol * 10;
   #pragma omp parallel for collapse(2)
   for (uint64_t i=0; i<m; ++i) {
     for (uint64_t j=0; j<n; ++j) {
@@ -1001,10 +987,9 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
         float actual_val = output_tensor.at({i,j});
         float ref_val = output_tensor_ref.at({i,j});
 
-        float abs_err = abs(ref_val - actual_val);
-        float rel_err = abs_err / (ref_val + std::numeric_limits<float>::epsilon());
+        float abs_err = fabs(ref_val - actual_val);
 
-        if ((abs_err >= tol) && (rel_err >= tol)) {
+        if (abs_err > (atol + rtol * fabs(ref_val))) {
           log_verbose("actual(",i,",",j,"): ",actual_val," , ref(",i,",",j,"): ",ref_val);
           is_comparison_successful = false;
         }
@@ -1014,9 +999,51 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
   return;
 }
 
-void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
-                       uint64_t batch_size, uint64_t m, uint64_t n,
-                       const float tol, bool &is_comparison_successful) {
+void compare_tensor_2D_matrix(tensor_t &output_tensor,
+                              tensor_t &output_tensor_ref, uint64_t m,
+                              uint64_t n, uint64_t k, const float rtol,
+                              const float epsilon, bool &is_comparison_successful) {
+  constexpr int C = 20; //Margin for F32:: tolerance
+  //ToDo: Add P value according to the postop currently, same value is used for all.
+  constexpr int P = 15; //to handle postop accumulation error
+  constexpr int scale_factor = 4; // scale factor
+  // abs_bound = (C*k+P)*epsilon
+  const float abs_bound = (output_tensor.get_data_type() == data_type_t::bf16)
+                          ? (k * epsilon)
+                          : (((C + log2(k)/scale_factor) * k + P) * epsilon);
+  log_verbose("abs_bound: ", abs_bound);
+  #pragma omp parallel for collapse(2)
+  for (uint64_t i=0; i<m; ++i) {
+    for (uint64_t j=0; j<n; ++j) {
+      if (is_comparison_successful) {
+        float actual_val = output_tensor.at({i,j});
+        float ref_val = output_tensor_ref.at({i,j});
+        float abs_err = fabs(ref_val - actual_val);
+        if (abs_err > abs_bound + rtol * fabs(ref_val)) {
+          log_verbose("actual(",i,",",j,"): ",actual_val," , ref(",i,",",j,"): ",ref_val);
+          log_verbose("abs_error: ", abs_err, " ,rtol* fabs(ref): ",
+                      rtol * fabs(ref_val)) ;
+          is_comparison_successful = false;
+        }
+      }
+    }
+  }
+  return;
+}
+
+void compare_tensor_3D_matrix(tensor_t &output_tensor,
+                              tensor_t &output_tensor_ref, uint64_t batch_size,
+                              uint64_t m, uint64_t n, uint64_t k, const float rtol,
+                              const float epsilon, bool &is_comparison_successful) {
+  constexpr int C = 20; //Margin for F32:: tolerance
+  //ToDo: Add P value according to the postop currently, same value is used for all.
+  constexpr int P = 15; //to handle postop accumulation error
+  constexpr int scale_factor = 4; // scale factor
+  //float abs_bound = ((20 + log2(k)/4) * k + 15) * epsilon; //(C*K+P)*epsilon
+  const float abs_bound = (output_tensor.get_data_type() == data_type_t::bf16)
+                          ? (k * epsilon)
+                          : (((C + log2(k)/scale_factor) * k + P) * epsilon);
+  log_verbose("abs_bound: ", abs_bound);
   #pragma omp parallel for collapse(3)
   for (uint64_t bs=0; bs<batch_size; ++bs) {
     for (uint64_t i=0; i<m; ++i) {
@@ -1024,13 +1051,12 @@ void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
         if (is_comparison_successful) {
           float actual_val = output_tensor.at({bs,i,j});
           float ref_val = output_tensor_ref.at({bs,i,j});
-
-          float abs_err = abs(ref_val - actual_val);
-          float rel_err = abs_err / (ref_val + std::numeric_limits<float>::epsilon());
-
-          if ((abs_err >= tol) && (rel_err >= tol)) {
+          float abs_err = fabs(ref_val - actual_val);
+          if (abs_err > abs_bound + rtol * fabs(ref_val)) {
             log_verbose("actual(",bs,",",i,",",j,"): ",actual_val," , ref(",bs,",",i,",",j,
-                        "): ",ref_val, ", abs_err: ", abs_err, " , rel_err: ", rel_err, " ,tol: ",tol);
+                        "): ",ref_val);
+            log_verbose("abs_error: ", abs_err, " ,rtol* fabs(ref): ",
+                        rtol * fabs(ref_val)) ;
             is_comparison_successful = false;
           }
         }

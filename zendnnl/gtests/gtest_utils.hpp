@@ -49,7 +49,6 @@ using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
 /** @brief Matmul Op Parameters Structure */
 struct MatmulType {
-  uint32_t large_dim;
   uint64_t matmul_m;
   uint64_t matmul_k;
   uint64_t matmul_n;
@@ -100,6 +99,10 @@ extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
 extern const float EMBAG_F32_TOL;
 extern const float EMBAG_BF16_TOL;
+extern const float epsilon_f32;
+extern const float epsilon_bf16;
+extern const float rtol_f32;
+extern const float rtol_bf16;
 extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
@@ -258,14 +261,33 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
                        uint64_t m,
                        uint64_t n, const float tol, bool &is_comparison_successful);
 
-/** @fn compare_tensor_3D
- *  @brief Function to compare two 3D tensor
+/** @fn compare_tensor_2D_matrix
+ *  @brief Function to compare two matrix result after matrix matmul
+ *
+ *  This function compares two 2D tensors representing matrix matmul element by element
+ *  and checks if they are within a specified bound or not.
+ *  Bound is based on error-propagation thoery.
+ *  @return void
  *
  * */
-// ToDO: Replace with comparator operator
-void compare_tensor_3D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
-                       uint64_t batch_size, uint64_t m, uint64_t n,
-                       const float tol, bool &flag);
+void compare_tensor_2D_matrix(tensor_t &output_tensor,
+                              tensor_t &output_tensor_ref, uint64_t m,
+                              uint64_t n, uint64_t k, const float rtol,
+                              const float epsilon, bool &flag);
+
+/** @fn compare_tensor_3D_matrix
+ *  @brief Function to compare two matrix result after batch-matrix matmul
+ *
+ *  This function compares two 3D tensors representing batch-matrix matmul
+ *  element by element and checks if they are within a specified bound or not.
+ *  Bound is based on error-propagation thoery.
+ *  @return void
+ *
+ * */
+void compare_tensor_3D_matrix(tensor_t &output_tensor,
+                              tensor_t &output_tensor_ref, uint64_t batch_size,
+                              uint64_t m, uint64_t n, uint64_t k, const float rtol,
+                              const float epsilon, bool &flag);
 
 /** @fn get_aligned_size
  *  @brief Function to align the given size_ according to the alignment

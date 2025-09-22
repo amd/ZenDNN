@@ -225,7 +225,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                  .set_data_type(data_type_t::f32)
                                  .set_storage()
                                  .create();
-  float *accum_buff_f32        = (float*)accum_tensor.get_raw_handle_unsafe();
+  float *accum_buff_f32        = (float *)accum_tensor.get_raw_handle_unsafe();
   if (accum_buff_f32 == nullptr) {
     log_error("accum_buff_f32 can not have align allocation");
     return status_t::unimplemented;

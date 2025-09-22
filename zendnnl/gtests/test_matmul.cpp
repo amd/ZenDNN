@@ -79,18 +79,18 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
  */
 TEST_P(TestMatmul,F32_F32) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::f32, 1.0f, transB);
+                            data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::f32, 1.0f, transA);
+                            data_type_t::f32, 2.0, transA);
 
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
 
   status_t status         = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor,
@@ -105,8 +105,9 @@ TEST_P(TestMatmul,F32_F32) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
+                             epsilon_f32, is_test_successful);
+
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -119,17 +120,17 @@ TEST_P(TestMatmul,F32_F32) {
  */
 TEST_P(TestMatmul, BF16_F32) {
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 1.0f, transB);
+                            data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 1.0f, transA);
+                            data_type_t::bf16, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
   status_t status         = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor,
                             po_index,
@@ -141,8 +142,8 @@ TEST_P(TestMatmul, BF16_F32) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
+                             epsilon_f32, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -156,17 +157,17 @@ TEST_P(TestMatmul, BF16_F32) {
 TEST_P(TestMatmul, BF16_BF16) {
   // TODO: Extend support for test cases with a wider range of values.
   auto weights            = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::bf16, 1.0f, transB);
+                            data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
-                            data_type_t::bf16, 1.0f, transA);
+                            data_type_t::bf16, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 1.0f);
+                            data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 1.0f);
+                            data_type_t::bf16, 2.0);
   status_t status         = matmul_kernel_test(input_tensor, weights, bias,
                             output_tensor,
                             po_index,
@@ -178,8 +179,8 @@ TEST_P(TestMatmul, BF16_BF16) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+                             epsilon_bf16, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -210,17 +211,17 @@ TEST_P(TestMatmul,F32_F32_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::f32, 1.0f, transB);
+                            stride_wt, data_type_t::f32, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::f32, 1.0f, transA);
+                            stride_in, data_type_t::f32, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
@@ -236,8 +237,8 @@ TEST_P(TestMatmul,F32_F32_Stride) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
+                             epsilon_f32, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -268,17 +269,17 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::bf16, 1.0f, transB);
+                            stride_wt, data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::bf16, 1.0f, transA);
+                            stride_in, data_type_t::bf16, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 1.0f);
+                            data_type_t::f32, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
@@ -294,8 +295,8 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_F32_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
+                             epsilon_f32, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -326,17 +327,17 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
     stride_in[1] += stride_in_inc;
   }
   auto weights            = tensor_factory.uniform_dist_strided_tensor({k, n},
-                            stride_wt, data_type_t::bf16, 1.0f, transB);
+                            stride_wt, data_type_t::bf16, 2.0, transB);
   auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
-                            stride_in, data_type_t::bf16, 1.0f, transA);
+                            stride_in, data_type_t::bf16, 2.0, transA);
   auto binary_tensor      = (po_index < po_arr.size() &&
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 1.0f) : tensor_t();
+                                data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 1.0f);
+                            data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 1.0f);
+                            data_type_t::bf16, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
@@ -352,8 +353,8 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D(output_tensor, output_tensor_ref, m, n, MATMUL_BF16_TOL,
-                      is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+                             epsilon_bf16, is_test_successful);
   }
 
   EXPECT_TRUE(is_test_successful);
