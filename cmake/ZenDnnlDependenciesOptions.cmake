@@ -16,7 +16,7 @@
 include_guard(GLOBAL)
 include(CMakeDependentOption)
 
-set(ZENDNNL_DEPENDS_AMDBLIS ON CACHE BOOL "Add AMD BLIS as a dependency")
+set(ZENDNNL_DEPENDS_AOCLDLP ON CACHE BOOL "Add AOCL DLP as a dependency")
 set(ZENDNNL_DEPENDS_ONEDNN  OFF CACHE BOOL "Add ONEDNN as a dependency")
 
 set(ZENDNNL_DEPENDS_AOCLUTILS ON
@@ -24,8 +24,8 @@ set(ZENDNNL_DEPENDS_AOCLUTILS ON
 set(ZENDNNL_DEPENDS_JSON ON
   CACHE BOOL "Use JSON script for configuration" FORCE)
 
-cmake_dependent_option(ZENDNNL_DEPENDS_AOCLDLP "Add AOCL_DLP as a dependency" OFF
-  "ZENDNNL_DEPENDS_AMDBLIS" ON)
+cmake_dependent_option(ZENDNNL_DEPENDS_AMDBLIS "Add AMDBLIS as a dependency" OFF
+  "ZENDNNL_DEPENDS_AOCLDLP" ON)
 
 cmake_dependent_option(ZENDNNL_LOCAL_AMDBLIS "use local AMDBLIS" OFF
   "ZENDNNL_DEPENDS_AMDBLIS" OFF)

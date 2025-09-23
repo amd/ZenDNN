@@ -181,11 +181,6 @@ if(ZENDNNL_LIB_BUILD_SHARED)
 
 endif()
 
-# Propagate backend compile defs to shared library
-if (ZENDNNL_DEPENDS_AOCLDLP)
-  target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLDLP=1)
-endif()
-
 # create top level include file
 prolog_header_file(${zendnnl_inc_file})
 

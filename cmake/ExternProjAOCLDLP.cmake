@@ -45,19 +45,18 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
         BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
         INSTALL_COMMAND cmake --build . --config release --target install)
     else()
-      message(FATAL_ERROR "Public aocl-dlp is not available yet.")
-      # ExternalProject_ADD(zendnnl-deps-aocldlp
-      #   SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
-      #   BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
-      #   INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
-      #   GIT_REPOSITORY ${AOCLDLP_GIT_REPO}
-      #   GIT_TAG ${AOCLDLP_GIT_TAG}
-      #   GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
-      #   CMAKE_ARGS ${AD_CMAKE_ARGS}
-      #   BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
-      #   INSTALL_COMMAND cmake --build . --config release --target install
-      #   BUILD_BYPRODUCTS <INSTALL_DIR>/lib/libaocl_dlp.a
-      #   UPDATE_DISCONNECTED TRUE)
+      message(DEBUG "${ZENDNNL_MSG_PREFIX}Will download AOCL-DLP with tag ${AOCLDLP_GIT_TAG}")
+      ExternalProject_ADD(zendnnl-deps-aocldlp
+        SOURCE_DIR "${AOCLDLP_ROOT_DIR}"
+        BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/aocldlp"
+        INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/deps/aocldlp"
+        GIT_REPOSITORY ${AOCLDLP_GIT_REPO}
+        GIT_TAG ${AOCLDLP_GIT_TAG}
+        GIT_PROGRESS ${AOCLDLP_GIT_PROGRESS}
+        CMAKE_ARGS ${AD_CMAKE_ARGS}
+        BUILD_COMMAND cmake --build . --config release --target all -- -j${NPROC}
+        INSTALL_COMMAND cmake --build . --config release --target install
+        UPDATE_DISCONNECTED TRUE)
     endif()
 
     list(APPEND AOCLDLP_CLEAN_FILES "${CMAKE_CURRENT_BINARY_DIR}/aocldlp")

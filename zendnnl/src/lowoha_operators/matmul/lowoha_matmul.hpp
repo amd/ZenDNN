@@ -17,6 +17,7 @@
 #ifndef _LOWOHA_MATMUL_HPP
 #define _LOWOHA_MATMUL_HPP
 
+#include <omp.h>
 #include "operators/matmul/matmul_context.hpp"
 #include "memory/memory_utils.hpp"
 

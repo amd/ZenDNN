@@ -60,15 +60,15 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
     std::vector<int32_t> wei_comp(N,0);
     zp_comp_size = N;
 
-    for (dim_t k = 0; k < K; ++k) {
-      for (dim_t n = 0; n < N; ++n) {
+    for (auto k = 0; k < K; ++k) {
+      for (auto n = 0; n < N; ++n) {
         if (k == 0) {
           wei_comp[n] = int32_t(0);
         }
         wei_comp[n] += wei[wei_s0 * k + wei_s1 * n];
       }
     }
-    for (dim_t n = 0; n < N; ++n) {
+    for (auto n = 0; n < N; ++n) {
       zp_comp[n] = 0 - src_zero_point * wei_comp[n];
     }
   }
@@ -81,8 +81,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
     zp_comp = (int32_t *)aligned_alloc(64, comp_size);
     zp_comp_size = M*N;
 
-    for (dim_t m = 0; m < M; ++m) {
-      for (dim_t k = 0; k < K; ++k) {
+    for (auto m = 0; m < M; ++m) {
+      for (auto k = 0; k < K; ++k) {
         if (k == 0) {
           src_comp[m] = int32_t(0);
         }
@@ -90,8 +90,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
       }
     }
 
-    for (dim_t m = 0; m < M; ++m) {
-      for (dim_t n = 0; n < N; ++n) {
+    for (auto m = 0; m < M; ++m) {
+      for (auto n = 0; n < N; ++n) {
         zp_comp[m * N + n] = 0 - wei_zero_point * src_comp[m];
       }
     }
@@ -106,8 +106,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
     zp_comp = (int32_t *)aligned_alloc(64, comp_size);
     zp_comp_size = M*N;
     //Src comp
-    for (dim_t m = 0; m < M; ++m) {
-      for (dim_t k = 0; k < K; ++k) {
+    for (auto m = 0; m < M; ++m) {
+      for (auto k = 0; k < K; ++k) {
         if (k == 0) {
           src_comp[m] = int32_t(0);
         }
@@ -115,8 +115,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
       }
     }
 
-    for (dim_t k = 0; k < K; ++k) {
-      for (dim_t n = 0; n < N; ++n) {
+    for (auto k = 0; k < K; ++k) {
+      for (auto n = 0; n < N; ++n) {
         if (k == 0) {
           wei_comp[n] = int32_t(0);
         }
@@ -124,8 +124,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
       }
     }
 
-    for (dim_t m = 0; m < M; ++m) {
-      for (dim_t n = 0; n < N; ++n) {
+    for (auto m = 0; m < M; ++m) {
+      for (auto n = 0; n < N; ++n) {
         zp_comp[m * N + n] = 0 - src_zero_point * wei_comp[n]
                              - wei_zero_point * src_comp[m]
                              + src_zero_point * wei_zero_point * (int)K;

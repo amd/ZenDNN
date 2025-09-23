@@ -148,6 +148,7 @@ status_t matmul_operator_t::validate() {
 
   auto weights      = context.get_param("weights");
   auto weights_size = weights->get_size();
+  auto bias_tensor  = context.get_param("bias");
 
   if (!input || !output) {
     apilog_error("Invalid input or output tensor.");
@@ -253,6 +254,17 @@ status_t matmul_operator_t::validate() {
         apilog_error("Output quant zero supports per tensor quantization");
         return status_t::failure;
       }
+    }
+  }
+  //Hard Force to Reference Kernel if input or weights are F32 whereas bias is BF16
+  if (bias_tensor) {
+    auto bias_dt    = bias_tensor->get_data_type();
+    auto weights_dt = weights->get_data_type();
+    auto input_dt   = input->get_data_type();
+    if (bias_dt == data_type_t::bf16 && (input_dt == data_type_t::f32 ||
+                                         weights_dt == data_type_t::f32)) {
+      log_info("Bias tensor is BF16, forcing reference kernel");
+      forced_kernel = "reference";
     }
   }
   //Hard Force to Reference Kernel if 2D Matrix is broadcasted from user-side
