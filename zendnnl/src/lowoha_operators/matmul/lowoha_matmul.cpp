@@ -15,11 +15,56 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul.hpp"
+#include "matmul_kernel_bf16_avx512.hpp"
 #include <cmath>
 #include <cstring>
 
 namespace zendnnl {
 namespace lowoha {
+
+inline int64_t divup(int64_t x, int64_t y) {
+  return (x + y - 1) / y;
+}
+
+template <class F>
+inline void zendnnl_parallel_for(
+  const int64_t begin,
+  const int64_t end,
+  const int64_t grain_size,
+  const F &f) {
+
+  if (begin >= end) {
+    return;
+  }
+  std::atomic_flag err_flag = ATOMIC_FLAG_INIT;
+  std::exception_ptr eptr;
+  // choose number of tasks based on grain size and number of threads
+  int64_t num_threads = omp_in_parallel() ? 1 : omp_get_max_threads();
+  if (grain_size > 0) {
+    num_threads = std::min(num_threads, divup((end - begin), grain_size));
+  }
+
+  #pragma omp parallel num_threads(num_threads)
+  {
+    int64_t num_threads = omp_get_num_threads();
+    int64_t tid = omp_get_thread_num();
+    int64_t chunk_size = divup((end - begin), num_threads);
+    int64_t begin_tid = begin + tid * chunk_size;
+    if (begin_tid < end) {
+      try {
+        f(begin_tid, std::min(end, chunk_size + begin_tid));
+      }
+      catch (...) {
+        if (!err_flag.test_and_set()) {
+          eptr = std::current_exception();
+        }
+      }
+    }
+  }
+  if (eptr) {
+    std::rethrow_exception(eptr);
+  }
+}
 
 void matmul_direct_native(char layout, char transA, char transB, int M, int N,
                           int K, float alpha, const void *A, int lda,
@@ -50,10 +95,10 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
           b_val = (transB == 'n') ? B_f32[k * ldb + n] : B_f32[n * ldb + k];
         }
         else if (is_bf16_src) {
-          a_val = bfloat16_t::bf16_to_f32_val((transA == 'n') ? A_bf16[m * lda + k] : A_bf16[k * lda +
-                                m]);
-          b_val = bfloat16_t::bf16_to_f32_val((transB == 'n') ? B_bf16[k * ldb + n] : B_bf16[n * ldb +
-                                k]);
+          a_val = bfloat16_t::bf16_to_f32_val((transA == 'n') ? A_bf16[m * lda + k] :
+                                              A_bf16[k * lda + m]);
+          b_val = bfloat16_t::bf16_to_f32_val((transB == 'n') ? B_bf16[k * ldb + n] :
+                                              B_bf16[n * ldb + k]);
         }
 
         acc += a_val * b_val;
@@ -102,6 +147,16 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
       log_info("Unsupported data type combination for BLIS, Redirecting it to native");
       matmul_direct_native(layout, transA, transB, M, N, K, alpha,
                            A, lda, B, ldb, beta, C, ldc, dtypes);
+    }
+  }
+  //TODO: To implement native AVX512 BF16 kernel
+  else if (0) {
+    if (dtypes.src == data_type_t::bf16 &&
+        dtypes.dst == data_type_t::bf16) {
+      matmul_bf16_dispatch(static_cast<const int16_t *>(A),
+                           static_cast<const int16_t *>(B),
+                           static_cast<int16_t *>(C), nullptr /*bias.data()*/,
+                           alpha, beta, M, N, K, lda, ldb, ldc, false);
     }
   }
   else {
@@ -192,8 +247,10 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
     return;
   }
 
-  if (quant_params.src_scale.buff || quant_params.wei_scale.buff || quant_params.dst_scale.buff ||
-      quant_params.src_zp.buff || quant_params.wei_zp.buff || quant_params.dst_zp.buff) {
+  if (quant_params.src_scale.buff || quant_params.wei_scale.buff ||
+      quant_params.dst_scale.buff ||
+      quant_params.src_zp.buff || quant_params.wei_zp.buff ||
+      quant_params.dst_zp.buff) {
     log_error("Quantization parameters are not supported in LOWOHA matmul_direct yet");
     return;
   }
@@ -252,6 +309,39 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
     int threads_per_batch = std::max(1, num_threads / batch_count);
     int M_block = std::max(1, (M + threads_per_batch - 1) / threads_per_batch);
 
+#if ENABLE_ZENDNNL_PARALLEL_FOR
+
+    // Calculate total number of work items (batch_count * number of M blocks)
+    int total_m_blocks = (M + M_block - 1) / M_block;
+    int total_work_items = batch_count * total_m_blocks;
+
+    zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
+      for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        // Convert linear work index back to (batch, m_block) coordinates
+        int b = work_idx / total_m_blocks;
+        int m_block_idx = work_idx % total_m_blocks;
+        int m_start = m_block_idx * M_block;
+        int m_len = std::min(M_block, M - m_start);
+
+        const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
+                                    get_batch_index(b, Batch_A) * src_stride;
+        const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
+                                    get_batch_index(b, Batch_B) * weight_stride;
+        uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+
+        const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
+                                         src_type_size);
+        void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+
+        matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                              m_len, N, K, alpha,
+                              A, lda, weight_ptr, ldb,
+                              beta, C, ldc,
+                              dtypes, use_blis);
+      }
+    });
+#else
+
     #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_count; ++b) {
       for (int m_start = 0; m_start < M; m_start += M_block) {
@@ -274,6 +364,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                               dtypes, use_blis);
       }
     }
+#endif
   }
   else {
     for (int b = 0; b < batch_count; ++b) {
@@ -291,7 +382,6 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
     }
   }
 }
-
 
 } // namespace lowoha
 } // namespace zendnnl

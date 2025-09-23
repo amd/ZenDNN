@@ -22,18 +22,25 @@ set(lowoha_matmul_sources
 set(lowoha_matmul_public_headers
   lowoha_matmul.hpp)
 
+set(lowoha_matmul_private_headers
+  matmul_kernel_bf16_avx512.hpp)
+
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
     PRIVATE ${lowoha_matmul_sources}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+            TYPE HEADERS FILES ${lowoha_matmul_public_headers}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${lowoha_matmul_private_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
     PRIVATE ${lowoha_matmul_sources}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${lowoha_matmul_public_headers})
+            TYPE HEADERS FILES ${lowoha_matmul_public_headers}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${lowoha_matmul_private_headers})
 endif()
 
 # append header files to top level include file

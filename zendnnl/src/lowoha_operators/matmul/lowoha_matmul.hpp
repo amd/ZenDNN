@@ -21,6 +21,8 @@
 #include "operators/matmul/matmul_context.hpp"
 #include "memory/memory_utils.hpp"
 
+#define ENABLE_ZENDNNL_PARALLEL_FOR 1
+
 namespace zendnnl {
 namespace lowoha {
 
