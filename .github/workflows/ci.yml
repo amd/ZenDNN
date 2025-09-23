@@ -1,0 +1,164 @@
+name: zendnn
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  jira-id-check:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: Check JIRA ID in Commits
+    uses: AMD-Zenai/ZenDNN/.github/workflows/jira_check.yml@main
+
+  license-header-check:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: Check License Headers
+    uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
+
+  zendnn_build:
+    runs-on: zendnn_presub_server
+    needs: [jira-id-check, license-header-check]
+    if: |
+      (github.event_name == 'push') ||
+      (github.event_name == 'pull_request' &&
+       needs.jira-id-check.outputs.result == 'success' &&
+       needs.license-header-check.outputs.result == 'success')
+    steps:
+      - name: basic_debug
+        run: |
+            pwd
+            echo "WORKSPACE, $GITHUB_WORKSPACE"
+            echo "HOME,$HOME"
+            ls -al $GITHUB_WORKSPACE
+        shell: bash
+
+      - name: checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+          path: ZenDNN
+          fetch-depth: 1
+          clean: true
+
+      - name: show GITHUB_WORKSPACE
+        run: |
+          echo "WORKSPACE, $GITHUB_WORKSPACE"
+          ls -al $GITHUB_WORKSPACE
+        shell: bash
+
+      - name: show checked out branch for ZenDNN
+        run: |
+          cd ZenDNN
+          pwd
+          git branch --show-current
+        shell: bash
+
+      - name: checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: AMD-Zenai/ZenDNN_tools
+          ref: main
+          token: ${{ secrets.LEPAKSHI_PAT_CLASSIC_NOV8_2025 }}
+          path: ZenDNN_tools
+          clean: true
+
+      - name: show checked out branch for ZenDNN_tools
+        run: |
+          cd ZenDNN_tools
+          pwd
+          git branch --show-current
+        shell: bash
+
+      - name: setup_env
+        run: |
+          mkdir -p BLIS
+          echo "PATH,$PATH"
+          PYTHON_PATH=$(which python)
+          echo "ZENDNN_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "ZENDNN_GCC_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "FBGEMM_INSTALL_PATH=${GITHUB_WORKSPACE}/FBGEMM" >> $GITHUB_ENV
+          echo "ZENDNN_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN" >> $GITHUB_ENV
+          echo "ZENDNN_TOOLS_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN_tools" >> $GITHUB_ENV
+          echo "PYTHON_PATH=${PYTHON_PATH}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: build zendnn
+        run: | 
+          cd ZenDNN
+          cmake -D_GLIBCXX_USE_CXX11_ABI=1 -DBUILD_SHARED_LIBS=ON -DAMDBLIS_TAG=AOCL-Sep2025-b1 -DAMDBLIS_ENABLE_BLAS=ON -DLPGEMM_V5_0=1 -DFBGEMM_ENABLE=1 -DBLIS_API=1 -DCMAKE_BUILD_TYPE=Release -DFBGEMM_BUILD_TESTS=0 -B build .
+          cmake --build build --parallel $(nproc)
+          mkdir -p _out
+          mkdir -p _out/lib
+          mkdir -p _out/tests
+          cp build/libamdZenDNN.so _out/lib/libamdZenDNN.so
+          cp build/third_party/amdblis-build/libblis-mt.so.* _out/lib/
+          cp build/third_party/fbgemm/libfbgemm.so _out/lib/
+          cp -r build/tests/* _out/tests/
+          ls -al _out/lib
+          ls -al _out/tests
+        shell: bash
+
+      - name: build tests
+        run: | 
+          cd ZenDNN
+          bash scripts/zendnn_gcc_env_setup.sh
+          cd ../ZenDNN_tools
+          export FBGEMM_ENABLE=1
+          export ZENDNN_STANDALONE_BUILD=1
+          export ZENDNN_ENABLE_TPP=1
+          sed -i '/sshpass/ s/^/#/' $ZENDNN_TOOLS_GIT_ROOT/scripts/zendnn_build_tests.sh
+          chmod 755 ./scripts/zendnn_build_tests.sh
+          bash ./scripts/zendnn_build_tests.sh gcc
+          echo "Building tests completed"
+        shell: bash
+
+      - name: run tests
+        run: |
+          cd ZenDNN
+          ./scripts/zendnn_gcc_env_setup.sh
+          env
+          cd ../ZenDNN_tools
+          chmod 755 ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh
+          ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh > $GITHUB_WORKSPACE/gcc_output.log 2>&1
+          # Check for the specific string in the log file
+          if grep "No such file or directory" $GITHUB_WORKSPACE/gcc_output.log; 
+          then
+             echo "zendnn gcc tests failed"
+             exit 1
+          else
+             echo "zendnn gcc tests passed"
+          fi
+          echo "Smoke test for GCC is done"
+                                    
+          cd ../ZenDNN
+          #bash -c "source ./scripts/zendnn_gcc_env_setup.sh"
+          export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/ZenDNN/build/:$GITHUB_WORKSPACE/ZenDNN/_out/lib/:$GITHUB_WORKSPACE/ZenDNN/external/googletest/lib:$GITHUB_WORKSPACE/BLIS/lib/LP64
+          chmod 755 ./scripts/runApiTest.sh
+          bash ./scripts/runApiTest.sh > $GITHUB_WORKSPACE/api_output.log 2>&1
+          cat $GITHUB_WORKSPACE/api_output.log
+          # Check for the specific string in the log file
+          if grep "error while loading shared libraries: libamdZenDNN.so" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          elif grep "FAILED" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          else 
+              echo "zendnn api tests passed"
+          fi
+        shell: bash
+
+      - name: clean zendnn
+        if: always()
+        run: | 
+          pwd
+          rm -rf ${GITHUB_WORKSPACE}/BLIS
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN_tools
+        shell: bash
