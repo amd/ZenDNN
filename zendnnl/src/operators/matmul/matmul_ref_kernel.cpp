@@ -19,6 +19,7 @@
 namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
+using namespace zendnnl::common;
 
 inline void read_quant_params(const tensor_t &tensor,
                               scale_and_zero_point_t::quant_t &scale, scale_and_zero_point_t::quant_t &zp) {
@@ -156,7 +157,7 @@ void matmul_ref_kernel_t::store_output(uint64_t nelem, float *accum_buff_f32,
     }
   }
   else if (output_dtype == data_type_t::bf16) {
-    float32_to_bf16_(accum_buff_f32, (int16_t *)output, nelem);
+    bfloat16_t::f32_to_bf16(accum_buff_f32, (int16_t *)output, nelem);
   }
   else {
     for (uint64_t i = 0; i < nelem; ++i) {

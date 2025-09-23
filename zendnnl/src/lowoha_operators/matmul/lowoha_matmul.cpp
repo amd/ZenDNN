@@ -50,9 +50,9 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
           b_val = (transB == 'n') ? B_f32[k * ldb + n] : B_f32[n * ldb + k];
         }
         else if (is_bf16_src) {
-          a_val = bf16_to_float_val((transA == 'n') ? A_bf16[m * lda + k] : A_bf16[k * lda +
+          a_val = bfloat16_t::bf16_to_f32_val((transA == 'n') ? A_bf16[m * lda + k] : A_bf16[k * lda +
                                 m]);
-          b_val = bf16_to_float_val((transB == 'n') ? B_bf16[k * ldb + n] : B_bf16[n * ldb +
+          b_val = bfloat16_t::bf16_to_f32_val((transB == 'n') ? B_bf16[k * ldb + n] : B_bf16[n * ldb +
                                 k]);
         }
 
@@ -64,9 +64,9 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
         C_f32[m * ldc + n] = alpha * acc + beta * c_val;
       }
       else if (is_bf16_out) {
-        float c_val         = bf16_to_float_val(C_bf16[m * ldc + n]);
+        float c_val         = bfloat16_t::bf16_to_f32_val(C_bf16[m * ldc + n]);
         float result        = alpha * acc + beta * c_val;
-        C_bf16[m * ldc + n] = float_to_bf16_val(result);
+        C_bf16[m * ldc + n] = bfloat16_t::f32_to_bf16_val(result);
       }
     }
   }

@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "bfloat16.hpp"
+#include <cstring>
+#include <immintrin.h>
 
 namespace zendnnl {
 namespace common {
@@ -57,8 +59,69 @@ bfloat16_t::operator int() const {
   return int(fp32bf16_t{raw_bits_}.fp32);
 }
 
-bfloat16_t& bfloat16_t::operator=(float f) {
+bfloat16_t &bfloat16_t::operator=(float f) {
   return (*this) = bfloat16_t(f);
+}
+
+float bfloat16_t::bf16_to_f32_val(int16_t bf16_val) {
+  int32_t inter_temp = *((int16_t *) &bf16_val);
+  inter_temp = inter_temp << 16;
+  float float_value = 0.0;
+  memcpy(&float_value, &inter_temp, sizeof(int32_t));
+  return float_value;
+}
+
+int16_t bfloat16_t::f32_to_bf16_val(float val) {
+  uint32_t temp;
+  std::memcpy(&temp, &val, sizeof(temp));
+  return static_cast<int16_t>(temp >> 16);
+}
+
+__attribute__((target("avx512f")))
+__m256i bfloat16_t::f32_to_bf16_avx512(__m512 val) {
+  // Reinterpret float32 as int32 for bit manipulation
+  __m512i int_val = _mm512_castps_si512(val);
+  // Extract LSB of the BF16 part to determine rounding direction
+  __m512i lsb = _mm512_and_si512(_mm512_srli_epi32(int_val, 16),
+                                 _mm512_set1_epi32(1));
+  // Add rounding bias (0x7FFF + lsb) for round-to-nearest-even
+  __m512i rounding_bias = _mm512_add_epi32(_mm512_set1_epi32(0x7FFF), lsb);
+  // Add bias to original bits
+  __m512i rounded = _mm512_add_epi32(int_val, rounding_bias);
+  // Shift right to extract upper 16 bits (BF16)
+  __m512i bf16 = _mm512_srli_epi32(rounded, 16);
+  // Narrow 32-bit integers to 16-bit integers
+  return _mm512_cvtepi32_epi16(bf16);
+}
+
+__attribute__((target("avx512f")))
+void bfloat16_t::f32_to_bf16(const float *input, int16_t *output,
+                                  size_t count) {
+  size_t i = 0;
+  for (; i + 15 < count; i += 16) {
+    // Load 16 float32 values
+    __m512 val = _mm512_loadu_ps(input + i);
+    // Convert to BF16 with rounding
+    __m256i bf16 = bfloat16_t::f32_to_bf16_avx512(val);
+    // Store 16 BF16 values
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(output + i), bf16);
+  }
+  // Handle remaining elements
+  for (; i < count; ++i) {
+    uint32_t bits;
+    std::memcpy(&bits, &input[i], sizeof(float));
+    uint32_t lsb = (bits >> 16) & 1;
+    uint32_t rounding_bias = 0x7FFF + lsb;
+    bits += rounding_bias;
+    output[i] = static_cast<uint16_t>(bits >> 16);
+  }
+}
+
+void bfloat16_t::bf16_to_f32_buf(const uint16_t *bf16_buf, float *f32_buf,
+                                 int64_t size_) {
+  for (int64_t j = 0; j < size_; ++j) {
+    f32_buf[j] = bfloat16_t::bf16_to_f32_val(static_cast<int16_t>(bf16_buf[j]));
+  }
 }
 
 }//namespace common

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cmath>
 #include <initializer_list>
+#include <immintrin.h>
 
 namespace zendnnl {
 namespace common {
@@ -28,9 +29,9 @@ namespace common {
  */
 union fp32bf16_t {
   /** @brief float constructor */
-  fp32bf16_t(float ff):fp32{ff}{}
+  fp32bf16_t(float ff):fp32{ff} {}
   /** @brief bf16 constructor */
-  fp32bf16_t(uint16_t hf):bf16{0,hf}{}
+  fp32bf16_t(uint16_t hf):bf16{0,hf} {}
 
   float       fp32;      /**< float value */
   uint16_t    bf16[2];   /**< equivalent bf16 value */
@@ -48,7 +49,7 @@ union fp32bf16_t {
  *  @todo Add support for basic arithmetic and comparison operators.
  */
 class bfloat16_t {
-public:
+ public:
   /** @name Constructors, Destructors and Assignment
    */
   /**@{*/
@@ -64,14 +65,14 @@ public:
    * @param f : float32 value.
    * @return A reference to converted bfloat16 value.
    */
-  bfloat16_t& operator=(float f);
+  bfloat16_t &operator=(float f);
 
   /** @brief Convertion constructor from an integer type to bfloat16.
    * @param i : an integer type value.
    */
   template<typename integer_type,
            typename SFINAE = std::enable_if_t<std::is_integral_v<integer_type>>>
-  bfloat16_t(integer_type i): bfloat16_t{float(i)} {
+             bfloat16_t(integer_type i): bfloat16_t{float(i)} {
   }
 
   /** @brief Convertion assignment from an integer type to bfloat16.
@@ -80,7 +81,7 @@ public:
    */
   template<typename integer_type,
            typename SFINAE = std::enable_if_t<std::is_integral_v<integer_type>>>
-  bfloat16_t& operator=(integer_type i) {
+  bfloat16_t &operator=(integer_type i) {
     return (*this) = bfloat16_t(i);
   }
   /**@}*/
@@ -95,7 +96,46 @@ public:
   operator int()   const;
   /**@}*/
 
-private:
+  /**
+   * @brief Convert BF16 value to float32 value using rounding to nearest-even.
+   * @param bf16_val The BF16 value to be converted.
+   * @return The converted float32 value.
+   */
+  static float bf16_to_f32_val(int16_t bf16_val);
+
+  /**
+   * @brief Convert float32 value to bf16 value using rounding to nearest-even.
+   * @param val The float32 value to be converted.
+   * @return The converted bf16 value.
+   */
+  static int16_t f32_to_bf16_val(float val);
+
+  /**
+   * @brief Convert 16 float32 values to 16 BF16 values using AVX512 instructions.
+   * @param val The 16 float32 values packed in an AVX512 register.
+   * @return The converted 16 BF16 values packed in an AVX512 register.
+   */
+  static __m256i f32_to_bf16_avx512(__m512 val);
+
+  /**
+   * @brief Convert an array of float32 values to BF16 values with rounding.
+   * @param input Pointer to the input array of float32 values.
+   * @param output Pointer to the output array of BF16 values.
+   * @param count Number of elements to convert.
+   */
+  static void f32_to_bf16(const float *input, int16_t *output,
+                               size_t count);
+
+  /**
+   * @brief Convert a BF16 buffer to float32.
+   * @param bf16_buf Pointer to the BF16 buffer.
+   * @param f32_buf Pointer to the output float32 buffer.
+   * @param size size of the buffer.
+   */
+  static void bf16_to_f32_buf(const uint16_t *bf16_buf, float *f32_buf,
+                              int64_t size_);
+
+ private:
   uint16_t raw_bits_; /*!< bfloat16 raw bits */
 };
 

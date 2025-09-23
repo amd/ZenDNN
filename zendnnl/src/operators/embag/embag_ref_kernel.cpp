@@ -21,6 +21,7 @@ namespace ops {
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
+using namespace zendnnl::common;
 
 template <typename InType, typename OutType>
 void embag_ref_kernel(
@@ -93,7 +94,7 @@ void embag_ref_kernel(
         if constexpr(input_is_bf16) {
           const uint16_t *bf16_row = reinterpret_cast<const uint16_t *>
                                      (&input[input_offset]);
-          bf16_to_f32_buf(bf16_row, temp_input_row.data(), width);
+          bfloat16_t::bf16_to_f32_buf(bf16_row, temp_input_row.data(), width);
           input_row = temp_input_row.data();
         }
         else {
@@ -142,7 +143,7 @@ void embag_ref_kernel(
     // Convert output back to BF16 if needed
     if constexpr(output_is_bf16) {
       int16_t *bf16_dst = reinterpret_cast<int16_t *>(&dst[dst_offset]);
-      float32_to_bf16_(temp_output_row.data(), bf16_dst, width);
+      bfloat16_t::f32_to_bf16(temp_output_row.data(), bf16_dst, width);
     }
   }
 
