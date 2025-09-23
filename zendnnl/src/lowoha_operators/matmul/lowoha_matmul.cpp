@@ -178,6 +178,7 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
                    float alpha, float beta, int M, int N, int K,
                    bool transA, bool transB, int lda, int ldb, int ldc,
                    data_types &dtypes, lowoha_post_op post_op,
+                   const lowoha_quantization_params_t &quant_params,
                    int Batch_A, int Batch_B) {
   log_info("Executing matmul LOWOHA kernel");
 
@@ -188,6 +189,12 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
 
   if (M <= 0 || N <= 0 || K <= 0 || Batch_A <= 0 || Batch_B <= 0) {
     log_error("Invalid matrix dimensions/Batch size");
+    return;
+  }
+
+  if (quant_params.src_scale.buff || quant_params.wei_scale.buff || quant_params.dst_scale.buff ||
+      quant_params.src_zp.buff || quant_params.wei_zp.buff || quant_params.dst_zp.buff) {
+    log_error("Quantization parameters are not supported in LOWOHA matmul_direct yet");
     return;
   }
 
@@ -226,7 +233,6 @@ void matmul_direct(const void *src, const void *weight, void *dst, void *bias,
   size_t src_stride = (transA ? K *lda : M * lda) * src_type_size;
   size_t weight_stride = (transB ? N *ldb : K * ldb) * src_type_size;
   size_t dst_stride = M * ldc * out_type_size;
-
 
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = omp_get_max_threads();

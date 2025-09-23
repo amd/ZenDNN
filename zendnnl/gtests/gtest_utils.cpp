@@ -516,7 +516,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         data_type_t wei_data_type = weight_tensor.get_data_type();
         data_type_t out_data_type = output_tensor.get_data_type();
         data_type_t bias_data_type = bias.get_data_type();
-        data_types matmul_dtypes = {src_data_type, wei_data_type, out_data_type, bias_data_type};
+        data_types matmul_dtypes;
+        matmul_dtypes.src = src_data_type;
+        matmul_dtypes.wei = wei_data_type;
+        matmul_dtypes.dst = out_data_type;
+        matmul_dtypes.bias = bias_data_type;
+        matmul_dtypes.compute = data_type_t::none;
 
         // Validate data types
         if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16) {
@@ -541,6 +546,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           transA, transB,
           lda, ldb, ldc,
           matmul_dtypes, postop,
+          lowoha_quantization_params_t(),
           batchA, batchB  // Batch_A, Batch_B
         );
       }
