@@ -32,19 +32,30 @@ find_path(AOCLDLP_INCLUDE_DIR
   NO_DEFAULT_PATH)
 
 include(FindPackageHandleStandardArgs)
-find_package_handle_standard_args(AOCLDLP
-  DEFAULT_MSG
-  AOCLDLP_LIB
-  AOCLDLP_ARCHIVE_LIB
-  AOCLDLP_INCLUDE_DIR)
+if(AOCLDLP_LIB-NOTFOUND)
+  find_package_handle_standard_args(AOCLDLP
+    DEFAULT_MSG
+    AOCLDLP_ARCHIVE_LIB
+    AOCLDLP_INCLUDE_DIR)
+else()
+  find_package_handle_standard_args(AOCLDLP
+    DEFAULT_MSG
+    AOCLDLP_LIB
+    AOCLDLP_ARCHIVE_LIB
+    AOCLDLP_INCLUDE_DIR)
+endif()
 
 if(AOCLDLP_FOUND)
-  add_library(aocldlp::aocl_dlp SHARED IMPORTED GLOBAL)
-  set_target_properties(aocldlp::aocl_dlp PROPERTIES
-    IMPORTED_LOCATION ${AOCLDLP_LIB}
-    INTERFACE_INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR})
-  mark_as_advanced(aocldlp::aocl_dlp)
+  if(AOCLDLP_LIB-NOTFOUND)
+    message(STATUS "aocl-dlp shared library not found.")
+  else()
+    add_library(aocldlp::aocl_dlp SHARED IMPORTED GLOBAL)
+    set_target_properties(aocldlp::aocl_dlp PROPERTIES
+      IMPORTED_LOCATION ${AOCLDLP_LIB}
+      INTERFACE_INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR}
+      INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR})
+    mark_as_advanced(aocldlp::aocl_dlp)
+  endif()
 
   add_library(aocldlp::aocl_dlp_static STATIC IMPORTED GLOBAL)
   set_target_properties(aocldlp::aocl_dlp_static PROPERTIES
@@ -52,4 +63,5 @@ if(AOCLDLP_FOUND)
     INTERFACE_INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR}
     INCLUDE_DIRECTORIES ${AOCLDLP_INCLUDE_DIR})
   mark_as_advanced(aocldlp::aocl_dlp_static)
+
 endif()

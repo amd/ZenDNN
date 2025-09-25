@@ -63,8 +63,8 @@ function parse_args() {
                 ZENDNNL_DEPENDS_ONEDNN=1
                 shift
 		;;
-	    --enable-aocldlp )
-                ZENDNNL_DEPENDS_AOCLDLP=1
+	    --enable-amdblis )
+                ZENDNNL_DEPENDS_AMDBLIS=1
                 shift
 		;;
 	    --local-amdblis )
@@ -106,7 +106,7 @@ function parse_args() {
                 echo " --doxygen          : build and install doxygen docs."
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
                 echo " --enable-onednn    : enable onednn."
-                echo " --enable-aocldlp   : enable aocldlp."
+                echo " --enable-amdblis   : enable amdblis (and disable aocldlp which is default)."
                 echo " --local-amdblis    : use local amdblis."
                 echo " --local-aocldlp    : use local aocldlp."
                 echo " --local-aoclutils  : use local aoclutils."
@@ -142,7 +142,7 @@ ZENDNNL_BENCHDNN=0
 ZENDNNL_DOXYGEN=0
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_ONEDNN=0
-ZENDNNL_DEPENDS_AOCLDLP=0
+ZENDNNL_DEPENDS_AMDBLIS=0
 ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLDLP=0
 ZENDNNL_LOCAL_AOCLUTILS=0
@@ -218,9 +218,9 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=OFF"
     fi
 
-    if [ ${ZENDNNL_DEPENDS_AOCLDLP} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AMDBLIS=OFF"
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=ON"
+    if [ ${ZENDNNL_DEPENDS_AMDBLIS} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF"
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AMDBLIS=ON"
     fi
 
     if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
@@ -260,7 +260,7 @@ else
         if [ $? -eq 0 ]; then
             #cmake --build . --target clean
             echo "cmake --build . --target all -j${ZENDNNL_NPROC}"
-            cmake --build . --target all
+            cmake --build . --target all -j${ZENDNNL_NPROC}
         fi
     elif [ ${ZENDNNL_CLEAN} -eq 1 ];then
         cmake ${CMAKE_OPTIONS} ..
@@ -287,7 +287,7 @@ else
             if [ $? -eq 0 ]; then
                 #cmake --build . --target clean
                 echo "cmake --build . --target ${TARGET_OPTIONS} -j${ZENDNNL_NPROC}"
-                cmake --build . --target ${TARGET_OPTIONS}
+                cmake --build . --target ${TARGET_OPTIONS} -j${ZENDNNL_NPROC}
             fi
         else
             echo "no targets given... nothing to do."

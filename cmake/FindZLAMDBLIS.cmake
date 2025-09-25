@@ -37,7 +37,7 @@ find_path(AMDBLIS_INCLUDE_DIR
   PATH_SUFFIXES LP64 amdzen blis)
 
 include(FindPackageHandleStandardArgs)
-if(AMDBLIS_LIB_NOTFOUND)
+if(AMDBLIS_LIB-NOTFOUND)
   find_package_handle_standard_args(ZLAMDBLIS
     DEFAULT_MSG
     AMDBLIS_ARCHIVE_LIB
@@ -51,7 +51,7 @@ else()
 endif()
 
 if(ZLAMDBLIS_FOUND)
-  if(AMDBLIS_LIB_NOTFOUND)
+  if(AMDBLIS_LIB-NOTFOUND)
     message(STATUS "amdblis shared library not found.")
   else()
     add_library(amdblis::amdblis SHARED IMPORTED GLOBAL)
