@@ -42,7 +42,7 @@ macro(zendnnl_add_dependency )
 
   if(${_zad_INCLUDE_ONLY})
     add_library(zendnnl_${_zad_NAME}_deps INTERFACE IMPORTED GLOBAL)
-    add_dependencies(zendnnl_${_zad_NAME}_deps ${_zad_DEPENDS})
+    #add_dependencies(zendnnl_${_zad_NAME}_deps ${_zad_DEPENDS})
 
     set_target_properties(zendnnl_${_zad_NAME}_deps
       PROPERTIES
@@ -50,7 +50,7 @@ macro(zendnnl_add_dependency )
   else()
 
     add_library(zendnnl_${_zad_NAME}_deps STATIC IMPORTED GLOBAL)
-    add_dependencies(zendnnl_${_zad_NAME}_deps ${_zad_DEPENDS})
+    #add_dependencies(zendnnl_${_zad_NAME}_deps ${_zad_DEPENDS})
 
     set_target_properties(zendnnl_${_zad_NAME}_deps
       PROPERTIES
@@ -60,6 +60,8 @@ macro(zendnnl_add_dependency )
   endif()
 
   add_library(${_zad_ALIAS} ALIAS zendnnl_${_zad_NAME}_deps)
+
+  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_${_ZAD_UNAME}_LIB_DIR}/${_zad_ARCHIVE_FILE}")
 endmacro()
 
 macro(zendnnl_add_option )

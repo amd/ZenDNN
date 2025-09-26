@@ -43,5 +43,10 @@ function(epilog_header_file inc_file)
   file(APPEND ${inc_file} ${epilog_banner})
 endfunction()
 
+function(deps_flag_header_file inc_file flag value)
+  set(deps_flag_str "#define ${flag}  ${value}\n\n")
+  file(APPEND ${inc_file} ${deps_flag_str})
+endfunction()
+
 #prolog_header_file(${INC_FILE_NAME})
 #create_header_file(${INC_FILE_NAME} ${INC_SUBDIR} ${INC_FILE_LIST})

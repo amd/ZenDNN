@@ -184,6 +184,24 @@ endif()
 # create top level include file
 prolog_header_file(${zendnnl_inc_file})
 
+if(ZENDNNL_DEPENDS_AMDBLIS)
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AMDBLIS" "1")
+else()
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AMDBLIS" "0")
+endif()
+
+if(ZENDNNL_DEPENDS_AOCLDLP)
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AOCLDLP" "1")
+else()
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_AOCLDLP" "0")
+endif()
+
+if(ZENDNNL_DEPENDS_ONEDNN)
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_ONEDNN" "1")
+else()
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_ONEDNN" "0")
+endif()
+
 add_subdirectory(common)
 add_subdirectory(memory)
 add_subdirectory(operators)

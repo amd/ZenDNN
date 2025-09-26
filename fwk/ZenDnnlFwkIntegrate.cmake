@@ -173,31 +173,8 @@ if(zendnnl_FOUND)
   endif()
 else()
   message(STATUS "(ZENDNNL) ZENDNNL NOT FOUND, will be built as an external project.")
-  message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
 
-  ExternalProject_ADD(fwk_zendnnl
-    SOURCE_DIR  "${ZENDNNL_SOURCE_DIR}"
-    BINARY_DIR  "${ZENDNNL_BINARY_DIR}"
-    CMAKE_ARGS  "${ZNL_CMAKE_ARGS}"
-    BUILD_COMMAND cmake --build . --target all -j
-    INSTALL_COMMAND "")
-
-  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_BINARY_DIR}")
-  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_INSTALL_PREFIX}")
-  set_target_properties(fwk_zendnnl
-    PROPERTIES
-    ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
-
-  # framwork dependencies
-  # add_dependencies(fwk_zendnnl <injected dependency targets>)
-  get_target_property(FWK_ZENDNNL_DEPENDS fwk_zendnnl MANUALLY_ADDED_DEPENDENCIES)
-  if(${FWK_ZENDNNL_DEPENDS} STREQUAL "FWK_ZENDNNL_DEPENDS-NOTFOUND")
-    message(AUTHOR_WARNING "(ZENDNNL) please ensure fwk_zendnnl depends on injected dependencies targets")
-  else()
-    message(STATUS "fwk_zendnnl dependencies : ${FWK_ZENDNNL_DEPENDS}")
-  endif()
-
-  # zendnnl library
+  # declare zendnnl library
   set(ZENDNNL_LIBRARY_INC_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/include")
   set(ZENDNNL_LIBRARY_LIB_DIR "${ZENDNNL_INSTALL_PREFIX}/zendnnl/lib")
 
@@ -218,11 +195,16 @@ else()
     INTERFACE OpenMP::OpenMP_CXX
     INTERFACE ${CMAKE_DL_LIBS})
 
+  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
+
+  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
+
+  # decalre all dependencies
+
   # json dependency
   zendnnl_add_dependency(NAME json
     PATH "${ZENDNNL_INSTALL_PREFIX}/deps/json"
     ALIAS "nlohmann_json::nlohmann_json"
-    DEPENDS fwk_zendnnl
     INCLUDE_ONLY)
 
   target_link_libraries(zendnnl_library INTERFACE nlohmann_json::nlohmann_json)
@@ -234,16 +216,15 @@ else()
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
       LIB_SUFFIX lib64
       ARCHIVE_FILE "libaoclutils.a"
-      ALIAS "au::aoclutils"
-      DEPENDS fwk_zendnnl)
+      ALIAS "au::aoclutils")
+
     target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
 
     zendnnl_add_dependency(NAME aucpuid
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
       LIB_SUFFIX lib64
       ARCHIVE_FILE "libau_cpuid.a"
-      ALIAS "au::au_cpuid"
-      DEPENDS fwk_zendnnl)
+      ALIAS "au::au_cpuid")
 
     target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
 
@@ -251,16 +232,14 @@ else()
     zendnnl_add_dependency(NAME aoclutils
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
       ARCHIVE_FILE "libaoclutils.a"
-      ALIAS "au::aoclutils"
-      DEPENDS fwk_zendnnl)
+      ALIAS "au::aoclutils")
 
     target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
 
     zendnnl_add_dependency(NAME aucpuid
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
       ARCHIVE_FILE "libau_cpuid.a"
-      ALIAS "au::au_cpuid"
-      DEPENDS fwk_zendnnl)
+      ALIAS "au::au_cpuid")
 
     target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
 
@@ -268,17 +247,74 @@ else()
 
   # amdblis dependency
   if (ZENDNNL_DEPENDS_AMDBLIS)
-    if (${ZENDNNL_AMDBLIS_FWK_DIR} STREQUAL "")
       zendnnl_add_dependency(NAME amdblis
         PATH "${ZENDNNL_INSTALL_PREFIX}/deps/amdblis"
         ARCHIVE_FILE "libblis-mt.a"
-        ALIAS "amdblis::amdblis_archive"
-        DEPENDS fwk_zendnnl)
+        ALIAS "amdblis::amdblis_archive")
 
       target_link_libraries(zendnnl_library INTERFACE amdblis::amdblis_archive)
-    endif()
   endif()
 
-  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
+  if (ZENDNNL_DEPENDS_AOCLDLP)
+      zendnnl_add_dependency(NAME aocldlp
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aocldlp"
+        ARCHIVE_FILE "libaocl-dlp.a"
+        ALIAS "aocldlp::aocl_dlp_static")
+
+      target_link_libraries(zendnnl_library INTERFACE aocldlp::aocl_dlp_static)
+  endif()
+
+  if (ZENDNNL_DEPENDS_ONEDNN)
+      zendnnl_add_dependency(NAME onednn
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+        ARCHIVE_FILE "libdnnl.a"
+        ALIAS "DNNL::dnnl")
+
+      target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+  endif()
+
+  message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
+  message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
+
+  ExternalProject_ADD(fwk_zendnnl
+    SOURCE_DIR  "${ZENDNNL_SOURCE_DIR}"
+    BINARY_DIR  "${ZENDNNL_BINARY_DIR}"
+    CMAKE_ARGS  "${ZNL_CMAKE_ARGS}"
+    BUILD_COMMAND cmake --build . --target all -j
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${ZNL_BYPRODUCTS})
+
+  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_BINARY_DIR}")
+  list(APPEND ZENDNNL_CLEAN_FILES "${ZENDNNL_INSTALL_PREFIX}")
+  set_target_properties(fwk_zendnnl
+    PROPERTIES
+    ADDITIONAL_CLEAN_FILES "${ZENDNNL_CLEAN_FILES}")
+
+  # framwork dependencies
+  # add_dependencies(fwk_zendnnl <injected dependency targets>)
+  get_target_property(FWK_ZENDNNL_DEPENDS fwk_zendnnl MANUALLY_ADDED_DEPENDENCIES)
+  if(${FWK_ZENDNNL_DEPENDS} STREQUAL "FWK_ZENDNNL_DEPENDS-NOTFOUND")
+    message(AUTHOR_WARNING "(ZENDNNL) please ensure fwk_zendnnl depends on injected dependencies targets")
+  else()
+    message(STATUS "fwk_zendnnl dependencies : ${FWK_ZENDNNL_DEPENDS}")
+  endif()
+
+  # make library and its dependencies depend on fwk_zendnnl
+  add_dependencies(zendnnl_library fwk_zendnnl)
+  add_dependencies(zendnnl_json_deps fwk_zendnnl)
+  add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
+  add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)
+
+  if(ZENDNNL_DEPENDS_AMDBLIS)
+    add_dependencies(zendnnl_amdblis_deps fwk_zendnnl)
+  endif()
+
+  if(ZENDNNL_DEPENDS_AOCLDLP)
+    add_dependencies(zendnnl_aocldlp_deps fwk_zendnnl)
+  endif()
+
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    add_dependencies(zendnnl_onednn_deps fwk_zendnnl)
+  endif()
 
 endif()

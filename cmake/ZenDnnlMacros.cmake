@@ -182,16 +182,19 @@ endmacro()
 
 # dependency injection
 macro(enable_dependency_injection _dep _fwk_build_option)
-  set(ZENDNNL_${_dep}_FWK_DIR ""
+  set(ZENDNNL_EMPTY_STR "")
+
+  set(ZENDNNL_${_dep}_FWK_DIR ${ZENDNNL_EMPTY_STR}
     CACHE PATH "Fwk ${_dep} install path")
   set(ZENDNNL_${_dep}_INJECTED OFF
     CACHE BOOL "${_dep} injected by fwk" FORCE)
 
   if (${_fwk_build_option})
-    if ("${ZENDNNL_${_dep}_FWK_DIR}" STREQUAL "")
-      message(STATUS "${ZENDNNL_MSG_PREFIX}Framework ${_dep} install path not given, if needed ${_dep} will be built.")
-    else()
+    string(COMPARE NOTEQUAL "${ZENDNNL_${_dep}_FWK_DIR}" "${ZENDNNL_EMPTY_STR}" FWK_DIR_FOUND)
+    if (${FWK_DIR_FOUND})
       set(ZENDNNL_${_dep}_INJECTED ON)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Framework ${_dep} install path not given, if needed ${_dep} will be built.")
     endif()
   endif()
 endmacro()
