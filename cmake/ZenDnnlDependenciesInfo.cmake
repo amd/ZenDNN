@@ -70,3 +70,16 @@ set(ONEDNN_GIT_REPO "https://github.com/oneapi-src/oneDNN.git")
 set(ONEDNN_GIT_TAG "v3.8.1")
 option(ONEDNN_GIT_PROGRESS ON)
 
+# libxsmm repo information
+set(LIBXSMM_ROOT_DIR "${ZENDNNL_DEPS_DIR}/libxsmm"
+  CACHE PATH "LIBXSMM root dir")
+set(LIBXSMM_GIT_REPO "https://github.com/libxsmm/libxsmm.git")
+set(LIBXSMM_GIT_TAG "eedaa03d49a1dffe6048711598bc5a4da5a86008")
+option(LIBXSMM_GIT_PROGRESS ON)
+
+# parlooper repo information
+set(PARLOOPER_ROOT_DIR "${ZENDNNL_DEPS_DIR}/parlooper"
+  CACHE PATH "PARLOOPER root dir")
+set(PARLOOPER_GIT_REPO "https://github.com/libxsmm/parlooper.git")
+set(PARLOOPER_GIT_TAG "630b6396369c2dab1fd96372c054cd1f34c35e7e")
+option(PARLOOPER_GIT_PROGRESS ON)

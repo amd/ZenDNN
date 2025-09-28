@@ -94,6 +94,20 @@ macro(find_build_dependencies  _install_prefix)
     endif()
   endif()
 
+  # find libxsmm
+  if(ZENDNNL_DEPENDS_LIBXSMM)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presencce...")
+    set(LIBXSMM_INSTALL_DIR "${_install_prefix}/deps/libxsmm")
+    find_package(LIBXSMM REQUIRED GLOBAL)
+  endif()
+
+  # find parlooper
+  if(ZENDNNL_DEPENDS_PARLOOPER)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presencce...")
+    set(PARLOOPER_INSTALL_DIR "${_install_prefix}/deps/parlooper")
+    find_package(PARLOOPER REQUIRED GLOBAL)
+  endif()
+
 endmacro()
 
 # dependencies
@@ -175,6 +189,26 @@ macro(find_install_dependencies  _install_prefix)
       endif()
     else()
       message(STATUS "${ZENDNNL_MSG_PREFIX}ONEDNN seems injected, will not check its presence...")
+    endif()
+  endif()
+
+  if(ZENDNNL_DEPENDS_LIBXSMM)
+    if(NOT ZENDNNL_LIBXSMM_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking LIBXSMM presencce...")
+      set(LIBXSMM_INSTALL_DIR "${_install_prefix}/deps/libxsmm")
+      find_package(LIBXSMM REQUIRED GLOBAL)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}LIBXSMM seems injected, will not check its presence...")
+    endif()
+  endif()
+
+  if(ZENDNNL_DEPENDS_PARLOOPER)
+    if(NOT ZENDNNL_PARLOOPER_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking PARLOOPER presencce...")
+      set(PARLOOPER_INSTALL_DIR "${_install_prefix}/deps/parlooper")
+      find_package(PARLOOPER REQUIRED GLOBAL)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}PARLOOPER seems injected, will not check its presence...")
     endif()
   endif()
 

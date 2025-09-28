@@ -21,6 +21,8 @@ if(ZENDNNL_BUILD_DEPS)
   include(ExternProjAOCLDLP)
   include(ExternProjAMDBLIS)
   include(ExternProjONEDNN)
+  include(ExternProjLIBXSMM)
+  include(ExternProjPARLOOPER)
   include(ExternProjGTEST)
 else()
   message(STATUS

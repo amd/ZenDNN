@@ -38,6 +38,8 @@ endif()
 enable_dependency_injection(AMDBLIS ZENDNNL_FWK_BUILD)
 enable_dependency_injection(AOCLDLP ZENDNNL_FWK_BUILD)
 enable_dependency_injection(ONEDNN  ZENDNNL_FWK_BUILD)
+enable_dependency_injection(LIBXSMM  ZENDNNL_FWK_BUILD)
+enable_dependency_injection(PARLOOPER  ZENDNNL_FWK_BUILD)
 
 
 

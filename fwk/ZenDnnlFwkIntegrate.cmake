@@ -132,6 +132,20 @@ zendnnl_add_option(NAME ZENDNNL_DEPENDS_ONEDNN
   CACHE_STRING "zendnnl onednn dependency"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+# set if zendnnl depends on libxsmm, default is OFF.
+zendnnl_add_option(NAME ZENDNNL_DEPENDS_LIBXSMM
+  VALUE OFF
+  TYPE BOOL
+  CACHE_STRING "zendnnl libxsmm dependency"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
+# set if zendnnl depends on parlooper default is OFF.
+zendnnl_add_option(NAME ZENDNNL_DEPENDS_PARLOOPER
+  VALUE OFF
+  TYPE BOOL
+  CACHE_STRING "zendnnl parlooper dependency"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
 # set path of amdblis if amdblis is injected. if the framework
 # does not inject it, set it to "" (empty string).
 zendnnl_add_option(NAME ZENDNNL_AMDBLIS_FWK_DIR
@@ -155,6 +169,23 @@ zendnnl_add_option(NAME ZENDNNL_ONEDNN_FWK_DIR
   TYPE PATH
   CACHE_STRING "zendnnl onednnn framework path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
+
+# set path of libxsmm if libxsmm is injected. if the framework
+# does not inject it, set it to "" (empty string).
+zendnnl_add_option(NAME ZENDNNL_LIBXSMM_FWK_DIR
+  VALUE <libxsmm install path>
+  TYPE PATH
+  CACHE_STRING "zendnnl libxsmm framework path"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
+# set path of parlooper if parlooper is injected. if the framework
+# does not inject it, set it to "" (empty string).
+zendnnl_add_option(NAME ZENDNNL_PARLOOPER_FWK_DIR
+  VALUE <parlooper install path>
+  TYPE PATH
+  CACHE_STRING "zendnnl parlooper framework path"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
 
 # try to find pre-built package
 set(zendnnl_ROOT "${ZENDNNL_INSTALL_PREFIX}/zendnnl")
@@ -273,6 +304,26 @@ else()
       target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
   endif()
 
+  # libxsmm dependency
+  if (ZENDNNL_DEPENDS_LIBXSMM)
+      zendnnl_add_dependency(NAME libxsmm
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/libxsmm"
+        ARCHIVE_FILE "libxsmm.a"
+        ALIAS "libxsmm::libxsmm_archive")
+
+      target_link_libraries(zendnnl_library INTERFACE libxsmm::libxsmm_archive)
+  endif()
+
+  # parlooper dependency
+  if (ZENDNNL_DEPENDS_PARLOOPER)
+      zendnnl_add_dependency(NAME parlooper
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/parlooper"
+        ARCHIVE_FILE "libparlooper.a"
+        ALIAS "parlooper::parlooper_archive")
+
+      target_link_libraries(zendnnl_library INTERFACE parlooper::parlooper_archive)
+  endif()
+
   message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
   message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
 
@@ -315,6 +366,14 @@ else()
 
   if(ZENDNNL_DEPENDS_ONEDNN)
     add_dependencies(zendnnl_onednn_deps fwk_zendnnl)
+  endif()
+
+  if(ZENDNNL_DEPENDS_LIBXSMM)
+    add_dependencies(zendnnl_libxsmm_deps fwk_zendnnl)
+  endif()
+
+  if(ZENDNNL_DEPENDS_PARLOOPER)
+    add_dependencies(zendnnl_parlooper_deps fwk_zendnnl)
   endif()
 
 endif()
