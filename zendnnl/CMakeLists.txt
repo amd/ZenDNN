@@ -17,9 +17,13 @@
 cmake_minimum_required(VERSION 3.25)
 
 # project information
-project(ZENDNNL_LIBRARY)
-#set(ZENDNNL_LIBRARY_VERSION "${PROJECT_VERSION}")
-set(ZENDNNL_LIBRARY_VERSION "1.0.0")
+project(ZENDNNL_LIBRARY VERSION ${ZENDNNL_PROJECT_VERSION})
+
+# library version
+set(ZENDNNL_LIBRARY_VERSION ${PROJECT_VERSION})
+set(ZENDNNL_LIBRARY_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(ZENDNNL_LIBRARY_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(ZENDNNL_LIBRARY_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 # specify c++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -74,8 +78,19 @@ add_subdirectory(src)
 # build gtests
 add_subdirectory(gtests)
 
+# create version file
+set(ZENDNNL_VERSION_FILE "${CMAKE_BINARY_DIR}/zendnnl_version.hpp")
+create_version_header_file(${ZENDNNL_VERSION_FILE}
+  ${ZENDNNL_LIBRARY_VERSION_MAJOR}
+  ${ZENDNNL_LIBRARY_VERSION_MINOR}
+  ${ZENDNNL_LIBRARY_VERSION_PATCH})
+
 # install config file
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/config/zendnnl_user_config.json"
   DESTINATION zendnnl/config)
+
+# install version file
+install(FILES "${ZENDNNL_VERSION_FILE}"
+  DESTINATION zendnnl/include)
 
 

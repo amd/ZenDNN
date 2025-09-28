@@ -18,7 +18,7 @@
 function(prolog_header_file inc_file)
   set(prolog_banner
 "/**************************************************************************
-* Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 * This is a system generated file.
 ****************************************************************************/
 #ifndef _ZENDNNL_HPP_
@@ -39,13 +39,39 @@ function(create_header_file inc_file inc_subdir inc_list)
 endfunction()
 
 function(epilog_header_file inc_file)
-  set(epilog_banner "\n#endif")
+  set(epilog_banner "\n#endif\n")
   file(APPEND ${inc_file} ${epilog_banner})
 endfunction()
 
 function(deps_flag_header_file inc_file flag value)
   set(deps_flag_str "#define ${flag}  ${value}\n\n")
   file(APPEND ${inc_file} ${deps_flag_str})
+endfunction()
+
+function(create_version_header_file inc_file vmajor vminor vpatch)
+  set(prolog_banner
+"/**************************************************************************
+* Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+* This is a system generated file.
+****************************************************************************/
+#ifndef _ZENDNNL_VERSION_HPP_
+#define _ZENDNNL_VERSION_HPP_\n\n")
+  file(APPEND ${inc_file} ${prolog_banner})
+
+  set(version_str "#define ZENDNNL_VERSION  ${vmajor}.${vminor}.${vpatch}\n")
+  file(APPEND ${inc_file} ${version_str})
+
+  set(version_major_str "#define ZENDNNL_VERSION_MAJOR  ${vmajor}\n")
+  file(APPEND ${inc_file} ${version_major_str})
+
+  set(version_minor_str "#define ZENDNNL_VERSION_MINOR  ${vminor}\n")
+  file(APPEND ${inc_file} ${version_minor_str})
+
+  set(version_patch_str "#define ZENDNNL_VERSION_PATCH  ${vpatch}\n")
+  file(APPEND ${inc_file} ${version_patch_str})
+
+  set(epilog_banner "\n#endif\n")
+  file(APPEND ${inc_file} ${epilog_banner})
 endfunction()
 
 #prolog_header_file(${INC_FILE_NAME})

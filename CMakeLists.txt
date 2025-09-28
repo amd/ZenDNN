@@ -25,6 +25,9 @@ project(ZENDNNL VERSION 1.0.0
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 
+# project version
+set(ZENDNNL_PROJECT_VERSION ${PROJECT_VERSION})
+
 # zendnnl module path
 set(ZENDNNL_MODULE_PATH "${ZENDNNL_SOURCE_DIR}/cmake"
   CACHE PATH "zendnnl module path" FORCE)
@@ -46,6 +49,9 @@ endif()
 
 # openmp support
 find_package(OpenMP REQUIRED QUIET)
+
+# ZENDNNL version information
+message(STATUS "${ZENDNNL_MSG_PREFIX}ZENDNNL_PROJECT_VERSION=${ZENDNNL_PROJECT_VERSION}")
 
 # build dependencies
 include(BuildDependencies)
