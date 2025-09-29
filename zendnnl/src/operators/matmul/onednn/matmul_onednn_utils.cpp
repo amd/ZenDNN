@@ -24,42 +24,30 @@ using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 
 #if ZENDNNL_DEPENDS_ONEDNN
-dnnl::memory::dims onednn_utils_t::to_dnnl_dims(tensor_t &zendnnl_tensor) {
-  auto zendnnl_size =  zendnnl_tensor.get_size();
-
-  dnnl::memory::dims dnnl_dims;
-  for (auto &i : zendnnl_size) {
-    dnnl_dims.push_back(int64_t(i));
-  }
-
-  return dnnl_dims;
-}
-
-dnnl::memory::format_tag onednn_utils_t::to_dnnl_format(
-  tensor_t &zendnnl_tensor) {
-
-  auto  zendnnl_dim = zendnnl_tensor.get_dim();
-
-  switch (zendnnl_dim) {
-  case 1:
+dnnl::memory::format_tag onednn_utils_t::to_dnnl_format(std::string tag) {
+  if (tag == "a") {
     return dnnl::memory::format_tag::a;
-  case 2:
-    return dnnl::memory::format_tag::ab;
-  case 3:
-    return dnnl::memory::format_tag::abc;
-  default:
+  }
+  else if (tag == "ab") {
     return dnnl::memory::format_tag::ab;
   }
-
-  return dnnl::memory::format_tag::ab;
+  else if (tag == "ba") {
+    return dnnl::memory::format_tag::ba;
+  }
+  else if (tag == "abc") {
+    return dnnl::memory::format_tag::abc;
+  }
+  else if (tag == "acb") {
+    return dnnl::memory::format_tag::acb;
+  }
+  else {
+    return dnnl::memory::format_tag::any;
+  }
 }
 
 dnnl::memory::data_type onednn_utils_t::to_dnnl_datatype(
-  tensor_t &zendnnl_tensor) {
-
-  auto zendnnl_data_type = zendnnl_tensor.get_data_type();
-
-  switch (zendnnl_data_type) {
+  data_type_t dtype) {
+  switch (dtype) {
   case data_type_t::f32:
     return dnnl::memory::data_type::f32;
   case data_type_t::bf16:
@@ -71,24 +59,29 @@ dnnl::memory::data_type onednn_utils_t::to_dnnl_datatype(
   return dnnl::memory::data_type::f32;
 }
 
-dnnl::memory onednn_utils_t::to_dnnl_tensor(tensor_t &zendnnl_tensor,
+dnnl::memory onednn_utils_t::to_dnnl_tensor(const onednn_tensor_params &params,
     dnnl::engine eng) {
-
-  dnnl::memory::dims tensor_dims       = onednn_utils_t::to_dnnl_dims(
-      zendnnl_tensor);
+  dnnl::memory::dims tensor_dims = params.dims;
+  [[maybe_unused]] dnnl::memory::dims stride_dims = params.strides;
   dnnl::memory::data_type tensor_dtype = onednn_utils_t::to_dnnl_datatype(
-      zendnnl_tensor);
+      params.dtype);
   dnnl::memory::format_tag tensor_tag  = onednn_utils_t::to_dnnl_format(
-      zendnnl_tensor);
+      params.format_tag);
 
-  auto tensor_md  = dnnl::memory::desc(tensor_dims, tensor_dtype, tensor_tag);
+  dnnl::memory::desc tensor_md;
+  if (params.format_tag == "any" || stride_dims.empty()) {
+    tensor_md = dnnl::memory::desc(tensor_dims, tensor_dtype, tensor_tag);
+  }
+  else {
+    tensor_md = dnnl::memory::desc(tensor_dims, tensor_dtype, stride_dims);
+  }
   auto tensor_mem = dnnl::memory(tensor_md, eng);
 
-  void *data_handle = zendnnl_tensor.get_raw_handle_unsafe();
-  tensor_mem.set_data_handle(data_handle);
+  tensor_mem.set_data_handle(params.buffer);
 
   return tensor_mem;
 }
+
 #endif
 
 

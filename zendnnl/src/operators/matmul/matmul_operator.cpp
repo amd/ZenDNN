@@ -51,13 +51,20 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
                                              tensor_size[1] == output_size.at(1))) {
           continue;
         }
+        // OneDNN supports only 3D Buffer Tensor
+        else if (tensor_size.size() == 3 && output_size.size() == 3 &&
+                 (forced_kernel == "onednn" || forced_kernel == "reference") &&
+                 (tensor_size[1] == output_size.at(1) &&
+                  tensor_size[2] == output_size.at(2))) {
+          continue;
+        }
         /** BMM postop check, Work only for 1D, 2D add tensor*/
         //** Todo: support 3D add tensor*/
-        else if (tensor_size.size() == 1 && output_size.size()==3 &&
+        else if (tensor_size.size() == 1 && output_size.size() == 3 &&
                  tensor_size[0] == output_size.at(2) && op.binary_add_params.scale == 1.0) {
           continue;
         }
-        else if (tensor_size.size() == 2 && output_size.size()==3 &&
+        else if (tensor_size.size() == 2 && output_size.size() == 3 &&
                  (tensor_size[0] == output_size.at(1) && tensor_size[1] == output_size.at(2))) {
           continue;
         }
@@ -97,6 +104,13 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
         }
         else if (tensor_size.size() == 2 && output_size.size()==3 &&
                  (tensor_size[0] == output_size.at(1) && tensor_size[1] == output_size.at(2))) {
+          continue;
+        }
+        // OneDNN supports only 3D Buffer Tensor
+        else if (tensor_size.size() == 3 && output_size.size() == 3 &&
+                 (forced_kernel == "onednn" || forced_kernel == "reference") &&
+                 (tensor_size[1] == output_size.at(1) &&
+                  tensor_size[2] == output_size.at(2))) {
           continue;
         }
         else {
@@ -163,13 +177,13 @@ status_t matmul_operator_t::validate() {
 
   bool is_mm_sizes  = (input_size.size() == 2 && weights_size.size() == 2 &&
                        output_size.size() == 2);
-  bool is_bmm_sizes = (((input_size.size() == 3 && (weights_size.size() == 2 ||
-                         weights_size.size() == 3)) ||
-                        ((input_size.size() == 2 || input_size.size() == 3) &&
-                         weights_size.size() == 3)) && output_size.size() == 3);
+  bool is_bmm_sizes = (input_size.size() == 3 && weights_size.size() == 3 &&
+                       output_size.size() == 3);
+  bool is_broadcast_bmm_sizes = ((input_size.size() == 3 &&
+                                  weights_size.size() == 2) || (input_size.size() == 2 &&
+                                      weights_size.size() == 3)) && (output_size.size() == 3);
 
-  //Input and Output Size Check
-  if (!is_mm_sizes && !is_bmm_sizes) {
+  if (!is_mm_sizes && !is_bmm_sizes && !is_broadcast_bmm_sizes) {
     apilog_error("input, weight or output size is not valid");
     return status_t::failure;
   }
@@ -220,6 +234,21 @@ status_t matmul_operator_t::validate() {
       log_error("Invalid matmul kernel algo is set");
       return status_t::failure;
     }
+  }
+
+  // Input and Output Size Check
+  // OneDNN doesn't support broadcasted inputs or weights
+  if (is_broadcast_bmm_sizes && forced_kernel == "onednn") {
+    apilog_error("Input, weight or output size is not valid for onednn");
+    return status_t::failure;
+  }
+
+  if (input_size.size() == 3 && forced_kernel == "onednn" &&
+      (input_size.at(0) != 1 && weights_size.at(0) != 1 &&
+       input_size.at(0) != weights_size.at(0))) {
+    apilog_error("Broadcast incompatible with onednn for batchmatmul. Input size= ",
+                 input_size.at(0), " weight size= ", weights_size.at(0));
+    return status_t::failure;
   }
 
   if (input->is_quantized()) {

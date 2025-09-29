@@ -82,19 +82,16 @@ int main(int argc, char **argv) {
 
   // Creating Random parameters for Matmul
   matmul_test.resize(test_num);
-  #pragma omp parallel for
   for (uint32_t i = 0; i < test_num; ++i) {
     matmul_test[i] = MatmulType(i, test_num);
   }
   // Creating Random parameters for BatchMatmul
   batchmatmul_test.resize(test_num);
-  #pragma omp parallel for
   for (uint32_t i = 0; i < test_num; ++i) {
     batchmatmul_test[i] = BatchMatmulType(i, test_num);
   }
   // Creating Random parameters for Reorder
   reorder_test.resize(test_num);
-  #pragma omp parallel for
   for (uint32_t i = 0; i < test_num; ++i) {
     reorder_test[i] = ReorderType(i, test_num);
   }

@@ -18,10 +18,17 @@
 #define _LOWOHA_MATMUL_HPP
 
 #include <omp.h>
+#include <cmath>
+#include <cstring>
+
 #include "operators/matmul/matmul_context.hpp"
 #include "memory/memory_utils.hpp"
 #include "lowoha_operators/matmul/lru_cache.hpp"
 #include "lowoha_operators/matmul/zendnnl_key.hpp"
+
+#if ZENDNNL_DEPENDS_LIBXSMM
+  #include "libxsmm.h"
+#endif
 
 #define M_FLOPS 6.0
 
@@ -43,16 +50,19 @@ struct postop {
   post_op_type_t po_type;
   void *buff;
   data_type_t dtype;
-  std::vector<int> dims;
+  std::vector<int64_t> dims;
+  float alpha;
+  float beta;
 
   /**
-   * @brief Default constructor for `postop`.
-   *
-   * Initializes the post-op type to `none`, buffer to `nullptr`,
-   * data type to `none`, and creates an empty dims vector.
-   */
+  * @brief Default constructor for `postop`.
+  *
+  * Initializes the post-op type to `none`, buffer to `nullptr`,
+  * data type to `none`, creates an empty dims vector, alpha to `0.0f`,
+  * and beta to `0.0f`.
+  */
   postop() : po_type(post_op_type_t::none), buff(nullptr),
-    dtype(data_type_t::none), dims() {}
+    dtype(data_type_t::none), dims(), alpha(0.0f), beta(0.0f) {}
 };
 
 /**

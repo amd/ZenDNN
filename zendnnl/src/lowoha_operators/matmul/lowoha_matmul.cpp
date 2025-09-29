@@ -14,14 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "lowoha_matmul.hpp"
-#include "matmul_kernel_bf16_avx512.hpp"
 #include "lowoha_matmul_utils.hpp"
-#include <cmath>
-#include <cstring>
-#if ZENDNNL_DEPENDS_LIBXSMM
-  #include "libxsmm.h"
-#endif
 
 #if ZENDNNL_DEPENDS_ONEDNN
   #include "operators/matmul/onednn/matmul_onednn_kernel.hpp"
@@ -80,13 +73,13 @@ inline void zendnnl_parallel_for(
 #if ZENDNNL_DEPENDS_LIBXSMM
 template<typename TA, typename TB, typename TC>
 int libxsmm_gemm(const TA *A, const TB *B, TC *C,
-                  int M, int N, int K,
-                  int lda, int ldb, int ldc,
-                  char transA, char transB,
-                  libxsmm_datatype a_type,
-                  libxsmm_datatype b_type,
-                  libxsmm_datatype c_type,
-                  libxsmm_datatype comp_type) {
+                 int M, int N, int K,
+                 int lda, int ldb, int ldc,
+                 char transA, char transB,
+                 libxsmm_datatype a_type,
+                 libxsmm_datatype b_type,
+                 libxsmm_datatype c_type,
+                 libxsmm_datatype comp_type) {
   libxsmm_bitfield l_flags = 0;
   if (transA == 'T' || transA == 't') {
     l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
@@ -138,13 +131,13 @@ static inline void run_blis(char        layout,
                             char        mem_format_b,
                             const void *A, const void *B, void *C,
                             const data_types &dtypes,
-                            const lowoha_params &post_op, const void *bias) {
+                            const lowoha_params &lowoha_param, const void *bias) {
 
   // Create aocl_post_op structure for bias and post-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *aocl_po = create_dlp_post_op(post_op, bias, dtypes, N);
+  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N);
 #else
-  aocl_post_op *aocl_po = create_blis_post_op(post_op, bias, dtypes, N);
+  aocl_post_op *aocl_po = create_blis_post_op(lowoha_param, bias, dtypes, N);
 #endif
 
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
@@ -170,123 +163,128 @@ static inline void run_blis(char        layout,
   }
   // Clean up aocl_post_op structure
 #if ZENDNNL_DEPENDS_AOCLDLP
-  cleanup_dlp_post_op(aocl_po, post_op);
+  cleanup_dlp_post_op(aocl_po, lowoha_param);
 #else
-  cleanup_blis_post_op(aocl_po, post_op);
+  cleanup_blis_post_op(aocl_po, lowoha_param);
 #endif
 }
 
 #if ZENDNNL_DEPENDS_ONEDNN
 static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
-    int K,
-    float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-    void *C, int ldc, data_types &dtypes, int batch_count) {
+    int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
+    void *C, int ldc, data_types &dtypes, int batchA, int batchB,
+    const void *bias) {
+
+  onednn_utils_t::onednn_matmul_params dnnl_params;
+
+  dnnl_params.src.buffer = const_cast<void *>(A);
+  dnnl_params.weights.buffer = const_cast<void *>(B);
+  dnnl_params.dst.buffer = C;
+
+  dnnl_params.src.dtype = dtypes.src;
+  dnnl_params.weights.dtype = dtypes.wei;
+  dnnl_params.dst.dtype = dtypes.dst;
+
+  if (bias != nullptr)  {
+    dnnl_params.bias.buffer = const_cast<void *>(bias);
+    dnnl_params.bias.dtype = dtypes.bias;
+  }
+
+  int batch_count = std::max(batchA, batchB);
+  if (batch_count == 1) {
+    dnnl_params.src.dims = {M, K};
+    dnnl_params.weights.dims = {K, N};
+    dnnl_params.dst.dims = {M, N};
+    if (bias != nullptr) dnnl_params.bias.dims = {1, N};
+  }
+  else {
+    dnnl_params.src.dims = {batchA, M, K};
+    dnnl_params.weights.dims = {batchB, K, N};
+    dnnl_params.dst.dims = {batch_count, M, N};
+    if (bias != nullptr) dnnl_params.bias.dims = {1, 1, N};
+  }
+
+  dnnl_params.src.is_transposed = (transA == 'n') ? false : true;
+  dnnl_params.weights.is_transposed = (transB == 'n') ? false : true;
+  if (batch_count == 1) {
+    dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
+    dnnl_params.weights.format_tag = (transB == 'n') ? "ab" : "ba";
+    dnnl_params.dst.format_tag = "ab";
+    if (bias != nullptr) {
+      dnnl_params.bias.format_tag = "ab";
+    }
+  }
+  else {
+    dnnl_params.src.format_tag = (transA == 'n') ? "abc" : "acb";
+    dnnl_params.weights.format_tag = (transB == 'n') ? "abc" : "acb";
+    dnnl_params.dst.format_tag = "abc";
+    if (bias != nullptr) {
+      dnnl_params.bias.format_tag = "abc";
+    }
+  }
+
   dnnl::engine eng(dnnl::engine::kind::cpu, 0);
-  dnnl::stream eng_stream(eng);
   std::unordered_map<int, dnnl::memory> matmul_args;
-
-  // Set up dimensions
-  dnnl::memory::dims src_dims = {batch_count, M, K};
-  dnnl::memory::dims weights_dims = {batch_count, K, N};
-  dnnl::memory::dims dst_dims = {batch_count, M, N};
-
-  // Select memory data types
-  dnnl::memory::data_type src_dtype = (dtypes.src == data_type_t::bf16)
-                                      ? dnnl::memory::data_type::bf16
-                                      : dnnl::memory::data_type::f32;
-  dnnl::memory::data_type weights_dtype = (dtypes.src == data_type_t::bf16)
-                                          ? dnnl::memory::data_type::bf16
-                                          : dnnl::memory::data_type::f32;
-  dnnl::memory::data_type dst_dtype = (dtypes.dst == data_type_t::bf16)
-                                      ? dnnl::memory::data_type::bf16
-                                      : dnnl::memory::data_type::f32;
-
-  void *src_ptr = const_cast<void *>(A);
-  void *weights_ptr = const_cast<void *>(B);
-  void *dst_ptr = C;
-
-  auto src_md = dnnl::memory::desc(src_dims, src_dtype,
-                                   (transA == 'n') ? dnnl::memory::format_tag::abc :
-                                   dnnl::memory::format_tag::acb);
-  auto weights_md = dnnl::memory::desc(weights_dims, weights_dtype,
-                                       (transB == 'n') ? dnnl::memory::format_tag::abc :
-                                       dnnl::memory::format_tag::acb);
-  auto dst_md = dnnl::memory::desc(dst_dims, dst_dtype,
-                                   dnnl::memory::format_tag::abc);
-
-  // Create memory objects
-  auto src_mem = dnnl::memory(src_md, eng, src_ptr);
-  auto weights_mem = dnnl::memory(weights_md, eng, weights_ptr);
-  auto dst_mem = dnnl::memory(dst_md, eng, dst_ptr);
-
-  dnnl::post_ops matmul_pops;
   dnnl::primitive_attr matmul_attr;
+  dnnl::post_ops matmul_pops;
+  int post_op_index = 0;
 
   if (alpha != 1.0f) {
     matmul_attr.set_scales_mask(DNNL_ARG_SRC, 0);
-    auto scales_A_m = dnnl::memory({{1}, dnnl::memory::data_type::f32, {1}}, eng,
-    &alpha);
-    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, scales_A_m});
+    auto alpha_mem = dnnl::memory({{1}, dnnl::memory::data_type::f32, {1}}, eng,
+    const_cast<float *>(&alpha));
+    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, alpha_mem});
   }
 
   if (beta != 0.0f) {
     matmul_pops.append_sum(beta);
+    post_op_index++;
   }
 
   if (matmul_pops.len() > 0) {
     matmul_attr.set_post_ops(matmul_pops);
   }
-  // Create primitive descriptor and primitive
-  auto matmul_pd = dnnl::matmul::primitive_desc(eng, src_mem.get_desc(),
-                   weights_mem.get_desc(),
-                   dst_mem.get_desc(), matmul_attr);
-  auto matmul_prim = dnnl::matmul(matmul_pd);
 
-  // Set up arguments
-  matmul_args.insert({DNNL_ARG_SRC, src_mem});
-  matmul_args.insert({DNNL_ARG_WEIGHTS, weights_mem});
-  matmul_args.insert({DNNL_ARG_DST, dst_mem});
-
-  // Execute primitive
-  matmul_prim.execute(eng_stream, matmul_args);
-  eng_stream.wait();
+  matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
+                                         eng);
 }
 #endif
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 static inline int run_libxsmm(char       transA,
-                               char       transB,
-                               int        M, int N, int K,
-                               int        lda, int ldb, int ldc,
-                               const void *A, const void *B, void *C,
-                               const data_types &dtypes) {
+                              char       transB,
+                              int        M, int N, int K,
+                              int        lda, int ldb, int ldc,
+                              const void *A, const void *B, void *C,
+                              const data_types &dtypes) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<float,float,float>(
-      static_cast<const float *>(A),
-      static_cast<const float *>(B),
-      static_cast<float *>(C),
-      M,N,K, lda,ldb,ldc, transA,transB,
-      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
-      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+                      static_cast<const float *>(A),
+                      static_cast<const float *>(B),
+                      static_cast<float *>(C),
+                      M,N,K, lda,ldb,ldc, transA,transB,
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
-      reinterpret_cast<const libxsmm_bfloat16 *>(A),
-      reinterpret_cast<const libxsmm_bfloat16 *>(B),
-      static_cast<float *>(C),
-      M,N,K, lda,ldb,ldc, transA,transB,
-      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+                      reinterpret_cast<const libxsmm_bfloat16 *>(A),
+                      reinterpret_cast<const libxsmm_bfloat16 *>(B),
+                      static_cast<float *>(C),
+                      M,N,K, lda,ldb,ldc, transA,transB,
+                      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
-      reinterpret_cast<const libxsmm_bfloat16 *>(A),
-      reinterpret_cast<const libxsmm_bfloat16 *>(B),
-      reinterpret_cast<libxsmm_bfloat16 *>(C),
-      M,N,K, lda,ldb,ldc, transA,transB,
-      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
+    kernel_status =
+      libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
+        reinterpret_cast<const libxsmm_bfloat16 *>(A),
+        reinterpret_cast<const libxsmm_bfloat16 *>(B),
+        reinterpret_cast<libxsmm_bfloat16 *>(C),
+        M,N,K, lda,ldb,ldc, transA,transB,
+        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
+        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
   }
   return kernel_status;
 }
@@ -346,10 +344,10 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            data_types &dtypes,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b,
-                           const lowoha_params &post_op, const void *bias) {
+                           const lowoha_params &lowoha_param, const void *bias) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-    if(run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes)) {
+    if (run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes)) {
       log_info("Using libxsmm kernel");
       return;
     }
@@ -358,8 +356,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 
   log_info("Using BLIS/AOCL kernel");
   run_blis(layout,transA,transB,M,N,K,alpha,beta,
-            lda,ldb,ldc,mem_format_a,mem_format_b,
-            A,B,C,dtypes,post_op,bias);
+           lda,ldb,ldc,mem_format_a,mem_format_b,
+           A,B,C,dtypes,lowoha_param,bias);
   return;
 
 //   TODO: To implement native AVX512 BF16 kernel
@@ -378,11 +376,13 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N,
                                int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                                void *C, int ldc, data_types &dtypes, int batch_count,
-                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride, size_t dst_stride,
-                               const lowoha_params &post_op, const void *bias) {
+                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
+                               size_t dst_stride,
+                               const lowoha_params &lowoha_param, const void *bias) {
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *metadata_array = create_dlp_post_op(post_op, bias, dtypes, N);
+  dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
+                                   N);
   md_t m_ = M;
   md_t n_ = N;
   md_t k_ = K;
@@ -391,7 +391,8 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   md_t ldc_ = ldc;
   md_t group_size = batch_count;
 #else
-  aocl_post_op *metadata_array = create_blis_post_op(post_op, bias, dtypes, N);
+  aocl_post_op *metadata_array = create_blis_post_op(lowoha_param, bias, dtypes,
+                                 N);
   dim_t m_ = M;
   dim_t n_ = N;
   dim_t k_ = K;
@@ -466,15 +467,16 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
     for (int b = 0; b < batch_count; ++b) {
       matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
                             a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
-                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b, post_op, bias);
+                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b, lowoha_param,
+                            bias);
     }
   }
 
   // Clean up aocl_post_op structure
 #if ZENDNNL_DEPENDS_AOCLDLP
-  cleanup_dlp_post_op(metadata_array, post_op);
+  cleanup_dlp_post_op(metadata_array, lowoha_param);
 #else
-  cleanup_blis_post_op(metadata_array, post_op);
+  cleanup_blis_post_op(metadata_array, lowoha_param);
 #endif
 }
 
@@ -648,6 +650,13 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
+
+  if (kernel == matmul_algo_t::onednn && (Batch_A != 1 && Batch_B != 1 &&
+                                          Batch_A != Batch_B)) {
+    log_error("OneDNN kernel is not supported for the given batch sizes");
+    return status_t::failure;
+  }
+
   if (kernel==matmul_algo_t::dynamic_dispatch) {
     kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
   }
@@ -669,16 +678,18 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     char trans = transB ? 't' : 'n';
     bool blocked_flag = false;
     if (params.dtypes.wei == data_type_t::f32) {
-      blocked_flag = reorderAndCacheWeights<float>(key_, weight, reordered_mem, K, N, ldb,
-                                            'r', trans, mem_format_b,
-                                            aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
-                                            weight_cache_type);
+      blocked_flag = reorderAndCacheWeights<float>(key_, weight, reordered_mem, K, N,
+                     ldb,
+                     'r', trans, mem_format_b,
+                     aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                     weight_cache_type);
     }
     else if (params.dtypes.wei == data_type_t::bf16) {
-      blocked_flag = reorderAndCacheWeights<int16_t>(key_, weight, reordered_mem, K, N, ldb,
-                                            'r', trans, mem_format_b,
-                                            aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
-                                            weight_cache_type);
+      blocked_flag = reorderAndCacheWeights<int16_t>(key_, weight, reordered_mem, K,
+                     N, ldb,
+                     'r', trans, mem_format_b,
+                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
+                     weight_cache_type);
     }
     if (blocked_flag) {
       is_weight_blocked = true;
@@ -691,8 +702,9 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       (kernel >= matmul_algo_t::algo_count)) {
     kernel = matmul_algo_t::aocl_blis;
   }
-  //TODO: Remove (params.postop_.size() > 0 || bias!=nullptr) condition when libxsmm and oneDNN supports bias and post_ops.
-  if(params.postop_.size() > 0 || bias!=nullptr){
+  // TODO: Remove condition, when libxsmm supports bias and post_ops and OneDNN supports post_ops.
+  if (params.postop_.size() > 0 || (bias != nullptr &&
+                                    kernel == matmul_algo_t::libxsmm)) {
     kernel = matmul_algo_t::aocl_blis;
   }
 
@@ -717,7 +729,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                           M, N, K, alpha,
                           src, lda, weight, ldb,
                           beta, dst, ldc,
-                          params.dtypes, batch_count);
+                          params.dtypes, Batch_A, Batch_B, bias);
   }
 #endif
   else if (num_threads > 1 && batch_count > 1) {
@@ -791,25 +803,27 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                                            src_type_size);
           void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-        // Create a modified post_op with offset binary tensor buffers
-        lowoha_params thread_post_op = params;
-        for (auto &po : thread_post_op.postop_) {
-          if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
-            if (po.buff != nullptr) {
-              // Calculate offset based on m_start and data type
-              size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
-              size_t row_offset = m_start * N * element_size;
-              po.buff = static_cast<uint8_t*>(const_cast<void*>(po.buff)) + row_offset;
+          // Create a modified post_op with offset binary tensor buffers
+          lowoha_params thread_lowoha_params = params;
+          for (auto &po : thread_lowoha_params.postop_) {
+            if (po.po_type == post_op_type_t::binary_add ||
+                po.po_type == post_op_type_t::binary_mul) {
+              if (po.buff != nullptr) {
+                // Calculate offset based on m_start and data type
+                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
+                                        uint16_t);
+                size_t row_offset = m_start * N * element_size;
+                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
+              }
             }
           }
-        }
 
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_len, N, K, alpha,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_post_op, bias);
+                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, bias);
         }
       });
     }
@@ -830,25 +844,27 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                                            src_type_size);
           void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-        // Create a modified post_op with offset binary tensor buffers
-        lowoha_params thread_post_op = params;
-        for (auto &po : thread_post_op.postop_) {
-          if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
-            if (po.buff != nullptr) {
-              // Calculate offset based on m_start and data type
-              size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
-              size_t row_offset = m_start * N * element_size;
-              po.buff = static_cast<uint8_t*>(const_cast<void*>(po.buff)) + row_offset;
+          // Create a modified post_op with offset binary tensor buffers
+          lowoha_params thread_lowoha_params = params;
+          for (auto &po : thread_lowoha_params.postop_) {
+            if (po.po_type == post_op_type_t::binary_add ||
+                po.po_type == post_op_type_t::binary_mul) {
+              if (po.buff != nullptr) {
+                // Calculate offset based on m_start and data type
+                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
+                                        uint16_t);
+                size_t row_offset = m_start * N * element_size;
+                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
+              }
             }
           }
-        }
 
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_len, N, K, alpha,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_post_op, bias);
+                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, bias);
         }
       }
     }

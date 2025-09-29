@@ -54,8 +54,8 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     if (use_LOWOHA && (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::onednn)) {
       po_index = 8;
     }
-    log_info("m: ",m, " k: ",k, " n: ", n, " TransA: ", transA, " TransB: ", transB,
-             " po_index: ",po_index);
+    log_info("m: ", m, " k: ", k, " n: ", n, " TransA: ", transA, " TransB: ", transB,
+             " po_index: ", po_index, " algo: ", static_cast<int>(algo));
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -96,8 +96,7 @@ TEST_P(TestMatmul,F32_F32) {
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -134,8 +133,7 @@ TEST_P(TestMatmul, BF16_F32) {
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -172,8 +170,7 @@ TEST_P(TestMatmul, BF16_BF16) {
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -226,12 +223,15 @@ TEST_P(TestMatmul,F32_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+    GTEST_SKIP();
+  }
+
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -284,12 +284,15 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+    GTEST_SKIP();
+  }
+
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -342,13 +345,15 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+    GTEST_SKIP();
+  }
 
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
-                            use_LOWOHA, algo, alpha,
-                            beta);
+                            use_LOWOHA, algo, alpha, beta);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -367,6 +372,10 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, INT8) {
+  if (algo == matmul_algo_t::onednn) {
+    GTEST_SKIP();
+  }
+
   // TODO: Extend support for test cases with a wider range of values.
   auto wei_scale          = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 0.2);

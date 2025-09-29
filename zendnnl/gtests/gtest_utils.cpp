@@ -37,6 +37,9 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
 
   if (test_index < third) {
     use_LOWOHA = false;
+    matmul_config_t &matmul_config = matmul_config_t::instance();
+    int32_t matmul_algo = matmul_config.get_algo();
+    algo = static_cast<matmul_algo_t>(matmul_algo);
   }
   else if (test_index < 2 * third) {
     use_LOWOHA = true;
@@ -46,9 +49,9 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
     use_LOWOHA = true;
 #if ZENDNNL_DEPENDS_ONEDNN
     algo = rand() % 2 == 0 ? matmul_algo_t::onednn : matmul_algo_t::libxsmm;
-    if(algo == matmul_algo_t::libxsmm){
-        alpha = 1;
-        beta = 0;
+    if (algo == matmul_algo_t::libxsmm) {
+      alpha = 1;
+      beta = 0;
     }
 #else
     alpha = 1;
@@ -179,7 +182,7 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       std::uniform_int_distribution<int> dist_s8(-1*val, val);
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist_s8(gen)); });
-    } 
+    }
     else if (dtype_ == data_type::u8) {
       std::uniform_int_distribution<int> dist_u8(0, val);
       uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
@@ -287,7 +290,7 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist(gen)); });
-    } 
+    }
     else if (dtype_ == data_type::u8) {
       uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<uint8_t>(dist(gen)); });
@@ -522,8 +525,8 @@ bool Parser::isInteger(const std::string &s) {
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias_tensor, tensor_t &output_tensor,
-                            uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha,
-                            float beta) {
+                            uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                            float alpha, float beta) {
   try {
 
     if (use_LOWOHA) {
@@ -593,8 +596,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         void *B_data = weight_tensor.get_raw_handle_unsafe();
         void *C_data = output_tensor.get_raw_handle_unsafe();
         void *bias_data = nullptr;
-        if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::onednn){
-            bias_data = bias_tensor.get_raw_handle_unsafe();
+        if (algo != matmul_algo_t::libxsmm) {
+          bias_data = bias_tensor.get_raw_handle_unsafe();
         }
 
         // Validate data pointers
@@ -644,7 +647,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               po_arr[index].second == post_op_type_t::binary_mul) {
             postop_item.buff = binary_tensor.get_raw_handle_unsafe();
             postop_item.dtype = binary_tensor.get_data_type();
-          } else {
+          }
+          else {
             postop_item.buff = nullptr; // For element-wise operations
             postop_item.dtype = out_data_type;
           }
@@ -740,7 +744,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weight_tensor,
                                        tensor_t &bias_tensor, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha,
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                                       float alpha,
                                        float beta) {
   try {
     // Default postop relu
@@ -755,7 +760,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                           .set_param("weights", weight_tensor)
                           .set_alpha(alpha)
                           .set_beta(beta);
-    if (!((algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::onednn) && use_LOWOHA)) {
+    if (!(algo == matmul_algo_t::libxsmm && use_LOWOHA)) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);
     }
 

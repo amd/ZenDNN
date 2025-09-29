@@ -18,6 +18,8 @@
 #define _MATMUL_ONEDNN_UTILS_HPP_
 
 #include "memory/tensor.hpp"
+#include <string>
+
 #if ZENDNNL_DEPENDS_ONEDNN
   #include "dnnl.hpp"
 #endif
@@ -36,12 +38,35 @@ class onednn_utils_t {
  public:
   onednn_utils_t() = default;
   ~onednn_utils_t() = default;
-#if ZENDNNL_DEPENDS_ONEDNN
-  static dnnl::memory::dims      to_dnnl_dims(tensor_t &zendnnl_tensor);
-  static dnnl::memory::format_tag to_dnnl_format(tensor_t &zendnnl_tensor);
-  static dnnl::memory::data_type  to_dnnl_datatype(tensor_t &zendnnl_tensor);
 
-  static dnnl::memory             to_dnnl_tensor(tensor_t &zendnnl_tensor,
+  // Describes a single tensor's properties for a OneDNN operation.
+  struct onednn_tensor_params {
+    void                   *buffer = nullptr;
+    std::vector<int64_t>    dims;
+    std::vector<int64_t>    strides;
+    data_type_t             dtype = data_type_t::none;
+    std::string             format_tag = "any"; // e.g., "ab", "abc"
+    bool                    is_transposed = false;
+  };
+
+  // Holds all parameters for the complete matmul operation.
+  struct onednn_matmul_params {
+    // Tensor descriptors
+    onednn_tensor_params src;
+    onednn_tensor_params weights;
+    onednn_tensor_params dst;
+    onednn_tensor_params bias;
+
+    // Scaling factors
+    float alpha = 1.0f;
+    float beta = 0.0f;
+  };
+
+#if ZENDNNL_DEPENDS_ONEDNN
+  static dnnl::memory::format_tag to_dnnl_format(std::string tag);
+  static dnnl::memory::data_type  to_dnnl_datatype(data_type_t dtype);
+
+  static dnnl::memory             to_dnnl_tensor(const onednn_tensor_params &params,
       dnnl::engine eng);
 #endif
 

@@ -38,6 +38,17 @@ class matmul_onednn_kernel_t final : public op_kernel_t<matmul_context_t> {
   status_t execute(const context_type &context_,
                    tensor_map_type &inputs_,
                    tensor_map_type &outputs_) override;
+#if ZENDNNL_DEPENDS_ONEDNN
+  static void execute_matmul(const onednn_utils_t::onednn_matmul_params &params,
+                             std::unordered_map<int, dnnl::memory> &matmul_args,
+                             dnnl::primitive_attr &matmul_attr, dnnl::engine &eng);
+
+ private:
+  status_t preprocess(const context_type &context_, tensor_map_type &inputs_,
+                      tensor_map_type &outputs_, onednn_utils_t::onednn_matmul_params &params,
+                      std::unordered_map<int, dnnl::memory> &matmul_args,
+                      dnnl::primitive_attr &matmul_attr, const dnnl::engine &eng);
+#endif
 };
 
 } //namespace ops

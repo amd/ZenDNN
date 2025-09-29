@@ -28,10 +28,10 @@ namespace lowoha {
 
 // Helper function to create post_op structure for bias and post-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
-dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_po,
+dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
                                    const void *bias, const data_types &dtypes, int N) {
   // Count total operations (bias + post-ops)
-  int total_ops = (bias ? 1 : 0) + lowoha_po.postop_.size();
+  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
 
   if (total_ops == 0) {
     return nullptr;
@@ -59,7 +59,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_po,
   int bias_count = bias ? 1 : 0;
 
   // Count post-ops by type
-  for (const auto &po : lowoha_po.postop_) {
+  for (const auto &po : lowoha_param.postop_) {
     switch (po.po_type) {
     case post_op_type_t::relu:
     case post_op_type_t::leaky_relu:
@@ -230,7 +230,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_po,
   }
 
   // Add post-ops
-  for (const auto &po : lowoha_po.postop_) {
+  for (const auto &po : lowoha_param.postop_) {
     switch (po.po_type) {
     case post_op_type_t::relu:
       if (eltwise_index >= eltwise_count) {
@@ -361,10 +361,10 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_po,
   return dlp_metadata;
 }
 #else
-aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_po,
+aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
                                   const void *bias, const data_types &dtypes, int N) {
   // Count total operations (bias + post-ops)
-  int total_ops = (bias ? 1 : 0) + lowoha_po.postop_.size();
+  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
 
   if (total_ops == 0) {
     return nullptr;
@@ -383,7 +383,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_po,
   int bias_count = bias ? 1 : 0;
 
   // Count post-ops by type
-  for (const auto &po : lowoha_po.postop_) {
+  for (const auto &po : lowoha_param.postop_) {
     switch (po.po_type) {
     case post_op_type_t::relu:
     case post_op_type_t::leaky_relu:
@@ -506,7 +506,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_po,
   }
 
   // Add post-ops
-  for (const auto &po : lowoha_po.postop_) {
+  for (const auto &po : lowoha_param.postop_) {
     switch (po.po_type) {
     case post_op_type_t::relu:
       aocl_po->seq_vector[op_index++] = ELTWISE;
@@ -621,7 +621,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_po,
 // Cleanup functions for post-op structures
 #if ZENDNNL_DEPENDS_AOCLDLP
 void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
-                         const lowoha_params &post_op) {
+                         const lowoha_params &lowoha_param) {
   if (aocl_po) {
     // Count operations for proper cleanup
     int eltwise_count = 0;
@@ -629,7 +629,7 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
     int matrix_mul_count = 0;
 
     // Count post-ops by type for cleanup
-    for (const auto &po : post_op.postop_) {
+    for (const auto &po : lowoha_param.postop_) {
       switch (po.po_type) {
       case post_op_type_t::relu:
       case post_op_type_t::leaky_relu:
@@ -713,7 +713,7 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
   }
 }
 #else
-void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op) {
+void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &lowoha_param) {
   if (aocl_po) {
     // Clean up eltwise operations
     if (aocl_po->eltwise) {
@@ -730,7 +730,7 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op) {
 
     // Clean up matrix operations
     if (aocl_po->matrix_add) {
-      for (int i = 0; i < (post_op.postop_.size() > 0 ? 1 : 0); i++) {
+      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
         if (aocl_po->matrix_add[i].scale_factor) {
           free(aocl_po->matrix_add[i].scale_factor);
         }
@@ -739,7 +739,7 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op) {
     }
 
     if (aocl_po->matrix_mul) {
-      for (int i = 0; i < (post_op.postop_.size() > 0 ? 1 : 0); i++) {
+      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
         if (aocl_po->matrix_mul[i].scale_factor) {
           free(aocl_po->matrix_mul[i].scale_factor);
         }
