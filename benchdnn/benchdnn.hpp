@@ -28,9 +28,6 @@
 
 #include "utils/benchdnn_utils.hpp"
 
-#define  OK          (0)
-#define  NOT_OK      (1)
-
 using namespace zendnnl::interface;
 using namespace zendnnl;
 
@@ -62,18 +59,6 @@ struct TimingStats {
   double total_time_ms = 0.0; /**< Total time taken for the operation */
 };
 
-/**
- * @struct global_options
- * @brief Holds global configuration options for benchmarking.
- *
- * This structure contains options that affect the overall benchmarking behavior,
- * such as the number of dimensions (ndims) for tensor creation and operator setup.
- *
- * @var ndims Number of dimensions for tensors (e.g., 2 for standard matmul, 3 for batched matmul).
- */
-struct global_options {
-  int ndims;
-};
 
 } // namespace benchdnn
 } // namespace zendnnl

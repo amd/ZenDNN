@@ -80,51 +80,19 @@ The flow is split into two main sections:
     - T: Measures the total time for Context Creation + Operator Creation + Operator Execution + Other Operations.
   - Cache flushing also occurs here if `cold_cache` is enabled.
 
+
+
 ## Features
 - **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`).
 - **Flexible Input File**: Use `--input_file=<filename>` to provide a configuration file tailored to the selected operator.
-- **Matmul Benchmarking**: For `--op=matmul`, the input file should contain one configuration per line with the following fields:
-  - `bs` (Batch Size) : The first field in each input line for batched matmul (BMM). For standard matmul, `bs` can be omitted
-    - **BMM (Batched Matmul)**: When `bs` is specified and `--ndims=3` is used, the benchmark runs batched matmul (BMM), processing multiple matrices in parallel
-  - `m`: Rows in matrix A
-  - `k`: Columns in matrix A / rows in matrix B
-  - `n`: Columns in matrix B (for multi-layer matmul, specify as colon-separated values, e.g., `512:256:128`)
-  - `iters`: Number of benchmark iterations
-  - `dt`: Data types (`src:weights:dst`, e.g., `f32:f32:f32`)
-  - `bias`: `true` or `false` (whether to add bias)
-  - `bias_dt`: Data type for bias (e.g., `f32`, `bf16`). If `bias` is `false`, this can be omitted or left empty.
-  - `post_ops`: Post-operations (colon-separated, e.g., `relu`, `gelu_erf`, `binary_mul`, or combinations like `relu:binary_mul`). Binary post-ops are supported and will use an additional tensor as input.
-  - `kernel`: Kernel backend (e.g., `aocl_blis_blocked`)
-  - `warmup_iters` (optional): Number of warmup iterations (if not provided, defaults to 20% of `iters`)
-- **Reorder Benchmarking**: For `--op=reorder`, the input file should contain one configuration per line with the following fields:
-  - `rows`: Number of rows in the tensor to reorder
-  - `cols`: Number of columns in the tensor to reorder
-  - `iters`: Number of benchmark iterations
-  - `dt`: Data type (e.g., `f32`, `bf16`)
-  - `kernel`: Kernel backend (e.g., `aocl`)
-  - `isInplace`: `true` or `false` (whether to perform in-place reorder)
-  - `warmup_iters` (optional): Number of warmup iterations (defaults to 20% of `iters` if not provided)
-- **Multiple Data Types**: Supports a range of data types (e.g., `f32`, `bf16`, `s8`, `u8`, etc.)
+- **Matmul Benchmarking**: Supports matrix multiplication benchmarks with options for single-layer, multi-layer, and batched matmul.
+- **Reorder Benchmarking**: Supports tensor reorder benchmarks with configurable parameters.
+- **Multiple Data Types**: Supports a range of data types (e.g., `f32`, `bf16`)
 - **Detailed Timing**: Reports total time, GFLOPS, and detailed timing statistics (context creation, operator creation, execution), including percentage breakdowns for each stage (% of total time)
 - **Warmup Iterations**: Optional warmup runs to stabilize measurements
 - **Cache Control**: Optional cache flush between runs for accurate timing (if enabled at compile time)
 - **Comprehensive Output**: Results are printed to the console and saved to a timestamped CSV file for easy analysis
 
-## Directory Structure
-- `benchdnn.cpp` / `benchdnn.hpp`: Main benchmarking logic and configuration structures
-### matmul/
-  - `CMakeLists.txt`: CMake build configuration for matmul benchmarking
-  - `matmul_benchdnn.cpp` / `matmul_benchdnn.hpp`: Matrix multiplication benchmarking implementation
-  - `matmul_tensor_factory.cpp` / `matmul_tensor_factory.hpp`: Tensor creation utilities for matmul benchmarks
-  - `matmul_utils.cpp` / `matmul_utils.hpp`: Utility functions for matmul benchmarking
-### reorder/
-  - `CMakeLists.txt`: CMake build configuration for reorder benchmarking
-  - `reorder_benchdnn.cpp` / `reorder_benchdnn.hpp`: Reorder benchmarking implementation
-  - `reorder_parser.cpp` / `reorder_parser.hpp`: Input parsing for reorder benchmark
-### utils/
-  - `CMakeLists.txt`: CMake build configuration for utils
-  - `benchdnn_utils.cpp` / `benchdnn_utils.hpp`: Utility functions for benchmarking (string conversion, cache flush, etc.)
-- `build/timings_<timestamp>.csv`: Output CSV files with timing results (created in the build directory)
 
 ## Build Instructions
 
@@ -138,122 +106,20 @@ cmake --build .
 
 ## Running the Benchmark
 
-Run the benchmark by passing the operator and input file as command-line arguments (from the build directory):
+To run a benchmark, specify the operator and input method as command-line arguments from the build directory. For example:
 
 ```sh
-./benchdnn/benchdnn --op=<operator> --input_file=input.txt [--ndims=3] 
+./benchdnn/benchdnn --op=<operator> [--input_file=<file>] [command-line options] [--input_model_file=<model_file>]
 ```
 
-- `<operator>`: The operator to benchmark (e.g., `matmul`, `reorder`).
-- `input.txt`: Path to the input file containing benchmark configurations (see below).
-- Use `--ndims=3` for batched matmul (BMM) benchmarks.
+- `<operator>`: Operator can be one of the following :
+  - [matmul](doc/matmul.md)
+  - [reorder](doc/reorder.md)
+- `--input_file=<file>`: Path to a configuration file with one or more test cases.
+- `--input_model_file=<model_file>`: (Optional) Path to a model file for model-based benchmarking.
+- `[command-line options]`: Command-line arguments to specify all required parameters directly. These can be used in combination with model files.
 
-Both the input file (`input.txt`) and the output CSV files (`timings_<timestamp>.csv`) are located in the `build` directory by default.
-
-## Input File Format
-
-Each line in the input file specifies a benchmark configuration for the selected operator. Below are example input lines for each mode:
-
-### Matmul Operator
-For `--op=matmul`, each line should be:
-
-- **Normal (single-layer) matmul:**
-  ```
-  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_blis_blocked, 30
-  128, 9216, 4096, 100, f32:f32:f32, true, f32, relu, aocl_blis_blocked, 30
-  ```
-
-- **Multi-layer (pipeline) matmul:**
-  ```
-  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, 30
-  4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, 30
-  ```
-
-- **Batched matmul (BMM):**
-  ```
-  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_blis, 20
-  ```
-
-### Reorder Operator
-For `--op=reorder`, each line should be:
-
-- **Reorder:**
-  ```
-  256, 5, 1000, f32, aocl, true
-  3072, 768, 100, f32, aocl, true, 30
-  ```
-
-## Output
-
-The benchmark prints the following for each input:
-- Total execution time
-- Achieved GFLOPS for matmul operator
-- Detailed timing statistics for all iterations of each input, including:
-  - Context creation time
-  - Operator creation time
-  - Operator execution time
-
-Output is printed to the console and also saved to a CSV file named `timings_<current timestamp>.csv` in the `build` directory.
-
-## Output Format (Matmul)
-
-The benchmark prints results to both the console and a CSV file named `timings_<timestamp>.csv` in the `build` directory. The output format supports both multi-layer (pipeline) and normal (single-layer) matmul configurations, with detailed timing breakdowns for each layer or configuration.
-
-### Matmul Output: Multi-Layer Pipeline (Console & CSV)
-
-For pipeline (multi-layer) matmul, the output includes a `Summary` row for each configuration and a `Layer_N` row for each layer.
-#### Example (multi-layer matmul, console/CSV)
-```
-Layer    M     K     N             Iters  Data_type    Bias_Enabled  Bias_dt  PostOp                              Kernel_Name        Warmup_iters  Total_time(ms, all iters)  GFLOPS  %_of_Total  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
-Summary  768   3072  512:256       100    f32:f32:f32  0                      gelu_erf:binary_add                 aocl_blis_blocked  30            2989.89                                                                                                   
-Layer_0  768   3072  512           100    f32:f32:f32  0                      gelu_erf:binary_add                 aocl_blis_blocked  30            1559.42                    154.92  52.16 %     0.61 (0.04 %)       0.15 (0.01 %)      1558.66 (99.95 %)   
-Layer_1  768   512   256           100    f32:f32:f32  0                      gelu_erf:binary_add                 aocl_blis_blocked  30            1430.47                    14.07   47.84 %     0.66 (0.05 %)       0.17 (0.01 %)      1429.64 (99.94 %)
-```
-
-### Matmul Output: Normal (Single-Layer) (Console & CSV)
-
-For normal (single-layer) matmul, each configuration produces a single row.
-#### Example (normal matmul, console/CSV)
-```
-M     K     N     Iters  Data_type       Bias_Enabled  Bias_dt  PostOp      Kernel_Name        Warmup_iters  Total_time(ms, all iters)  GFLOPS   Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)
-128   9216  4096  1      f32:f32:f32     1             f32      relu        aocl_blis_blocked  30            12.73                      758.84   0.01 (0.06 %)       0.00 (0.01 %)      12.73 (99.92 %)
-128   9216  4096  100    f32:f32:f32     1             f32      relu        aocl_blis_blocked  30            1364.92                    708.00   0.84 (0.06 %)       0.20 (0.01 %)      1363.89 (99.92 %)
-```
-
-### Matmul Output: Batched Matmul (BMM) (Console & CSV)
-
-For batched matmul, the output includes a `BS` column for batch size.
-#### Example (batched matmul, console/CSV)
-```
-BS    M     K     N     Iterations  Data_type    Bias_Enabled  Bias_dt  PostOp                              Kernel_Name        Warmup_iters  Total_time(ms, all iters)  GFLOPS  %_of_Total  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
-100   100   3456  512   100         f32:f32:f32  1                      gelu_erf:binary_add                 aocl_blis          20            20710.60                   170.88  100.00 %   0.12 (0.00 %)       0.03 (0.00 %)      20710.45 (99.94 %)   
-```
-
-### Notes
-- All timing columns are in milliseconds.
-- GFLOPS is calculated per layer for matmul.
-- For multi-layer matmul, each layer's results are shown separately, with N as colon-separated values in the summary.
-- The CSV format is suitable for further analysis and plotting.
-- Context/Operator/Execution times and percentages help identify bottlenecks and optimize performance.
-
-## Output Format (Reorder)
-
-The benchmark prints results to both the console and a CSV file named `timings_<timestamp>.csv` in the `build` directory.
-
-### Reorder Output (Console & CSV)
-
-Each row contains timing and configuration details for a single reorder benchmark run.
-#### Example (reorder, console/CSV)
-```
-Rows  Cols  Iterations  Data_type  Kernel_Name  In-place  Warmup_iters  Total_time(ms)  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  Others(ms_%)
-3072  768   100         f32        aocl         1         30            1318.81         0.16 (0.01 %)       0.21 (0.02 %)      1318.12 (99.95 %)   0.31 (0.02 %)
-768   3072  100         f32        aocl         1         30            1288.75         0.16 (0.01 %)       0.20 (0.02 %)      1288.11 (99.95 %)   0.29 (0.02 %)
-```
-
-### Notes
-- All timing columns are in milliseconds.
-- Percentages show the proportion of total time spent in each stage.
-- The CSV format is suitable for further analysis and plotting.
+The output CSV files (`timings_<timestamp>.csv`) are located in the `build` directory.
 
 ## Extending
 - Add new post-operations or data types by updating enums and parsing logic in the utility and parser modules.

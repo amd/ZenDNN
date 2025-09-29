@@ -248,9 +248,6 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         std::vector<char> buffer(CACHE_SIZE, 1);
         flush_cache(buffer);
 #endif
-#if !MEASURE_INDIVIDUAL_TIMINGS
-        auto start_total = std::chrono::high_resolution_clock::now();
-#endif
         for (auto i = 0; i < cfg.n_values.size(); i++) {
 #if !MEASURE_INDIVIDUAL_TIMINGS
           auto start_layer = std::chrono::high_resolution_clock::now();
@@ -284,11 +281,6 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
           log_benchmark_failure(cfg);
           break;
         }
-#if !MEASURE_INDIVIDUAL_TIMINGS
-        auto end_total = std::chrono::high_resolution_clock::now();
-        double total_time_taken = (std::chrono::duration<double, std::milli>
-                                   (end_total - start_total).count());
-#endif
       }
       if (skip) {
         continue;
@@ -300,6 +292,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
         time_stats_layer[i].total_time_ms = elapsed_ms_layer[i];
       }
 #endif
+      print_matmul_execution_summary(cfg, time_stats_layer, options);
       matmul_results.emplace_back(cfg, time_stats_layer);
     }
     catch (const exception_t &ex) {
@@ -307,24 +300,35 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
       return NOT_OK;
     }
   }
-
-  if (skip) {
-    return NOT_OK;
-  }
   return OK;
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const global_options &options, const bool isLOWOHA) {
-  // Open the input file for reading benchmark configurations
-  std::ifstream infile(in_filename);
-  if (!infile.is_open()) {
-    testlog_error("Error: Cannot open file ", in_filename);
-    return NOT_OK;
-  }
+          const InputMode inputMode, const global_options &options, const bool isLOWOHA) {
+
   std::vector<MatmulConfig> matmulConfig;
   bool isPipeline = false;
-  inputParser(infile, matmulConfig, isPipeline, options);
+  if (inputMode == InputMode::FILE) {
+    // Open the input file for reading benchmark configurations
+    std::ifstream infile(in_filename);
+    if (!infile.is_open()) {
+      testlog_error("Error: Cannot open file ", in_filename);
+      return NOT_OK;
+    }
+    inputFileParser(infile, matmulConfig, isPipeline, options);
+  }
+  else if (inputMode == InputMode::MODEL) {
+    // Open the input file for reading benchmark configurations
+    std::ifstream infile(in_filename);
+    if (!infile.is_open()) {
+      testlog_error("Error: Cannot open file ", in_filename);
+      return NOT_OK;
+    }
+    inputModelFileParser(infile, matmulConfig, isPipeline, options);
+  }
+  else if (inputMode == InputMode::COMMAND_LINE) {
+    inputCommandLineParser(matmulConfig, isPipeline, options);
+  }
 
   if (isLOWOHA && isPipeline) {
     testlog_error("Error: LOWOHA and pipeline mode are not compatible.");
@@ -351,7 +355,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
 
   if (isPipeline) {
     // Print results to console for each configuration
-    print_pipeline_results(matmul_results, std::cout);
+    print_pipeline_results(matmul_results, std::cout, options, inputMode);
 
     // Export results to CSV file
     std::ofstream outfile(out_filename);
@@ -359,12 +363,12 @@ int bench(const std::string &in_filename, const std::string &out_filename,
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
       return 1;
     }
-    log_pipeline_results(matmul_results, outfile);
+    log_pipeline_results(matmul_results, outfile, options, inputMode);
     outfile.close();
   }
   else {
     // Print results to console for each configuration
-    print_results(matmul_results, std::cout, options, isLOWOHA);
+    print_results(matmul_results, std::cout, options, isLOWOHA, inputMode);
 
     // Export results to CSV file
     std::ofstream outfile(out_filename);
@@ -372,7 +376,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
       return 1;
     }
-    log_results(matmul_results, outfile, options, isLOWOHA);
+    log_results(matmul_results, outfile, options, isLOWOHA, inputMode);
     outfile.close();
   }
 

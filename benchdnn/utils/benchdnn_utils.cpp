@@ -222,5 +222,148 @@ void flush_cache(std::vector<char> &buffer) {
 }
 #endif
 
+int parseCLArgs(benchdnn::global_options &options, std::string arg) {
+  if (arg.find("--ndims=") == 0) {
+    if (arg.substr(8).empty()) {
+      commonlog_error("ndims value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.ndims = std::stoi(arg.substr(8));
+  }
+  else if (arg.find("--bs=") == 0) {
+    if (arg.substr(5).empty() || std::stoi(arg.substr(5)) <= 0) {
+      commonlog_error("bs value cannot be empty or <= 0. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.bs = std::stoi(arg.substr(5));
+  }
+  else if (arg.find("--m=") == 0) {
+    if (arg.substr(4).empty() || std::stoi(arg.substr(4)) <= 0) {
+      commonlog_error("M value cannot be empty or <= 0. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.m = std::stoi(arg.substr(4));
+  }
+  else if (arg.find("--k=") == 0) {
+    if (arg.substr(4).empty() || std::stoi(arg.substr(4)) <= 0) {
+      commonlog_error("K value cannot be empty or <= 0. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.k = std::stoi(arg.substr(4));
+  }
+  else if (arg.find("--n=") == 0) {
+    std::string n_values_str = arg.substr(4);
+    if (n_values_str.empty()) {
+      commonlog_error("N values cannot be empty. Please provide valid numbers.");
+      return NOT_OK;
+    }
+    auto n_values = split(n_values_str, ':');
+    for (const auto &n : n_values) {
+      if (n.empty() || std::stoi(n) <= 0) {
+        commonlog_error("One of the n values is empty or <= 0. Please provide a valid value.");
+        return NOT_OK;
+      }
+      options.n_values.push_back(std::stoi(n));
+    }
+  }
+  else if (arg.find("--bias=") == 0) {
+    std::string bias_str = arg.substr(7);
+    if (bias_str.empty()) {
+      commonlog_error("Bias value cannot be empty. Please provide true/false or 1/0.");
+      return NOT_OK;
+    }
+    std::transform(bias_str.begin(), bias_str.end(), bias_str.begin(), ::tolower);
+    if (bias_str == "true" || bias_str == "1") {
+      options.isBiasEnabled = true;
+    }
+    else if (bias_str == "false" || bias_str == "0") {
+      options.isBiasEnabled = false;
+    }
+    else {
+      commonlog_error("Invalid value for bias. Use true/false or 1/0.");
+      return NOT_OK;
+    }
+  }
+  else if (arg.find("--post_ops=") == 0) {
+    std::string post_ops_str = arg.substr(11);
+    if (post_ops_str.empty()) {
+      commonlog_error("Post-ops string cannot be empty. Please provide valid post-ops.");
+      return NOT_OK;
+    }
+    auto post_ops_vec = split(post_ops_str, ':');
+    for (const auto &post_op_str : post_ops_vec) {
+      options.post_ops.push_back(strToPostOps(post_op_str));
+    }
+  }
+  else if (arg.find("--iters=") == 0) {
+    if (arg.substr(8).empty()) {
+      commonlog_error("Iterations value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.iters = std::stoi(arg.substr(8));
+  }
+  else if (arg.find("--sdt=") == 0) {
+    if (arg.substr(6).empty()) {
+      commonlog_error("Source data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.sdt = strToDatatype(arg.substr(6));
+  }
+  else if (arg.find("--wdt=") == 0) {
+    if (arg.substr(6).empty()) {
+      commonlog_error("Weights data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.wdt = strToDatatype(arg.substr(6));
+  }
+  else if (arg.find("--ddt=") == 0) {
+    if (arg.substr(6).empty()) {
+      commonlog_error("Destination data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.ddt = strToDatatype(arg.substr(6));
+  }
+  else if (arg.find("--kernel_name=") == 0) {
+    if (arg.substr(14).empty()) {
+      commonlog_error("Kernel name cannot be empty. Please provide a valid kernel name.");
+      return NOT_OK;
+    }
+    options.kernel_name = arg.substr(14);
+  }
+  else if (arg.find("--bias_dt=") == 0) {
+    if (arg.substr(10).empty()) {
+      commonlog_error("Bias data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.bias_dt = strToDatatype(arg.substr(10));
+  }
+  else if (arg.find("--isTransA=") == 0) {
+    if (arg.substr(11).empty()) {
+      commonlog_error("isTransA value cannot be empty. Please provide true/false or 1/0.");
+      return NOT_OK;
+    }
+    options.isTransA = (arg.substr(11) == "true");
+  }
+  else if (arg.find("--isTransB=") == 0) {
+    if (arg.substr(11).empty()) {
+      commonlog_error("isTransB value cannot be empty. Please provide true/false or 1/0.");
+      return NOT_OK;
+    }
+    options.isTransB = (arg.substr(11) == "true");
+  }
+  else if (arg.find("--warmup_iters=") == 0) {
+    if (arg.substr(15).empty()) {
+      commonlog_error("Warmup iterations value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.warmup_iters = std::stoi(arg.substr(15));
+  }
+  else {
+    commonlog_error("Unknown argument: ", arg);
+    return NOT_OK;
+  }
+  return OK;
+}
+
 } // namespace benchdnn
 } // namespace zendnnl

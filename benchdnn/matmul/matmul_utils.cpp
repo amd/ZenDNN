@@ -20,8 +20,8 @@ namespace zendnnl {
 namespace benchdnn {
 namespace matmul {
 
-void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
-                 bool &isPipeline, const global_options &options) {
+void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
+                     bool &isPipeline, const global_options &options) {
   std::string line;
 
   // Parse each line of the input file into a MatmulConfig object
@@ -50,21 +50,43 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
     try {
       int id = 0;
       if (options.ndims > 2) {
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          commonlog_error("BS value cannot be empty or <= 0. Please provide a valid number.");
+          continue;
+        }
         cfg.bs = std::stoi(fields[id++]);
       }
       else {
         cfg.bs = 1;
       }
-      // Parse matrix dimensions and iteration count
+      if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+        commonlog_error("M value cannot be empty or <= 0. Please provide a valid number.");
+        continue;
+      }
       cfg.m = std::stoi(fields[id++]);
+      if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+        commonlog_error("K value cannot be empty or <= 0. Please provide a valid number.");
+        continue;
+      }
       cfg.k = std::stoi(fields[id++]);
-      // Parse n values (colon-separated for multi-layer)
+      if (fields[id].empty()) {
+        commonlog_error("N values cannot be empty. Please provide a valid number.");
+        continue;
+      }
       auto n_values = split(fields[id++], ':');
       for (const auto &n : n_values) {
+        if (n.empty() || std::stoi(n) <= 0) {
+          commonlog_error("One of the n values is empty or <= 0. Please provide a valid value.");
+          continue;
+        }
         cfg.n_values.push_back(std::stoi(n));
       }
       // Set isPipeline to true if more than one n value is present
       isPipeline = (n_values.size() > 1) ? true : isPipeline;
+      if (fields[id].empty()) {
+        commonlog_error("Field for iterations is empty. Please provide a value.");
+        continue;
+      }
       cfg.iters = std::stoi(fields[id++]);
       // Parse data types (input:weights:output)
       auto dt = split(fields[id++], ':');
@@ -87,6 +109,10 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         commonlog_warning("No data types specified. Defaulting all to f32.");
       }
       // Parse bias flag and bias data type
+      if (fields[id].empty()) {
+        commonlog_error("Field for isBiasEnabled is empty. Please provide a value.");
+        continue;
+      }
       std::string bias_flag = fields[id];
       std::transform(bias_flag.begin(), bias_flag.end(), bias_flag.begin(),
                      ::tolower);
@@ -133,7 +159,8 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       }
       else {
         cfg.kernel_name = fields[id - 1];
-        if (options.ndims > 2 && cfg.kernel_name != "aocl_blis") {
+        if (options.ndims > 2 && (cfg.kernel_name != "aocl_blis" &&
+                                  cfg.kernel_name != "onednn")) {
           commonlog_error("For BMM, kernel name should be 'aocl_blis'.");
           continue;
         }
@@ -185,6 +212,217 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
   }
 }
 
+void inputModelFileParser(std::ifstream &infile,
+                          std::vector<MatmulConfig> &configs, bool &isPipeline,
+                          const global_options &options) {
+  std::string line;
+
+  // Parse each line of the input file into a MatmulConfig object
+  while (std::getline(infile, line)) {
+    if (line.empty()) {
+      continue;
+    }
+
+    // Split the line into fields and validate
+    auto fields = split(line, ',');
+    int fields_size = fields.size();
+    int expected_fields_cnt = options.ndims + 1; // modelname, [bs], [m], k, n
+    if (fields_size > 2) {
+      auto to_lower = [](const std::string &s) {
+        std::string out = s;
+        std::transform(out.begin(), out.end(), out.begin(), ::tolower);
+        return out;
+      };
+      auto is_bool_str = [](const std::string &s) {
+        return s == "true" || s == "1" || s == "false" || s == "0";
+      };
+      auto is_number_str = [](const std::string &s) {
+        return !s.empty() && std::all_of(s.begin(), s.end(), ::isdigit);
+      };
+      std::string last = to_lower(fields[fields_size - 1]);
+      std::string prev = (fields_size > 1) ? fields[fields_size - 2] : "";
+
+      if (is_bool_str(last)) {
+        // If previous is not a number, treat as trailing [postOp, isBiasEnabled] and ignore both
+        if (!is_number_str(prev)) {
+          fields_size -= 2;
+        }
+        else if (!(last == "1" || last == "0")) {
+          // If last is not 1/0 and previous is a number, error
+          commonlog_error(
+            "Invalid input: ", line, " (expected ", expected_fields_cnt, " fields): <",
+            "ModelName, ", (options.ndims > 2) ? "bs, " : "",
+            "M, K, N, [postOp, isBiasEnabled]>");
+          continue;
+        }
+        // else: last is 1/0 and previous is a number, do nothing
+      }
+      else if (!is_number_str(last)) {
+        // If last is not a number, treat as trailing postOp and ignore it
+        fields_size--;
+      }
+      // else: last is a number, do nothing
+    }
+
+    if (fields_size < expected_fields_cnt) {
+      commonlog_error(
+        "Invalid input: ", line, " (expected ", expected_fields_cnt, " fields): <",
+        "ModelName, ", (options.ndims > 2) ? "bs, " : "",
+        "M, K, N, [postOp, isBiasEnabled]>");
+      continue;
+    }
+    MatmulConfig cfg;
+    try {
+      int id = 0;
+      cfg.modelName = fields[id++];
+      cfg.bs = 1;
+      // Handle different field counts based on ndims
+      if (fields_size == 3) {
+        if (options.m <= 0) {
+          commonlog_error("M value cannot be <= 0. Please provide a valid number.");
+          continue;
+        }
+        cfg.m = options.m;
+      }
+      else if (fields_size == 4) {
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          commonlog_error("M value cannot be empty or <= 0. Please provide a valid number.");
+          continue;
+        }
+        else {
+          cfg.m = std::stoi(fields[id++]);
+        }
+      }
+      else if (fields_size == 5) {
+        if (fields[id].empty()) {
+          commonlog_error("Field for bs is empty. Please provide a value.");
+          continue;
+        }
+        else {
+          cfg.bs = std::stoi(fields[id++]);
+        }
+        if (fields[id].empty()) {
+          commonlog_error("Field for m is empty. Please provide a value.");
+          continue;
+        }
+        else {
+          cfg.m = std::stoi(fields[id++]);
+        }
+      }
+      if (fields[id].empty()) {
+        commonlog_error("Field for k is empty. Please provide a value.");
+        continue;
+      }
+      else {
+        cfg.k = std::stoi(fields[id++]);
+      }
+      if (fields[id].empty()) {
+        commonlog_error("Field for n is empty. Please provide a value.");
+        continue;
+      }
+      auto n_values = split(fields[id++], ':');
+      for (const auto &n : n_values) {
+        if (n.empty()) {
+          commonlog_error("One of the n values is empty. Please provide a value.");
+          continue;
+        }
+        cfg.n_values.push_back(std::stoi(n));
+      }
+
+      // Set isPipeline to true if more than one n value is present
+      isPipeline = (n_values.size() > 1) ? true : isPipeline;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        auto postOps = split(fields[id], ':');
+        auto binary_post_op_pos = 0;
+        for (auto i = 0; i < postOps.size(); i++) {
+          if (!postOps[i].empty()) {
+            cfg.post_ops.push_back(strToPostOps(postOps[i]));
+            // Track positions of binary post-operations
+            if (postOps[i].find("binary_") == 0) {
+              cfg.binary_post_ops_pos.push_back(binary_post_op_pos);
+            }
+            binary_post_op_pos++;
+          }
+        }
+      }
+      id++;
+
+      if (id < fields.size() && !(fields[id].empty())) {
+        std::string bias_flag = fields[id];
+        std::transform(bias_flag.begin(), bias_flag.end(), bias_flag.begin(),
+                       ::tolower);
+        if (bias_flag == "true" || bias_flag == "1") {
+          cfg.isBiasEnabled = true;
+        }
+        else if (bias_flag == "false" || bias_flag == "0") {
+          cfg.isBiasEnabled = false;
+        }
+        else {
+          commonlog_error("Invalid value for isBiasEnabled. Use true/false or 1/0.");
+          continue;
+        }
+      }
+      else {
+        cfg.isBiasEnabled = false;
+      }
+
+      cfg.iters = options.iters;
+      cfg.dt.push_back(options.sdt);
+      cfg.dt.push_back(options.wdt);
+      cfg.dt.push_back(options.ddt);
+      cfg.kernel_name = options.kernel_name;
+      cfg.bias_dt = options.bias_dt;
+      cfg.isTransA = options.isTransA;
+      cfg.isTransB = options.isTransB;
+      cfg.warmup_iters = options.warmup_iters;
+
+      configs.push_back(cfg);
+    }
+    catch (const std::exception &e) {
+      commonlog_error(e.what());
+      continue;
+    }
+  }
+}
+
+void inputCommandLineParser(std::vector<MatmulConfig> &configs,
+                            bool &isPipeline,
+                            const global_options &options) {
+  MatmulConfig cfg;
+  try {
+    if (options.ndims > 2) {
+      cfg.bs = options.bs;
+    }
+    else {
+      cfg.bs = 1;
+    }
+    cfg.m = options.m;
+    cfg.k = options.k;
+    if (options.n_values.size() > 1) {
+      isPipeline = true;
+    }
+    for (const auto &n : options.n_values) {
+      cfg.n_values.push_back(n);
+    }
+    cfg.isBiasEnabled = options.isBiasEnabled;
+    cfg.iters = options.iters;
+    cfg.dt.push_back(options.sdt);
+    cfg.dt.push_back(options.wdt);
+    cfg.dt.push_back(options.ddt);
+    cfg.kernel_name = options.kernel_name;
+    cfg.bias_dt = options.bias_dt;
+    cfg.isTransA = options.isTransA;
+    cfg.isTransB = options.isTransB;
+    cfg.warmup_iters = options.warmup_iters;
+
+    configs.push_back(cfg);
+  }
+  catch (const std::exception &e) {
+    commonlog_error(e.what());
+  }
+}
+
 void log_benchmark_failure(const MatmulConfig &cfg) {
   std::string post_op = "";
   if (!cfg.post_ops.empty()) {
@@ -203,6 +441,37 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
                   ", ", post_op, ", ", cfg.kernel_name, ", ", cfg.warmup_iters);
 }
 
+void print_matmul_execution_summary(const MatmulConfig &cfg,
+                                    const std::vector<TimingStats> &time_stats_layer,
+                                    const global_options &options) {
+  std::string post_op = "";
+  if (!cfg.post_ops.empty()) {
+    for (auto j = 0; j < cfg.post_ops.size(); j++) {
+      post_op += (j > 0 ? ":" : "") + postOpsToStr(cfg.post_ops[j]);
+    }
+  }
+  std::string n_values = "";
+  double total_time = 0.0;
+  for (auto i = 0; i < cfg.n_values.size(); i++) {
+    n_values += (i > 0 ? ":" : "") + std::to_string(cfg.n_values[i]);
+    total_time += time_stats_layer[i].total_time_ms;
+  }
+  if (options.ndims > 2) {
+    std::cout << cfg.bs << ", ";
+  }
+  std::cout << cfg.m << ", " << cfg.k << ", " << n_values << ", "
+            << cfg.iters << ", "
+            << datatypeToStr(cfg.dt[0]) << ":" << datatypeToStr(cfg.dt[1])
+            << ":" << datatypeToStr(cfg.dt[2]) << ", "
+            << cfg.isBiasEnabled << ", "
+            << (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) : "")
+            << ", " << post_op << ", " << cfg.kernel_name << ", "
+            << cfg.isTransA << ", "
+            << cfg.isTransB << ", "
+            << cfg.warmup_iters << ", "
+            << total_time << std::endl;
+}
+
 void write_each_config_result(const MatmulConfig &config,
                               const std::vector<TimingStats> &stat, std::ostream &outfile,
                               const bool isLOWOHA,
@@ -216,9 +485,6 @@ void write_each_config_result(const MatmulConfig &config,
   double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = (gops / (stat[layer_num].total_time_ms / config.iters)) *
                       1000;
-  if (isPipeline) {
-    outfile << "Layer " << layer_num << ", ";
-  }
   outfile << m << ", " << k << ", " << n;
   outfile << ", " << config.iters << ", "
           << datatypeToStr(config.dt[0]) << ":"
@@ -273,10 +539,6 @@ void cal_column_width(const MatmulConfig &config,
   double gflops_val = (gops / (stat[layer_num].total_time_ms / config.iters)) *
                       1000;
   int col = st_index;
-  if (isPipeline) {
-    std::string layer_str = "Layer_" + std::to_string(layer_num);
-    col_widths[col++] = std::max(col_widths[col], layer_str.size() + 2);
-  }
   col_widths[col++] = std::max(col_widths[col], std::to_string(m).size() + 2);
   col_widths[col++] = std::max(col_widths[col], std::to_string(k).size() + 2);
   col_widths[col++] = std::max(col_widths[col], std::to_string(n).size() + 2);
@@ -348,9 +610,6 @@ void fill_row(const MatmulConfig &config,
   double gops = (2 * bs * m * k * n * 0.000000001);
   double gflops_val = ((gops / (stat[layer_num].total_time_ms / config.iters)) *
                        1000);
-  if (isPipeline) {
-    row.push_back("Layer_" + std::to_string(layer_num));
-  }
   row.push_back(std::to_string(m));
   row.push_back(std::to_string(k));
   row.push_back(std::to_string(n));
@@ -368,8 +627,8 @@ void fill_row(const MatmulConfig &config,
   }
   row.push_back(postop_str);
   row.push_back(config.kernel_name);
-  row.push_back(config.isTransA ? "true" : "false");
-  row.push_back(config.isTransB ? "true" : "false");
+  row.push_back(std::to_string(config.isTransA));
+  row.push_back(std::to_string(config.isTransB));
   row.push_back(std::to_string(config.warmup_iters));
   std::ostringstream total_time_ss;
   total_time_ss << std::fixed << std::setprecision(2) <<
@@ -410,11 +669,19 @@ void fill_row(const MatmulConfig &config,
 
 void log_pipeline_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile) {
+  std::ostream &outfile, const global_options &options,
+  const InputMode inputMode) {
 
   outfile << std::fixed << std::setprecision(2);
+  outfile << "Layer Number, ";
+  if (inputMode == InputMode::MODEL) {
+    outfile << "Model Name, ";
+  }
+  if (options.ndims > 2) {
+    outfile << "BS, ";
+  }
   outfile <<
-          "Layer Number, M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
@@ -429,9 +696,14 @@ void log_pipeline_results(
     for (auto i = 0; i < config.n_values.size(); i++) {
       total_time += stat[i].total_time_ms;
     }
-    outfile << "Summary, " <<
-            config.m << ", " <<
-            config.k << ", ";
+    outfile << "Summary, ";
+    if (inputMode == InputMode::MODEL) {
+      outfile << config.modelName << ", ";
+    }
+    if (options.ndims > 2) {
+      outfile << config.bs << ", ";
+    }
+    outfile << config.m << ", " << config.k << ", ";
     // Output N values separated by ':'
     if (!config.n_values.empty()) {
       outfile << config.n_values[0];
@@ -461,6 +733,13 @@ void log_pipeline_results(
 
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
+      outfile << "Layer " << i << ", ";
+      if (inputMode == InputMode::MODEL) {
+        outfile << config.modelName << ", ";
+      }
+      if (options.ndims > 2) {
+        outfile << config.bs << ", ";
+      }
       write_each_config_result(config, stat, outfile, false, i, percentage, true);
     }
   }
@@ -468,14 +747,22 @@ void log_pipeline_results(
 
 void print_pipeline_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile) {
+  std::ostream &outfile, const global_options &options,
+  const InputMode inputMode) {
 
   // Dynamic column widths calculation
-  std::vector<std::string> headers = {
-    "Layer", "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
+  std::vector<std::string> headers = { "Layer" };
+  if (inputMode == InputMode::MODEL) {
+    headers.push_back("Model Name");
+  }
+  if (options.ndims > 2) {
+    headers.push_back("BS");
+  }
+  headers.insert(headers.end(), {
+    "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
     "isTransA", "isTransB",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS", "%_of_Total"
-  };
+  });
 #if MEASURE_INDIVIDUAL_TIMINGS
   headers.push_back("Ctx_Creation(ms_%)");
   headers.push_back("Op_Creation(ms_%)");
@@ -498,6 +785,14 @@ void print_pipeline_results(
     int col = 0;
     col_widths[col++] = std::max(col_widths[col],
                                  std::string("Summary").size() + 2);
+    if (inputMode == InputMode::MODEL) {
+      col_widths[col++] = std::max(col_widths[col],
+                                   std::string("Model Name").size() + 2);
+    }
+    if (options.ndims > 2) {
+      col_widths[col++] = std::max(col_widths[col],
+                                   std::string("BS").size() + 2);
+    }
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.m).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
@@ -552,7 +847,21 @@ void print_pipeline_results(
     // Per-layer rows
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
-      int st_index = 1;
+      int st_index = 0;
+
+      std::string layer_str = "Layer_" + std::to_string(i);
+      col_widths[st_index] = std::max(col_widths[st_index], layer_str.size() + 2);
+      st_index++;
+      if (inputMode == InputMode::MODEL) {
+        col_widths[st_index] = std::max(col_widths[st_index],
+                                        std::string("Model Name").size() + 2);
+        st_index++;
+      }
+      if (options.ndims > 2) {
+        col_widths[st_index] = std::max(col_widths[st_index],
+                                        std::string("BS").size() + 2);
+        st_index++;
+      }
       cal_column_width(config, stat, col_widths, st_index, false, i, percentage,
                        true);
     }
@@ -582,6 +891,12 @@ void print_pipeline_results(
     // Summary row (aggregated for the pipeline)
     std::vector<std::string> summary_row;
     summary_row.push_back("Summary");
+    if (inputMode == InputMode::MODEL) {
+      summary_row.push_back(config.modelName);
+    }
+    if (options.ndims > 2) {
+      summary_row.push_back(std::to_string(config.bs));
+    }
     summary_row.push_back(std::to_string(config.m));
     summary_row.push_back(std::to_string(config.k));
     // N values as colon separated string
@@ -627,6 +942,13 @@ void print_pipeline_results(
     for (auto i = 0; i < stat.size(); i++) {
       double percentage = (stat[i].total_time_ms / total_time) * 100;
       std::vector<std::string> layer_row;
+      layer_row.push_back("Layer_" + std::to_string(i));
+      if (inputMode == InputMode::MODEL) {
+        layer_row.push_back(config.modelName);
+      }
+      if (options.ndims > 2) {
+        layer_row.push_back(std::to_string(config.bs));
+      }
       fill_row(config, stat, layer_row, false, i, percentage, true);
       print_row(layer_row);
     }
@@ -635,9 +957,13 @@ void print_pipeline_results(
 
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile,  const global_options &options, const bool isLOWOHA) {
+  std::ostream &outfile,  const global_options &options, const bool isLOWOHA,
+  const InputMode inputMode) {
 
   outfile << std::fixed << std::setprecision(2);
+  if (inputMode == InputMode::MODEL) {
+    outfile << "Model_Name, ";
+  }
   if (options.ndims > 2) {
     outfile << "BS, ";
   }
@@ -655,6 +981,9 @@ void log_results(
   for (const auto &result : matmul_results) {
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
+    if (inputMode == InputMode::MODEL) {
+      outfile << config.modelName << ", ";
+    }
     if (options.ndims > 2) {
       outfile << config.bs << ", ";
     }
@@ -664,17 +993,22 @@ void log_results(
 
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options, const bool isLOWOHA) {
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA,
+  const InputMode inputMode) {
 
   // Dynamic column widths calculation
-  std::vector<std::string> headers = {
+  std::vector<std::string> headers;
+  if (inputMode == InputMode::MODEL) {
+    headers.insert(headers.begin(), "Model_Name");
+  }
+  if (options.ndims > 2) {
+    headers.insert(headers.end(), "BS");
+  }
+  headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
     "isTransA", "isTransB",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS"
-  };
-  if (options.ndims > 2) {
-    headers.insert(headers.begin(), "BS");
-  }
+  });
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {
     headers.push_back("Ctx_Creation(ms_%)");
@@ -692,10 +1026,16 @@ void print_results(
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
     // Column index offset for dynamic table formatting.
-    // For BMM (ndims > 2), the first column is batch size (BS), so st_index is incremented.
     int st_index = 0;
+    if (inputMode == InputMode::MODEL) {
+      col_widths[st_index] = std::max(col_widths[st_index],
+                                      config.modelName.size() + 2);
+      st_index++;
+    }
+    // For BMM (ndims > 2), the first column is batch size (BS), so st_index is incremented.
     if (options.ndims > 2) {
-      col_widths[0] = std::max(col_widths[0], std::to_string(config.bs).size() + 2);
+      col_widths[st_index] = std::max(col_widths[st_index],
+                                      std::to_string(config.bs).size() + 2);
       st_index++;
     }
     cal_column_width(config, stat, col_widths, st_index, isLOWOHA);
@@ -719,6 +1059,9 @@ void print_results(
     const MatmulConfig &config = result.first;
     const std::vector<TimingStats> &stat = result.second;
     std::vector<std::string> row;
+    if (inputMode == InputMode::MODEL) {
+      row.push_back(config.modelName);
+    }
     if (options.ndims > 2) {
       row.push_back(std::to_string(config.bs));
     }

@@ -49,6 +49,7 @@ namespace matmul {
  * @var warmup_iters Number of warmup iterations to run before actual benchmarking.
  */
 struct MatmulConfig {
+  std::string modelName; /**< Name of the model (used for model-based benchmarking). */
   size_t bs; /**< Batch size (for batched matmul; default 1 for non-batched). */
   size_t m; /**< Number of rows in matrix A (output rows). */
   size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
@@ -83,9 +84,41 @@ struct MatmulConfig {
  * @param infile Reference to an open std::ifstream containing the input configurations.
  * @param configs Reference to a vector of MatmulConfig to be populated.
  * @param isPipeline Reference to a boolean flag that will be set to true if the input describes a pipeline configuration.
+ * @param options Global benchmarking options (e.g., ndims, data types).
  */
-void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
-                 bool &isPipeline, const global_options &options);
+void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
+                     bool &isPipeline, const global_options &options);
+
+/**
+ * @brief Parses a model input file and populates benchmark configurations for matrix multiplication.
+ *
+ * Reads the provided model input file stream, extracting configuration parameters for each layer
+ * of the model. Populates the vector of MatmulConfig structures with parsed values, including
+ * matrix dimensions, data types, bias, post-operations, kernel selection, and warmup iterations.
+ * Sets the isPipeline flag to true if the input describes a multi-layer pipeline.
+ *
+ * @param infile Reference to an open std::ifstream containing the model input configurations.
+ * @param configs Reference to a vector of MatmulConfig to be populated.
+ * @param isPipeline Reference to a boolean flag that will be set to true if the input describes a pipeline configuration.
+ * @param options Global benchmarking options (e.g., ndims, data types).
+ */
+void inputModelFileParser(std::ifstream &infile,
+                          std::vector<MatmulConfig> &configs, bool &isPipeline,
+                          const global_options &options);
+
+/**
+ * @brief Parses command-line arguments and populates benchmark configurations for matrix multiplication.
+ *
+ * Extracts matrix multiplication parameters (such as matrix dimensions, data types, bias, post-operations,
+ * kernel selection, and warmup iterations) from command-line arguments and populates the vector of
+ * MatmulConfig structures. Sets the isPipeline flag to true if the configuration describes a multi-layer pipeline.
+ *
+ * @param configs Reference to a vector of MatmulConfig to be populated.
+ * @param isPipeline Reference to a boolean flag that will be set to true if the configuration describes a pipeline.
+ * @param options Global benchmarking options (e.g., ndims, data_types).
+ */
+void inputCommandLineParser(std::vector<MatmulConfig> &configs,
+                            bool &isPipeline, const global_options &options);
 
 /**
 * @brief Logs a detailed error message for a failed benchmark configuration.
@@ -95,6 +128,21 @@ void inputParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
 * @param cfg MatmulConfig structure for which the benchmark failed.
 */
 void log_benchmark_failure(const MatmulConfig &cfg);
+
+/**
+ * @brief Prints a summary of matmul execution results immediately after each run.
+ *
+ * Formats and outputs the configuration parameters (such as matrix dimensions, data types, bias, post-operations,
+ * kernel name, warmup iterations) and timing statistics (total time per layer) to the standard output.
+ * This function is typically called right after the execution of a matmul configuration.
+ *
+ * @param cfg The MatmulConfig structure containing the configuration for the current run.
+ * @param time_stats_layer Vector of TimingStats for each layer in the current configuration.
+ * @param options Global benchmarking options (e.g., ndims, data_types).
+ */
+void print_matmul_execution_summary(const MatmulConfig &cfg,
+                                    const std::vector<TimingStats> &time_stats_layer,
+                                    const global_options &options);
 
 /**
  * @brief Writes a single configuration's result as a CSV row to the output stream.
@@ -164,10 +212,12 @@ void fill_row(const MatmulConfig &config,
  *
  * @param matmul_results Vector of pairs of MatmulConfig and per-layer TimingStats.
  * @param outfile Output stream to write CSV results to (e.g., std::ofstream).
+ * @param inputMode Mode of input (FILE, MODEL, COMMAND_LINE).
  */
 void log_pipeline_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile);
+  std::ostream &outfile, const global_options &options,
+  const InputMode inputMode);
 
 /**
  * @brief Prints pipeline (multi-layer) matmul benchmark results as a formatted table.
@@ -177,10 +227,12 @@ void log_pipeline_results(
  *
  * @param matmul_results Vector of pairs of MatmulConfig and per-layer TimingStats.
  * @param outfile Output stream to print table results to (e.g., std::cout).
+ * @param inputMode Mode of input (FILE, MODEL, COMMAND_LINE).
  */
 void print_pipeline_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile);
+  std::ostream &outfile, const global_options &options,
+  const InputMode inputMode);
 
 /**
  * @brief Logs single-layer matmul benchmark results to a CSV file.
@@ -192,10 +244,12 @@ void print_pipeline_results(
  * @param outfile Output stream to write CSV results to (e.g., std::ofstream).
  * @param options Global options for command-line configuration.
  * @param isLOWOHA Whether this is a Low Overhead API result.
+ * @param inputMode Mode of input (FILE, MODEL, COMMAND_LINE).
  */
 void log_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options, const bool isLOWOHA);
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA,
+  const InputMode inputMode);
 
 /**
  * @brief Prints single-layer matmul benchmark results as a formatted table.
@@ -207,10 +261,12 @@ void log_results(
  * @param outfile Output stream to print table results to (e.g., std::cout).
  * @param options Global options for command-line configuration.
  * @param isLOWOHA Whether this is a Low Overhead API result.
+ * @param inputMode Mode of input (FILE, MODEL, COMMAND_LINE).
  */
 void print_results(
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-  std::ostream &outfile, const global_options &options, const bool isLOWOHA);
+  std::ostream &outfile, const global_options &options, const bool isLOWOHA,
+  const InputMode inputMode);
 } // namespace matmul
 } // namespace benchdnn
 } // namespace zendnnl

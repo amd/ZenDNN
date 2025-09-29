@@ -19,6 +19,8 @@
 #include "zendnnl.hpp"
 
 using namespace zendnnl::interface;
+#define  OK          (0)
+#define  NOT_OK      (1)
 
 #define COLD_CACHE 0
 
@@ -42,6 +44,56 @@ using namespace zendnnl::interface;
 
 namespace zendnnl {
 namespace benchdnn {
+
+/**
+ * @struct global_options
+ * @brief Holds global configuration options for benchmarking.
+ *
+ * This structure contains options that affect the overall benchmarking behavior,
+ * such as the number of dimensions (ndims) for tensor creation and operator setup.
+ *
+ * @var ndims Number of dimensions for tensors (e.g., 2 for standard matmul, 3 for batched matmul).
+ */
+struct global_options {
+  size_t bs; /**< Batch size (for batched matmul; default 1 for non-batched). */
+  size_t m; /**< Number of rows in matrix A (output rows). */
+  size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
+  std::vector<size_t> n_values; /**< Vector of output columns
+                               for each layer (multi-layer support). */
+  bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
+  std::vector<zendnnl::ops::post_op_type_t> post_ops; /**< List of post operations
+                                                      to apply (e.g., relu, gelu). */
+  int ndims; /**< Number of dimensions for tensors (e.g., 2 for standard matmul, 3 for batched matmul). */
+  int iters; /**< Number of iterations to run the benchmark. */
+  data_type_t sdt; /**< Datatype of input. */
+  data_type_t wdt; /**< Datatype of weights. */
+  data_type_t ddt; /**< Datatype of destination/output. */
+  std::string kernel_name; /**< Name of the kernel to use. */
+  data_type_t bias_dt; /**< Datatype of bias. */
+  bool isTransA; /**< Transpose flag for input matrix */
+  bool isTransB; /**< Transpose flag for weight matrix */
+  int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
+
+  global_options() : isBiasEnabled(false), ndims(2), iters(100),
+    sdt(data_type_t::f32), wdt(data_type_t::f32),
+    ddt(data_type_t::f32), kernel_name("aocl_blis"), bias_dt(data_type_t::f32),
+    isTransA(false), isTransB(false), warmup_iters(20) {}
+};
+
+/**
+ * @enum InputMode
+ * @brief Specifies the mode of input for the benchmarking utility.
+ *
+ * This enumeration defines the possible sources of input for the benchmark configuration:
+ * - FILE: Input is read from a configuration file.
+ * - MODEL: Input is read from a model file.
+ * - COMMAND_LINE: Input is provided directly via command-line arguments.
+ */
+enum class InputMode {
+  FILE,
+  MODEL,
+  COMMAND_LINE
+};
 
 /**
  * @fn trim
@@ -118,6 +170,19 @@ std::string postOpsToStr(post_op_type_t post_op);
   */
   void flush_cache(std::vector<char> &buffer);
 #endif
+/**
+ * @brief Parses a single command-line argument and updates global benchmarking options.
+ *
+ * This function examines the provided argument string, determines if it matches any known
+ * benchmarking option (such as ndims, iters, data types, kernel name, transpose flags, etc.),
+ * and updates the corresponding field in the global_options structure. Returns OK if parsing
+ * was successful, NOT_OK otherwise.
+ *
+ * @param options Reference to the global_options structure to update.
+ * @param arg The command-line argument string to parse.
+ * @return int OK (0) if parsing was successful, NOT_OK (1) otherwise.
+ */
+int parseCLArgs(benchdnn::global_options &options, std::string arg);
 
 } // namespace benchdnn
 } // namespace zendnnl

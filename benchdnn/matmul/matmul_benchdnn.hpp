@@ -71,12 +71,13 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
  *
  * @param in_filename Path to the input file containing benchmark configurations.
  * @param out_filename Path to the output CSV file for writing results.
+ * @param inputMode Mode of input (FILE, MODEL, COMMAND_LINE).
  * @param options Global options for command-line configuration.
  * @param isLOWOHA If true, runs the LOWOHA (Low Overhead API) benchmark variant.
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const global_options &options, const bool isLOWOHA);
+          const InputMode inputMode, const global_options &options, const bool isLOWOHA);
 
 } // namespace matmul
 } // namespace benchdnn

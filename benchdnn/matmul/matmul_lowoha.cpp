@@ -45,7 +45,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      ret = create_bias_tensor(tensor_factory, cfg, bias);
+      ret = create_bias_tensor(tensor_factory, cfg, bias, options);
       if (ret != OK) {
         testlog_error("create_bias_tensor failed");
         log_benchmark_failure(cfg);
@@ -201,6 +201,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       for (size_t i = 0; i < cfg.n_values.size(); i++) {
         time_stats_layer[i].total_time_ms = elapsed_ms_layer[i];
       }
+      print_matmul_execution_summary(cfg, time_stats_layer, options);
       matmul_results.emplace_back(cfg, time_stats_layer);
     }
     catch (const exception_t &ex) {

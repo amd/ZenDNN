@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
   benchdnn::global_options options;
   options.ndims = 2;
   bool isLOWOHA = false;
+  benchdnn::InputMode inputMode = benchdnn::InputMode::COMMAND_LINE;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     // Parse operator argument
@@ -56,24 +57,57 @@ int main(int argc, char **argv) {
     // Parse input file argument
     else if (arg.find("--input_file=") == 0) {
       input_file = arg.substr(13);
+      if (inputMode == benchdnn::InputMode::COMMAND_LINE) {
+        inputMode = benchdnn::InputMode::FILE;
+      }
+      else {
+        commonlog_error("Multiple input modes specified. Please specify only one input mode.");
+        return NOT_OK;
+      }
     }
-    else if (arg.find("--ndims=") == 0) {
-      options.ndims = std::stoi(arg.substr(8));
+    else if (arg.find("--lowoha") == 0) {
+      isLOWOHA = true;
+    }
+    else if (arg.find("--input_model_file=") == 0) {
+      input_file = arg.substr(19);
+      if (inputMode == benchdnn::InputMode::COMMAND_LINE) {
+        inputMode = benchdnn::InputMode::MODEL;
+      }
+      else {
+        commonlog_error("Multiple input modes specified. Please specify only one input mode.");
+        return NOT_OK;
+      }
     }
     else if (arg.find("--lowoha") == 0) {
       isLOWOHA = true;
     }
     else {
-      commonlog_error("Unknown argument: ", arg);
-      return NOT_OK;
+      int status = benchdnn::parseCLArgs(options, arg);
+      if (status != OK) {
+        return NOT_OK;
+      }
     }
   }
 
   // Validate required arguments
-  if (op.empty() || input_file.empty()) {
-    commonlog_error("Usage: ", argv[0],
-                    " --op=<matmul|reorder> --input_file=<filename>\n");
+  if (op.empty()) {
+    commonlog_error("Usage: ", argv[0], " --op=<matmul|reorder> ...");
     return NOT_OK;
+  }
+
+  if ((inputMode == benchdnn::InputMode::MODEL ||
+       inputMode == benchdnn::InputMode::FILE) && input_file.empty()) {
+    commonlog_error("Input file is required for MODEL or FILE mode.");
+    return NOT_OK;
+  }
+
+  if (inputMode == benchdnn::InputMode::COMMAND_LINE) {
+    if ((options.ndims > 2 && options.bs == 0) || options.m == 0 ||
+        options.k == 0 || options.n_values.size() < 1) {
+      commonlog_error("For COMMAND_LINE mode, ", (options.ndims > 2) ? "--bs, " : "",
+                      "--m, --k, and --n must be specified.");
+      return NOT_OK;
+    }
   }
 
   // Generate output filename based on current timestamp for CSV results
@@ -91,7 +125,7 @@ int main(int argc, char **argv) {
 
   // Dispatch to the appropriate benchmark based on operator type
   if (op == "matmul") {
-    benchdnn::matmul::bench(in_filename, out_filename,
+    benchdnn::matmul::bench(in_filename, out_filename, inputMode,
                             options, isLOWOHA); ///< Run matmul benchmark
   }
   else if (op == "reorder") {
