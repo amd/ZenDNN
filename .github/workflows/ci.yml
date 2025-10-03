@@ -1,4 +1,4 @@
-name: zendnn CI
+name: zendnn 
 
 on:
   push:
