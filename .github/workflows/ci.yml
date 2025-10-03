@@ -20,13 +20,17 @@ jobs:
 
   zendnn_build:
     runs-on: zendnn_presub_server
-    needs: [jira-id-check, license-header-check]
-    if: |
-      (github.event_name == 'push') ||
-      (github.event_name == 'pull_request' &&
-       needs.jira-id-check.outputs.result == 'success' &&
-       needs.license-header-check.outputs.result == 'success')
+    
     steps:
+      - name: Build for push
+        if: github.event_name == 'push'
+        run: |
+          echo "Building ZenDNN directly for push"
+      
+      - name: Build for PR
+        if: github.event_name == 'pull_request' && steps.jira-id-check.outcome == 'success' && steps.license-header-check.outcome == 'success'
+        run: |
+          echo "Building ZenDNN after PR checks"
       - name: basic_debug
         run: |
             pwd
