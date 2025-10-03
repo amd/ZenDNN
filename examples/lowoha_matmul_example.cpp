@@ -48,30 +48,32 @@ int run_lowoha_matmul_fp32_test() {
     matmul_dtype.bias = data_type_t::none;
     matmul_dtype.compute = data_type_t::none;
 
-    lowoha_post_op postop;
+    lowoha_params params;
+    params.dtypes = matmul_dtype;
+
     zendnnl::lowoha::postop op1;
     op1.po_type = post_op_type_t::none;
     op1.buff = nullptr;
     op1.dtype = data_type_t::none;
     op1.dims = {M, N};
-    postop.postop_.push_back(op1);
+    params.postop_.push_back(op1);
 
     zendnnl::lowoha::postop op2;
     op2.po_type = post_op_type_t::relu;
     op2.buff = nullptr;
     op2.dtype = data_type_t::none;
     op2.dims = {M, N};
-    postop.postop_.push_back(op2);
+    params.postop_.push_back(op2);
 
     // Call the low-overhead matmul API
     status_t status = matmul_direct(
-                        A.data(), B.data(), C.data(), nullptr,
-                        1.0f, 0.0f,  // alpha, beta
-                        M, N, K,
+                        'r',  // layout: row-major
                         false, false,  // transA, transB
-                        lda, ldb, ldc,
-                        matmul_dtype, postop,
-                        lowoha_quantization_params_t(),
+                        M, N, K,
+                        1.0f, A.data(), lda, B.data(), ldb,
+                        nullptr,  // alpha, src, lda, weight, ldb, bias
+                        0.0f, C.data(), ldc,  // beta, dst, ldc
+                        params,
                         1, 1  // Batch_A, Batch_B
                       );
     if (status != status_t::success) {

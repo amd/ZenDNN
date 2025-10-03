@@ -30,19 +30,11 @@ using namespace zendnnl::common;
 using namespace zendnnl::ops;
 
 struct data_types {
-  data_type_t src;
-  data_type_t wei;
-  data_type_t dst;
-  data_type_t bias;
-  data_type_t compute;
-
-  /**
-   * @brief Default constructor for `data_types`.
-   *
-   * Initializes all data types to `none` to ensure safe usage.
-   */
-  data_types() : src(data_type_t::none), wei(data_type_t::none), dst(data_type_t::none),
-                 bias(data_type_t::none), compute(data_type_t::none) {}
+  data_type_t src = data_type_t::none;
+  data_type_t wei = data_type_t::none;
+  data_type_t dst = data_type_t::none;
+  data_type_t bias = data_type_t::none;
+  data_type_t compute = data_type_t::none;
 };
 
 struct postop {
@@ -57,14 +49,15 @@ struct postop {
    * Initializes the post-op type to `none`, buffer to `nullptr`,
    * data type to `none`, and creates an empty dims vector.
    */
-  postop() : po_type(post_op_type_t::none), buff(nullptr), dtype(data_type_t::none), dims() {}
+  postop() : po_type(post_op_type_t::none), buff(nullptr),
+    dtype(data_type_t::none), dims() {}
 };
 
 /**
  * @struct lowoha_quantization_params_t
  * @brief A structure to encapsulate scale and zero-point information for quantized operations.
  *
- * This structure is used to store the scale and zero-point parameters for both the source
+ * This structure is used to store the scale and zero-point params for both the source
  * and weight tensors in quantized operations. It contains an inner structure `quant_t` to
  * represent individual scale or zero-point data, and the outer structure aggregates these
  * for the source and weight tensors.
@@ -111,18 +104,32 @@ struct lowoha_quantization_params_t {
    * Initializes all members (`src_scale`, `wei_scale`, `dst_scale`, `src_zp`, `wei_zp`, `dst_zp`)
    * using the default constructor of `quant_t`.
    */
-  lowoha_quantization_params_t() : src_scale(), wei_scale(), dst_scale(), src_zp(), wei_zp(), dst_zp() {}
+  lowoha_quantization_params_t() : src_scale(), wei_scale(), dst_scale(),
+    src_zp(), wei_zp(), dst_zp() {}
 };
 
-struct lowoha_post_op {
+struct lowoha_params {
+  data_types dtypes;
   std::vector<postop> postop_;
+  lowoha_quantization_params_t quant_params;
+  const char mem_format_a;
+  const char mem_format_b;
+
+  /**
+   * @brief Default constructor for `lowoha_params`.
+   *
+   * Initializes all members using their default constructors.
+   */
+  lowoha_params()
+    : dtypes(), postop_(), quant_params(), mem_format_a('n'), mem_format_b('n') {}
 };
 
-status_t matmul_direct(const void *src, const void *weight, void *dst, void *bias,
-                   float alpha, float beta, int M, int N, int K, bool transA, bool transB, int lda,
-                   int ldb, int ldc, data_types &dtypes, lowoha_post_op post_op,
-                   const lowoha_quantization_params_t &quant_params = lowoha_quantization_params_t(),
-                   int Batch_A = 1, int Batch_B = 1);
+status_t matmul_direct(const char layout, const bool transA, const bool transB,
+                       const int M, const int N, const int K, const float alpha, const void *src,
+                       const int lda, const void *weight, const int ldb, const void *bias,
+                       const float beta, void *dst, const int ldc,
+                       lowoha_params params,
+                       int Batch_A = 1, int Batch_B = 1);
 
 } // namespace lowoha
 } // namespace zendnnl

@@ -119,28 +119,29 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
 
 void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                           void *C, int ldc, data_types &dtypes, bool use_blis) {
+                           void *C, int ldc, data_types &dtypes, bool use_blis,
+                           char mem_format_a, char mem_format_b) {
 
   if (use_blis) {
     if (dtypes.src == data_type_t::f32 &&
         dtypes.dst == data_type_t::f32) {
       aocl_gemm_f32f32f32of32(layout, transA, transB, M, N, K, alpha,
-                              static_cast<const float *>(A), lda, 'n',
-                              static_cast<const float *>(B), ldb, 'n',
+                              static_cast<const float *>(A), lda, mem_format_a,
+                              static_cast<const float *>(B), ldb, mem_format_b,
                               beta, static_cast<float *>(C), ldc, nullptr);
     }
     else if (dtypes.src == data_type_t::bf16 &&
              dtypes.dst == data_type_t::bf16) {
       aocl_gemm_bf16bf16f32obf16(layout, transA, transB, M, N, K, alpha,
-                                 static_cast<const int16_t *>(A), lda, 'n',
-                                 static_cast<const int16_t *>(B), ldb, 'n',
+                                 static_cast<const int16_t *>(A), lda, mem_format_a,
+                                 static_cast<const int16_t *>(B), ldb, mem_format_b,
                                  beta, static_cast<int16_t *>(C), ldc, nullptr);
     }
     else if (dtypes.src == data_type_t::bf16 &&
              dtypes.dst == data_type_t::f32) {
       aocl_gemm_bf16bf16f32of32(layout, transA, transB, M, N, K, alpha,
-                                static_cast<const int16_t *>(A), lda, 'n',
-                                static_cast<const int16_t *>(B), ldb, 'n',
+                                static_cast<const int16_t *>(A), lda, mem_format_a,
+                                static_cast<const int16_t *>(B), ldb, mem_format_b,
                                 beta, static_cast<float *>(C), ldc, nullptr);
     }
     else {
@@ -163,6 +164,102 @@ void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
     // Native kernel call
     matmul_direct_native(layout, transA, transB, M, N, K, alpha,
                          A, lda, B, ldb, beta, C, ldc, dtypes);
+  }
+}
+
+void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M, int N,
+                               int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
+                               void *C, int ldc, data_types &dtypes, int batch_count,
+                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride, size_t dst_stride) {
+
+
+#if ZENDNNL_DEPENDS_AOCLDLP
+  md_t m_ = M;
+  md_t n_ = N;
+  md_t k_ = K;
+  md_t lda_ = lda;
+  md_t ldb_ = ldb;
+  md_t ldc_ = ldc;
+  dlp_metadata_t* metadata_array = nullptr;
+  md_t group_size = batch_count;
+#else
+  dim_t m_ = M;
+  dim_t n_ = N;
+  dim_t k_ = K;
+  dim_t lda_ = lda;
+  dim_t ldb_ = ldb;
+  dim_t ldc_ = ldc;
+  aocl_post_op* metadata_array = nullptr;
+  dim_t group_size = batch_count;
+#endif
+
+  // Prepare pointer arrays for matrices
+  std::vector<const void*> a_ptrs(batch_count);
+  std::vector<const void*> b_ptrs(batch_count);
+  std::vector<void*> c_ptrs(batch_count);
+
+  // Set up pointers for each batch
+  #pragma omp parallel for
+  for (int b = 0; b < batch_count; ++b) {
+    a_ptrs[b] = static_cast<const uint8_t*>(A) + b * src_stride;
+    b_ptrs[b] = static_cast<const uint8_t*>(B) + b * weight_stride;
+    c_ptrs[b] = static_cast<uint8_t*>(C) + b * dst_stride;
+  }
+
+  // Call appropriate batch GEMM based on data types
+  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
+    log_info("executing aocl_batch_gemm_f32f32f32of32");
+    aocl_batch_gemm_f32f32f32of32(
+        &layout, &transA, &transB,
+        &m_, &n_, &k_,
+        &alpha,
+        reinterpret_cast<const float**>(a_ptrs.data()), &lda_,
+        reinterpret_cast<const float**>(b_ptrs.data()), &ldb_,
+        &beta,
+        reinterpret_cast<float**>(c_ptrs.data()), &ldc_,
+        1, // single group
+        &group_size,
+        &mem_format_a, &mem_format_b,
+        &metadata_array);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
+    log_info("executing aocl_batch_gemm_bf16bf16f32of32");
+    aocl_batch_gemm_bf16bf16f32of32(
+        &layout, &transA, &transB,
+        &m_, &n_, &k_,
+        &alpha,
+        reinterpret_cast<const bfloat16**>(a_ptrs.data()), &lda_,
+        reinterpret_cast<const bfloat16**>(b_ptrs.data()), &ldb_,
+        &beta,
+        reinterpret_cast<float**>(c_ptrs.data()), &ldc_,
+        1, // single group
+        &group_size,
+        &mem_format_a, &mem_format_b,
+        &metadata_array);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
+    log_info("executing aocl_batch_gemm_bf16bf16f32obf16");
+    aocl_batch_gemm_bf16bf16f32obf16(
+        &layout, &transA, &transB,
+        &m_, &n_, &k_,
+        &alpha,
+        reinterpret_cast<const bfloat16**>(a_ptrs.data()), &lda_,
+        reinterpret_cast<const bfloat16**>(b_ptrs.data()), &ldb_,
+        &beta,
+        reinterpret_cast<bfloat16**>(c_ptrs.data()), &ldc_,
+        1, // single group
+        &group_size,
+        &mem_format_a, &mem_format_b,
+        &metadata_array);
+  }
+  else {
+    log_info("Unsupported data type combination for batch GEMM, falling back to native");
+    // Fall back to native implementation for each batch
+    for (int b = 0; b < batch_count; ++b) {
+      matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
+                           a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
+                           dtypes, false, mem_format_a, mem_format_b);
+    }
   }
 }
 
@@ -229,12 +326,11 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
 }
 
 
-status_t matmul_direct(const void *src, const void *weight, void *dst,
-                       void *bias,
-                       float alpha, float beta, int M, int N, int K,
-                       bool transA, bool transB, int lda, int ldb, int ldc,
-                       data_types &dtypes, lowoha_post_op post_op,
-                       const lowoha_quantization_params_t &quant_params,
+status_t matmul_direct(const char layout,const bool transA,const bool transB,
+                       const int M, const int N, const int K,const float alpha, const void *src,
+                       const int lda, const void *weight,const int ldb,const void *bias,
+                       const float beta, void *dst, const int ldc,
+                       lowoha_params params,
                        int Batch_A, int Batch_B) {
   log_info("Executing matmul LOWOHA kernel");
 
@@ -248,18 +344,18 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
     return status_t::failure;
   }
 
-  if (quant_params.src_scale.buff || quant_params.wei_scale.buff ||
-      quant_params.dst_scale.buff ||
-      quant_params.src_zp.buff || quant_params.wei_zp.buff ||
-      quant_params.dst_zp.buff) {
-    log_error("Quantization parameters are not supported in LOWOHA matmul_direct yet");
+  if (params.quant_params.src_scale.buff || params.quant_params.wei_scale.buff ||
+      params.quant_params.dst_scale.buff ||
+      params.quant_params.src_zp.buff || params.quant_params.wei_zp.buff ||
+      params.quant_params.dst_zp.buff) {
+    log_error("Quantization params are not supported in LOWOHA matmul_direct yet");
     return status_t::failure;
   }
 
-  const bool is_f32_src  = (dtypes.src == data_type_t::f32);
-  const bool is_bf16_src = (dtypes.src == data_type_t::bf16);
-  const bool is_f32_out  = (dtypes.dst == data_type_t::f32);
-  const bool is_bf16_out = (dtypes.dst == data_type_t::bf16);
+  const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
+  const bool is_bf16_src = (params.dtypes.src == data_type_t::bf16);
+  const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
+  const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
 
   if ((!is_f32_src && !is_bf16_src) || (!is_f32_out && !is_bf16_out)) {
     log_error("Unsupported data type combination");
@@ -271,7 +367,7 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
     return status_t::failure;
   }
 
-  if (post_op.postop_.size()) {
+  if (params.postop_.size()) {
     log_error("Post-op is not supported in LOWOHA matmul_direct");
     return status_t::failure;
   }
@@ -283,7 +379,6 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
 
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
-  const char layout       = 'r';
 
   size_t src_type_size = is_f32_src ? sizeof(float) : sizeof(int16_t);
   size_t out_type_size = is_f32_out ? sizeof(float) : sizeof(int16_t);
@@ -295,9 +390,19 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = omp_get_max_threads();
   const bool use_blis   = true;
+  const bool use_blis_bmm = false;
 
-  if (num_threads > 1 &&
-      !may_i_use_blis_partition(batch_count, M, N, num_threads, dtypes.src)) {
+  if (use_blis_bmm) {
+    // Use batch GEMM for multiple batches
+    matmul_batch_gemm_wrapper(layout, trans_input, trans_weight,
+                              M, N, K, alpha,
+                              src, lda, weight, ldb, beta, dst, ldc,
+                              params.dtypes, batch_count,
+                              params.mem_format_a, params.mem_format_b,
+                              src_stride, weight_stride, dst_stride);
+  }
+  else if (num_threads > 1 &&
+           !may_i_use_blis_partition(batch_count, M, N, num_threads, params.dtypes.src)) {
     /*
     * Parallel partitioning strategy:
     * The total number of available threads is divided across batches to compute `threads_per_batch`,
@@ -352,7 +457,8 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
                               m_len, N, K, alpha,
                               A, lda, weight_ptr, ldb,
                               beta, C, ldc,
-                              dtypes, use_blis);
+                              params.dtypes, use_blis,
+                              params.mem_format_a, params.mem_format_b);
       }
     });
 #else
@@ -376,7 +482,8 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
                               m_len, N, K, alpha,
                               A, lda, weight_ptr, ldb,
                               beta, C, ldc,
-                              dtypes, use_blis);
+                              params.dtypes, use_blis,
+                              params.mem_format_a, params.mem_format_b);
       }
     }
 #endif
@@ -393,7 +500,8 @@ status_t matmul_direct(const void *src, const void *weight, void *dst,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr, ldb,
                             beta, dst_ptr, ldc,
-                            dtypes, use_blis);
+                            params.dtypes, use_blis,
+                            params.mem_format_a, params.mem_format_b);
     }
   }
   return status_t::success;

@@ -19,7 +19,7 @@
 #include "benchdnn.hpp"
 
 using zendnnl::lowoha::data_types;
-using zendnnl::lowoha::lowoha_post_op;
+using zendnnl::lowoha::lowoha_params;
 using zendnnl::lowoha::matmul_direct;
 
 namespace zendnnl {

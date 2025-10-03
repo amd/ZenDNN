@@ -521,16 +521,16 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                  batchB, " M:", M, " N:", N, " K:", K,
                  " alpha:", alpha, " beta:", beta);
 
-        lowoha_post_op postop;
+        lowoha_params params;
+        params.dtypes = matmul_dtypes;
 
         status_t status = matmul_direct(
-                            A_data, B_data, C_data, nullptr,  // No bias
-                            alpha, beta,
-                            static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                            'r',  // layout: row-major
                             transA, transB,
-                            lda, ldb, ldc,
-                            matmul_dtypes, postop,
-                            lowoha_quantization_params_t(),
+                            static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                            alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                            beta, C_data, ldc,
+                            params,
                             batchA, batchB  // Batch_A, Batch_B
                           );
         if (status != status_t::success) {

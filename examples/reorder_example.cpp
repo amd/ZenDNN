@@ -588,7 +588,10 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
 
     // Compute the size to reorder and create a buffer with size
     size_t reorder_size = reorder_operator.get_reorder_size();
-    void *reorder_weights = aligned_alloc(64, reorder_size);
+    size_t alignment = 64;
+    reorder_size = get_aligned_size(alignment, reorder_size);
+    void *reorder_weights = aligned_alloc(alignment, reorder_size);
+
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation
@@ -737,7 +740,9 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
 
     // Compute the reorder size and create a buffer with reorderd size
     size_t reorder_size = reorder_operator.get_reorder_size();
-    void *reorder_weights = aligned_alloc(64, reorder_size);
+    size_t alignment = 64;
+    reorder_size = get_aligned_size(alignment, reorder_size);
+    void *reorder_weights = aligned_alloc(alignment, reorder_size);
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation
@@ -778,7 +783,8 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
 
     // Compute the size to unreorder and create a buffer with size
     size_t unreorder_size = unreorder_operator.get_reorder_size();
-    void *unreorder_weights = aligned_alloc(64, unreorder_size);
+    unreorder_size = get_aligned_size(alignment, unreorder_size);
+    void *unreorder_weights = aligned_alloc(alignment, unreorder_size);
 
     // Create a Pair of storage params [reorder size and reorder weights] and
     // use it in tensor creation

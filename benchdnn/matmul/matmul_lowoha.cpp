@@ -99,7 +99,8 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       matmul_dtypes.bias = cfg.bias_dt;
       matmul_dtypes.compute = data_type_t::none;
 
-      lowoha_post_op postop;
+      lowoha_params params;
+      params.dtypes = matmul_dtypes;
 
       // Validate data types
       if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16) {
@@ -128,13 +129,12 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
           void *C_data = output_tensor[i].get_raw_handle_unsafe();
 
           status_t status = matmul_direct(
-                              A_data, B_data, C_data, nullptr,  // No bias
-                              alpha, beta,
-                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              'r',  // layout: row-major
                               cfg.isTransA, cfg.isTransB,
-                              lda, ldb, ldc,
-                              matmul_dtypes, postop,
-                              zendnnl::lowoha::lowoha_quantization_params_t(),
+                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                              beta, C_data, ldc,
+                              params,
                               batchA, batchB  // Batch_A, Batch_B
                             );
           if (status != status_t::success) {
@@ -169,13 +169,12 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
           void *B_data = weight_tensor[i].get_raw_handle_unsafe();
           void *C_data = output_tensor[i].get_raw_handle_unsafe();
           status_t status = matmul_direct(
-                              A_data, B_data, C_data, nullptr,  // No bias
-                              alpha, beta,
-                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              'r',  // layout: row-major
                               cfg.isTransA, cfg.isTransB,
-                              lda, ldb, ldc,
-                              matmul_dtypes, postop,
-                              zendnnl::lowoha::lowoha_quantization_params_t(),
+                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                              beta, C_data, ldc,
+                              params,
                               batchA, batchB  // Batch_A, Batch_B
                             );
           if (status != status_t::success) {
