@@ -229,12 +229,13 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
 }
 
 
-status_t matmul_direct(const void *src, const void *weight, void *dst, void *bias,
-                   float alpha, float beta, int M, int N, int K,
-                   bool transA, bool transB, int lda, int ldb, int ldc,
-                   data_types &dtypes, lowoha_post_op post_op,
-                   const lowoha_quantization_params_t &quant_params,
-                   int Batch_A, int Batch_B) {
+status_t matmul_direct(const void *src, const void *weight, void *dst,
+                       void *bias,
+                       float alpha, float beta, int M, int N, int K,
+                       bool transA, bool transB, int lda, int ldb, int ldc,
+                       data_types &dtypes, lowoha_post_op post_op,
+                       const lowoha_quantization_params_t &quant_params,
+                       int Batch_A, int Batch_B) {
   log_info("Executing matmul LOWOHA kernel");
 
   if (!src || !weight || !dst) {
@@ -308,6 +309,20 @@ status_t matmul_direct(const void *src, const void *weight, void *dst, void *bia
     */
     int threads_per_batch = std::max(1, num_threads / batch_count);
     int M_block = std::max(1, (M + threads_per_batch - 1) / threads_per_batch);
+
+    // Optimize M_block based on batch count and M size
+    // TODO: Further refine the tuning based on heuristics
+    // involving batch_count, M, and num_threads.
+    if ((batch_count >= 1024 && M <= 2048) ||
+        (batch_count >= 512 && M <= 64)) {
+      M_block = std::min(36, M);
+    }
+    else if (batch_count == 64 && M >= 512) {
+      M_block = std::min(192, M);
+    }
+    else {
+      M_block = std::min(M_block, M);  // Ensure M_block <= M
+    }
 
 #if ENABLE_ZENDNNL_PARALLEL_FOR
 
