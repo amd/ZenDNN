@@ -1,4 +1,4 @@
-name: zendnn CI
+name: ZenDNN CI
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     name: Check License Headers
     uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
     
- zendnn_build_push:
+ zendnn_build_push:   
   runs-on: zendnn_presub_server
   if: ${{ github.event_name == 'push' }}
   steps:
