@@ -29,6 +29,7 @@
 #include <mutex>
 #include <map>
 #include <vector>
+#include <algorithm>
 
 #include "common/zendnnl_exceptions.hpp"
 #include "common/config_params.hpp"

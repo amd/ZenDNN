@@ -48,6 +48,7 @@ enum class log_module_t : uint32_t {
   test,             /*!< Test log */
   profile,          /*!< Profile log */
   debug,            /*!< Debug log */
+  trace,            /*!< Trace log */ 
   log_module_count  /*!< Log module count */
 };
 
@@ -76,6 +77,8 @@ class logger_support_t final {
       return "PROF   ";
     case log_module_t::debug:
       return "DEBUG  ";
+    case log_module_t::trace:
+      return "TRACE  ";
     default:
       return "unknown";
     }
@@ -111,6 +114,9 @@ class logger_support_t final {
     }
     if ("debug" == str_) {
       return log_module_t::debug;
+    }
+    if ("trace" == str_) {
+      return log_module_t::trace;
     }
 
     return log_module_t::log_module_count;
