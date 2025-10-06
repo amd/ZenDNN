@@ -301,3 +301,41 @@ jobs:
           rm -rf ${GITHUB_WORKSPACE}/ZenDNN
           rm -rf ${GITHUB_WORKSPACE}/ZenDNN_tools
         shell: bash
+ trigger_pytorch_plugin:
+    needs: [zendnn_build]
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: amd-zenai-arc-xsmall-dind
+    steps:
+      - name: Trigger ZenDNN_PyTorch_Plugin workflow
+        run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-pr",
+            "client_payload": {
+              "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+              "ZENTORCH_USE_LOCAL_ZENDNN": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+        shell: bash
+ trigger_tensorflow_plugin:
+    needs: [zendnn_build]
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: amd-zenai-arc-xsmall-dind
+    steps:
+      - name: Trigger ZenDNN_PyTorch_Plugin workflow
+        run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_TensorFlow_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-pr",
+            "client_payload": {
+              "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+              "ZENTF_USE_LOCAL_ZENDNN": "1",
+              "ZENTF_USE_LOCAL_BLIS": "1"
+            }
+          }'
+        shell: bash
