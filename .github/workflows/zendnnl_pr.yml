@@ -20,12 +20,12 @@ on:
       gtest_filter:
         description: 'GTest filter pattern (e.g. Matmul/*)'
         required: false
-        default: 'Matmul/*'
+        default: '*'
         type: string
       test_iterations:
         description: 'Number of test iterations'
         required: false
-        default: '100'
+        default: '10'
         type: string
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
     name: Check License Headers
     uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
 
-  Zenndnnl_build_PR:
+  Zendnnl_build_PR:
     runs-on: zendnnl_presub_server
     needs: [jira-id-check, license-header-check]
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
@@ -186,7 +186,7 @@ jobs:
         echo "Workspace cleanup completed"
       shell: bash
 
-  Zendnn_build_push: 
+  Zendnnl_build_push: 
    runs-on: zendnnl_presub_server
    if: ${{ github.event_name == 'push' }}
    env:
@@ -353,7 +353,7 @@ jobs:
   asan-build:
    runs-on: zendnnl_presub_server
    if: ${{ github.event_name == 'push' }}
-   needs:  Zendnn_build_push
+   needs:  Zendnnl_build_push
    env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
