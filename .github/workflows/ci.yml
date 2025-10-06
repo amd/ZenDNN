@@ -325,7 +325,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: amd-zenai-arc-xsmall-dind
     steps:
-      - name: Trigger ZenDNN_PyTorch_Plugin workflow
+      - name: Trigger ZenDNN_Tensorflow_Plugin workflow
         run: |
           curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_TensorFlow_Plugin/dispatches \
           -H "Accept: application/vnd.github.v3+json" \
