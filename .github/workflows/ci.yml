@@ -22,7 +22,7 @@ jobs:
   zendnn_build:
     runs-on: zendnn_presub_server
     needs: [jira-id-check, license-header-check]
-    if: |
+    if: >
       (github.event_name == 'push') ||
       ((github.event_name == 'workflow_dispatch' ||github.event_name == 'pull_request') &&
        needs.jira-id-check.outputs.result == 'success' &&
