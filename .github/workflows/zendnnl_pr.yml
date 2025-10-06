@@ -2,9 +2,9 @@ name: ZenDNNL PR Build
 
 on:
   push:
-    branches: [ nedomako_zendnnl]
+    branches: [ nedomako_zendnnl , zendnnl]
   pull_request:
-    branches: [ nedomako_zendnnl ]
+    branches: [ nedomako_zendnnl , zendnnl]
   workflow_dispatch:
     inputs:
       python_version:
