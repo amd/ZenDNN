@@ -60,16 +60,18 @@ status_t embag_operator_t::validate() {
     return status_t::failure;
   }
 
-  if (indices_data_type != data_type_t::s32) {
-    apilog_error(name, ": indices datatype must be int32");
+  if (indices_data_type != data_type_t::s64 &&
+      indices_data_type != data_type_t::s32) {
+    apilog_error(name, ": indices datatype must be int64 or int32");
     return status_t::failure;
   }
 
   // Validate optional offset tensor
   if (get_input("offsets")) {
     auto offsets_data_type = get_input("offsets")->get_data_type();
-    if (offsets_data_type != data_type_t::s32) {
-      apilog_error(name, ": offsets datatype must be int32");
+    if (offsets_data_type != data_type_t::s64 &&
+        offsets_data_type != data_type_t::s32) {
+      apilog_error(name, ": offsets datatype must be int64 or int32");
       return status_t::failure;
     }
 
@@ -147,16 +149,18 @@ status_t embag_operator_t::validate_forced_kernel() {
       return status_t::failure;
     }
 
-    if (indices_data_type != data_type_t::s32) {
-      apilog_error(name, ": indices datatype must be int32");
+    if (indices_data_type != data_type_t::s64 &&
+        indices_data_type != data_type_t::s32) {
+      apilog_error(name, ": indices datatype must be int64 or int32");
       return status_t::failure;
     }
 
     // Validate optional offset tensor
     if (get_input("offsets")) {
       auto offsets_data_type = get_input("offsets")->get_data_type();
-      if (offsets_data_type != data_type_t::s32) {
-        apilog_error(name, ": offsets datatype must be int32");
+      if (offsets_data_type != data_type_t::s64 &&
+          offsets_data_type != data_type_t::s32) {
+        apilog_error(name, ": offsets datatype must be int64 or int32");
         return status_t::failure;
       }
 

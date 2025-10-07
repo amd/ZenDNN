@@ -25,12 +25,12 @@ namespace examples {
 using namespace zendnnl::interface;
 
 // Generate random indices
-std::vector<uint32_t> generate_random_indices(size_t count,
-    uint32_t min_val = 0, uint32_t max_val = 99) {
-  std::vector<uint32_t> indices(count);
+std::vector<int64_t> generate_random_indices(size_t count,
+    int64_t min_val = 0, int64_t max_val = 99) {
+  std::vector<int64_t> indices(count);
   std::random_device rd;
   std::mt19937 gen(rd());
-  std::uniform_int_distribution<uint32_t> dis(min_val, max_val);
+  std::uniform_int_distribution<int64_t> dis(min_val, max_val);
   for (size_t i = 0; i < count; ++i) {
     indices[i] = dis(gen);
   }
@@ -39,8 +39,8 @@ std::vector<uint32_t> generate_random_indices(size_t count,
 }
 
 // Generate offsets
-std::vector<uint32_t> generate_offsets(size_t batch_size) {
-  std::vector<uint32_t> offsets(batch_size, 0);
+std::vector<int64_t> generate_offsets(size_t batch_size) {
+  std::vector<int64_t> offsets(batch_size, 0);
   for (size_t i = 1; i < batch_size; ++i) {
     offsets[i] = offsets[i-1] + 2;
   }
@@ -48,8 +48,8 @@ std::vector<uint32_t> generate_offsets(size_t batch_size) {
   return offsets;
 }
 
-std::vector<uint32_t> indices = generate_random_indices(INDICES_SIZE);
-std::vector<uint32_t> offsets = generate_offsets(EMB_BATCH_SIZE);
+std::vector<int64_t> indices = generate_random_indices(INDICES_SIZE);
+std::vector<int64_t> offsets = generate_offsets(EMB_BATCH_SIZE);
 
 int embedding_bag_f32_kernel_example() {
 
@@ -85,11 +85,11 @@ int embedding_bag_f32_kernel_example() {
     }
 
     auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
-                          data_type_t::s32,
+                          data_type_t::s64,
                           indices, "indices");
 
     auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
-                          data_type_t::s32,
+                          data_type_t::s64,
                           offsets, "offsets");
 
     auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
@@ -154,11 +154,11 @@ int embedding_bag_f32_forced_ref_kernel_example() {
     }
 
     auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
-                          data_type_t::s32,
+                          data_type_t::s64,
                           indices, "indices");
 
     auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
-                          data_type_t::s32,
+                          data_type_t::s64,
                           offsets, "offsets");
 
     auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
@@ -227,7 +227,7 @@ int embedding_f32_kernel_example() {
     }
 
     auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
-                          data_type_t::s32,
+                          data_type_t::s64,
                           indices, "indices");
 
     auto output_tensor = tensor_factory.zero_tensor({indices.size(), EMB_DIM},

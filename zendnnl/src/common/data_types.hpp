@@ -46,6 +46,7 @@ enum class data_type_t : uint8_t {
   f16,  /*!< float 16bit */
   bf16, /*!< brain float 16bit */
   s32,  /*!< signed integer 32 bit */
+  s64,  /*!< signed integer 64 bit */
   s16,  /*!< signed integer 16 bit */
   s8,   /*!< signed integer 8 bit */
   s4,   /*!< signed integer 4 bit */
@@ -87,6 +88,12 @@ struct prec_traits<data_type_t::bf16> {
 template <>
 struct prec_traits<data_type_t::s32> {
     typedef int32_t type;
+};
+
+/** @brief s64 to int64_t */
+template <>
+struct prec_traits<data_type_t::s64> {
+    typedef int64_t type;
 };
 
 /** @brief s16 to int16_t */

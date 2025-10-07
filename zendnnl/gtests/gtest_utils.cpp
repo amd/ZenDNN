@@ -78,6 +78,8 @@ EmbagType::EmbagType() {
   padding_index = -1;
   include_last_offset = std::rand() % 2;
   is_weights = std::rand() % 2;
+  indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  offsets_dtype = indices_dtype;
   scatter_stride = -1;
 }
 
@@ -88,6 +90,7 @@ EmbeddingType::EmbeddingType() {
   num_indices = 128 + std::rand() % 2048;
   padding_index = -1;
   is_weights = std::rand() % 2;
+  indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
 }
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
@@ -387,53 +390,80 @@ tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
 
 // Extended tensor factory implementations
 tensor_t tensor_factory_t::random_indices_tensor(const std::vector<index_type>
-    size_,
-    uint64_t num_embeddings) {
+    size_, uint64_t num_embeddings_,
+    data_type_t indices_dtype_) {
   auto indices_tensor = tensor_t()
                         .set_name("indices_tensor")
                         .set_size(size_)
-                        .set_data_type(data_type_t::s32)
+                        .set_data_type(indices_dtype_)
                         .set_storage()
                         .create();
   void *data = indices_tensor.get_raw_handle_unsafe();
+  int num_indices = size_[0];
 
   std::random_device rd;
   std::mt19937 gen(rd());
-  std::uniform_int_distribution<uint32_t> dist(0,
-      static_cast<uint32_t>(num_embeddings - 1));
 
-  int num_indices = size_[0];
+  if (indices_dtype_ == data_type_t::s32) {
+    std::uniform_int_distribution<int32_t> dist(0,
+        static_cast<int32_t>(num_embeddings_ - 1));
 
-  for (int i = 0; i < num_indices; ++i) {
-    static_cast<uint32_t *>(data)[i] = dist(gen);
+    for (int i = 0; i < num_indices; ++i) {
+      static_cast<int32_t *>(data)[i] = dist(gen);
+    }
+  }
+  else if (indices_dtype_ == data_type_t::s64) {
+    std::uniform_int_distribution<int64_t> dist(0,
+        static_cast<int64_t>(num_embeddings_ - 1));
+
+    for (int i = 0; i < num_indices; ++i) {
+      static_cast<int64_t *>(data)[i] = dist(gen);
+    }
+  }
+  else {
+    log_warning("tensor ", indices_tensor.get_name(), " unsupported data type.");
   }
 
   return indices_tensor;
 }
 
 tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
-    size_,
-    uint64_t num_indices,
-    bool include_last_offset) {
+    size_, uint64_t num_indices_,
+    data_type_t offsets_dtype_,
+    bool include_last_offset_) {
   auto tensor = tensor_t()
                 .set_name("offsets_tensor")
                 .set_size(size_)
-                .set_data_type(data_type_t::s32)
+                .set_data_type(offsets_dtype_)
                 .set_storage()
                 .create();
   void *data = tensor.get_raw_handle_unsafe();
 
   int num_offsets = size_[0];
-  if (include_last_offset) {
+  if (include_last_offset_) {
     num_offsets--;
   }
 
-  for (int i = 0; i < num_offsets; ++i) {
-    static_cast<uint32_t *>(data)[i] = (i * num_indices) / num_offsets;
-  }
+  if (offsets_dtype_ == data_type_t::s32) {
+    for (int i = 0; i < num_offsets; ++i) {
+      static_cast<int32_t *>(data)[i] = (i * num_indices_) / num_offsets;
+    }
 
-  if (include_last_offset) {
-    static_cast<uint32_t *>(data)[num_offsets] = num_indices;
+    if (include_last_offset_) {
+      static_cast<int32_t *>(data)[num_offsets] = num_indices_;
+    }
+  }
+  else if (offsets_dtype_ == data_type_t::s64) {
+    for (int i = 0; i < num_offsets; ++i) {
+      static_cast<int64_t *>(data)[i] = (i * num_indices_) / num_offsets;
+    }
+
+    if (include_last_offset_) {
+      static_cast<int64_t *>(data)[num_offsets] = num_indices_;
+    }
+  }
+  else {
+    log_warning("tensor ", tensor.get_name(), " unsupported data type.");
   }
 
   return tensor;
@@ -526,7 +556,8 @@ bool Parser::isInteger(const std::string &s) {
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias_tensor, tensor_t &output_tensor,
                             uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
-                            float alpha, float beta) {
+                            float alpha,
+                            float beta) {
   try {
 
     if (use_LOWOHA) {

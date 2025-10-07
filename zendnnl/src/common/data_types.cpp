@@ -32,6 +32,8 @@ uint32_t size_of(data_type_t data_type) {
     return sizeof(prec_traits<data_type_t::bf16>::type);
   case data_type_t::s32 :
     return sizeof(prec_traits<data_type_t::s32>::type);
+  case data_type_t::s64 :
+    return sizeof(prec_traits<data_type_t::s64>::type);
   case data_type_t::s16 :
     return sizeof(prec_traits<data_type_t::s16>::type);
   case data_type_t::s8 :
@@ -63,6 +65,8 @@ switch(data_type) {
     return "bf16";
   case data_type_t::s32 :
     return "s32";
+  case data_type_t::s64 :
+    return "s64";
   case data_type_t::s16 :
     return "s16";
   case data_type_t::s8 :

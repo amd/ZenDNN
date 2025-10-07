@@ -209,7 +209,7 @@ tensor_t tensor_factory_t::broadcast_uniform_tensor(const
 
 tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type>
     size_,
-    data_type dtype_, std::vector<uint32_t> val_,
+    data_type dtype_, std::vector<int64_t> val_,
     std::string tensor_name_, tensor_t scale, tensor_t zp) {
 
   auto utensor = tensor_t()
@@ -234,8 +234,8 @@ tensor_t tensor_factory_t::non_uniform_tensor(const std::vector<index_type>
     auto  buf_nelem  = utensor.get_nelem();
     void *buf_vptr   = utensor.get_raw_handle_unsafe();
 
-    if (dtype_ == data_type::s32) {
-      uint32_t *buf_ptr = static_cast<uint32_t *>(buf_vptr);
+    if (dtype_ == data_type::s64) {
+      int64_t *buf_ptr = static_cast<int64_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = val_[i];
       }

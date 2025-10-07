@@ -60,7 +60,7 @@ class tensor_factory_t {
   /** @brief non-uniform tensor */
   tensor_t non_uniform_tensor(const std::vector<index_type> size_,
                               data_type dtype_,
-                              std::vector<uint32_t> val_, std::string tensor_name_="non_uniform",
+                              std::vector<int64_t> val_, std::string tensor_name_="non_uniform",
                               tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniform distributed tensor */

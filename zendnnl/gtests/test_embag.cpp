@@ -37,6 +37,8 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
     padding_index      = params.padding_index;
     include_last_offset = params.include_last_offset;
     is_weights         = params.is_weights;
+    indices_dtype      = params.indices_dtype;
+    offsets_dtype      = params.offsets_dtype;
     scatter_stride     = params.scatter_stride;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
@@ -52,6 +54,7 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
   embag_algo_t algo;
   int64_t padding_index;
   bool include_last_offset, is_weights;
+  data_type_t indices_dtype, offsets_dtype;
   int64_t scatter_stride;
   tensor_factory_t tensor_factory{};
 };
@@ -66,10 +69,10 @@ TEST_P(TestEmbag, F32_F32) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::f32, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
   auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
-                           num_indices, include_last_offset);
+                           num_indices, offsets_dtype, include_last_offset);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
@@ -106,10 +109,10 @@ TEST_P(TestEmbag, F32_BF16) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::f32, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
   auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
-                           num_indices, include_last_offset);
+                           num_indices, offsets_dtype, include_last_offset);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
@@ -146,10 +149,10 @@ TEST_P(TestEmbag, BF16_F32) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
   auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
-                           num_indices, include_last_offset);
+                           num_indices, offsets_dtype, include_last_offset);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
@@ -186,10 +189,10 @@ TEST_P(TestEmbag, BF16_BF16) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   uint64_t offsets_size  = include_last_offset ? num_bags + 1 : num_bags;
   auto offsets_tensor    = tensor_factory.random_offsets_tensor({offsets_size},
-                           num_indices, include_last_offset);
+                           num_indices, offsets_dtype, include_last_offset);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},

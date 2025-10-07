@@ -23,12 +23,16 @@ using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
 
-template <typename InType, typename OutType>
+template <
+  typename InType,
+  typename IndexType,
+  typename OffsetType,
+  typename OutType>
 void embag_ref_kernel(
   const InType *input,           // [num_embeddings, width] - embedding table
   const float *weights,          // [indsz] or nullptr if is_weights == false
-  const int32_t *indices,        // [indsz] - indices into embedding table
-  const int32_t *offsets,        // [offsz] - start positions of each bag
+  const IndexType *indices,     // [indsz] - indices into embedding table
+  const OffsetType *offsets,    // [offsz] - start positions of each bag
   OutType *dst,                  // [offsz, width] with stride dst_stride - output buffer
   int64_t width,                 // embedding dimension
   int64_t indsz,                 // number of indices
@@ -60,8 +64,8 @@ void embag_ref_kernel(
 
   // Iterate over the offsets
   for (int oi = 0; oi < outer_loop; ++oi) {
-    int32_t start = is_embedding ? oi : offsets[oi];
-    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+    int64_t start = is_embedding ? oi : offsets[oi];
+    int64_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
                                            (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     auto dst_offset = oi * dst_stride;
     float wt_sum = 0;
@@ -182,9 +186,7 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   const auto &dst_tensor = dst_iter->second;
 
   float const *input    = (const float *)table_tensor.get_raw_handle_const();
-  int32_t     *indices  = (int32_t *)indices_tensor.get_raw_handle_unsafe();
   void        *dst      = dst_tensor.get_raw_handle_unsafe();
-  int32_t     *offsets  = nullptr;
   float       *weights  = nullptr;
 
   const int64_t  width            = table_tensor.get_size(1);
@@ -194,11 +196,16 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
+  bool is_offsets                 = (offsets_iter != inputs_.end()) ? true :
+                                    false;
   int64_t offsz                   = 0;
 
   // Get data types
-  const data_type_t table_dtype = table_tensor.get_data_type();
-  const data_type_t dst_dtype   = dst_tensor.get_data_type();
+  auto table_dtype = table_tensor.get_data_type();
+  auto dst_dtype   = dst_tensor.get_data_type();
+  auto indices_data_type = indices_tensor.get_data_type();
+  auto offsets_data_type = is_offsets ? offsets_iter->second.get_data_type() :
+                           data_type_t::none;
 
   // weights tensor is present
   if (is_weights) {
@@ -212,9 +219,9 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
 
   // Offsets tensor is optional - when not provided,
   // operates as simple embedding lookup rather than embedding bag aggregation
-  if (offsets_iter != inputs_.end()) {
-    offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
-    offsz              = offsets_iter->second.get_size(0);
+  if (is_offsets) {
+    auto offsets_tensor = offsets_iter->second;
+    offsz = offsets_tensor.get_size(0);
     if (include_last_offset==1) {
       offsz -= 1;
     }
@@ -229,37 +236,113 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
     // FP32 input -> FP32 output
     const float *input_f32 = reinterpret_cast<const float *>(input);
     float *dst_f32 = reinterpret_cast<float *>(dst);
-
-    embag_ref_kernel<float, float>(
-      input_f32, weights, indices, offsets, dst_f32, width, indsz, offsz,
-      padidx, is_weights, algo, stride, include_last_offset);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<float, int64_t, int64_t, float>(
+        input_f32, weights, indices, offsets, dst_f32, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<float, int32_t, int32_t, float>(
+        input_f32, weights, indices, offsets, dst_f32, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
   }
   else if (table_dtype == data_type_t::f32 && dst_dtype == data_type_t::bf16) {
     // FP32 input -> BF16 output
     const float *input_f32 = reinterpret_cast<const float *>(input);
     uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
-
-    embag_ref_kernel<float, uint16_t>(
-      input_f32, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-      padidx, is_weights, algo, stride, include_last_offset);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<float, int64_t, int64_t, uint16_t>(
+        input_f32, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<float, int32_t, int32_t, uint16_t>(
+        input_f32, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
   }
   else if (table_dtype == data_type_t::bf16 && dst_dtype == data_type_t::f32) {
     // BF16 input -> FP32 output
     const uint16_t *input_bf16 = reinterpret_cast<const uint16_t *>(input);
     float *dst_f32 = reinterpret_cast<float *>(dst);
-
-    embag_ref_kernel<uint16_t, float>(
-      input_bf16, weights, indices, offsets, dst_f32, width, indsz, offsz,
-      padidx, is_weights, algo, stride, include_last_offset);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<uint16_t, int64_t, int64_t, float>(
+        input_bf16, weights, indices, offsets, dst_f32, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<uint16_t, int32_t, int32_t, float>(
+        input_bf16, weights, indices, offsets, dst_f32, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
   }
   else if (table_dtype == data_type_t::bf16 && dst_dtype == data_type_t::bf16) {
     // BF16 input -> BF16 output
     const uint16_t *input_bf16 = reinterpret_cast<const uint16_t *>(input);
     uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
-
-    embag_ref_kernel<uint16_t, uint16_t>(
-      input_bf16, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-      padidx, is_weights, algo, stride, include_last_offset);
+    if (indices_data_type == data_type_t::s64) {
+      int64_t *indices = (int64_t *)indices_tensor.get_raw_handle_unsafe();
+      int64_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s64) {
+        offsets = (int64_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+        input_bf16, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else if (indices_data_type == data_type_t::s32) {
+      int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
+      int32_t *offsets = nullptr;
+      if (is_offsets && offsets_data_type == data_type_t::s32) {
+        offsets = (int32_t *)offsets_iter->second.get_raw_handle_unsafe();
+      }
+      embag_ref_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+        input_bf16, weights, indices, offsets, dst_bf16, width, indsz, offsz,
+        padidx, is_weights, algo, stride, include_last_offset);
+    }
+    else {
+      apilog_error("Unsupported data type for indices and offsets");
+    }
   }
   else {
     LOG_DEBUG_INFO("Unsupported data type combination");
@@ -271,19 +354,35 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
 }
 
 // Template instantiations
-template void embag_ref_kernel<float, float>(
+template void embag_ref_kernel<float, int64_t, int64_t, float>(
+  const float *, const float *, const int64_t *, const int64_t *, float *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+
+template void embag_ref_kernel<float, int32_t, int32_t, float>(
   const float *, const float *, const int32_t *, const int32_t *, float *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<float, uint16_t>(
+template void embag_ref_kernel<float, int64_t, int64_t, uint16_t>(
+  const float *, const float *, const int64_t *, const int64_t *, uint16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+
+template void embag_ref_kernel<float, int32_t, int32_t, uint16_t>(
   const float *, const float *, const int32_t *, const int32_t *, uint16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<uint16_t, uint16_t>(
+template void embag_ref_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+  const uint16_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+
+template void embag_ref_kernel<uint16_t, int32_t, int32_t, uint16_t>(
   const uint16_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 
-template void embag_ref_kernel<uint16_t, float>(
+template void embag_ref_kernel<uint16_t, int64_t, int64_t, float>(
+  const uint16_t *, const float *, const int64_t *, const int64_t *, float *,
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
+
+template void embag_ref_kernel<uint16_t, int32_t, int32_t, float>(
   const uint16_t *, const float *, const int32_t *, const int32_t *, float *,
   int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool);
 

@@ -36,8 +36,8 @@ namespace ops {
 
 // Prefetch helper for input rows
 template <typename T>
-inline void maybe_prefetch_input(const T *input, int32_t idx, int64_t width,
-                                 int32_t padidx) {
+inline void maybe_prefetch_input(const T *input, int64_t idx, int64_t width,
+                                 int64_t padidx) {
 #ifdef ENABLE_PREFETCH
   if (idx != padidx) {
     _mm_prefetch(reinterpret_cast<const char *>(&input[idx * width]), _MM_HINT_T0);
@@ -46,8 +46,8 @@ inline void maybe_prefetch_input(const T *input, int32_t idx, int64_t width,
 }
 
 // Prefetch helper for weights
-inline void maybe_prefetch_weight(const float *weights, int32_t i,
-                                  int32_t end) {
+inline void maybe_prefetch_weight(const float *weights, int64_t i,
+                                  int64_t end) {
 #ifdef ENABLE_PREFETCH
   const float *pf_wt_ptr = (i < end) ? &weights[i] : &weights[end - 1];
   _mm_prefetch(reinterpret_cast<const char *>(pf_wt_ptr), _MM_HINT_T0);
@@ -104,13 +104,17 @@ inline void maybe_prefetch_weight(const float *weights, int32_t i,
 
 */
 
-template <typename InType, typename OutType>
+template <
+  typename InType,
+  typename IndexType,
+  typename OffsetType,
+  typename OutType>
 __attribute__((target("avx512f,avx512vl,avx512bf16")))
 void embag_avx512_kernel(
   const InType *input,           // [num_embeddings, width] - embedding table
   const float *weights,          // [indsz] or nullptr if is_weights == false
-  const int32_t *indices,        // [indsz] - indices into embedding table
-  const int32_t *offsets,        // [offsz] - start positions of each bag
+  const IndexType *indices,     // [indsz] - indices into embedding table
+  const OffsetType *offsets,        // [offsz] - start positions of each bag
   OutType *dst,                  // [offsz, width] with stride dst_stride - output buffer
   int64_t width,                 // embedding dimension
   int64_t indsz,                 // number of indices
@@ -131,8 +135,8 @@ void embag_avx512_kernel(
 
   #pragma omp parallel for
   for (int oi = 0; oi < outer_loop; ++oi) {
-    int32_t start = is_embedding ? oi : offsets[oi];
-    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+    int64_t start = is_embedding ? oi : offsets[oi];
+    int64_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
                                            (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
     bool first_valid_index = true;
@@ -147,14 +151,14 @@ void embag_avx512_kernel(
     }
 
     for (int i = start; i < end; ++i) {
-      int32_t pf_i = i + prefetch_distance;
-      int32_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
+      int64_t pf_i = i + prefetch_distance;
+      int64_t pf_idx = (pf_i < end) ? indices[pf_i] : padidx;
       maybe_prefetch_input(input, pf_idx, width, padidx);
       if (is_weights) {
         maybe_prefetch_weight(weights, pf_i, end);
       }
 
-      int32_t idx = indices[i];
+      int64_t idx = indices[i];
       if (idx == padidx) {
         continue;
       }

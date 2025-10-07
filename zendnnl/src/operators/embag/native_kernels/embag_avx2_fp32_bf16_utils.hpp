@@ -131,13 +131,17 @@ inline void fp32_to_bf16_avx2(__m256 fp32_vec, uint16_t *bf16_data) {
   _mm_storeu_si128(reinterpret_cast<__m128i *>(bf16_data), bf16_vec);
 }
 
-template <typename InType, typename OutType>
+template <
+  typename InType,
+  typename IndexType,
+  typename OffsetType,
+  typename OutType>
 __attribute__((target("avx2,fma")))
 void embag_avx2_kernel(
   const InType *input,           // [num_embeddings, width] - embedding table
   const float *weights,          // [indsz] or nullptr if is_weights == false
-  const int32_t *indices,        // [indsz] - indices into embedding table
-  const int32_t *offsets,        // [offsz] - start positions of each bag
+  const IndexType *indices,     // [indsz] - indices into embedding table
+  const OffsetType *offsets,        // [offsz] - start positions of each bag
   OutType *dst,                  // [offsz, width] with stride dst_stride - output buffer
   int64_t width,                 // embedding dimension
   int64_t indsz,                 // number of indices
@@ -158,8 +162,8 @@ void embag_avx2_kernel(
 
   #pragma omp parallel for
   for (int oi = 0; oi < outer_loop; ++oi) {
-    int32_t start = is_embedding ? oi : offsets[oi];
-    int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
+    int64_t start = is_embedding ? oi : offsets[oi];
+    int64_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
                                            (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
     bool first_valid_index = true;

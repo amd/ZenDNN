@@ -34,6 +34,7 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
     num_indices        = params.num_indices;
     padding_index      = params.padding_index;
     is_weights         = params.is_weights;
+    indices_dtype      = params.indices_dtype;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_indices: ", num_indices, " padding_index: ", padding_index,
@@ -46,6 +47,7 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
   uint64_t num_embeddings, embedding_dim, num_indices;
   int64_t padding_index;
   bool is_weights;
+  data_type_t indices_dtype;
   tensor_factory_t tensor_factory{};
 };
 
@@ -59,7 +61,7 @@ TEST_P(TestEmbedding, F32_F32) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::f32, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
@@ -92,7 +94,7 @@ TEST_P(TestEmbedding, F32_BF16) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::f32, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
@@ -125,7 +127,7 @@ TEST_P(TestEmbedding, BF16_F32) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
@@ -159,7 +161,7 @@ TEST_P(TestEmbedding, BF16_BF16) {
   auto table_tensor      = tensor_factory.uniform_dist_tensor({num_embeddings, embedding_dim},
                            data_type_t::bf16, 2.0f);
   auto indices_tensor    = tensor_factory.random_indices_tensor({num_indices},
-                           num_embeddings);
+                           num_embeddings, indices_dtype);
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},

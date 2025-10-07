@@ -87,6 +87,8 @@ struct EmbagType {
   int64_t padding_index;
   bool include_last_offset;
   bool is_weights;
+  data_type_t indices_dtype;
+  data_type_t offsets_dtype;
   int64_t scatter_stride;
   EmbagType();
 };
@@ -98,6 +100,7 @@ struct EmbeddingType {
   uint64_t num_indices;
   int64_t padding_index;
   bool is_weights;
+  data_type_t indices_dtype;
   EmbeddingType();
 };
 
@@ -131,7 +134,8 @@ class tensor_factory_t {
   using data_type  = data_type_t;
 
   /** @brief zero tensor */
-  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_, tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
+  tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
+                       tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniformly distributed tensor */
 
@@ -144,7 +148,7 @@ class tensor_factory_t {
   tensor_t uniform_dist_strided_tensor(const std::vector<index_type> size_,
                                        const std::vector<index_type> stride_,
                                        data_type dtype_, float range_, bool trans = false,
-                                      tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
+                                       tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief uniform tensor */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
@@ -160,11 +164,12 @@ class tensor_factory_t {
 
   /** @brief Generate random indices tensor with optional padding index */
   tensor_t random_indices_tensor(const std::vector<index_type> size_,
-                                 uint64_t num_embeddings);
+                                 uint64_t num_embeddings_, data_type_t indices_dtype_);
 
   /** @brief Generate random offsets tensor for bag boundaries */
   tensor_t random_offsets_tensor(const std::vector<index_type> size_,
-                                 uint64_t num_indices, bool include_last_offset = true);
+                                 uint64_t num_indices_, data_type_t offsets_dtype_,
+                                 bool include_last_offset_ = true);
 };
 
 /**
@@ -210,7 +215,8 @@ extern std::vector<data_type_t> dtype_arr;
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor, uint32_t index,
-                            tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha = 1.0f,
+                            tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                            float alpha = 1.0f,
                             float beta = 0.0f);
 
 /** @fn matmul_forced_ref_kernel_test
@@ -225,7 +231,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo, float alpha = 1.0f,
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                                       float alpha = 1.0f,
                                        float beta = 0.0f);
 
 /** @fn reorder_kernel_test
