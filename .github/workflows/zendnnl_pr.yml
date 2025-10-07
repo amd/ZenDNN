@@ -192,7 +192,7 @@ jobs:
    env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
-      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
    steps:
     - name: Verify user account
@@ -357,7 +357,7 @@ jobs:
    env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
-      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
     
    steps:
