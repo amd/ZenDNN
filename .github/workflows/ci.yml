@@ -23,40 +23,6 @@ jobs:
   runs-on: zendnn_presub_server
   if: ${{ github.event_name == 'push' }}
   steps:
-     - name: Print workflow changes
-       run: |
-        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-         echo "=== PULL REQUEST INFO ==="
-         echo "PR BASE BRANCH   : ${{ github.event.pull_request.base.ref }}"
-         echo "PR BASE SHA      : ${{ github.event.pull_request.base.sha }}"
-         echo "PR SOURCE BRANCH : ${{ github.event.pull_request.head.ref }}"
-         echo "PR HEAD SHA      : ${{ github.event.pull_request.head.sha }}"
-         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
-         echo ""
-         echo "All commits in this PR:"
-         git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-         echo ""
-         echo "Changed files:"
-         git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-         echo ""
-         echo "Diff stats:"
-         git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-        else
-         echo "=== PUSH / WORKFLOW_DISPATCH INFO ==="
-         BRANCH=${GITHUB_REF#refs/heads/}
-         echo "Branch   : $BRANCH"
-         echo "Latest commit SHA: $GITHUB_SHA"
-         git fetch origin $BRANCH
-         echo ""
-         echo "Last 10 commits:"
-         git log --oneline -10
-         echo ""
-         echo "Changed files in last commit:"
-         git diff --name-status HEAD~1 HEAD
-         echo ""
-         echo "Diff stats for last commit:"
-         git diff --stat HEAD~1 HEAD
-        fi
 
      - name: basic_debug
        run: |
@@ -75,6 +41,53 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
           clean: true
+     - name: Print Commit / PR Info
+       run: |
+        echo "=== GITHUB EVENT TYPE: ${GITHUB_EVENT_NAME} ==="
+        echo ""
+
+        # Always ensure remote is authenticated
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         echo "=== PULL REQUEST INFO ==="
+         echo "PR BASE BRANCH   : ${{ github.event.pull_request.base.ref }}"
+         echo "PR BASE SHA      : ${{ github.event.pull_request.base.sha }}"
+         echo "PR SOURCE BRANCH : ${{ github.event.pull_request.head.ref }}"
+         echo "PR HEAD SHA      : ${{ github.event.pull_request.head.sha }}"
+         echo ""
+         echo "Fetching branches..."
+         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
+         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
+         echo ""
+         echo "=== COMMITS BETWEEN BASE AND HEAD ==="
+         git log --oneline origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
+         echo ""
+         echo "=== FILES CHANGED ==="
+         git diff --name-status origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
+         echo ""
+         echo "=== DIFF STATS ==="
+         git diff --stat origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
+
+        else
+         echo "=== PUSH OR WORKFLOW_DISPATCH INFO ==="
+         BRANCH=${GITHUB_REF#refs/heads/}
+         echo "Branch   : $BRANCH"
+         echo "Latest commit SHA: $GITHUB_SHA"
+         echo ""
+         echo "Fetching full history..."
+         git fetch origin $BRANCH
+         echo ""
+         echo "=== LAST 20 COMMITS ==="
+         git log --oneline -20
+         echo ""
+         echo "=== CHANGED FILES IN LAST COMMIT ==="
+         git diff --name-status HEAD~1 HEAD || echo "No previous commit to diff"
+         echo ""
+         echo "=== DIFF STATS FOR LAST COMMIT ==="
+         git diff --stat HEAD~1 HEAD || echo "No previous commit to diff"
+        fi
+       shell: bash
 
      - name: show GITHUB_WORKSPACE
        run: |
