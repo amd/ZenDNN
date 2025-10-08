@@ -26,18 +26,23 @@ jobs:
      - name: Print PR info
        if: ${{ github.event_name == 'pull_request' }}
        run: |
-         echo "PR BASE SHA: ${{ github.event.pull_request.base.sha }}"
-         echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
-    
-         echo "Commits in this PR:"
-         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
-         git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        echo "PR BASE BRANCH: ${{ github.event.pull_request.base.ref }}"
+        echo "PR BASE SHA   : ${{ github.event.pull_request.base.sha }}"
+        echo "PR SOURCE BRANCH: ${{ github.event.pull_request.head.ref }}"
+        echo "PR HEAD SHA     : ${{ github.event.pull_request.head.sha }}"
 
-         echo "Changed files in this PR:"
-         git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        echo ""
+        echo "Commits in this PR:"
+        git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
+        git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
 
-         echo "Diff stats:"
-         git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        echo ""
+        echo "Changed files in this PR:"
+        git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+        echo ""
+        echo "Diff stats:"
+        git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
      - name: basic_debug
        run: |
             pwd
@@ -184,18 +189,23 @@ jobs:
       - name: Print PR info
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-            echo "PR BASE SHA: ${{ github.event.pull_request.base.sha }}"
-            echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
-    
-            echo "Commits in this PR:"
-            git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
-            git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+         echo "PR BASE BRANCH: ${{ github.event.pull_request.base.ref }}"
+         echo "PR BASE SHA   : ${{ github.event.pull_request.base.sha }}"
+         echo "PR SOURCE BRANCH: ${{ github.event.pull_request.head.ref }}"
+         echo "PR HEAD SHA     : ${{ github.event.pull_request.head.sha }}"
 
-            echo "Changed files in this PR:"
-            git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+         echo ""
+         echo "Commits in this PR:"
+         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
+         git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
 
-            echo "Diff stats:"
-            git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+         echo ""
+         echo "Changed files in this PR:"
+         git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+         echo ""
+         echo "Diff stats:"
+         git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
       - name: basic_debug
         run: |
             pwd
