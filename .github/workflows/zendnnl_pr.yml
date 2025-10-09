@@ -59,6 +59,50 @@ jobs:
       
     - name: Checkout repository
       uses: actions/checkout@v3
+    - name: Print PR or Push Info for ZenDNN and ZenDNN_Tools
+      shell: bash
+      run: |
+        echo "=============================="
+        echo "   ZENDNN  "
+        echo "=============================="
+
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+        git log --oneline origin/$BASE_BRANCH..origin/$SOURCE_BRANCH || echo "No commits found"
+        echo ""
+
       
     - name: Set up build environment
       run: |
@@ -204,6 +248,49 @@ jobs:
       
     - name: Checkout repository
       uses: actions/checkout@v3
+    - name: Print PR or Push Info for ZenDNN and ZenDNN_Tools
+      shell: bash
+      run: |
+        echo "=============================="
+        echo "   ZENDNN  "
+        echo "=============================="
+
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+        git log --oneline origin/$BASE_BRANCH..origin/$SOURCE_BRANCH || echo "No commits found"
+        echo ""
       
     - name: Set up build environment
       run: |
