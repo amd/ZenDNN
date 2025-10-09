@@ -22,6 +22,11 @@
   #include "libxsmm.h"
 #endif
 
+#if ZENDNNL_DEPENDS_ONEDNN
+  #include "operators/matmul/onednn/matmul_onednn_kernel.hpp"
+  using namespace dnnl;
+#endif
+
 namespace zendnnl {
 namespace lowoha {
 
@@ -150,9 +155,86 @@ static inline void run_blis(char        layout,
                               beta,static_cast<float *>(C),ldc,nullptr);
   }
   else {
-    apilog_info("Data type not supported");
+    log_info("Data type not supported");
   }
 }
+
+#if ZENDNNL_DEPENDS_ONEDNN
+static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
+    int K,
+    float alpha, const void *A, int lda, const void *B, int ldb, float beta,
+    void *C, int ldc, data_types &dtypes, int batch_count) {
+  dnnl::engine eng(dnnl::engine::kind::cpu, 0);
+  dnnl::stream eng_stream(eng);
+  std::unordered_map<int, dnnl::memory> matmul_args;
+
+  // Set up dimensions
+  dnnl::memory::dims src_dims = {batch_count, M, K};
+  dnnl::memory::dims weights_dims = {batch_count, K, N};
+  dnnl::memory::dims dst_dims = {batch_count, M, N};
+
+  // Select memory data types
+  dnnl::memory::data_type src_dtype = (dtypes.src == data_type_t::bf16)
+                                      ? dnnl::memory::data_type::bf16
+                                      : dnnl::memory::data_type::f32;
+  dnnl::memory::data_type weights_dtype = (dtypes.src == data_type_t::bf16)
+                                          ? dnnl::memory::data_type::bf16
+                                          : dnnl::memory::data_type::f32;
+  dnnl::memory::data_type dst_dtype = (dtypes.dst == data_type_t::bf16)
+                                      ? dnnl::memory::data_type::bf16
+                                      : dnnl::memory::data_type::f32;
+
+  void *src_ptr = const_cast<void *>(A);
+  void *weights_ptr = const_cast<void *>(B);
+  void *dst_ptr = C;
+
+  auto src_md = dnnl::memory::desc(src_dims, src_dtype,
+                                   (transA == 'n') ? dnnl::memory::format_tag::abc :
+                                   dnnl::memory::format_tag::acb);
+  auto weights_md = dnnl::memory::desc(weights_dims, weights_dtype,
+                                       (transB == 'n') ? dnnl::memory::format_tag::abc :
+                                       dnnl::memory::format_tag::acb);
+  auto dst_md = dnnl::memory::desc(dst_dims, dst_dtype,
+                                   dnnl::memory::format_tag::abc);
+
+  // Create memory objects
+  auto src_mem = dnnl::memory(src_md, eng, src_ptr);
+  auto weights_mem = dnnl::memory(weights_md, eng, weights_ptr);
+  auto dst_mem = dnnl::memory(dst_md, eng, dst_ptr);
+
+  dnnl::post_ops matmul_pops;
+  dnnl::primitive_attr matmul_attr;
+
+  if (alpha != 1.0f) {
+    matmul_attr.set_scales_mask(DNNL_ARG_SRC, 0);
+    auto scales_A_m = dnnl::memory({{1}, dnnl::memory::data_type::f32, {1}}, eng,
+    &alpha);
+    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, scales_A_m});
+  }
+
+  if (beta != 0.0f) {
+    matmul_pops.append_sum(beta);
+  }
+
+  if (matmul_pops.len() > 0) {
+    matmul_attr.set_post_ops(matmul_pops);
+  }
+  // Create primitive descriptor and primitive
+  auto matmul_pd = dnnl::matmul::primitive_desc(eng, src_mem.get_desc(),
+                   weights_mem.get_desc(),
+                   dst_mem.get_desc(), matmul_attr);
+  auto matmul_prim = dnnl::matmul(matmul_pd);
+
+  // Set up arguments
+  matmul_args.insert({DNNL_ARG_SRC, src_mem});
+  matmul_args.insert({DNNL_ARG_WEIGHTS, weights_mem});
+  matmul_args.insert({DNNL_ARG_DST, dst_mem});
+
+  // Execute primitive
+  matmul_prim.execute(eng_stream, matmul_args);
+  eng_stream.wait();
+}
+#endif
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 static inline void run_libxsmm(char       transA,
@@ -229,27 +311,19 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b) {
 #if ZENDNNL_DEPENDS_LIBXSMM
-  if (kernel == zendnnl::ops::matmul_algo_t::libxsmm) {
+  if (kernel == matmul_algo_t::libxsmm) {
     if (can_use_libxsmm(transA,transB,K,alpha,beta,dtypes)) {
-      apilog_info("Using libxsmm kernel");
+      log_info("Using libxsmm kernel");
       run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
       return;
     }
     else {
-      kernel = zendnnl::ops::matmul_algo_t::aocl_blis;
+      kernel  = matmul_algo_t::aocl_blis;
     }
   }
-  
-  if (kernel == zendnnl::ops::matmul_algo_t::aocl_blis) {
-    apilog_info("Using BLIS/AOCL kernel");
-    run_blis(layout,transA,transB,M,N,K,alpha,beta,
-             lda,ldb,ldc,mem_format_a,mem_format_b,
-             A,B,C,dtypes);
-    return;
-  }
 #endif
-  // Use BLIS as fallback
-  apilog_info("Using BLIS/AOCL kernel");
+
+  log_info("Using BLIS/AOCL kernel");
   run_blis(layout,transA,transB,M,N,K,alpha,beta,
            lda,ldb,ldc,mem_format_a,mem_format_b,
            A,B,C,dtypes);
@@ -310,7 +384,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 
   // Call appropriate batch GEMM based on data types
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    apilog_info("executing aocl_batch_gemm_f32f32f32of32");
+    log_info("executing aocl_batch_gemm_f32f32f32of32");
     aocl_batch_gemm_f32f32f32of32(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
@@ -325,7 +399,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    apilog_info("executing aocl_batch_gemm_bf16bf16f32of32");
+    log_info("executing aocl_batch_gemm_bf16bf16f32of32");
     aocl_batch_gemm_bf16bf16f32of32(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
@@ -340,7 +414,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    apilog_info("executing aocl_batch_gemm_bf16bf16f32obf16");
+    log_info("executing aocl_batch_gemm_bf16bf16f32obf16");
     aocl_batch_gemm_bf16bf16f32obf16(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
@@ -355,7 +429,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else {
-    apilog_info("Unsupported data type combination for batch GEMM, falling back to native");
+    log_info("Unsupported data type combination for batch GEMM, falling back to native");
     // Fall back to native implementation for each batch
     for (int b = 0; b < batch_count; ++b) {
       matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
@@ -480,7 +554,6 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        const float beta, void *dst, const int ldc,
                        lowoha_params params,
                        int Batch_A, int Batch_B) {
-  log_info("Executing matmul LOWOHA kernel");
 
   if (!src || !weight || !dst) {
     log_error("Null pointer input to matmul_direct");
@@ -547,10 +620,18 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   if (kernel==matmul_algo_t::dynamic_dispatch) {
     kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
   }
-  const bool use_blis_bmm = false;
 
-  if (use_blis_bmm) {
+  if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
+                                   kernel == matmul_algo_t::onednn_blocked)) ||
+      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm)) ||
+      (kernel >= matmul_algo_t::algo_count)) {
+    kernel = matmul_algo_t::aocl_blis;
+  }
+
+  if (kernel == matmul_algo_t::batched_sgemm) {
     // Use batch GEMM for multiple batches
+    apilog_info("Executing matmul LOWOHA kernel with batch GEMM, algo: ",
+                static_cast<int>(kernel));
     matmul_batch_gemm_wrapper(layout, trans_input, trans_weight,
                               M, N, K, alpha,
                               src, lda, weight, ldb, beta, dst, ldc,
@@ -558,8 +639,22 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               params.mem_format_a, params.mem_format_b,
                               src_stride, weight_stride, dst_stride);
   }
+#if ZENDNNL_DEPENDS_ONEDNN
+  else if (kernel == matmul_algo_t::onednn ||
+           kernel == matmul_algo_t::onednn_blocked) {
+    apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
+                static_cast<int>(kernel));
+    matmul_onednn_wrapper(trans_input, trans_weight,
+                          M, N, K, alpha,
+                          src, lda, weight, ldb,
+                          beta, dst, ldc,
+                          params.dtypes, batch_count);
+  }
+#endif
   else if ((num_threads > 1 && !use_blis_partitioning) ||
-           kernel==zendnnl::ops::matmul_algo_t::libxsmm) {
+           kernel == matmul_algo_t::libxsmm) {
+    apilog_info("Executing matmul LOWOHA kernel with parallel partitioning, algo: ",
+                static_cast<int>(kernel));
     /*
     * Parallel partitioning strategy:
     * The total number of available threads is divided across batches to compute `threads_per_batch`,
@@ -587,7 +682,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     }
 
 #if ENABLE_ZENDNNL_PARALLEL_FOR
-
+    apilog_info("Using zendnnl_parallel_for");
     // Calculate total number of work items (batch_count * number of M blocks)
     int total_m_blocks = (M + M_block - 1) / M_block;
     int total_work_items = batch_count * total_m_blocks;
@@ -619,7 +714,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       }
     });
 #else
-
+    apilog_info("Using OpenMP parallel for");
     #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_count; ++b) {
       for (int m_start = 0; m_start < M; m_start += M_block) {
@@ -646,6 +741,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 #endif
   }
   else {
+    apilog_info("Executing matmul LOWOHA kernel with AOCL, algo: ",
+                static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
                                   get_batch_index(b, Batch_A) * src_stride;

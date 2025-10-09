@@ -104,6 +104,9 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   else if (algo == "reference") {
     return matmul_algo_t::reference;
   }
+  else if (algo == "batched_sgemm") {
+    return matmul_algo_t::batched_sgemm;
+  }
 
   return matmul_algo_t::algo_count;
 }

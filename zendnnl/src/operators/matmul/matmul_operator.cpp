@@ -113,7 +113,7 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
 
 status_t matmul_operator_t::update_matmul_kernel() {
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  uint32_t algo = matmul_config.get_algo();
+  int32_t algo = matmul_config.get_algo();
   if (algo == static_cast<int>(matmul_algo_t::aocl_blis)) {
     forced_kernel = "aocl_blis";
   }
@@ -127,7 +127,8 @@ status_t matmul_operator_t::update_matmul_kernel() {
   else if (algo == static_cast<int>(matmul_algo_t::reference)) {
     forced_kernel = "reference";
   }
-  else if (algo == static_cast<int>(matmul_algo_t::algo_count)) {
+  else if (algo == static_cast<int>(matmul_algo_t::algo_count) ||
+           algo == static_cast<int>(matmul_algo_t::batched_sgemm)) {
     return status_t::failure;
   }
 
