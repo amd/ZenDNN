@@ -89,6 +89,16 @@ struct EmbagType {
   EmbagType();
 };
 
+/** @brief Embedding Op Parameters Structure */
+struct EmbeddingType {
+  uint64_t num_embeddings;
+  uint64_t embedding_dim;
+  uint64_t num_indices;
+  int64_t padding_index;
+  bool is_weights;
+  EmbeddingType();
+};
+
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
@@ -107,6 +117,7 @@ extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
 extern std::vector<EmbagType> embag_test;
+extern std::vector<EmbeddingType> embedding_test;
 
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
@@ -248,6 +259,30 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                       bool include_last_offset,
                                       bool is_weights,
                                       int64_t scatter_stride);
+
+/** @fn embedding_kernel_test
+ *  @brief Test function for embedding kernel
+ *
+ * @return status_t Success or failure status
+ */
+status_t embedding_kernel_test(tensor_t &table_tensor,
+                               tensor_t &indices_tensor,
+                               tensor_t &weights_tensor,
+                               tensor_t &output_tensor,
+                               int64_t padding_index,
+                               bool is_weights);
+
+/** @fn embedding_forced_ref_kernel_test
+ *  @brief Test function for embedding reference kernel (forced)
+ *
+ * @return status_t Success or failure status
+ */
+status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
+    tensor_t &indices_tensor,
+    tensor_t &weights_tensor,
+    tensor_t &output_tensor,
+    int64_t padding_index,
+    bool is_weights);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

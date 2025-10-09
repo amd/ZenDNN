@@ -49,6 +49,7 @@ gtests/
 ├── test_matmul.cpp          # Matmul testsuite with different test cases.
 ├── test_reorder.cpp         # Reorder testsuite with different test cases.
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
+├── test_embedding.cpp       # Embedding testsuite with different test cases.
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
 ```
 
@@ -131,7 +132,7 @@ cmake --build .
  - Embedding Bag TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16)
 1. Run all F32 Input, F32 Output embedding bag tests:
 ``` bash
-./install/gtests/gtests --gtest_filter==EmbeddingBag/TestEmbag.F32_F32/*
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F32_F32/*
 ```
 2. Run all F32 Input, BF16 Output embedding bag tests:
 ``` bash
@@ -144,6 +145,25 @@ cmake --build .
 4. Run all BF16 Input, BF16 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.BF16_BF16/*
+```
+
+### Embedding Tests
+ - Embedding TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16)
+1. Run all F32 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_F32/*
+```
+2. Run all F32 Input, BF16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_BF16/*
+```
+3. Run all BF16 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.BF16_F32/*
+```
+4. Run all BF16 Input, BF16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.BF16_BF16/*
 ```
 
 ### Example with more Arguments Support

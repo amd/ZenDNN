@@ -50,6 +50,15 @@ EmbagType::EmbagType() {
   scatter_stride = -1;
 }
 
+// EmbeddingType constructor
+EmbeddingType::EmbeddingType() {
+  num_embeddings = 128 + std::rand() % 2048;
+  embedding_dim = 16 + std::rand() % 512;
+  num_indices = 128 + std::rand() % 2048;
+  padding_index = -1;
+  is_weights = std::rand() % 2;
+}
+
 BatchMatmulType::BatchMatmulType() {
   batch_size = BATCH_START + rand() % BATCH_END;
 }
@@ -969,6 +978,119 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 
     if (status != status_t::success) {
       log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+      return status_t::failure;
+    }
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  return status_t::success;
+}
+
+status_t embedding_kernel_test(tensor_t &table_tensor,
+                               tensor_t &indices_tensor,
+                               tensor_t &weights_tensor,
+                               tensor_t &output_tensor,
+                               int64_t padding_index,
+                               bool is_weights) {
+  try {
+    status_t status;
+
+    //define embedding context
+    auto embedding_context = embag_context_t()
+                             .set_param("table", table_tensor)
+                             .set_padding_index(padding_index)
+                             .set_is_weights(is_weights)
+                             .create();
+
+    //define embedding operator
+    auto embedding_operator = embag_operator_t()
+                              .set_name("embedding_bag")
+                              .set_context(embedding_context)
+                              .create();
+
+    if (! embedding_operator.check()) {
+      testlog_error(" operator ", embedding_operator.get_name(),
+                    " creation failed.");
+      return status_t::failure;
+    }
+
+    if (is_weights) {
+      // Execute operator
+      status = embedding_operator
+               .set_input("indices", indices_tensor)
+               .set_input("weights", weights_tensor)
+               .set_output("output", output_tensor)
+               .execute();
+    }
+    else {
+      status = embedding_operator
+               .set_input("indices", indices_tensor)
+               .set_output("output", output_tensor)
+               .execute();
+    }
+
+    if (status != status_t::success) {
+      log_info("operator ", embedding_operator.get_name(), " execution failed.");
+      return status_t::failure;
+    }
+  }
+  catch (const exception_t &ex) {
+    log_verbose(ex.what());
+    return status_t::failure;
+  }
+  return status_t::success;
+}
+
+status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
+    tensor_t &indices_tensor,
+    tensor_t &weights_tensor,
+    tensor_t &output_tensor,
+    int64_t padding_index,
+    bool is_weights) {
+  try {
+    status_t status;
+
+    //define embedding context
+    auto embedding_context = embag_context_t()
+                             .set_param("table", table_tensor)
+                             .set_padding_index(padding_index)
+                             .set_is_weights(is_weights)
+                             .create();
+
+    //define embedding operator
+    auto embedding_operator = embag_operator_t()
+                              .set_name("ref_embedding_bag")
+                              .set_context(embedding_context)
+                              .create();
+
+    if (! embedding_operator.check()) {
+      testlog_error(" operator ", embedding_operator.get_name(),
+                    " creation failed.");
+      return status_t::failure;
+    }
+
+    if (is_weights) {
+      // Execute operator
+      status = embedding_operator
+               .set_input("indices", indices_tensor)
+               .set_input("weights", weights_tensor)
+               .set_output("output", output_tensor)
+               .set_forced_kernel("reference")
+               .execute();
+    }
+    else {
+      // Execute operator
+      status = embedding_operator
+               .set_input("indices", indices_tensor)
+               .set_output("output", output_tensor)
+               .set_forced_kernel("reference")
+               .execute();
+    }
+
+    if (status != status_t::success) {
+      log_info("operator ", embedding_operator.get_name(), " execution failed.");
       return status_t::failure;
     }
   }

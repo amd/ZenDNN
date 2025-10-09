@@ -35,7 +35,8 @@ if(ZENDNNL_BUILD_GTEST)
     test_matmul.cpp
     test_reorder.cpp
     test_batchmatmul.cpp
-    test_embag.cpp)
+    test_embag.cpp
+    test_embedding.cpp)
 
   set(gtests_headers
     gtest_utils.hpp)

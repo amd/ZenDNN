@@ -54,6 +54,9 @@ std::vector<ReorderType> reorder_test{};
 /** @brief embag_test Data Structure(vector of structures) to hold random Embedding Bag Parameters */
 std::vector<EmbagType> embag_test{};
 
+/** @brief embedding_test Data Structure(vector of structures) to hold random Embedding Parameters */
+std::vector<EmbeddingType> embedding_test{};
+
 int main(int argc, char **argv) {
   //Supported Postop
   po_arr = { {"relu", post_op_type_t::relu},
@@ -80,6 +83,8 @@ int main(int argc, char **argv) {
   reorder_test.resize(test_num);
   // Creating Random parameters for Embedding Bag
   embag_test.resize(test_num);
+  // Creating Random parameters for Embedding
+  embedding_test.resize(test_num);
 
   ::testing :: InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
