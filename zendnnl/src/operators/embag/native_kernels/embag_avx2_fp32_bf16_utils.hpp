@@ -162,6 +162,7 @@ void embag_avx2_kernel(
     int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
                                            (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
+    bool first_valid_index = true;
     float wt_sum = 0.0f;
 
     // Accumulator registers for SIMD blocks
@@ -210,7 +211,12 @@ void embag_avx2_kernel(
         }
         else {
           if (algo == embag_algo_t::max) {
-            acc[b] = _mm256_max_ps(acc[b], in_vec);
+            if (first_valid_index) {
+              acc[b] = in_vec;
+            }
+            else {
+              acc[b] = _mm256_max_ps(acc[b], in_vec);
+            }
           }
           else {
             acc[b] = _mm256_fmadd_ps(in_vec, wt_vec, acc[b]);
@@ -248,7 +254,12 @@ void embag_avx2_kernel(
 
           for (int t = 0; t < tail; ++t) {
             if (algo == embag_algo_t::max) {
-              tail_acc[t] = std::max(tail_acc[t], tail_input[t]);
+              if (first_valid_index) {
+                tail_acc[t] = tail_input[t];
+              }
+              else {
+                tail_acc[t] = std::max(tail_acc[t], tail_input[t]);
+              }
             }
             else {
               tail_acc[t] += wt * tail_input[t];
@@ -258,8 +269,8 @@ void embag_avx2_kernel(
           // Load back to accumulator
           acc[full_blocks] = _mm256_loadu_ps(tail_acc);
         }
-
       }
+      first_valid_index = false;
     }
 
     if (!is_embedding) {

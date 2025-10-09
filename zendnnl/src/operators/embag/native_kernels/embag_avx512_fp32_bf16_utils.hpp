@@ -135,6 +135,7 @@ void embag_avx512_kernel(
     int32_t end = is_embedding ? oi + 1 : (include_last_offset ? offsets[oi + 1] :
                                            (oi < offsz - 1 ? offsets[oi + 1] : indsz));
     int64_t dst_offset = oi * dst_stride;
+    bool first_valid_index = true;
     float wt_sum = 0.0f;
 
     // Accumulator registers for SIMD blocks
@@ -185,7 +186,12 @@ void embag_avx512_kernel(
         }
         else {
           if (algo == embag_algo_t::max) {
-            acc[b] = _mm512_max_ps(acc[b], in_vec);
+            if (first_valid_index) {
+              acc[b] = in_vec;
+            }
+            else {
+              acc[b] = _mm512_max_ps(acc[b], in_vec);
+            }
           }
           else {
             acc[b] = _mm512_fmadd_ps(in_vec, wt_vec, acc[b]);
@@ -218,13 +224,19 @@ void embag_avx512_kernel(
         }
         else {
           if (algo == embag_algo_t::max) {
-            acc[full_blocks] = _mm512_max_ps(acc[full_blocks], in_vec);
+            if (first_valid_index) {
+              acc[full_blocks] = in_vec;
+            }
+            else {
+              acc[full_blocks] = _mm512_max_ps(acc[full_blocks], in_vec);
+            }
           }
           else {
             acc[full_blocks] = _mm512_fmadd_ps(in_vec, wt_vec, acc[full_blocks]);
           }
         }
       }
+      first_valid_index = false;
     }
 
     if (!is_embedding) {
