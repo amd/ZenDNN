@@ -27,6 +27,9 @@ using namespace zendnnl::error_handling;
 struct config_logger_t {
   std::map<log_module_t, log_level_t> log_level_map;
 };
+struct config_profiler_t {
+  bool enable_profiler;
+};
 
 }//common
 }//zendnnl

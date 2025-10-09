@@ -349,6 +349,15 @@ template<typename OP_T, typename OP_CONTEXT_T>
 OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
   LOG_DEBUG_INFO("<", name, "> Creating operator");
 
+  // create a profiler instance
+  profiler_t obj;
+  std::string op_info;
+  bool is_log = is_profile_enabled();
+  if (is_log) {
+    //start the timer
+    obj.tbp_start();
+  }
+
   if (status != status_t::success) {
     if (! context.check()) {
       log_error("operator <", name, "> : bad context");
@@ -360,7 +369,17 @@ OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
     status = status_t::success;
     hash();
   }
-  apilog_info(op_create_info());
+
+  if (apilog_verbose_enabled() || profilelog_verbose_enabled()) {
+    op_info = op_create_info();
+    apilog_verbose(op_info);
+    if (is_log) {
+      //stop the timer
+      obj.tbp_stop();
+      profilelog_verbose(op_info,
+                        ",time:", obj.tbp_elapsedtime(), obj.get_res_str());
+    }
+  }
   return dynamic_cast<OP_T &>(*this);
 }
 
@@ -369,6 +388,15 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
   LOG_DEBUG_INFO("<",name, "> Executing operator");
 
   try {
+    std::string op_info;
+    bool is_log = is_profile_enabled();
+
+    // create a profiler instance
+    profiler_t obj;
+    if (is_log) {
+      //start the timer
+      obj.tbp_start();
+    }
     // check if pre_processing is successful
     if (status != status_t::success) {
       apilog_error("<", name, "> bad object");
@@ -393,30 +421,27 @@ status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
       return status_t::failure;
     }
 
-    // create a profiler instance
-    profiler_t obj;
-
-    //start the timer
-    obj.tbp_start();
-
     //execute kernel
     if (kernel->execute(context, inputs, outputs) != status_t::success) {
       apilog_error("<", name, "> kernel execution failed");
       return status_t::failure;
     }
 
-    //stop the timer
-    obj.tbp_stop();
-
-    apilog_info(op_execute_info());
-    profilelog_info(op_execute_info(),
-                    ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
-
+    if (apilog_verbose_enabled() || (is_log && profilelog_verbose_enabled())) {
+      op_info = op_execute_info();
+      apilog_verbose(op_info);
+    }
     //cleanup
     kernel.reset();
     inputs.clear();
     outputs.clear();
 
+    if (is_log) {
+      //stop the timer
+      obj.tbp_stop();
+      profilelog_verbose(op_info,
+                         ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
+    }
   }
   catch (const exception_t &ex) {
     EXCEPTION_WITH_LOC(ex.what());

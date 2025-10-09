@@ -92,7 +92,7 @@ static inline void zendnnl_init() {
  * @brief Get a reference to zendnnl global block singleton
  * @return A reference to zendnnl global block singleton.
  */
-static inline zendnnl_global_block_t& zendnnl_global_block() {
+static inline zendnnl_global_block_t &zendnnl_global_block() {
   return (*(zendnnl_global_block_t::get()));
 }
 
@@ -100,7 +100,7 @@ static inline zendnnl_global_block_t& zendnnl_global_block() {
  * @brief Get a reference to zendnnl platform information block
  * @return A reference to zendnnl platform information block.
  */
-static inline platform_info_t& zendnnl_platform_info() {
+static inline platform_info_t &zendnnl_platform_info() {
   return (zendnnl_global_block_t::get())->get_platform_info();
 }
 
@@ -108,7 +108,7 @@ static inline platform_info_t& zendnnl_platform_info() {
  * @brief Get a reference to zendnnl platform information block
  * @return A reference to zendnnl platform information block.
  */
-static inline config_manager_t& zendnnl_config_manager() {
+static inline config_manager_t &zendnnl_config_manager() {
   return (zendnnl_global_block_t::get())->get_config_manager();
 }
 
@@ -120,6 +120,14 @@ static inline config_manager_t& zendnnl_config_manager() {
 static inline const char *get_relative_path(const char *abs_path_) {
   const char *rel = std::strstr(abs_path_, "ZenDNN/");
   return (rel? rel : abs_path_);
+}
+
+/** @fn is_profile_enabled
+ * @brief Check if profiling is enabled.
+ * @return A boolean indicating if profiling is enabled.
+ */
+static inline bool is_profile_enabled() {
+  return zendnnl_global_block().get_config_manager().get_profiler_config().enable_profiler;
 }
 
 }//common

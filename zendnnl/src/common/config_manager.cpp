@@ -44,6 +44,10 @@ const config_logger_t &config_manager_t::get_logger_config() const {
   return config_logger;
 }
 
+const config_profiler_t &config_manager_t::get_profiler_config() const {
+  return config_profiler;
+}
+
 status_t config_manager_t::parse(std::string file_name_) {
 
   std::ifstream json_file(file_name_);
@@ -61,6 +65,7 @@ status_t config_manager_t::parse(std::string file_name_) {
 
 void config_manager_t::set_default_config() {
   set_default_logger_config();
+  set_default_profiler_config();
 
   // Retrieve the singleton instance of matmul_config_t and set default configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -69,6 +74,7 @@ void config_manager_t::set_default_config() {
 
 void config_manager_t::set_user_config() {
   set_user_logger_config();
+  set_user_profiler_config();
 
   // Retrieve the singleton instance of matmul_config_t and set user configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -77,6 +83,7 @@ void config_manager_t::set_user_config() {
 
 void config_manager_t::set_env_config() {
   set_env_logger_config();
+  set_env_profiler_config();
 
   // Retrieve the singleton instance of matmul_config_t and set env configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -89,6 +96,7 @@ status_t config_manager_t::set_default_logger_config() {
   for (uint32_t i = 0; i < module_count; ++i) {
     config_logger.log_level_map[log_module_t(i)] = log_level_t::warning;
   }
+  config_logger.log_level_map[log_module_t::profile] = log_level_t::verbose;
 
   return status_t::success;
 }
@@ -202,6 +210,39 @@ status_t config_manager_t::set_env_logger_config() {
 
   return status_t::success;
 
+}
+
+status_t config_manager_t::set_default_profiler_config() {
+  config_profiler.enable_profiler = false;
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_user_profiler_config() {
+  //check for log_levels key
+  auto profiler_json = config_json["profiler"];
+  if (profiler_json.empty()) {
+    return status_t::failure;
+  }
+
+  //get log levels of each log
+  auto enable_profiler_json = profiler_json["enable_profiler"];
+  if (!enable_profiler_json.empty()) {
+    config_profiler.enable_profiler = enable_profiler_json.get<bool>();
+  }
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_env_profiler_config() {
+  {
+    char *enable_profiler_str = std::getenv("ZENDNNL_ENABLE_PROFILER");
+    if (enable_profiler_str) {
+      config_profiler.enable_profiler = (std::string(enable_profiler_str) == "1");
+    }
+  }
+
+  return status_t::success;
 }
 
 } //common

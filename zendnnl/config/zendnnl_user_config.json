@@ -13,8 +13,14 @@
         "common"  : "verbose",
         "api"     : "info",
         "test"    : "info",
-        "profile" : "disabled",
+        "profile" : "verbose",
         "debug"   : "disabled"
+    },
+    "profiler" : {
+        "__description" : [
+            "enables/disable profiler functionality"
+        ],
+        "enable_profiler" : false
     },
     "runtime_variables" : {
         "__description" : "runtime variables for operators",

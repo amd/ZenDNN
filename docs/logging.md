@@ -99,11 +99,12 @@ When test logs are enabled, ZenDNN* outputs detailed information about test exec
 
 ## Profile Logs
 
-ZenDNN* provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` environment variable.
+ZenDNN* provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` and `ZENDNNL_ENABLE_PROFILER` environment variable.
 
 ### Enabling Profile Logs
 To enable profiling logs, set the log level for the `PROFILE` module to verbose (4):
 ```bash
+export ZENDNNL_ENABLE_PROFILER=1
 export ZENDNNL_PROFILE_LOG_LEVEL=4
 ```
 

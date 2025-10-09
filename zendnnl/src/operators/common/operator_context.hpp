@@ -242,9 +242,12 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   // create a profiler instance
   profiler_t obj;
 
-  //start the timer
-  obj.tbp_start();
-
+  std::string op_info;
+  bool is_log = is_profile_enabled();
+  if (is_log) {
+    //start the timer
+    obj.tbp_start();
+  }
   if (validate() != status_t::success) {
     status = status_t::failure;
     apilog_error("Context validation failed");
@@ -260,12 +263,16 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   status = status_t::success;
   hash();
 
-//stop the timer
-  obj.tbp_stop();
-
-  apilog_info(context_info());
-  profilelog_info(context_info(),
-                  ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
+  if (apilog_verbose_enabled() || profilelog_verbose_enabled()) {
+    op_info = context_info();
+    apilog_verbose(op_info);
+    if (is_log) {
+      //stop the timer
+      obj.tbp_stop();
+      profilelog_verbose(op_info,
+                        ",time:", obj.tbp_elapsedtime(), obj.get_res_str());
+    }
+  }
 
   return static_cast<OP_CONTEXT_T &>(*this);
 };

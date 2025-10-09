@@ -82,6 +82,16 @@ class config_manager_t final {
   const config_logger_t      &get_logger_config() const;
   /**@}*/
 
+  /** @name Get Configurations
+   */
+  /**@{*/
+  /** @brief Get profiler configuration
+   *
+   *  @return Profiler configuration.
+   */
+  const config_profiler_t   &get_profiler_config() const;
+  /**@}*/
+
  private:
 
   /** @brief Parse a JSON file.
@@ -122,9 +132,28 @@ class config_manager_t final {
    */
   status_t          set_env_logger_config();
 
-  json              config_json;    /**< JSON object read from
+  /** @brief Set default profiler config.
+   *
+   * @return success.
+   */
+  status_t          set_default_profiler_config();
+
+  /** @brief Set profiler config from JSON file.
+   *
+   * @return success.
+   */
+  status_t          set_user_profiler_config();
+
+  /** @brief Set profiler config from environment variables.
+   *
+   * @return success.
+   */
+  status_t          set_env_profiler_config();
+
+  json              config_json;     /**< JSON object read from
                                        config file */
-  config_logger_t   config_logger;  /**< Logger config */
+  config_logger_t   config_logger;   /**< Logger config */
+  config_profiler_t config_profiler; /**< Profiler config */
 };
 
 
