@@ -59,12 +59,16 @@ jobs:
       
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+       fetch-depth: 0 
     - name: Print PR or Push Info for ZenDNN and ZenDNN_Tools
       shell: bash
       run: |
         echo "=============================="
         echo "   ZENDNN  "
         echo "=============================="
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
         if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
          BASE_SHA="${{ github.event.pull_request.base.sha }}"
@@ -245,12 +249,15 @@ jobs:
       
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0 
     - name: Print PR or Push Info for ZenDNN and ZenDNN_Tools
       shell: bash
       run: |
         echo "=============================="
         echo "   ZENDNN  "
         echo "=============================="
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
 
         if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
