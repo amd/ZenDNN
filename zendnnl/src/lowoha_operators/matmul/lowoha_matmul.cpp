@@ -18,6 +18,9 @@
 #include "matmul_kernel_bf16_avx512.hpp"
 #include <cmath>
 #include <cstring>
+#if ZENDNNL_DEPENDS_LIBXSMM
+  #include "libxsmm.h"
+#endif
 
 namespace zendnnl {
 namespace lowoha {
@@ -117,60 +120,208 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
   }
 }
 
-void matmul_kernel_wrapper(char layout, char transA, char transB, int M, int N,
-                           int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                           void *C, int ldc, data_types &dtypes, bool use_blis,
-                           char mem_format_a, char mem_format_b) {
 
-  if (use_blis) {
-    if (dtypes.src == data_type_t::f32 &&
-        dtypes.dst == data_type_t::f32) {
-      aocl_gemm_f32f32f32of32(layout, transA, transB, M, N, K, alpha,
-                              static_cast<const float *>(A), lda, mem_format_a,
-                              static_cast<const float *>(B), ldb, mem_format_b,
-                              beta, static_cast<float *>(C), ldc, nullptr);
-    }
-    else if (dtypes.src == data_type_t::bf16 &&
-             dtypes.dst == data_type_t::bf16) {
-      aocl_gemm_bf16bf16f32obf16(layout, transA, transB, M, N, K, alpha,
-                                 static_cast<const int16_t *>(A), lda, mem_format_a,
-                                 static_cast<const int16_t *>(B), ldb, mem_format_b,
-                                 beta, static_cast<int16_t *>(C), ldc, nullptr);
-    }
-    else if (dtypes.src == data_type_t::bf16 &&
-             dtypes.dst == data_type_t::f32) {
-      aocl_gemm_bf16bf16f32of32(layout, transA, transB, M, N, K, alpha,
-                                static_cast<const int16_t *>(A), lda, mem_format_a,
-                                static_cast<const int16_t *>(B), ldb, mem_format_b,
-                                beta, static_cast<float *>(C), ldc, nullptr);
-    }
-    else {
-      log_info("Unsupported data type combination for BLIS, Redirecting it to native");
-      matmul_direct_native(layout, transA, transB, M, N, K, alpha,
-                           A, lda, B, ldb, beta, C, ldc, dtypes);
-    }
+#if ZENDNNL_DEPENDS_LIBXSMM
+template<typename TA, typename TB, typename TC>
+void libxsmm_gemm(const TA *A, const TB *B, TC *C,
+                          int M, int N, int K,
+                          int lda, int ldb, int ldc,
+                          char transA, char transB,
+                          libxsmm_datatype a_type,
+                          libxsmm_datatype b_type,
+                          libxsmm_datatype c_type,
+                          libxsmm_datatype comp_type) {
+  libxsmm_bitfield l_flags = 0;
+  if (transA == 'T' || transA == 't') {
+    l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
   }
-  //TODO: To implement native AVX512 BF16 kernel
-  else if (0) {
-    if (dtypes.src == data_type_t::bf16 &&
-        dtypes.dst == data_type_t::bf16) {
-      matmul_bf16_dispatch(static_cast<const int16_t *>(A),
-                           static_cast<const int16_t *>(B),
-                           static_cast<int16_t *>(C), nullptr /*bias.data()*/,
-                           alpha, beta, M, N, K, lda, ldb, ldc, false);
-    }
+  if (transB == 'T' || transB == 't') {
+    l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
+  }
+  l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+
+  libxsmm_gemm_shape shape{};
+  shape.m   = N;
+  shape.n   = M;
+  shape.k   = K;
+  shape.lda = ldb;
+  shape.ldb = lda;
+  shape.ldc = ldc;
+  shape.a_in_type = a_type;
+  shape.b_in_type = b_type;
+  shape.out_type  = c_type;
+  shape.comp_type = comp_type;
+
+  libxsmm_gemm_batch_reduce_config brcfg{};
+  brcfg.br_type = LIBXSMM_GEMM_BATCH_REDUCE_NONE;
+
+  libxsmm_gemmfunction ker =
+    libxsmm_dispatch_brgemm(shape, l_flags, 0, brcfg);
+
+  if (!ker) {
+    return;
+  }
+
+  libxsmm_gemm_param p{};
+  p.a.primary = const_cast<TB *>(B);
+  p.b.primary = const_cast<TA *>(A);
+  p.c.primary = C;
+
+  ker(&p);
+}
+#endif
+
+static inline void run_blis(char        layout,
+                            char        transA,
+                            char        transB,
+                            int         M, int N, int K,
+                            float       alpha, float beta,
+                            int         lda, int ldb, int ldc,
+                            char        mem_format_a,
+                            char        mem_format_b,
+                            const void *A, const void *B, void *C,
+                            const data_types &dtypes) {
+  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
+    aocl_gemm_f32f32f32of32(layout,transA,transB,M,N,K,alpha,
+                            static_cast<const float *>(A),lda,mem_format_a,
+                            static_cast<const float *>(B),ldb,mem_format_b,
+                            beta,static_cast<float *>(C),ldc,nullptr);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
+    aocl_gemm_bf16bf16f32obf16(layout,transA,transB,M,N,K,alpha,
+                               static_cast<const int16_t *>(A),lda,mem_format_a,
+                               static_cast<const int16_t *>(B),ldb,mem_format_b,
+                               beta,static_cast<int16_t *>(C),ldc,nullptr);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
+    aocl_gemm_bf16bf16f32of32(layout,transA,transB,M,N,K,alpha,
+                              static_cast<const int16_t *>(A),lda,mem_format_a,
+                              static_cast<const int16_t *>(B),ldb,mem_format_b,
+                              beta,static_cast<float *>(C),ldc,nullptr);
   }
   else {
-    // Native kernel call
-    matmul_direct_native(layout, transA, transB, M, N, K, alpha,
-                         A, lda, B, ldb, beta, C, ldc, dtypes);
+    apilog_info("Data type not supported, falling back native kernel");
+    matmul_direct_native(layout,transA,transB,M,N,K,alpha,
+                         A,lda,B,ldb,beta,C,ldc,dtypes);
   }
 }
 
-void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M, int N,
+#if ZENDNNL_DEPENDS_LIBXSMM
+static inline void run_libxsmm(char       transA,
+                               char       transB,
+                               int        M, int N, int K,
+                               int        lda, int ldb, int ldc,
+                               const void *A, const void *B, void *C,
+                               const data_types &dtypes) {
+  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
+    libxsmm_gemm<float,float,float>(
+      static_cast<const float *>(A),
+      static_cast<const float *>(B),
+      static_cast<float *>(C),
+      M,N,K, lda,ldb,ldc, transA,transB,
+      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
+      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
+    libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
+      reinterpret_cast<const libxsmm_bfloat16 *>(A),
+      reinterpret_cast<const libxsmm_bfloat16 *>(B),
+      static_cast<float *>(C),
+      M,N,K, lda,ldb,ldc, transA,transB,
+      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
+      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
+    libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
+      reinterpret_cast<const libxsmm_bfloat16 *>(A),
+      reinterpret_cast<const libxsmm_bfloat16 *>(B),
+      reinterpret_cast<libxsmm_bfloat16 *>(C),
+      M,N,K, lda,ldb,ldc, transA,transB,
+      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
+      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
+  }
+}
+#endif
+
+#if ZENDNNL_DEPENDS_LIBXSMM
+static inline bool can_use_libxsmm(char        transA,
+                                   char        transB,
+                                   int         K,
+                                   float       alpha,
+                                   float       beta,
+                                   const data_types &dtypes) {
+
+  const bool scalars_ok = (alpha == 1.0f && beta == 0.0f);
+  if (!scalars_ok) {
+    return false;
+  }
+
+  if (transA == 't' && transB == 'n' &&
+      dtypes.src == data_type_t::bf16 && (K & 1)) {
+    return false;
+  }
+
+  const bool dtype_ok =
+    (dtypes.src == data_type_t::f32  && dtypes.dst == data_type_t::f32) ||
+    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) ||
+    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16);
+
+  return dtype_ok;
+}
+#endif
+
+void matmul_kernel_wrapper(char layout, char transA, char transB,
+                           int M, int N, int K,
+                           float alpha,
+                           const void *A, int lda,
+                           const void *B, int ldb,
+                           float beta,
+                           void *C, int ldc,
+                           data_types &dtypes,
+                           zendnnl::ops::matmul_algo_t kernel,
+                           char mem_format_a, char mem_format_b) {
+#if ZENDNNL_DEPENDS_LIBXSMM
+  if (kernel == zendnnl::ops::matmul_algo_t::libxsmm) {
+    if (can_use_libxsmm(transA,transB,K,alpha,beta,dtypes)) {
+      apilog_info("Using libxsmm kernel");
+      run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
+      return;
+    }
+    else {
+      kernel  = zendnnl::ops::matmul_algo_t::aocl_blis;
+    }
+  }
+#endif
+
+  if (kernel == zendnnl::ops::matmul_algo_t::aocl_blis) {
+    apilog_info("Using BLIS/AOCL kernel");
+    run_blis(layout,transA,transB,M,N,K,alpha,beta,
+             lda,ldb,ldc,mem_format_a,mem_format_b,
+             A,B,C,dtypes);
+    return;
+  }
+//   TODO: To implement native AVX512 BF16 kernel
+//   else if (0) {
+//     if (dtypes.src == data_type_t::bf16 &&
+//         dtypes.dst == data_type_t::bf16) {
+//       matmul_bf16_dispatch(static_cast<const int16_t *>(A),
+//                            static_cast<const int16_t *>(B),
+//                            static_cast<int16_t *>(C), nullptr /*bias.data()*/,
+//                            alpha, beta, M, N, K, lda, ldb, ldc, false);
+//     }
+//   }
+
+  apilog_info("Using native kernel");
+  matmul_direct_native(layout,transA,transB,M,N,K,alpha,
+                       A,lda,B,ldb,beta,C,ldc,dtypes);
+}
+
+void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
+                               int N,
                                int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                                void *C, int ldc, data_types &dtypes, int batch_count,
-                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride, size_t dst_stride) {
+                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
+                               size_t dst_stride) {
 
 
 #if ZENDNNL_DEPENDS_AOCLDLP
@@ -180,7 +331,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M, int
   md_t lda_ = lda;
   md_t ldb_ = ldb;
   md_t ldc_ = ldc;
-  dlp_metadata_t* metadata_array = nullptr;
+  dlp_metadata_t *metadata_array = nullptr;
   md_t group_size = batch_count;
 #else
   dim_t m_ = M;
@@ -189,76 +340,76 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M, int
   dim_t lda_ = lda;
   dim_t ldb_ = ldb;
   dim_t ldc_ = ldc;
-  aocl_post_op* metadata_array = nullptr;
+  aocl_post_op *metadata_array = nullptr;
   dim_t group_size = batch_count;
 #endif
 
   // Prepare pointer arrays for matrices
-  std::vector<const void*> a_ptrs(batch_count);
-  std::vector<const void*> b_ptrs(batch_count);
-  std::vector<void*> c_ptrs(batch_count);
+  std::vector<const void *> a_ptrs(batch_count);
+  std::vector<const void *> b_ptrs(batch_count);
+  std::vector<void *> c_ptrs(batch_count);
 
   // Set up pointers for each batch
   #pragma omp parallel for
   for (int b = 0; b < batch_count; ++b) {
-    a_ptrs[b] = static_cast<const uint8_t*>(A) + b * src_stride;
-    b_ptrs[b] = static_cast<const uint8_t*>(B) + b * weight_stride;
-    c_ptrs[b] = static_cast<uint8_t*>(C) + b * dst_stride;
+    a_ptrs[b] = static_cast<const uint8_t *>(A) + b * src_stride;
+    b_ptrs[b] = static_cast<const uint8_t *>(B) + b * weight_stride;
+    c_ptrs[b] = static_cast<uint8_t *>(C) + b * dst_stride;
   }
 
   // Call appropriate batch GEMM based on data types
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_f32f32f32of32");
+    apilog_info("executing aocl_batch_gemm_f32f32f32of32");
     aocl_batch_gemm_f32f32f32of32(
-        &layout, &transA, &transB,
-        &m_, &n_, &k_,
-        &alpha,
-        reinterpret_cast<const float**>(a_ptrs.data()), &lda_,
-        reinterpret_cast<const float**>(b_ptrs.data()), &ldb_,
-        &beta,
-        reinterpret_cast<float**>(c_ptrs.data()), &ldc_,
-        1, // single group
-        &group_size,
-        &mem_format_a, &mem_format_b,
-        &metadata_array);
+      &layout, &transA, &transB,
+      &m_, &n_, &k_,
+      &alpha,
+      reinterpret_cast<const float **>(a_ptrs.data()), &lda_,
+      reinterpret_cast<const float **>(b_ptrs.data()), &ldb_,
+      &beta,
+      reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
+      1, // single group
+      &group_size,
+      &mem_format_a, &mem_format_b,
+      &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32of32");
+    apilog_info("executing aocl_batch_gemm_bf16bf16f32of32");
     aocl_batch_gemm_bf16bf16f32of32(
-        &layout, &transA, &transB,
-        &m_, &n_, &k_,
-        &alpha,
-        reinterpret_cast<const bfloat16**>(a_ptrs.data()), &lda_,
-        reinterpret_cast<const bfloat16**>(b_ptrs.data()), &ldb_,
-        &beta,
-        reinterpret_cast<float**>(c_ptrs.data()), &ldc_,
-        1, // single group
-        &group_size,
-        &mem_format_a, &mem_format_b,
-        &metadata_array);
+      &layout, &transA, &transB,
+      &m_, &n_, &k_,
+      &alpha,
+      reinterpret_cast<const bfloat16 **>(a_ptrs.data()), &lda_,
+      reinterpret_cast<const bfloat16 **>(b_ptrs.data()), &ldb_,
+      &beta,
+      reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
+      1, // single group
+      &group_size,
+      &mem_format_a, &mem_format_b,
+      &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32obf16");
+    apilog_info("executing aocl_batch_gemm_bf16bf16f32obf16");
     aocl_batch_gemm_bf16bf16f32obf16(
-        &layout, &transA, &transB,
-        &m_, &n_, &k_,
-        &alpha,
-        reinterpret_cast<const bfloat16**>(a_ptrs.data()), &lda_,
-        reinterpret_cast<const bfloat16**>(b_ptrs.data()), &ldb_,
-        &beta,
-        reinterpret_cast<bfloat16**>(c_ptrs.data()), &ldc_,
-        1, // single group
-        &group_size,
-        &mem_format_a, &mem_format_b,
-        &metadata_array);
+      &layout, &transA, &transB,
+      &m_, &n_, &k_,
+      &alpha,
+      reinterpret_cast<const bfloat16 **>(a_ptrs.data()), &lda_,
+      reinterpret_cast<const bfloat16 **>(b_ptrs.data()), &ldb_,
+      &beta,
+      reinterpret_cast<bfloat16 **>(c_ptrs.data()), &ldc_,
+      1, // single group
+      &group_size,
+      &mem_format_a, &mem_format_b,
+      &metadata_array);
   }
   else {
-    log_info("Unsupported data type combination for batch GEMM, falling back to native");
+    apilog_info("Unsupported data type combination for batch GEMM, falling back to native");
     // Fall back to native implementation for each batch
     for (int b = 0; b < batch_count; ++b) {
       matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
-                           a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
-                           dtypes, false, mem_format_a, mem_format_b);
+                            a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
+                            dtypes, zendnnl::ops::matmul_algo_t::none, mem_format_a, mem_format_b);
     }
   }
 }
@@ -389,7 +540,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = omp_get_max_threads();
-  const bool use_blis   = true;
+  zendnnl::ops::matmul_algo_t kernel = static_cast<zendnnl::ops::matmul_algo_t>(zendnnl::ops::matmul_config_t::instance().get_algo());
   const bool use_blis_bmm = false;
 
   if (use_blis_bmm) {
@@ -457,7 +608,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               m_len, N, K, alpha,
                               A, lda, weight_ptr, ldb,
                               beta, C, ldc,
-                              params.dtypes, use_blis,
+                              params.dtypes, kernel,
                               params.mem_format_a, params.mem_format_b);
       }
     });
@@ -482,7 +633,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               m_len, N, K, alpha,
                               A, lda, weight_ptr, ldb,
                               beta, C, ldc,
-                              params.dtypes, use_blis,
+                              params.dtypes, kernel,
                               params.mem_format_a, params.mem_format_b);
       }
     }
@@ -500,7 +651,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr, ldb,
                             beta, dst_ptr, ldc,
-                            params.dtypes, use_blis,
+                            params.dtypes, kernel,
                             params.mem_format_a, params.mem_format_b);
     }
   }

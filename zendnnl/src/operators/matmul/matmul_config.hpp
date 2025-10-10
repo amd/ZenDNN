@@ -36,7 +36,8 @@ enum class matmul_algo_t : uint32_t {
   aocl_blis_blocked = 2, /*!< Blocked AOCL */
   onednn = 3,            /*!< OneDNN */
   onednn_blocked = 4,    /*!< Blocked OneDNN */
-  reference = 5,         /*!< Reference */
+  libxsmm = 5,           /*!< LIBXSMM */
+  reference = 6,         /*!< Reference */
   algo_count             /*!< Algo count */
 };
 
