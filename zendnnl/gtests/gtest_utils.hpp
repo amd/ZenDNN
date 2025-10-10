@@ -105,7 +105,7 @@ extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
 extern const uint32_t dtype_size;
-extern int seed;
+extern int64_t seed;
 extern std::string cmd_post_op;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
@@ -181,14 +181,14 @@ class Parser {
   /** @brief check if string is numeric or not */
   bool isInteger(const std::string &s);
   /** @brief read from key if valid or invalid key is given */
-  void read_from_umap(const std::string &key, int &num);
+  void read_from_umap(const std::string &key, int64_t &num);
   void read_from_umap(const std::string &key, uint32_t &num);
   void read_from_umap(const std::string &key, std::string &num);
  public:
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
-                  int &seed, uint32_t &test_num, std::string &po);
+                  int64_t &seed, uint32_t &test_num, std::string &po);
 };
 
 bool is_binary_postop(const std::string post_op);

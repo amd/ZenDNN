@@ -161,11 +161,25 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing embag_ref kernel");
   log_info("Executing embag_ref kernel");
 
-  auto table_tensor   = context_.get_param("table").value();
-  auto indices_tensor = inputs_.find("indices")->second;
-  auto dst_tensor     = outputs_.find("output")->second;
+  const auto table_param = context_.get_param("table");
+  const auto &table_tensor = table_param.value();
+
+  auto indices_iter = inputs_.find("indices");
+  auto dst_iter = outputs_.find("output");
   auto offsets_iter   = inputs_.find("offsets");
   auto weights_iter   = inputs_.find("weights");
+
+  if (indices_iter == inputs_.end()) {
+    log_error("indices tensor not found");
+    return status_t::failure;
+  }
+  if (dst_iter == outputs_.end()) {
+    log_error("output tensor not found");
+    return status_t::failure;
+  }
+
+  const auto &indices_tensor = indices_iter->second;
+  const auto &dst_tensor = dst_iter->second;
 
   float const *input    = (const float *)table_tensor.get_raw_handle_const();
   int32_t     *indices  = (int32_t *)indices_tensor.get_raw_handle_unsafe();
@@ -183,12 +197,16 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   int64_t offsz                   = 0;
 
   // Get data types
-  auto table_dtype = table_tensor.get_data_type();
-  auto dst_dtype   = dst_tensor.get_data_type();
+  const data_type_t table_dtype = table_tensor.get_data_type();
+  const data_type_t dst_dtype   = dst_tensor.get_data_type();
 
   // weights tensor is present
-  if ((weights_iter != inputs_.end()) && is_weights) {
-    auto weights_tensor = weights_iter->second;
+  if (is_weights) {
+    if (weights_iter == inputs_.end()) {
+      log_error("weights tensor not found but is_weights is true");
+      return status_t::failure;
+    }
+    const tensor_t &weights_tensor = weights_iter->second;
     weights = (float *)weights_tensor.get_raw_handle_unsafe();
   }
 

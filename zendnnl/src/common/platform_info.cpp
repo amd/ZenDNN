@@ -24,7 +24,7 @@ using namespace Au;
 
 platform_info_t::platform_info_t()
   : is_avx2{false}, is_avx512f{false}, isa_version{0}, cpu_family{0},
-    cpu_model{0}, cpu_vendor{} {
+    cpu_model{0}, cpu_vendor{}, cpu_uarch{0} {
 }
 
 status_t platform_info_t::populate() {

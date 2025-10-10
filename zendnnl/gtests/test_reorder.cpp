@@ -90,10 +90,10 @@ TEST_P(TestReorder,F32_F32) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
@@ -141,10 +141,10 @@ TEST_P(TestReorder, BF16_F32) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
@@ -191,10 +191,10 @@ TEST_P(TestReorder, BF16_BF16) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
@@ -412,10 +412,10 @@ TEST_P(TestReorder, F32_F32_Stride) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
@@ -481,10 +481,10 @@ TEST_P(TestReorder, BF16_F32_Stride) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
@@ -550,10 +550,10 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
       inplace_reorder, &weights_buff);
   if (reorder_status == status_t::unimplemented) {
-    GTEST_SKIP();
     if (weights_buff) {
       free(weights_buff);
     }
+    GTEST_SKIP();
   }
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,

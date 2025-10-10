@@ -242,21 +242,25 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
         num_post_ops_eltwise++;
         break;
       case post_op_type_t::binary_add:
-        if (inputs_.find(zen_po.binary_add_params.tensor_name)->second.get_size().size()
-            == 1) {
-          num_post_ops_1d_add++;
-        }
-        else {
-          num_post_ops_binary_add++;
+        {
+          auto it = inputs_.find(zen_po.binary_add_params.tensor_name);
+          if (it != inputs_.end() && it->second.get_size().size() == 1) {
+            num_post_ops_1d_add++;
+          }
+          else {
+            num_post_ops_binary_add++;
+          }
         }
         break;
       case post_op_type_t::binary_mul:
-        if (inputs_.find(zen_po.binary_mul_params.tensor_name)->second.get_size().size()
-            == 1) {
-          num_post_ops_1d_mul++;
-        }
-        else {
-          num_post_ops_binary_mul++;
+        {
+          auto it = inputs_.find(zen_po.binary_mul_params.tensor_name);
+          if (it != inputs_.end() && it->second.get_size().size() == 1) {
+            num_post_ops_1d_mul++;
+          }
+          else {
+            num_post_ops_binary_mul++;
+          }
         }
         break;
       default:
@@ -375,42 +379,45 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
       aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::ELTWISE;
       break;
     case post_op_type_t::binary_add:
-      log_info("Adding binary_add post-op");
-      if (inputs_.find(zen_po.binary_add_params.tensor_name)->second.get_size().size()
-          == 1) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
-      }
-      else {
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor = malloc(sizeof(
-              float));
-        *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).sf->scale_factor) =
-          zen_po.binary_add_params.scale;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor_len = 1;
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_ADD;
-        add_index_2d++;
+      {
+        log_info("Adding binary_add post-op");
+        auto it = inputs_.find(zen_po.binary_add_params.tensor_name);
+        if (it != inputs_.end() && it->second.get_size().size() == 1) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
+        }
+        else {
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor = malloc(sizeof(
+                float));
+          *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).sf->scale_factor) =
+            zen_po.binary_add_params.scale;
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor_len = 1;
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_ADD;
+          add_index_2d++;
+        }
       }
       break;
     case post_op_type_t::binary_mul:
-      log_info("Adding binary_mul post-op");
-      if (inputs_.find(zen_po.binary_mul_params.tensor_name)->second.get_size().size()
-          == 1) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor = NULL;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = NULL;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = inputs_.find(
-              zen_po.binary_mul_params.tensor_name)->second.get_size()[0];
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
-        log_info("Adding done");
-        mul_index_1d++;
-      }
-      else {
-        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor = malloc(sizeof(
-              float));
-        *((float *)(aocl_dlp_po_ptr->matrix_mul[mul_index_2d]).sf->scale_factor) =
-          zen_po.binary_mul_params.scale;
-        (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor_len = 1;
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_MUL;
-        mul_index_2d++;
+      {
+        log_info("Adding binary_mul post-op");
+        auto it = inputs_.find(zen_po.binary_mul_params.tensor_name);
+        if (it != inputs_.end() && it->second.get_size().size() == 1) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor = NULL;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = NULL;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = it->second.get_size()[0];
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
+          log_info("Adding done");
+          mul_index_1d++;
+        }
+        else {
+          (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor = malloc(sizeof(
+                float));
+          *((float *)(aocl_dlp_po_ptr->matrix_mul[mul_index_2d]).sf->scale_factor) =
+            zen_po.binary_mul_params.scale;
+          (aocl_dlp_po_ptr->matrix_mul + mul_index_2d)->sf->scale_factor_len = 1;
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_MUL;
+          mul_index_2d++;
+        }
       }
       break;
     default:

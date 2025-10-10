@@ -160,19 +160,21 @@ int tensor_move_and_refcount_example() {
     return NOT_OK;
   }
 
+  // Store the original name before moving
+  std::string original_name = tensor.get_name();
+
   auto move_tensor = std::move(tensor);
   move_tensor.set_name("move_s8_tensor");
-  testlog_info("moved ", tensor.get_name(), " to ", move_tensor.get_name());
+  testlog_info("moved ", original_name, " to ", move_tensor.get_name());
 
-  if (move_tensor != tensor) {
-    testlog_info("tensor move of ", tensor.get_name(),
+  // After move, tensor is in a valid but unspecified state
+  // We can only check if move_tensor is valid, not compare with moved tensor
+  if (move_tensor.check()) {
+    testlog_info("tensor move of ", original_name,
              " to ", move_tensor.get_name(), " is successful");
     testlog_info(move_tensor.get_name(),
              " hash :", move_tensor.hash(),
              " storage count : ", move_tensor.get_storage_count());
-    testlog_info(tensor.get_name(),
-             " hash :", tensor.hash(),
-             " storage count : ", tensor.get_storage_count());
   }
   else {
     testlog_error("move tensor failed.");

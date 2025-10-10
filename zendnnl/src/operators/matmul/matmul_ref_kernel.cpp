@@ -172,9 +172,23 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   LOG_DEBUG_INFO("Executing matmul_ref kernel");
   log_info("Executing matmul_ref kernel");
 
-  auto  input_tensor           = inputs_.find("matmul_input")->second;
-  auto  output_tensor          = outputs_.find("matmul_output")->second;
-  auto  weight_tensor          = context_.get_param("weights").value();
+  auto input_iter = inputs_.find("matmul_input");
+  auto output_iter = outputs_.find("matmul_output");
+
+  if (input_iter == inputs_.end()) {
+    log_error("matmul_input tensor not found");
+    return status_t::failure;
+  }
+  if (output_iter == outputs_.end()) {
+    log_error("matmul_output tensor not found");
+    return status_t::failure;
+  }
+
+  const auto &input_tensor = input_iter->second;
+  const auto &output_tensor = output_iter->second;
+
+  const auto weight_param = context_.get_param("weights");
+  const auto &weight_tensor = weight_param.value();
   float alpha                  = context_.get_alpha();
   float beta                   = context_.get_beta();
 
@@ -235,7 +249,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   [[maybe_unused]] void *bias      = nullptr;
   [[maybe_unused]] auto bias_dtype = data_type_t::f32;
   if (optional_bias_tensor) {
-    auto bias_tensor           = context_.get_param("bias").value();
+    const auto &bias_tensor    = optional_bias_tensor.value();
     bias                       = (void *)bias_tensor.get_raw_handle_unsafe();
     bias_dtype                 = bias_tensor.get_data_type();
   }
@@ -261,12 +275,13 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                    input_dtype, weight_dtype, bias_dtype, output_dtype);
   }
   //Applying Post-op
-  if (apply_post_op(output_tensor, inputs_, accum_buff_f32, context_) != status_t::success) {
+  if (apply_post_op(const_cast<tensor_t &>(output_tensor), inputs_,
+                    accum_buff_f32, context_) != status_t::success) {
     return status_t::failure;
   }
   // Apply dst scale and zp
   if (is_int8) {
-    quantize_dst(output_tensor, accum_buff_f32);
+    quantize_dst(const_cast<tensor_t &>(output_tensor), accum_buff_f32);
   }
   uint64_t nelem = output_tensor.get_nelem();
   store_output(nelem, accum_buff_f32, output, output_dtype);
@@ -307,7 +322,7 @@ status_t matmul_ref_kernel_t::apply_post_op(tensor_t &output_tensor,
       mul_idx++;
     }
     else {
-      if (apply_post_op(output_tensor, zen_po,
+      if (apply_post_op(output_tensor, std::move(zen_po),
                         accum_buff_f32) != status_t::success) {
         return status_t::failure;
       }
@@ -421,7 +436,7 @@ status_t matmul_ref_kernel_t::apply_eltwise_post_op(float (
   uint64_t  size         = tensor_.get_nelem();
 
   for (uint64_t i = 0; i < size; ++i) {
-    output[i] = (this->*post_op_func)(output[i], std::forward<Args>(args)...);
+    output[i] = (this->*post_op_func)(output[i], args...);
   }
   return status_t::success;
 }

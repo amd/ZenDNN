@@ -439,7 +439,7 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
   return tensor;
 }
 
-void Parser::operator()(const int &argc, char *argv[], int &seed,
+void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
                         uint32_t &tests, std::string &po) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
@@ -454,12 +454,12 @@ void Parser::operator()(const int &argc, char *argv[], int &seed,
   return;
 }
 
-void Parser::read_from_umap(const std::string &key, int &num) {
+void Parser::read_from_umap(const std::string &key, int64_t &num) {
   if (umap.count(key)) {
     std::string val = umap.at(key);
     if (isInteger(val)) {
       try {
-        num = stoi(val);
+        num = static_cast<int64_t> (stol(val));
       }
       catch (const std::out_of_range &e) {
         log_info("Out-of-range argument for ", key,
@@ -687,7 +687,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       bias_tensor.set_name("bias");
 
       //define matmul context
-      auto matmul_context = matmul_context_t()
+      matmul_context_t matmul_context = matmul_context_t()
                             .set_param("weights", weight_tensor)
                             .set_param("bias", bias_tensor)
                             .set_alpha(alpha)
@@ -700,7 +700,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       }
 
       //define matmul operator
-      auto matmul_operator = matmul_operator_t()
+      matmul_operator_t matmul_operator = matmul_operator_t()
                              .set_name("matmul_operator")
                              .set_context(matmul_context)
                              .create();
@@ -756,7 +756,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
     bias_tensor.set_name("bias");
 
     //define matmul context
-    auto matmul_context = matmul_context_t()
+    matmul_context_t matmul_context = matmul_context_t()
                           .set_param("weights", weight_tensor)
                           .set_alpha(alpha)
                           .set_beta(beta);
@@ -772,7 +772,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
     }
 
     //define matmul operator
-    auto matmul_operator = matmul_operator_t()
+    matmul_operator_t matmul_operator = matmul_operator_t()
                            .set_name("matmul_forced_ref_operator")
                            .set_context(matmul_context)
                            .create();
@@ -820,7 +820,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     data_type_t dtype           = input_tensor.get_data_type();
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl");
 
     // Set Input source dtype if the weights dtype is s8
@@ -832,7 +832,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
     uint64_t rows               = input_tensor.get_size(0);
     uint64_t cols               = input_tensor.get_size(1);
-    tensor_t output_tensor;
+    tensor_t output_tensor{};  // Initialize to avoid UNINIT issue
 
     bool memory_reorder         = (!(input_tensor.get_layout() | uint8_t(
                                        tensor_layout_t::contiguous)) ||
@@ -843,7 +843,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
     if (memory_reorder) {
       // Reorder operator creation with name, context and input.
-      auto reorder_operator = reorder_operator_t()
+      reorder_operator_t reorder_operator = reorder_operator_t()
                               .set_name("reorder_operator")
                               .set_context(reorder_context)
                               .create()
@@ -863,11 +863,11 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
         // InPlace reorder works when reorder size is equal to input buffer size.
         if (reorder_size != input_buffer_size) {
           log_info("Inplace reorder is not possible for given input");
-          return std::make_pair(input_tensor, status_t::unimplemented);
+          return std::make_pair(tensor_t(), status_t::unimplemented);
         }
         else {
           // Assign input_tensor to buffer_params as a tensor_t variant
-          StorageParam buffer_params = input_tensor;
+          StorageParam buffer_params = std::move(input_tensor);
 
           // Output Tensor creation with separate view for input tensor
           output_tensor = tensor_factory.copy_tensor({rows, cols},
@@ -884,7 +884,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
         if (*weights == nullptr) {
           log_info("weights can not have align allocation");
-          return std::make_pair(input_tensor, status_t::failure);
+          return std::make_pair(tensor_t(), status_t::failure);
         }
 
         // Create a Pair of storage params [reorder size and reorder weights] and
@@ -904,7 +904,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
       if (status != status_t::success) {
         log_info("operator ", reorder_operator.get_name(), " execution failed.");
-        return std::make_pair(input_tensor, status_t::failure);
+        return std::make_pair(tensor_t(), status_t::failure);
       }
       else {
         log_info("operator ", reorder_operator.get_name(), " execution successful.");
@@ -913,7 +913,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     }
     else {
       // reorder operator creation with name, context and input.
-      auto reorder_operator = reorder_operator_t()
+      reorder_operator_t reorder_operator = reorder_operator_t()
                               .set_name("reorder_operator")
                               .set_context(reorder_context)
                               .create()
@@ -926,7 +926,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
       // Inplace reorder
       if (inplace_reorder) {
-        StorageParam buffer_params = input_tensor;
+        StorageParam buffer_params = std::move(input_tensor);
 
         output_tensor = tensor_factory.copy_tensor({rows, cols},
                         dtype,
@@ -944,7 +944,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
         if (*weights == nullptr) {
           log_info("weights can not have align allocation");
-          return std::make_pair(input_tensor, status_t::failure);
+          return std::make_pair(tensor_t(), status_t::failure);
         }
 
         // Create a Pair of storage params [reorder size and reorder weights] and
@@ -965,7 +965,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
       if (status != status_t::success) {
         log_info("operator ", reorder_operator.get_name(), " execution failed.");
-        return std::make_pair(input_tensor, status_t::failure);
+        return std::make_pair(tensor_t(), status_t::failure);
       }
       else {
         log_info("operator ", reorder_operator.get_name(), " execution successful.");
@@ -993,7 +993,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
     status_t status;
 
     //define embag context
-    auto embedding_bag_context = embag_context_t()
+    embag_context_t embedding_bag_context = embag_context_t()
                                  .set_param("table", table_tensor)
                                  .set_algo(algo)
                                  .set_padding_index(padding_index)
@@ -1003,7 +1003,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                                  .create();
 
     //define embedding bag operator
-    auto embedding_bag_operator = embag_operator_t()
+    embag_operator_t embedding_bag_operator = embag_operator_t()
                                   .set_name("embedding_bag")
                                   .set_context(embedding_bag_context)
                                   .create();
@@ -1057,7 +1057,7 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
     status_t status;
 
     //define embag context
-    auto embedding_bag_context = embag_context_t()
+    embag_context_t embedding_bag_context = embag_context_t()
                                  .set_param("table", table_tensor)
                                  .set_algo(algo)
                                  .set_padding_index(padding_index)
@@ -1067,7 +1067,7 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                  .create();
 
     //define embedding bag operator
-    auto embedding_bag_operator = embag_operator_t()
+    embag_operator_t embedding_bag_operator = embag_operator_t()
                                   .set_name("ref_embedding_bag")
                                   .set_context(embedding_bag_context)
                                   .create();
@@ -1121,14 +1121,14 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
     status_t status;
 
     //define embedding context
-    auto embedding_context = embag_context_t()
+    embag_context_t embedding_context = embag_context_t()
                              .set_param("table", table_tensor)
                              .set_padding_index(padding_index)
                              .set_is_weights(is_weights)
                              .create();
 
     //define embedding operator
-    auto embedding_operator = embag_operator_t()
+    embag_operator_t embedding_operator = embag_operator_t()
                               .set_name("embedding_bag")
                               .set_context(embedding_context)
                               .create();
@@ -1176,14 +1176,14 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     status_t status;
 
     //define embedding context
-    auto embedding_context = embag_context_t()
+    embag_context_t embedding_context = embag_context_t()
                              .set_param("table", table_tensor)
                              .set_padding_index(padding_index)
                              .set_is_weights(is_weights)
                              .create();
 
     //define embedding operator
-    auto embedding_operator = embag_operator_t()
+    embag_operator_t embedding_operator = embag_operator_t()
                               .set_name("ref_embedding_bag")
                               .set_context(embedding_context)
                               .create();

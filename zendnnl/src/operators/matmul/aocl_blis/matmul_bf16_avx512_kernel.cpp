@@ -28,9 +28,24 @@ status_t matmul_bf16_avx512_kernel_t::execute(const context_type &context_,
   log_info("Executing matmul_bf16_avx512 kernel");
 
   auto     aocl_dlp_po_ptr   = context_.get_aocl_dlp_post_op_ptr_unsafe();
-  auto     input_tensor       = inputs_.find("matmul_input")->second;
-  auto     output_tensor      = outputs_.find("matmul_output")->second;
-  auto     weight_tensor      = context_.get_param("weights").value();
+
+  auto input_iter = inputs_.find("matmul_input");
+  auto output_iter = outputs_.find("matmul_output");
+
+  if (input_iter == inputs_.end()) {
+    log_error("matmul_input tensor not found");
+    return status_t::failure;
+  }
+  if (output_iter == outputs_.end()) {
+    log_error("matmul_output tensor not found");
+    return status_t::failure;
+  }
+
+  const auto &input_tensor = input_iter->second;
+  const auto &output_tensor = output_iter->second;
+
+  const auto weight_param = context_.get_param("weights");
+  const auto &weight_tensor = weight_param.value();
 
   int16_t *input_raw_handle   = (int16_t *)input_tensor.get_raw_handle_unsafe();
   void    *output_raw_handle  = output_tensor.get_raw_handle_unsafe();

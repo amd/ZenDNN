@@ -29,6 +29,8 @@ struct config_logger_t {
 };
 struct config_profiler_t {
   bool enable_profiler;
+
+  config_profiler_t() : enable_profiler(false) {}
 };
 
 }//common

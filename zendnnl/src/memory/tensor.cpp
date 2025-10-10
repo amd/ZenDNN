@@ -498,14 +498,12 @@ float tensor_t::at(const index_vec_type &index_) const {
     }
     default :
       std::string message  = "getting element with this data type is unimplemented";
-      EXCEPTION_WITH_LOC(message);
+      EXCEPTION_WITH_LOC(std::move(message));
     }
   }
   catch (const exception_t &ex) {
     EXCEPTION_WITH_LOC(ex.what());
   }
-
-  return 0.0;
 }
 
 uint64_t tensor_t::get_nelem() const {

@@ -33,7 +33,7 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
                         1.0, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -43,7 +43,7 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("outofplace_reorder_f32_operator")
                             .set_context(reorder_context)
                             .create()
@@ -121,7 +121,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
                         1.0, "reorder_input", src_scale, src_zero_points);
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .set_source_dtype(data_type_t::u8)
                            .create();
@@ -132,7 +132,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("outofplace_reorder_s8_operator")
                             .set_context(reorder_context)
                             .create()
@@ -161,7 +161,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
     // Create output tensor with blocked layout.
     auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
                          data_type_t::s8, buffer_params,
-                         false, true, "reorder_output", src_scale, src_zero_points);
+                         false, true, "reorder_output", std::move(src_scale), std::move(src_zero_points));
 
     // Reorder operator execution.
     status = reorder_operator
@@ -200,7 +200,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
                          5.0f, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -210,7 +210,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("outofplace_reorder_f32_operator")
                             .set_context(reorder_context)
                             .create()
@@ -265,7 +265,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
     auto relu_post_op = post_op_t{post_op_type_t::relu};
 
     // Matmul context creation with weights, Bias and Postop: relu
-    auto matmul_context = matmul_context_t()
+    const matmul_context_t matmul_context = matmul_context_t()
                           .set_param("weights", reorder_weights_tensor)
                           .set_param("bias", bias)
                           .set_post_op(relu_post_op)
@@ -277,7 +277,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
     }
 
     // Matmul operator creation with name and context
-    auto matmul_operator = matmul_operator_t()
+    matmul_operator_t matmul_operator = matmul_operator_t()
                            .set_name("matmul_f32_operator")
                            .set_context(matmul_context)
                            .create();
@@ -337,7 +337,7 @@ int reorder_inplace_bf16_kernel_contiguous_blocked_example() {
                         1.0, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -347,7 +347,7 @@ int reorder_inplace_bf16_kernel_contiguous_blocked_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("inplace_reorder_bf16_operator")
                             .set_context(reorder_context)
                             .create()
@@ -367,7 +367,7 @@ int reorder_inplace_bf16_kernel_contiguous_blocked_example() {
     // Inplace reorder takes place when reorder buffer size is same as input buffer size
     if (reorder_size == input_buffer_size) {
       // Assign input_tensor to buffer_params as a tensor_t variant
-      StorageParam buffer_params = input_tensor;
+      StorageParam buffer_params = std::move(input_tensor);
 
       // Blocked Tensor creation with seperate view for input tensor.
       auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
@@ -416,7 +416,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
                          5.0f, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -426,7 +426,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("inplace_reorder_bf16_operator")
                             .set_context(reorder_context)
                             .create()
@@ -443,13 +443,13 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
       return NOT_OK;
     }
 
-    [[maybe_unused]] tensor_t reorder_weights_tensor;
-    bool reorder_status;
+    [[maybe_unused]] tensor_t reorder_weights_tensor{};
+    bool reorder_status = false;
 
     // Inplace reorder takes place when input buffer size is equal to reorder size
     if (reorder_size == input_buffer_size) {
       // Assign input_tensor to buffer_params as a tensor_t variant
-      StorageParam buffer_params = weight_tensor;
+      StorageParam buffer_params = std::move(weight_tensor);
 
       // New Tensor is created with Blocked layout and is used for Reorder
       reorder_weights_tensor = tensor_factory.copy_tensor({MATMUL_K, MATMUL_N},
@@ -505,7 +505,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
     }
 
     // Matmul operator creation with name and context
-    auto matmul_operator = matmul_operator_t()
+    matmul_operator_t matmul_operator = matmul_operator_t()
                            .set_name("matmul_bf16_operator")
                            .set_context(matmul_context)
                            .create();
@@ -564,7 +564,7 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
                         range, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -574,7 +574,7 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("outofplace_reorder_bf16_operator")
                             .set_context(reorder_context)
                             .create()
@@ -650,7 +650,7 @@ int reorder_inplace_s8_kernel_blocked_contiguous_example() {
                         range, "reorder_input", src_scale, src_zero_points);
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .set_source_dtype(data_type_t::u8)
                            .create();
@@ -661,7 +661,7 @@ int reorder_inplace_s8_kernel_blocked_contiguous_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("inplace_reorder_s8_operator")
                             .set_context(reorder_context)
                             .create()
@@ -674,12 +674,12 @@ int reorder_inplace_s8_kernel_blocked_contiguous_example() {
     }
 
     // Assign input_tensor to buffer_params as a tensor_t variant
-    StorageParam buffer_params = input_tensor;
+    StorageParam buffer_params = std::move(input_tensor);
 
     // Blocked Tensor creation with seperate view for input tensor.
     auto output_tensor = tensor_factory.copy_tensor({ROWS, COLS},
                          data_type_t::s8, buffer_params,
-                         false, false, "reorder_output", src_scale, src_zero_points);
+                         false, false, "reorder_output", std::move(src_scale), std::move(src_zero_points));
 
     // Inplace Reorder operator execution.
     // New tensor with same memory view is passed as output for reorder operation.
@@ -716,7 +716,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
                         1.0f, "reorder_input");
 
     // Reorder context creation with backend aocl.
-    auto reorder_context = reorder_context_t()
+    const reorder_context_t reorder_context = reorder_context_t()
                            .set_algo_format("aocl")
                            .create();
 
@@ -726,7 +726,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
     }
 
     // Reorder operator creation with name, context and input.
-    auto reorder_operator = reorder_operator_t()
+    reorder_operator_t reorder_operator = reorder_operator_t()
                             .set_name("outofplace_reorder_bf16_operator")
                             .set_context(reorder_context)
                             .create()
@@ -769,7 +769,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
     }
 
     // Unreorder operator creation with name, context and input.
-    auto unreorder_operator = reorder_operator_t()
+    reorder_operator_t unreorder_operator = reorder_operator_t()
                               .set_name("outofplace_unreorder_bf16_operator")
                               .set_context(reorder_context)
                               .create()

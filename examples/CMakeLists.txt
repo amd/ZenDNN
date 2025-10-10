@@ -36,6 +36,7 @@ set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH} ${CMAKE_MODULE_PATH}")
 # display cmake variables
 message(DEBUG "EXAMPLES CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 message(DEBUG "EXAMPLES CMAKE_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
+set(CMAKE_CXX_FLAGS "-Wall -Werror ${CMAKE_CXX_FLAGS}")
 
 # find common packages
 find_package(OpenMP REQUIRED)

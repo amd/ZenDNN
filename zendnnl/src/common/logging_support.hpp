@@ -82,8 +82,6 @@ class logger_support_t final {
     default:
       return "unknown";
     }
-
-    return "unknown";
   }
 
   /** @brief Convert from string to log module.
@@ -142,8 +140,6 @@ class logger_support_t final {
     default:
       return "unknown";
     }
-
-    return "unknown";
   }
 
   /** @brief Convert from string to log level.

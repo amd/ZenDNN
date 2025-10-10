@@ -24,10 +24,22 @@ status_t reorder_kernel_t::execute(const context_type &context_,
                                    tensor_map_type &outputs_) {
   log_info("Executing reorder kernel");
 
-  auto     input_tensor  = inputs_.find("reorder_input")->second;
-  auto     input_dtype   = input_tensor.get_data_type();
-  auto     output_tensor = outputs_.find("reorder_output")->second;
-  auto     source_dtype  = context_.get_source_dtype();
+  auto input_iter = inputs_.find("reorder_input");
+  auto output_iter = outputs_.find("reorder_output");
+  
+  if (input_iter == inputs_.end()) {
+    log_error("reorder_input tensor not found");
+    return status_t::failure;
+  }
+  if (output_iter == outputs_.end()) {
+    log_error("reorder_output tensor not found");
+    return status_t::failure;
+  }
+  
+  const auto& input_tensor = input_iter->second;
+  const auto& output_tensor = output_iter->second;
+  const auto input_dtype = input_tensor.get_data_type();
+  const auto source_dtype = context_.get_source_dtype();
 
   void     *input        = input_tensor.get_raw_handle_unsafe();
   void     *output       = output_tensor.get_raw_handle_unsafe();

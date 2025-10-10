@@ -25,7 +25,7 @@ namespace common {
 bfloat16_t::bfloat16_t():raw_bits_{0} {
 }
 
-bfloat16_t::bfloat16_t(float f) {
+bfloat16_t::bfloat16_t(float f) : raw_bits_{0} {
   switch (std::fpclassify(f)) {
   case FP_SUBNORMAL:
   case FP_ZERO:

@@ -31,12 +31,12 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
     for (const auto &op : po) {
       if (op.type == post_op_type_t::binary_add) {
         auto add_tensor_obj = inputs.find(op.binary_add_params.tensor_name);
-        auto tensor_size = add_tensor_obj->second.get_size();
         if (add_tensor_obj == inputs.end()) {
           apilog_error("Invalid post-op: ",
                        op.binary_add_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
+        auto tensor_size = add_tensor_obj->second.get_size();
         if (add_tensor_obj->second.get_order() == "ba") {
           apilog_error("Invalid post-op: ",
                        op.binary_add_params.tensor_name, " transposed buffer not supported.");
@@ -77,12 +77,12 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
       }
       else if (op.type == post_op_type_t::binary_mul) {
         auto mul_tensor_obj = inputs.find(op.binary_mul_params.tensor_name);
-        auto tensor_size = mul_tensor_obj->second.get_size();
         if (mul_tensor_obj == inputs.end()) {
           apilog_error("Invalid post-op: ",
                        op.binary_mul_params.tensor_name, " buffer not passed.");
           return status_t::failure;
         }
+        auto tensor_size = mul_tensor_obj->second.get_size();
         if (mul_tensor_obj->second.get_order() == "ba") {
           apilog_error("Invalid post-op: ",
                        op.binary_mul_params.tensor_name, " transposed buffer not supported.");

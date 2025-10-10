@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include "gtest_utils.hpp"
+#include <ctime>
 
 using namespace std;
 
@@ -43,7 +44,7 @@ const float EMBAG_BF16_TOL = 0.01;
 
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;
-int seed               = time(NULL);
+int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
@@ -62,23 +63,24 @@ std::vector<EmbagType> embag_test{};
 std::vector<EmbeddingType> embedding_test{};
 
 int main(int argc, char **argv) {
-  //Supported Postop
-  po_arr = { {"relu", post_op_type_t::relu},
-    {"gelu_tanh", post_op_type_t::gelu_tanh},
-    {"gelu_erf", post_op_type_t::gelu_erf},
-    {"sigmoid", post_op_type_t::sigmoid},
-    {"swish", post_op_type_t::swish},
-    {"tanh", post_op_type_t::tanh},
-    {"binary_add", post_op_type_t::binary_add},
-    {"binary_mul", post_op_type_t::binary_mul}
-  };
+  try {
+    //Supported Postop
+    po_arr = { {"relu", post_op_type_t::relu},
+      {"gelu_tanh", post_op_type_t::gelu_tanh},
+      {"gelu_erf", post_op_type_t::gelu_erf},
+      {"sigmoid", post_op_type_t::sigmoid},
+      {"swish", post_op_type_t::swish},
+      {"tanh", post_op_type_t::tanh},
+      {"binary_add", post_op_type_t::binary_add},
+      {"binary_mul", post_op_type_t::binary_mul}
+    };
 
-  dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
-  // Command line argument parser
-  Parser parse;
-  parse(argc, argv, seed, test_num, cmd_post_op);
-  srand(seed);
-  std::cout<<"Value "<<seed<<" is used as seed. \n";
+    dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
+    // Command line argument parser
+    Parser parse;
+    parse(argc, argv, seed, test_num, cmd_post_op);
+    srand(static_cast<unsigned int>(seed));
+    std::cout<<"Value "<<seed<<" is used as seed. \n";
 
   // Creating Random parameters for Matmul
   matmul_test.resize(test_num);
@@ -100,6 +102,15 @@ int main(int argc, char **argv) {
   // Creating Random parameters for Embedding
   embedding_test.resize(test_num);
 
-  ::testing :: InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+    ::testing :: InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+  }
+  catch (const std::exception &e) {
+    std::cerr << "Exception caught in main: " << e.what() << std::endl;
+    return 1;
+  }
+  catch (...) {
+    std::cerr << "Unknown exception caught in main" << std::endl;
+    return 1;
+  }
 }

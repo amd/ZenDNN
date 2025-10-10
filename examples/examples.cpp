@@ -22,6 +22,7 @@
 #include "compare_op_example.hpp"
 #include "embedding_bag_example.hpp"
 #include "lowoha_matmul_example.hpp"
+#include <iostream>
 
 
 #define  OK          (0)
@@ -31,78 +32,92 @@ using namespace zendnnl::interface;
 using namespace zendnnl::examples;
 
 int main() {
-  /** Tensor functionality examples.
-   *  Demonstrates strided, unaligned allocation, aligned allocation,
-   *  constness of tensor functionalities of tensor.
-   */
-  tensor_unaligned_allocation_example();
-  tensor_aligned_allocation_example();
-  tensor_strided_aligned_allocation_example();
-  tensor_copy_and_compare_example();
-  tensor_move_and_refcount_example();
-  tensor_constness_example();
-  tensor_create_alike_example();
-  tensor_broadcast_example();
-  tensor_axes_permutation_example();
-  tensor_quantization_example();
+  try {
+    /** Tensor functionality examples.
+     *  Demonstrates strided, unaligned allocation, aligned allocation,
+     *  constness of tensor functionalities of tensor.
+     */
+    tensor_unaligned_allocation_example();
+    tensor_aligned_allocation_example();
+    tensor_strided_aligned_allocation_example();
+    tensor_copy_and_compare_example();
+    tensor_move_and_refcount_example();
+    tensor_constness_example();
+    tensor_create_alike_example();
+    tensor_broadcast_example();
+    tensor_axes_permutation_example();
+    tensor_quantization_example();
 
-  /** MatMul operator functionality examples.
-   *  Demonstrates fused post-ops, different data types computation,
-   *  strided input MatMul functionalities of MatMul operator.
-   */
-  matmul_relu_f32_kernel_example();
-  matmul_relu_bf16_kernel_example();
-  matmul_silu_add_int8_kernel_example();
-  matmul_mul_silu_mul_f32_kernel_example();
-  matmul_silu_mul_bf16_kernel_example();
-  matmul_strided_f32_kernel_example();
-  matmul_relu_forced_ref_kernel_example();
-  matmul_broadcast_example(); //2d mm broadcast example
-  run_lowoha_matmul_fp32_test();
+    /** MatMul operator functionality examples.
+    *  Demonstrates fused post-ops, different data types computation,
+    *  strided input MatMul functionalities of MatMul operator.
+    */
+    matmul_relu_f32_kernel_example();
+    matmul_relu_bf16_kernel_example();
+    matmul_silu_add_int8_kernel_example();
+    matmul_mul_silu_mul_f32_kernel_example();
+    matmul_silu_mul_bf16_kernel_example();
+    matmul_strided_f32_kernel_example();
+    matmul_relu_forced_ref_kernel_example();
+    matmul_broadcast_example(); //2d mm broadcast example
+    run_lowoha_matmul_fp32_test();
 
-  /** BatchMatMul operator functionality examples.
-   *  Demonstrates fused post-ops, different data types computation,
-   */
-  batch_matmul_relu_f32_kernel_example();
-  batch_matmul_wei2d_relu_f32_kernel_example();
-  batch_matmul_inp2d_relu_f32_kernel_example();
-  batch_matmul_relu_bf16_kernel_example();
-  batch_matmul_relu_forced_ref_kernel_example();
-  batch_matmul_mul_silu_mul_f32_kernel_example();
-  batch_matmul_silu_mul_bf16_kernel_example();
-  batchmatmul_broadcast_example();
+    /** BatchMatMul operator functionality examples.
+     *  Demonstrates fused post-ops, different data types computation,
+     */
+    batch_matmul_relu_f32_kernel_example();
+    batch_matmul_wei2d_relu_f32_kernel_example();
+    batch_matmul_inp2d_relu_f32_kernel_example();
+    batch_matmul_relu_bf16_kernel_example();
+    batch_matmul_relu_forced_ref_kernel_example();
+    batch_matmul_mul_silu_mul_f32_kernel_example();
+    batch_matmul_silu_mul_bf16_kernel_example();
+    batchmatmul_broadcast_example();
 
-  /** Reorder operator functionality examples.
-   *  Demonstrates reordering memory from contiguous to blocked format and vice versa,
-   *  inplace reorder functionalities of Reorder operator.
-   */
-  reorder_outofplace_f32_kernel_contiguous_blocked_example();
-  reorder_outofplace_s8_kernel_contiguous_blocked_example();
-  reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example();
-  reorder_inplace_bf16_kernel_contiguous_blocked_example();
-  reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example();
-  reorder_outofplace_bf16_kernel_blocked_contiguous_example();
-  reorder_inplace_s8_kernel_blocked_contiguous_example();
-  reorder_unreorder_outofplace_bf16_kernel_example();
+    /** Reorder operator functionality examples.
+     *  Demonstrates reordering memory from contiguous to blocked format and vice versa,
+     *  inplace reorder functionalities of Reorder operator.
+     */
+    reorder_outofplace_f32_kernel_contiguous_blocked_example();
+    reorder_outofplace_s8_kernel_contiguous_blocked_example();
+    reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example();
+    reorder_inplace_bf16_kernel_contiguous_blocked_example();
+    reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example();
+    reorder_outofplace_bf16_kernel_blocked_contiguous_example();
+    reorder_inplace_s8_kernel_blocked_contiguous_example();
+    reorder_unreorder_outofplace_bf16_kernel_example();
 
-  /** Compare operator functionality examples.
-   *  Demonstrates compare operator usage for comparison of tensors.
-   */
-  compare_op_example();
-  compare_ref_and_aocl_matmul_kernel_example();
+    /** Compare operator functionality examples.
+     *  Demonstrates compare operator usage for comparison of tensors.
+     */
+    compare_op_example();
+    compare_ref_and_aocl_matmul_kernel_example();
 
-  /** Embedding Bag operator functionality examples.
-   *  Demonstrates embedding bag operator usage for efficient lookup of embeddings.
-   */
-  embedding_bag_f32_kernel_example();
-  embedding_bag_f32_forced_ref_kernel_example();
-  embedding_f32_kernel_example();
+    /** Embedding Bag operator functionality examples.
+     *  Demonstrates embedding bag operator usage for efficient lookup of embeddings.
+     */
+    embedding_bag_f32_kernel_example();
+    embedding_bag_f32_forced_ref_kernel_example();
+    embedding_f32_kernel_example();
 
-  /** Sample functionality examples.
-   *
-   */
-  sample_f32_kernel_example();
-  sample_bf16_kernel_example();
+    /** Sample functionality examples.
+     *
+     */
+    sample_f32_kernel_example();
+    sample_bf16_kernel_example();
 
-  return OK;
+    return OK;
+  }
+  catch (const zendnnl::error_handling::exception_t& e) {
+    std::cerr << "ZenDNN exception caught in main: " << e.what() << std::endl;
+    return NOT_OK;
+  }
+  catch (const std::exception& e) {
+    std::cerr << "Standard exception caught in main: " << e.what() << std::endl;
+    return NOT_OK;
+  }
+  catch (...) {
+    std::cerr << "Unknown exception caught in main" << std::endl;
+    return NOT_OK;
+  }
 }

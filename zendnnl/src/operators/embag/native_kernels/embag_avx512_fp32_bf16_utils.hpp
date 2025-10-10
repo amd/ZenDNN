@@ -277,6 +277,9 @@ void embag_avx512_kernel(
                     tail * sizeof(uint16_t));
       }
     }
+
+    // Free allocated memory
+    _mm_free(acc);
   }
 }
 
