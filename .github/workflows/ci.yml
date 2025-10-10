@@ -41,54 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
           clean: true
-     - name: Print Commit / PR Info
-       run: |
-        echo "=== GITHUB EVENT TYPE: ${GITHUB_EVENT_NAME} ==="
-        echo ""
-
-        # Always ensure remote is authenticated
-        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-
-        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-         echo "=== PULL REQUEST INFO ==="
-         echo "PR BASE BRANCH   : ${{ github.event.pull_request.base.ref }}"
-         echo "PR BASE SHA      : ${{ github.event.pull_request.base.sha }}"
-         echo "PR SOURCE BRANCH : ${{ github.event.pull_request.head.ref }}"
-         echo "PR HEAD SHA      : ${{ github.event.pull_request.head.sha }}"
-         echo ""
-         echo "Fetching branches..."
-         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
-         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
-         echo ""
-         echo "=== COMMITS BETWEEN BASE AND HEAD ==="
-         git log --oneline origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
-         echo ""
-         echo "=== FILES CHANGED ==="
-         git diff --name-status origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
-         echo ""
-         echo "=== DIFF STATS ==="
-         git diff --stat origin/${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}
-
-        else
-         echo "=== PUSH OR WORKFLOW_DISPATCH INFO ==="
-         BRANCH=${GITHUB_REF#refs/heads/}
-         echo "Branch   : $BRANCH"
-         echo "Latest commit SHA: $GITHUB_SHA"
-         echo ""
-         echo "Fetching full history..."
-         git fetch origin $BRANCH
-         echo ""
-         echo "=== LAST 20 COMMITS ==="
-         git log --oneline -20
-         echo ""
-         echo "=== CHANGED FILES IN LAST COMMIT ==="
-         git diff --name-status HEAD~1 HEAD || echo "No previous commit to diff"
-         echo ""
-         echo "=== DIFF STATS FOR LAST COMMIT ==="
-         git diff --stat HEAD~1 HEAD || echo "No previous commit to diff"
-        fi
-       shell: bash
-
+  
      - name: show GITHUB_WORKSPACE
        run: |
           echo "WORKSPACE, $GITHUB_WORKSPACE"
@@ -117,7 +70,75 @@ jobs:
           pwd
           git branch --show-current
        shell: bash
+     - name: PR INFO
+       shell: bash
+       run: |
+        echo "=============================="
+        echo "   ZENDNN & ZENDNN_TOOLS INFO  "
+        echo "=============================="
 
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+        git log --oneline -20 || echo "No commits found"
+        echo ""
+
+        echo "=============================="
+        echo "   ZENDNN_TOOLS INFO"
+        echo "=============================="
+        
+        if [ -d "$GITHUB_WORKSPACE/ZenDNN_tools" ]; then
+         cd "$GITHUB_WORKSPACE/ZenDNN_tools"
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/AMD-Zenai/ZenDNN_tools.git
+         git fetch --all --no-tags || true
+
+         BRANCH=${GITHUB_REF_NAME:-main}
+         HEAD_SHA=$(git rev-parse HEAD)
+         BASE_BRANCH="main"
+         BASE_SHA=$(git rev-parse origin/main || echo "N/A")
+
+         echo "CURRENT BRANCH   : $BRANCH"
+         echo "HEAD SHA         : $HEAD_SHA"
+         echo "BASE BRANCH      : $BASE_BRANCH"
+         echo "BASE SHA         : $BASE_SHA"
+         echo ""
+
+         echo "LAST 20 COMMITS (ZenDNN_tools)"
+         git log --oneline -20 || echo "No commits found"
+        else
+         echo "ZenDNN_tools directory not found — skipping."
+        fi
      - name: setup_env
        run: |
           mkdir -p BLIS
@@ -280,6 +301,77 @@ jobs:
           pwd
           git branch --show-current
         shell: bash
+      - name: PR INFO
+        shell: bash
+        run: |
+         echo "=============================="
+         echo "   ZENDNN & ZENDNN_TOOLS INFO  "
+         echo "=============================="
+
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+         if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "=== PULL REQUEST INFO ==="
+         elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+          BASE_BRANCH="main"
+          BASE_SHA="$(git rev-parse origin/main)"
+          SOURCE_BRANCH="${GITHUB_REF_NAME}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "=== PUSH EVENT INFO ==="
+         else
+          BASE_BRANCH="main"
+          BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+          SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "=== WORKFLOW DISPATCH INFO ==="
+         fi
+
+         echo "PR BASE BRANCH   : $BASE_BRANCH"
+         echo "PR BASE SHA      : $BASE_SHA"
+         echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+         echo "PR HEAD SHA      : $HEAD_SHA"
+         echo ""
+
+         echo "Fetching branches..."
+         git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+         git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+         echo ""
+
+         echo "COMMITS BETWEEN BASE AND HEAD"
+         git log --oneline -20 || echo "No commits found"
+         echo ""
+
+         echo "=============================="
+         echo "   ZENDNN_TOOLS INFO"
+         echo "=============================="
+         if [ -d "$GITHUB_WORKSPACE/ZenDNN_tools" ]; then
+          cd "$GITHUB_WORKSPACE/ZenDNN_tools"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/AMD-Zenai/ZenDNN_tools.git
+          git fetch --all --no-tags || true
+
+          BRANCH=${GITHUB_REF_NAME:-main}
+          HEAD_SHA=$(git rev-parse HEAD)
+          BASE_BRANCH="main"
+          BASE_SHA=$(git rev-parse origin/main || echo "N/A")
+
+          echo "CURRENT BRANCH   : $BRANCH"
+          echo "HEAD SHA         : $HEAD_SHA"
+          echo "BASE BRANCH      : $BASE_BRANCH"
+          echo "BASE SHA         : $BASE_SHA"
+          echo ""
+
+          echo "LAST 20 COMMITS (ZenDNN_tools)"
+          git log --oneline -20 || echo "No commits found"
+         else
+          echo "ZenDNN_tools directory not found — skipping."
+         fi
+     
+      
+     
 
       - name: setup_env
         run: |
