@@ -138,7 +138,7 @@ jobs:
          echo "LAST 20 COMMITS (ZenDNN_tools)"
          git log --oneline -20 || echo "No commits found"
         else
-         echo "ZenDNN_tools directory not found — skipping."
+         echo "ZenDNN_tools directory not found"
         fi
      - name: setup_env
        run: |
