@@ -62,6 +62,7 @@ jobs:
           ref: main
           token: ${{ secrets.LEPAKSHI_PAT_CLASSIC_NOV8_2025 }}
           path: ZenDNN_tools
+          fetch-depth: 0
           clean: true
 
      - name: show checked out branch for ZenDNN_tools
@@ -270,7 +271,7 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
           path: ZenDNN
-          fetch-depth: 1
+          fetch-depth: 0
           clean: true
 
       - name: show GITHUB_WORKSPACE
@@ -293,6 +294,7 @@ jobs:
           ref: main
           token: ${{ secrets.LEPAKSHI_PAT_CLASSIC_NOV8_2025 }}
           path: ZenDNN_tools
+          fetch-depth: 0
           clean: true
 
       - name: show checked out branch for ZenDNN_tools
