@@ -132,6 +132,8 @@ void logger_t::log_msg(log_module_t log_module_, log_level_t log_level_,
                        MSG_T msg_arg0_, MSG_TS... msg_args_) {
 
   if (log_level_map.at(log_module_) >= log_level_) {
+    std::lock_guard<std::mutex> lk{log_mutex};
+
     std::stringstream stream;
     stream << msg_arg0_;
     std::string message = stream.str();

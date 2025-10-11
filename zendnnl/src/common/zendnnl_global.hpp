@@ -64,6 +64,17 @@
              zendnnl::error_handling::log_level_t::LOG_LEVEL, vargs...);    \
   }
 
+#define LOGGER_ENABLED_MACRO(LOG_MODULE, LOG_LEVEL)                        \
+  static inline bool LOG_MODULE##log##_##LOG_LEVEL##_enabled() {           \
+    if (zendnnl::common::zendnnl_global_block()                            \
+        .get_logger()                                                      \
+        .get_log_level(zendnnl::error_handling::log_module_t::LOG_MODULE)  \
+        >= zendnnl::error_handling::log_level_t::LOG_LEVEL)                \
+      return true;                                                         \
+                                                                           \
+    return false;                                                          \
+  }                                                                        \
+
 namespace zendnnl {
 namespace common {
 
@@ -147,6 +158,31 @@ LOGGER_MACRO(debug, error)
 LOGGER_MACRO(debug, warning)
 LOGGER_MACRO(debug, info)
 LOGGER_MACRO(debug, verbose)
+
+LOGGER_ENABLED_MACRO(common, error)
+LOGGER_ENABLED_MACRO(common, warning)
+LOGGER_ENABLED_MACRO(common, info)
+LOGGER_ENABLED_MACRO(common, verbose)
+
+LOGGER_ENABLED_MACRO(api, error)
+LOGGER_ENABLED_MACRO(api, warning)
+LOGGER_ENABLED_MACRO(api, info)
+LOGGER_ENABLED_MACRO(api, verbose)
+
+LOGGER_ENABLED_MACRO(test, error)
+LOGGER_ENABLED_MACRO(test, warning)
+LOGGER_ENABLED_MACRO(test, info)
+LOGGER_ENABLED_MACRO(test, verbose)
+
+LOGGER_ENABLED_MACRO(profile, error)
+LOGGER_ENABLED_MACRO(profile, warning)
+LOGGER_ENABLED_MACRO(profile, info)
+LOGGER_ENABLED_MACRO(profile, verbose)
+
+LOGGER_ENABLED_MACRO(debug, error)
+LOGGER_ENABLED_MACRO(debug, warning)
+LOGGER_ENABLED_MACRO(debug, info)
+LOGGER_ENABLED_MACRO(debug, verbose)
 
 }//error_handling
 

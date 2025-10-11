@@ -104,7 +104,7 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
   std::string empty_hdr  = std::string(hdr.length(), ' ');
 
   if (log_cout_flag) {
-    std::lock_guard<std::mutex> lk{log_mutex};
+    //std::lock_guard<std::mutex> lk{log_mutex};
 
     std::size_t nl_pos = message_.find('\n');
     if (nl_pos != std::string::npos) {
@@ -124,7 +124,7 @@ void logger_t::log_msg_r(log_module_t log_module_, log_level_t log_level_,
     }
   }
   else {
-    std::lock_guard<std::mutex> lk{log_mutex};
+    //std::lock_guard<std::mutex> lk{log_mutex};
     log_ofstream << hdr << "\n" << message_ << "\n";
   }
 }
