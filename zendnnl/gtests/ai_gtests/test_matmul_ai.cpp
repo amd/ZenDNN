@@ -79,7 +79,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
     tensors.input = tensor_creator({params.m, params.k}, input_dtype, input_name);
     tensors.weights = tensor_creator({params.k, params.n}, weight_dtype,
                                      weights_name);
-    tensors.bias = tensor_creator({params.n}, output_dtype, bias_name);
+    tensors.bias = tensor_creator({1, params.n}, output_dtype, bias_name);
     tensors.output = AITensorFactory::create_zero_tensor({params.m, params.n},
                      output_dtype, output_name);
     if (create_reference_output)
@@ -421,7 +421,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
     auto output_dtype = AITestUtils::get_output_dtype(params.data_types);
     std::vector<uint64_t> input_dims = {params.m, params.k};
     std::vector<uint64_t> weight_dims = {params.k, params.n};
-    std::vector<uint64_t> bias_dims = {params.n};
+    std::vector<uint64_t> bias_dims = {1, params.n};
     std::vector<uint64_t> output_dims = {params.m, params.n};
 
     // 1. Weights tensor is null
@@ -479,7 +479,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                        "input_accuracy");
       tensor_t weights = AITensorFactory::create_uniform_tensor(weight_dims,
                          weight_dtype, "weights_accuracy");
-      tensor_t bias = AITensorFactory::create_uniform_tensor({params.n + 1},
+      tensor_t bias = AITensorFactory::create_uniform_tensor({1, params.n + 1},
                       output_dtype, "bias_bad_accuracy");
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
