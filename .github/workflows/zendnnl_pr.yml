@@ -230,6 +230,54 @@ jobs:
         rm -f $WORKSPACE/gtest_output.log
         echo "Workspace cleanup completed"
       shell: bash
+  trigger-zenTorch-ZenDNNL:
+    needs: [Zendnnl_build_PR]
+    runs-on: amd-zenai-arc-xsmall-dind
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+     - name: Trigger ZenTorch_ZenDNNL workflow
+       run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnnl-pr",
+            "client_payload": {
+              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+       shell: bash
+  check-zenTorch-status:
+     needs: [trigger-zenTorch-ZenDNNL]
+     runs-on: ubuntu-latest
+     if: always()
+     steps:
+      - name: Wait for ZenTorch_ZenDNNL status and decide final result
+        run: |
+          repo_pytorch="AMD-Zenai/ZenDNN_PyTorch_Plugin"
+          zendnnl_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "Checking ZenTorch_ZenDNNL CI status for commit: $zendnnl_sha"
+
+          # Wait a bit to allow status to update
+          sleep 120
+
+          # Fetch statuses for that commit
+          state=$(curl -s -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+            "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/$zendnnl_sha" | \
+            jq -r 'map(select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI")) | .[0].state')
+
+          echo "ZenTorch_ZenDNNL status: $state"
+
+          if [[ "$state" != "success" ]]; then
+            echo " ZenTorch_ZenDNNL failed — marking ZenDNNL as failed"
+            exit 1
+          else
+            echo "ZenTorch_ZenDNNL passed — ZenDNNL remains green"
+          fi
+
 
   Zendnnl_build_push: 
    runs-on: zendnnl_presub_server
