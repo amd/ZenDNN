@@ -250,12 +250,11 @@ jobs:
             }
           }'
        shell: bash
-  check-zenTorch-status:
+  check-status:
      needs: [trigger-zenTorch-ZenDNNL]
-     runs-on: ubuntu-latest
-     if: always()
+     runs-on: amd-zenai-arc-xsmall-dind
      steps:
-      - name: Wait for ZenTorch_ZenDNNL status and decide final result
+      - name:  ZenTorch_ZenDNNL status
         run: |
           repo_pytorch="AMD-Zenai/ZenDNN_PyTorch_Plugin"
           zendnnl_sha="${{ github.event.pull_request.head.sha || github.sha }}"
