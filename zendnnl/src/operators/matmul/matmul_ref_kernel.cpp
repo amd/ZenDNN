@@ -261,7 +261,9 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                    input_dtype, weight_dtype, bias_dtype, output_dtype);
   }
   //Applying Post-op
-  apply_post_op(output_tensor, inputs_, accum_buff_f32, context_);
+  if (apply_post_op(output_tensor, inputs_, accum_buff_f32, context_) != status_t::success) {
+    return status_t::failure;
+  }
   // Apply dst scale and zp
   if (is_int8) {
     quantize_dst(output_tensor, accum_buff_f32);
