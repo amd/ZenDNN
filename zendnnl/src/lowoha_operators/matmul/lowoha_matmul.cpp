@@ -25,6 +25,8 @@
 namespace zendnnl {
 namespace lowoha {
 
+using namespace zendnnl::ops;
+
 inline int64_t divup(int64_t x, int64_t y) {
   return (x + y - 1) / y;
 }
@@ -124,13 +126,13 @@ void matmul_direct_native(char layout, char transA, char transB, int M, int N,
 #if ZENDNNL_DEPENDS_LIBXSMM
 template<typename TA, typename TB, typename TC>
 void libxsmm_gemm(const TA *A, const TB *B, TC *C,
-                          int M, int N, int K,
-                          int lda, int ldb, int ldc,
-                          char transA, char transB,
-                          libxsmm_datatype a_type,
-                          libxsmm_datatype b_type,
-                          libxsmm_datatype c_type,
-                          libxsmm_datatype comp_type) {
+                  int M, int N, int K,
+                  int lda, int ldb, int ldc,
+                  char transA, char transB,
+                  libxsmm_datatype a_type,
+                  libxsmm_datatype b_type,
+                  libxsmm_datatype c_type,
+                  libxsmm_datatype comp_type) {
   libxsmm_bitfield l_flags = 0;
   if (transA == 'T' || transA == 't') {
     l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
@@ -409,7 +411,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
     for (int b = 0; b < batch_count; ++b) {
       matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
                             a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
-                            dtypes, zendnnl::ops::matmul_algo_t::none, mem_format_a, mem_format_b);
+                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b);
     }
   }
 }
@@ -476,6 +478,52 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
           || small_batch_override);
 }
 
+// TODO: Further tune the heuristics based on num_threads and other params
+inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
+    int num_threads) {
+  if (BS <= 512) {
+    if (N <= 512) {
+      if (N <= 48) {
+        if (M <= 196) {
+          return matmul_algo_t::libxsmm;
+        }
+        else {
+          return matmul_algo_t::aocl_blis;
+        }
+      }
+      else {
+        return matmul_algo_t::libxsmm;
+      }
+    }
+    else {
+      if (K <= 512) {
+        return matmul_algo_t::libxsmm;
+      }
+      else {
+        return matmul_algo_t::aocl_blis;
+      }
+    }
+  }
+  else {
+    if (K <= 48) {
+      return matmul_algo_t::libxsmm;
+    }
+    else {
+      if (K < 50) {
+        return matmul_algo_t::aocl_blis;
+      }
+      else {
+        if (K <= 196) {
+          return matmul_algo_t::libxsmm;
+        }
+        else {
+          return matmul_algo_t::aocl_blis;
+        }
+      }
+    }
+  }
+}
+
 
 status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        const int M, const int N, const int K,const float alpha, const void *src,
@@ -540,7 +588,13 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = omp_get_max_threads();
-  zendnnl::ops::matmul_algo_t kernel = static_cast<zendnnl::ops::matmul_algo_t>(zendnnl::ops::matmul_config_t::instance().get_algo());
+  const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
+                                     num_threads, params.dtypes.src);
+  matmul_algo_t kernel = static_cast<matmul_algo_t>
+                         (matmul_config_t::instance().get_algo());
+  if (kernel==matmul_algo_t::dynamic_dispatch) {
+    kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
+  }
   const bool use_blis_bmm = false;
 
   if (use_blis_bmm) {
@@ -552,8 +606,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               params.mem_format_a, params.mem_format_b,
                               src_stride, weight_stride, dst_stride);
   }
-  else if (num_threads > 1 &&
-           !may_i_use_blis_partition(batch_count, M, N, num_threads, params.dtypes.src)) {
+  else if ((num_threads > 1 && !use_blis_partitioning) ||
+           kernel==zendnnl::ops::matmul_algo_t::libxsmm) {
     /*
     * Parallel partitioning strategy:
     * The total number of available threads is divided across batches to compute `threads_per_batch`,

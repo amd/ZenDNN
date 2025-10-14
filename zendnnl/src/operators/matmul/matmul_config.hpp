@@ -31,7 +31,7 @@ namespace ops {
  * Defines all available matmul backends.
  */
 enum class matmul_algo_t : uint32_t {
-  none = 0,              /*!< No algorithm */
+  dynamic_dispatch = 0,  /*!< Dynamic dispatch */
   aocl_blis = 1,         /*!< AOCL */
   aocl_blis_blocked = 2, /*!< Blocked AOCL */
   onednn = 3,            /*!< OneDNN */

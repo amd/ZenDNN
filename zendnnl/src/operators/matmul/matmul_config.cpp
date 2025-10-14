@@ -21,7 +21,7 @@ namespace ops {
 
 void matmul_config_t::set_default_config() {
   // Set default configuration for matmul
-  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::none);
+  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::aocl_blis);
   set_algo(matmul_algo);
 }
 
@@ -32,7 +32,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     return status_t::failure;
   }
   // get matmul_algo
-  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::none);
+  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::aocl_blis);
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
     auto matmul_algo_json = matmul_json["kernel"];
@@ -50,7 +50,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
 void matmul_config_t::set_env_config() {
   // Set environment variables configuration for matmul
   char *algo_env = std::getenv("ZENDNNL_MATMUL_ALGO");
-  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::none);
+  uint32_t matmul_algo = static_cast<int>(matmul_algo_t::aocl_blis);
   if (algo_env) {
     uint32_t algo = std::stoi(algo_env);
     if (algo < uint32_t(matmul_algo_t::algo_count)) {
@@ -85,8 +85,8 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
     return std::tolower(c);
   });
 
-  if (algo == "none") {
-    return matmul_algo_t::none;
+  if (algo == "dynamic_dispatch") {
+    return matmul_algo_t::dynamic_dispatch;
   }
   else if (algo == "aocl_blis") {
     return matmul_algo_t::aocl_blis;
