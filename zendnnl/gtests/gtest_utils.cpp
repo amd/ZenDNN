@@ -24,40 +24,58 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   transB     = rand() % 2;
   po_index   = rand() % (po_size + 1);
 
-  // Use std::random_device and std::mt19937 for random float generation
-  std::random_device rd;
-  std::mt19937 gen(rd());
+  // Use std::mt19937 for random float generation
+  std::mt19937 gen(rand());
   std::uniform_real_distribution<float> dist(0.0, 10.0);
   alpha    = dist(gen);
   beta     = dist(gen);
 
-  // Control LOWOHA and LIBXSMM based on test index
-  // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
-  uint32_t third = total_tests / TEST_PARTITIONS;
-
-  if (test_index < third) {
-    use_LOWOHA = false;
-    matmul_config_t &matmul_config = matmul_config_t::instance();
-    int32_t matmul_algo = matmul_config.get_algo();
-    algo = static_cast<matmul_algo_t>(matmul_algo);
-  }
-  else if (test_index < 2 * third) {
-    use_LOWOHA = true;
-    algo = matmul_algo_t::aocl_blis;
+  // Algorithm configuration based on command-line input or random selection
+  if (!cmd_backend.empty()) {
+    // Handle oneDNN dependency check for command-line backends
+#if ZENDNNL_DEPENDS_ONEDNN
+    algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn : strToAlgo(
+             cmd_backend);
+#else
+    // Fallback to AOCL BLIS if oneDNN backends requested but not available
+    algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
+           ? matmul_algo_t::aocl_blis
+           : strToAlgo(cmd_backend);
+#endif
+    //TODO: Add command-line arg support for LOWOHA
+    use_LOWOHA = (algo == matmul_algo_t::libxsmm);
+    if (algo == matmul_algo_t::libxsmm) {
+      alpha    = 1.0f;
+      beta     = 0.0f;
+      po_index = 8;
+    }
   }
   else {
-    use_LOWOHA = true;
+    // Random algorithm selection
 #if ZENDNNL_DEPENDS_ONEDNN
-    algo = rand() % 2 == 0 ? matmul_algo_t::onednn : matmul_algo_t::libxsmm;
-    if (algo == matmul_algo_t::libxsmm) {
+    int algo_range_max = 3;
+#else
+    int algo_range_max = 2;
+#endif
+    std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
+    algo = static_cast<matmul_algo_t>(algo_dist(gen));
+
+    // Control LOWOHA and LIBXSMM based on test index
+    // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+    uint32_t third = total_tests / TEST_PARTITIONS;
+
+    if (test_index < third) {
+      use_LOWOHA = false;
+    }
+    else if (test_index < 2 * third) {
+      use_LOWOHA = true;
+    }
+    else {
+      use_LOWOHA = true;
       alpha = 1;
       beta = 0;
+      algo = matmul_algo_t::libxsmm;
     }
-#else
-    alpha = 1;
-    beta = 0;
-    algo = matmul_algo_t::libxsmm;
-#endif
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   output_dtype = dtype_arr[rand() % dtype_size];
@@ -470,7 +488,7 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
-                        uint32_t &tests, std::string &po) {
+                        uint32_t &tests, std::string &po, std::string &backend) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -481,6 +499,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("seed", seed);
   read_from_umap("test", tests);
   read_from_umap("postop", po);
+  read_from_umap("backend", backend);
   return;
 }
 
@@ -489,7 +508,7 @@ void Parser::read_from_umap(const std::string &key, int64_t &num) {
     std::string val = umap.at(key);
     if (isInteger(val)) {
       try {
-        num = static_cast<int64_t> (stol(val));
+        num = static_cast<int64_t>(stol(val));
       }
       catch (const std::out_of_range &e) {
         log_info("Out-of-range argument for ", key,
@@ -533,7 +552,7 @@ void Parser::read_from_umap(const std::string &key, std::string &num) {
   }
   else {
     log_info("No argument for ", key,
-             ", so using the random postop from supported list.");
+             ", so using the random ", key, " from supported list.");
   }
 }
 
@@ -551,6 +570,42 @@ bool Parser::isInteger(const std::string &s) {
     }
   }
   return true;
+}
+
+matmul_algo_t strToAlgo(std::string str) {
+  if (str == "aocl_blis") {
+    return matmul_algo_t::aocl_blis;
+  }
+  if (str == "aocl_blis_blocked") {
+    return matmul_algo_t::aocl_blis_blocked;
+  }
+  if (str == "onednn") {
+    return matmul_algo_t::onednn;
+  }
+  if (str == "onednn_blocked") {
+    return matmul_algo_t::onednn_blocked;
+  }
+  if (str == "libxsmm") {
+    return matmul_algo_t::libxsmm;
+  }
+  return matmul_algo_t::none;
+}
+
+std::string algoToStr(matmul_algo_t algo) {
+  switch (algo) {
+  case matmul_algo_t::aocl_blis:
+    return "aocl_blis";
+  case matmul_algo_t::aocl_blis_blocked:
+    return "aocl_blis_blocked";
+  case matmul_algo_t::onednn:
+    return "onednn";
+  case matmul_algo_t::onednn_blocked:
+    return "onednn_blocked";
+  case matmul_algo_t::libxsmm:
+    return "libxsmm";
+  default:
+    return "none";
+  }
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
@@ -719,10 +774,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
       //define matmul context
       matmul_context_t matmul_context = matmul_context_t()
-                            .set_param("weights", weight_tensor)
-                            .set_param("bias", bias_tensor)
-                            .set_alpha(alpha)
-                            .set_beta(beta);
+                                        .set_param("weights", weight_tensor)
+                                        .set_param("bias", bias_tensor)
+                                        .set_alpha(alpha)
+                                        .set_beta(beta);
       if (index != po_size) {
         matmul_context = matmul_context.set_post_op(post_op).create();
       }
@@ -732,9 +787,9 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
       //define matmul operator
       matmul_operator_t matmul_operator = matmul_operator_t()
-                             .set_name("matmul_operator")
-                             .set_context(matmul_context)
-                             .create();
+                                          .set_name("matmul_operator")
+                                          .set_context(matmul_context)
+                                          .create();
 
       if (! matmul_operator.check()) {
         log_error("operator ", matmul_operator.get_name(), " creation failed.");
@@ -752,10 +807,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           matmul_operator.set_input(post_op.binary_mul_params.tensor_name, binary_tensor);
         }
       }
-      status_t status = matmul_operator
-                        .set_input("matmul_input", input_tensor)
-                        .set_output("matmul_output", output_tensor)
-                        .execute();
+      matmul_operator.set_input("matmul_input", input_tensor)
+      .set_output("matmul_output", output_tensor);
+      if (algo != matmul_algo_t::none) {
+        matmul_operator.set_forced_kernel(algoToStr(algo));
+      }
+      status_t status = matmul_operator.execute();
 
       if (status != status_t::success) {
         log_info("operator ", matmul_operator.get_name(), " execution failed.");
@@ -788,10 +845,10 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
 
     //define matmul context
     matmul_context_t matmul_context = matmul_context_t()
-                          .set_param("weights", weight_tensor)
-                          .set_alpha(alpha)
-                          .set_beta(beta);
-    if (!(algo == matmul_algo_t::libxsmm && use_LOWOHA)) {
+                                      .set_param("weights", weight_tensor)
+                                      .set_alpha(alpha)
+                                      .set_beta(beta);
+    if (!(algo == matmul_algo_t::libxsmm)) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);
     }
 
@@ -804,9 +861,9 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
 
     //define matmul operator
     matmul_operator_t matmul_operator = matmul_operator_t()
-                           .set_name("matmul_forced_ref_operator")
-                           .set_context(matmul_context)
-                           .create();
+                                        .set_name("matmul_forced_ref_operator")
+                                        .set_context(matmul_context)
+                                        .create();
 
     if (! matmul_operator.check()) {
       log_error("operator ", matmul_operator.get_name(), " creation failed.");
@@ -852,7 +909,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
 
     // Reorder context creation with backend aocl.
     reorder_context_t reorder_context = reorder_context_t()
-                           .set_algo_format("aocl");
+                                        .set_algo_format("aocl");
 
     // Set Input source dtype if the weights dtype is s8
     if ((dtype == data_type_t::s8) && (source_dtype == data_type_t::s8 ||
@@ -875,10 +932,10 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     if (memory_reorder) {
       // Reorder operator creation with name, context and input.
       reorder_operator_t reorder_operator = reorder_operator_t()
-                              .set_name("reorder_operator")
-                              .set_context(reorder_context)
-                              .create()
-                              .set_input("reorder_input", input_tensor);
+                                            .set_name("reorder_operator")
+                                            .set_context(reorder_context)
+                                            .create()
+                                            .set_input("reorder_input", input_tensor);
 
       if (! reorder_operator.check()) {
         log_error("operator ", reorder_operator.get_name(), " creation failed.");
@@ -945,10 +1002,10 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     else {
       // reorder operator creation with name, context and input.
       reorder_operator_t reorder_operator = reorder_operator_t()
-                              .set_name("reorder_operator")
-                              .set_context(reorder_context)
-                              .create()
-                              .set_input("reorder_input", input_tensor);
+                                            .set_name("reorder_operator")
+                                            .set_context(reorder_context)
+                                            .create()
+                                            .set_input("reorder_input", input_tensor);
 
       if (! reorder_operator.check()) {
         log_error("operator ", reorder_operator.get_name(), " creation failed.");
@@ -1025,19 +1082,19 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
     //define embag context
     embag_context_t embedding_bag_context = embag_context_t()
-                                 .set_param("table", table_tensor)
-                                 .set_algo(algo)
-                                 .set_padding_index(padding_index)
-                                 .set_include_last_offset(include_last_offset)
-                                 .set_is_weights(is_weights)
-                                 .set_scatter_stride(scatter_stride)
-                                 .create();
+                                            .set_param("table", table_tensor)
+                                            .set_algo(algo)
+                                            .set_padding_index(padding_index)
+                                            .set_include_last_offset(include_last_offset)
+                                            .set_is_weights(is_weights)
+                                            .set_scatter_stride(scatter_stride)
+                                            .create();
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
-                                  .set_name("embedding_bag")
-                                  .set_context(embedding_bag_context)
-                                  .create();
+        .set_name("embedding_bag")
+        .set_context(embedding_bag_context)
+        .create();
 
     if (! embedding_bag_operator.check()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -1089,19 +1146,19 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
 
     //define embag context
     embag_context_t embedding_bag_context = embag_context_t()
-                                 .set_param("table", table_tensor)
-                                 .set_algo(algo)
-                                 .set_padding_index(padding_index)
-                                 .set_include_last_offset(include_last_offset)
-                                 .set_is_weights(is_weights)
-                                 .set_scatter_stride(scatter_stride)
-                                 .create();
+                                            .set_param("table", table_tensor)
+                                            .set_algo(algo)
+                                            .set_padding_index(padding_index)
+                                            .set_include_last_offset(include_last_offset)
+                                            .set_is_weights(is_weights)
+                                            .set_scatter_stride(scatter_stride)
+                                            .create();
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
-                                  .set_name("ref_embedding_bag")
-                                  .set_context(embedding_bag_context)
-                                  .create();
+        .set_name("ref_embedding_bag")
+        .set_context(embedding_bag_context)
+        .create();
 
     if (! embedding_bag_operator.check()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
@@ -1153,16 +1210,16 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
 
     //define embedding context
     embag_context_t embedding_context = embag_context_t()
-                             .set_param("table", table_tensor)
-                             .set_padding_index(padding_index)
-                             .set_is_weights(is_weights)
-                             .create();
+                                        .set_param("table", table_tensor)
+                                        .set_padding_index(padding_index)
+                                        .set_is_weights(is_weights)
+                                        .create();
 
     //define embedding operator
     embag_operator_t embedding_operator = embag_operator_t()
-                              .set_name("embedding_bag")
-                              .set_context(embedding_context)
-                              .create();
+                                          .set_name("embedding_bag")
+                                          .set_context(embedding_context)
+                                          .create();
 
     if (! embedding_operator.check()) {
       testlog_error(" operator ", embedding_operator.get_name(),
@@ -1208,16 +1265,16 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
 
     //define embedding context
     embag_context_t embedding_context = embag_context_t()
-                             .set_param("table", table_tensor)
-                             .set_padding_index(padding_index)
-                             .set_is_weights(is_weights)
-                             .create();
+                                        .set_param("table", table_tensor)
+                                        .set_padding_index(padding_index)
+                                        .set_is_weights(is_weights)
+                                        .create();
 
     //define embedding operator
     embag_operator_t embedding_operator = embag_operator_t()
-                              .set_name("ref_embedding_bag")
-                              .set_context(embedding_context)
-                              .create();
+                                          .set_name("ref_embedding_bag")
+                                          .set_context(embedding_context)
+                                          .create();
 
     if (! embedding_operator.check()) {
       testlog_error(" operator ", embedding_operator.get_name(),

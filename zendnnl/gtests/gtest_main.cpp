@@ -46,6 +46,7 @@ const float EMBAG_BF16_TOL = 0.01;
 uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
+std::string cmd_backend {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -78,7 +79,7 @@ int main(int argc, char **argv) {
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;
-    parse(argc, argv, seed, test_num, cmd_post_op);
+    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend);
     srand(static_cast<unsigned int>(seed));
     std::cout<<"Value "<<seed<<" is used as seed. \n";
 

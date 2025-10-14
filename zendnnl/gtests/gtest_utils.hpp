@@ -110,6 +110,7 @@ extern const uint32_t po_size; //Supported postop
 extern const uint32_t dtype_size;
 extern int64_t seed;
 extern std::string cmd_post_op;
+extern std::string cmd_backend;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
@@ -193,7 +194,7 @@ class Parser {
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
-                  int64_t &seed, uint32_t &test_num, std::string &po);
+                  int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend);
 };
 
 bool is_binary_postop(const std::string post_op);
@@ -204,6 +205,27 @@ extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
 //Supported Dtype declaration
 extern std::vector<data_type_t> dtype_arr;
 
+/** @fn strToAlgo
+ *  @brief Convert string representation to matmul algorithm type
+ *
+ *  This function converts a string representation of a matrix multiplication
+ *  algorithm to the corresponding matmul_algo_t enumeration value.
+ *
+ *  @param str String representation of the algorithm (e.g., "onednn", "aocl_blis", etc.)
+ *  @return matmul_algo_t The corresponding algorithm enumeration value
+ */
+matmul_algo_t strToAlgo(std::string str);
+
+/** @fn algoToStr
+ *  @brief Convert matmul algorithm type to string representation
+ *
+ *  This function converts a matmul_algo_t enumeration value to its
+ *  corresponding string representation for display or logging purposes.
+ *
+ *  @param algo The matmul algorithm enumeration value
+ *  @return std::string String representation of the algorithm
+ */
+std::string algoToStr(matmul_algo_t algo);
 
 /** @fn matmul_kernel_test
  *  @brief Compute Matmul Operation using AOCL kernel.

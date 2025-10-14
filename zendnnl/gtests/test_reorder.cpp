@@ -45,10 +45,10 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
     else {
       po_index = params.mat.po_index;
     }
+    algo = matmul_algo_t::aocl_blis; //TODO: Implement dynamic backend selection when additional backends are supported
     inplace_reorder = params.inplace_reorder;
     use_LOWOHA = 0; // TODO: Enable LOWOHA support
     source_dtype = params.mat.source_dtype;
-    algo = params.mat.algo;
     log_info("m: ",m, " k: ",k, " n: ",n," po_index: ",po_index, " reorder: ",
              inplace_reorder ? "In Place" : "Out of Place");
   }

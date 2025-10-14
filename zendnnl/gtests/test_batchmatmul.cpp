@@ -54,6 +54,9 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
                        algo == matmul_algo_t::onednn)) {
       po_index = 8;
     }
+    if (algo == matmul_algo_t::aocl_blis_blocked) {
+      algo = matmul_algo_t::aocl_blis;
+    }
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
              transA, " TransB: ", transB, " po_index: ",po_index, " algo: ",
              static_cast<int>(algo));
