@@ -443,7 +443,7 @@ jobs:
         shell: bash
  trigger_pytorch_plugin:
     #needs: [zendnn_build]
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: amd-zenai-arc-xsmall-dind
     steps:
       - name: Trigger ZenDNN_PyTorch_Plugin workflow
@@ -463,7 +463,7 @@ jobs:
         shell: bash
  trigger_tensorflow_plugin:
     #needs: [zendnn_build]
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: amd-zenai-arc-xsmall-dind
     steps:
       - name: Trigger ZenDNN_Tensorflow_Plugin workflow
