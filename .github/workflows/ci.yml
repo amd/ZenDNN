@@ -1,4 +1,4 @@
-name: ZenDNN CI
+name: ZENDNN CI
 
 on:
   push:
@@ -39,9 +39,8 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
           path: ZenDNN
           fetch-depth: 0
-          persist-credentials: true
           clean: true
-  
+          
      - name: show GITHUB_WORKSPACE
        run: |
           echo "WORKSPACE, $GITHUB_WORKSPACE"
@@ -237,26 +236,7 @@ jobs:
     needs: [jira-id-check, license-header-check]
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     steps:
-      - name: Print PR info
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-         echo "PR BASE BRANCH: ${{ github.event.pull_request.base.ref }}"
-         echo "PR BASE SHA   : ${{ github.event.pull_request.base.sha }}"
-         echo "PR SOURCE BRANCH: ${{ github.event.pull_request.head.ref }}"
-         echo "PR HEAD SHA     : ${{ github.event.pull_request.head.sha }}"
-
-         echo ""
-         echo "Commits in this PR:"
-         git fetch --no-tags origin +refs/heads/${{ github.event.pull_request.head.ref }}:refs/remotes/origin/${{ github.event.pull_request.head.ref }}
-         git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-
-         echo ""
-         echo "Changed files in this PR:"
-         git diff --name-status ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-
-         echo ""
-         echo "Diff stats:"
-         git diff --stat ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+     
       - name: basic_debug
         run: |
             pwd
@@ -310,7 +290,7 @@ jobs:
          echo "   ZENDNN & ZENDNN_TOOLS INFO  "
          echo "=============================="
 
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
 
          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
           BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
@@ -369,12 +349,9 @@ jobs:
           echo "LAST 20 COMMITS (ZenDNN_tools)"
           git log --oneline -20 || echo "No commits found"
          else
-          echo "ZenDNN_tools directory not found — skipping."
+          echo "ZenDNN_tools directory not found"
          fi
      
-      
-     
-
       - name: setup_env
         run: |
           mkdir -p BLIS
@@ -465,7 +442,7 @@ jobs:
           rm -rf ${GITHUB_WORKSPACE}/ZenDNN_tools
         shell: bash
  trigger_pytorch_plugin:
-    needs: [zendnn_build]
+    #needs: [zendnn_build]
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: amd-zenai-arc-xsmall-dind
     steps:
@@ -478,13 +455,14 @@ jobs:
             "event_type": "zendnn-pr",
             "client_payload": {
               "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+               "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
               "ZENTORCH_USE_LOCAL_ZENDNN": "1",
               "ZENTORCH_USE_LOCAL_BLIS": "1"
             }
           }'
         shell: bash
  trigger_tensorflow_plugin:
-    needs: [zendnn_build]
+    #needs: [zendnn_build]
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: amd-zenai-arc-xsmall-dind
     steps:
@@ -497,8 +475,48 @@ jobs:
             "event_type": "zendnn-pr",
             "client_payload": {
               "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
               "ZENTF_USE_LOCAL_ZENDNN": "1",
               "ZENTF_USE_LOCAL_BLIS": "1"
             }
           }'
         shell: bash
+        
+ check_status:
+  needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin]
+  runs-on: amd-zenai-arc-xsmall-dind
+  steps:
+    - name: PyTorch & TensorFlow plugin CI statuses
+      env:
+        GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
+        REPO_ZENDNN: AMD-Zenai/ZenDNN
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        echo "Waiting for PyTorch & TensorFlow plugin statuses..."
+        for i in {1..60}; do
+          pytorch_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+          
+          tf_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_TensorFlow_Plugin CI") | .state' | tail -n 1)
+
+          echo "PyTorch: $pytorch_state | TF: $tf_state"
+
+          # stop waiting if both are complete
+          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" ]]; then
+            echo " Both plugin workflows succeeded."
+            exit 0
+          fi
+
+          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ]]; then
+            echo "One of the plugin workflows failed."
+            exit 1
+          fi
+
+          sleep 30
+        done
+
+        echo " Timeout: waited too long for statuses."
+        exit 1
