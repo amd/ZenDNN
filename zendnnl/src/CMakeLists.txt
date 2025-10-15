@@ -283,7 +283,7 @@ endif()
 
 if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   message(STATUS "ASAN enabled for zendnnl source code")
-  set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1 -g)
+  set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1)
   target_compile_options(zendnnl_archive PRIVATE ${SANITIZER_FLAGS})
   target_link_options(zendnnl_archive PRIVATE "-fsanitize=address")
 endif()
