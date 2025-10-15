@@ -15,6 +15,8 @@ ZenDNN* depends on the following dependencies
 | aocl-utils | To detect runtime system information | Mandatory |
 | amd-blis or aocl-dlp | As default BLAS backend. Any one of these two need to be present | Mandatory |
 | onednn | In an unlikely situation of onednn kernels doing better than ZenDNN* | Optional |
+| libxsmm         | Optimized small matrix multiplication library | Optional |
+| parlooper       | Parallel loop abstraction library             | Optional |
 
 
 ZenDNN* build the following components
@@ -76,6 +78,8 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_AMDBLIS_FWK_DIR | If the framework is building a ZenDNN* dependency (for example AMDBLIS in this case), it can inform the library where this dependency is installed, by populating this variable. If populated, ZenDNN* assumes that the dependency is already built before library build starts, the binaries of the dependency are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/lib, and the include files are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/include. The framework build will have to ascertain by creating proper CMake dependency tree that this dependency is built before the library starts building. ZenDNN* provides a CMake include file (fwk/ZenDNNLFwkIntergate.cmake) to enable it. If this variable is not populated, then ZenDNN* assumes that the dependency is not being provided by the framework, and builds it the way it does for standalone build. | PATH | NO DEFAULT |
 | ZENDNNL_AOCLDLP_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for AOCLDLP dependency | PATH | NO DEFAULT |
 | ZENDNNL_ONEDNN_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for ONEDNN dependency | PATH | NO DEFAULT |
+| ZENDNNL_LIBXSMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for LIBXSMM dependency | PATH | NO DEFAULT |
+| ZENDNNL_PARLOOPER_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for PARLOOPER dependency | PATH | NO DEFAULT |
 
 ### Dependencies Options
 
@@ -83,9 +87,13 @@ In order to configure the build according to dependencies, components, and stand
 |--------|-------------|------|---------|
 | ZENDNNL_DEPENDS_AOCLDLP | aocl-dlp is default BLAS backend for ZenDNN*. If this option is OFF, then amd-blis becomes default BLAS backend of ZenDNN* | BOOL | ON |
 | ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN* | BOOL | OFF |
+| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN* | BOOL | OFF |
+| ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN* | BOOL | OFF |
 | ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publically available, or a varsion still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
+| ZENDNNL_LOCAL_LIBXSMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for LIBXSMM | BOOL | OFF |
+| ZENDNNL_LOCAL_PARLOOPER | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for PARLOOPER | BOOL | OFF |
 
 ## The Build Process
 
@@ -134,13 +142,15 @@ In order to assist ZenDNN* build integration to a framework, it provides CMake f
 ZenDNN* build can be integrated to the framework build using these files as follows
 
 - Put these files in CMAKE_MODULE_PATH of the framework build.
-- ZenDnnlFwkIntegrate.cmake uses a macro called *zendnnl_add_option* to set ZenDNN* build options. Edit this file the set the ZenDNN*options as needed. In particular the following options are to be provided
+- ZenDnnlFwkIntegrate.cmake uses a macro called *zendnnl_add_option* to set ZenDNN* build options. Edit this file to set the ZenDNN* options as needed. In particular the following options are to be provided
   - ZENDNN_SOURCE_DIR : ZenDNN* source code.
   - ZENDNNL_BINARY_DIR : Where ZenDNN* will be built in the build tree. if unsure set ${CMAKE_CURRENT_BINARY_DIR}/zendnnl.
   - ZENDNNL_INSTALL_DIR : Where ZenDNN* will be built in the build tree. if unsure set ${CMAKE_INSTALL_PREFIX}/zendnnl.
   - ZENDNNL_AMDBLIS_FWK_DIR : Install path of amd-blis if framework is building it and wants to inject it to ZenDNN* build.
   - ZENDNNL_AOCLDLP_FWK_DIR : Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN* build.
   - ZENDNNL_ONEDNN_FWK_DIR : Install path of onednn if framework is building it and wants to inject it to ZenDNN* build.
+  - ZENDNNL_LIBXSMM_FWK_DIR : Install path of libxsmm if framework is building it and wants to inject it to ZenDNN* build.
+  - ZENDNNL_PARLOOPER_FWK_DIR : Install path of parlooper if framework is building it and wants to inject it to ZenDNN* build.
 
 - Make *fwk_zendnnl* target dependent on injected dependencies by editing its "add_dependencies(fwk_zendnnl...)" command.
 - Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN* is to be built.
