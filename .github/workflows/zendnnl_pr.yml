@@ -494,7 +494,7 @@ jobs:
   asan-build:
    runs-on: zendnnl_presub_server
    if: ${{ github.event_name == 'push' }}
-   #needs: Zendnnl_build_Push
+   needs: Zendnnl_build_Push
    env:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
