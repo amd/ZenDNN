@@ -529,12 +529,12 @@ jobs:
           echo "PyTorch: $pytorch_state | TF: $tf_state | Zentoch_zendnnl: $zentorch_zendnnl_state"
 
           # stop waiting if both are complete
-          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" && "$zentorch_zendnnl_state" == "success"]]; then
+          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" && "$zentorch_zendnnl_state" == "success" ]]; then
             echo " All plugin workflows succeeded."
             exit 0
           fi
 
-          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ||  "$zentorch_zendnnl_state" == "failure"]]; then
+          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ||  "$zentorch_zendnnl_state" == "failure" ]]; then
             echo "One of the plugin workflows failed."
             exit 1
           fi
