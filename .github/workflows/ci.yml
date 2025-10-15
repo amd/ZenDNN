@@ -506,13 +506,13 @@ jobs:
   needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin, trigger-zenTorch-ZenDNNL]
   runs-on: amd-zenai-arc-xsmall-dind
   steps:
-    - name: PyTorch & TensorFlow plugin CI statuses
+    - name: PyTorch & TensorFlow & Zentorch_Zendnnl plugin CI statuses
       env:
         GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
         REPO_ZENDNN: AMD-Zenai/ZenDNN
         COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        echo "Waiting for PyTorch & TensorFlow & Zentorch_zendnnl plugin statuses..."
+        echo "Waiting for PyTorch & TensorFlow & Zentorch_Zendnnl plugin statuses..."
         for i in {1..60}; do
           pytorch_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
