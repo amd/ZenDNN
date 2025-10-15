@@ -503,7 +503,7 @@ jobs:
        shell: bash
         
  check_status:
-  needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin]
+  needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin, trigger-zenTorch-ZenDNNL]
   runs-on: amd-zenai-arc-xsmall-dind
   steps:
     - name: PyTorch & TensorFlow plugin CI statuses
