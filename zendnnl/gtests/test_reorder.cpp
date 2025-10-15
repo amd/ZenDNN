@@ -47,6 +47,7 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
     }
     inplace_reorder = params.inplace_reorder;
     source_dtype = params.source_dtype;
+    use_LOWOHA = 0; // TODO: Enable LOWOHA support
     log_info("m: ",m, " k: ",k, " n: ",n," po_index: ",po_index, " reorder: ",
              inplace_reorder ? "In Place" : "Out of Place");
   }
@@ -58,6 +59,7 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
   uint32_t po_index;
   bool inplace_reorder;
   data_type_t source_dtype;
+  bool use_LOWOHA;
   tensor_factory_t tensor_factory{};
 };
 
@@ -80,7 +82,7 @@ TEST_P(TestReorder,F32_F32) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
                             output_tensor_ref, po_index,
-                            binary_tensor);
+                            binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -94,7 +96,7 @@ TEST_P(TestReorder,F32_F32) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -131,7 +133,7 @@ TEST_P(TestReorder, BF16_F32) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
                             output_tensor_ref, po_index,
-                            binary_tensor);
+                            binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -145,7 +147,7 @@ TEST_P(TestReorder, BF16_F32) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -181,7 +183,7 @@ TEST_P(TestReorder, BF16_BF16) {
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
-                            output_tensor_ref, po_index, binary_tensor);
+                            output_tensor_ref, po_index, binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -195,7 +197,7 @@ TEST_P(TestReorder, BF16_BF16) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -402,7 +404,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -416,7 +418,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -471,7 +473,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -485,7 +487,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -540,7 +542,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -555,7 +557,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor,
                             output_tensor,
-                            po_index, binary_tensor);
+                            po_index, binary_tensor, use_LOWOHA);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

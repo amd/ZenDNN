@@ -31,10 +31,8 @@
 #include "operators/embag/embag_operator.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
-#define LOWOHA 0
-
 #define MATMUL_SIZE_START 1
-#define MATMUL_SIZE_END 1000
+#define MATMUL_SIZE_END 3000
 #define MATMUL_LARGE_SIZE_END 10000
 #define BATCH_START 1
 #define BATCH_END 256
@@ -58,6 +56,7 @@ struct MatmulType {
   //TODO: Add support for other data_types as well
   float    alpha;
   float    beta;
+  bool     use_LOWOHA;
   MatmulType();
 };
 
@@ -201,7 +200,8 @@ extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
                             tensor_t &bias, tensor_t &output_tensor, uint32_t index,
-                            tensor_t &binary_tensor, float alpha = 1.0f, float beta = 0.0f);
+                            tensor_t &binary_tensor, bool use_LOWOHA, float alpha = 1.0f,
+                            float beta = 0.0f);
 
 /** @fn matmul_forced_ref_kernel_test
  *  @brief Compute Matmul Op using Reference kernel.
@@ -215,7 +215,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, float alpha = 1.0f, float beta = 0.0f);
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha = 1.0f,
+                                       float beta = 0.0f);
 
 /** @fn reorder_kernel_test
  *  @brief Function to Reorder tensor

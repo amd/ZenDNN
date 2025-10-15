@@ -38,7 +38,7 @@ const float EMBAG_F32_TOL  = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
 
 //number of testcases, random seed and empty post_op
-uint32_t test_num      = 100;
+uint32_t test_num      = 400;
 int seed               = time(NULL);
 std::string cmd_post_op {};
 

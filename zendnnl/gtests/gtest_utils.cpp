@@ -30,6 +30,16 @@ MatmulType::MatmulType() {
   std::uniform_real_distribution<float> dist(0.0, 10.0);
   alpha    = dist(gen);
   beta     = dist(gen);
+  use_LOWOHA = rand() % 2;
+  if (use_LOWOHA) {
+    bool use_libxsmm = rand() % 2;
+    // LibXSMM currently supports only alpha=1 and beta=0 configurations.
+    // We force these values when using LibXSMM to ensure test case validation.
+    if (use_libxsmm) {
+      alpha = 1;
+      beta = 0;
+    }
+  }
 }
 
 // EmbagType constructor
@@ -452,10 +462,11 @@ bool Parser::isInteger(const std::string &s) {
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             tensor_t &bias_tensor, tensor_t &output_tensor,
-                            uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
+                            uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha,
+                            float beta) {
   try {
 
-    if (LOWOHA && index == po_size) {
+    if (use_LOWOHA) {
       try {
         // Validate input tensors
         if (!input_tensor.check() || !weight_tensor.check() || !output_tensor.check()) {
@@ -465,6 +476,30 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         auto input_dim              = input_tensor.get_dim();
         auto weight_dim             = weight_tensor.get_dim();
         auto output_dim             = output_tensor.get_dim();
+        if (input_dim < 2 || input_dim > 3 || weight_dim < 2 || weight_dim > 3 ||
+            output_dim < 2 || output_dim > 3 ||
+            !((input_dim == weight_dim && output_dim == input_dim) ||
+              (input_dim == 2 && weight_dim == 3 && output_dim == 3) ||
+              (input_dim == 3 && weight_dim == 2 && output_dim == 3))) {
+          log_error("LOWOHA: Invalid tensor dimensions - Input dim:", input_dim,
+                    " Weight dim:", weight_dim, " Output dim:", output_dim);
+          return status_t::failure;
+        }
+        if (input_tensor.get_size(input_dim - 2) != output_tensor.get_size(
+              output_dim - 2) ||
+            input_tensor.get_size(input_dim - 1) != weight_tensor.get_size(
+              weight_dim - 2) ||
+            weight_tensor.get_size(weight_dim - 1) != output_tensor.get_size(
+              output_dim - 1)) {
+          log_error("LOWOHA: Mismatched tensor dimensions - Input sizes: [",
+                    input_tensor.get_size(input_dim - 2),
+                    ", ", input_tensor.get_size(input_dim - 1), "], Weight sizes: [",
+                    weight_tensor.get_size(weight_dim - 2),
+                    ", ", weight_tensor.get_size(weight_dim - 1), "], Output sizes: [",
+                    output_tensor.get_size(output_dim - 2),
+                    ", ", output_tensor.get_size(output_dim - 1), "]");
+          return status_t::failure;
+        }
         bool transA       = (input_dim == 2)  ? (input_tensor.get_order() ==
                             "ba") : (input_tensor.get_order() == "acb");
         bool transB       = (weight_dim == 2) ? (weight_tensor.get_order() ==
@@ -622,7 +657,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weight_tensor,
                                        tensor_t &bias_tensor, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, float alpha, float beta) {
+                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, float alpha,
+                                       float beta) {
   try {
     // Default postop relu
     post_op_t post_op = post_op_t{po_arr[0].second};
@@ -637,9 +673,9 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                           .set_alpha(alpha)
                           .set_beta(beta);
 
-#if !LOWOHA
-    matmul_context.set_param("bias", bias_tensor);
-#endif
+    if (!use_LOWOHA) {
+      matmul_context = matmul_context.set_param("bias", bias_tensor);
+    }
 
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();

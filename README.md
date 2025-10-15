@@ -12,9 +12,10 @@
 - [Build and Install](#2-build-and-install)
   - [Build Dependencies](#21-build-dependencies)
   - [Build and install](#22-build-and-install)
-- [Examples and Tests](#3-examples-tests)
+- [Examples, Tests and Benchmarks](#3-ZenDNN*-examples-tests-and-benchmarks)
   - [Examples](#31-examples)
-  - [GoogleTest](#32-googletest)
+  - [GoogleTest](#32-gtests)
+  - [BenchDNN](#33-benchdnn)
 <!-- tocstop -->
 
 # 1. About ZenDNN*
@@ -33,6 +34,7 @@ ZenDNN* has the following top level directory structure:
 ```
 ZenDNN
 |- build        : to build and install the library.
+|- benchdnn     : contains benchmarking utilities for performance analysis.
 |- cmake        : contains CMake modules.
 |- dependencies : to download all dependencies.
 |- examples     : contains tutorial examples illustrating how to use ZenDNN* APIs.
@@ -92,6 +94,7 @@ CMake build exposes the following component targets:
 | Dependencies(TPL) | zendnnl-deps     | None         |
 | ZenDNN* Library   | zendnnl          | zendnnl-deps |
 | Examples          | zendnnl-examples | zendnnl      |
+| BenchDNN          | zendnnl-benchdnn | zendnnl      |
 | Doxygen Docs      | zendnnl-doxygen  | None         |
 
 
@@ -115,6 +118,7 @@ controlled by setting the appropriate options in `ZenDNN/cmake/ZenDnnlComponents
 - `ZENDNNL_BUILD_EXAMPLES=ON/OFF` (default: ON)
 - `ZENDNNL_BUILD_DOXYGEN=ON/OFF` (default: OFF)
 - `ZENDNNL_BUILD_GTEST=ON/OFF` (default: OFF)
+- `ZENDNNL_BUILD_BENCHDNN=ON/OFF` (default: OFF)
 
 In addition, a shell script `ZenDNN/scripts/zendnnl_build.sh` is also provided to execute the build process easily.
 
@@ -211,12 +215,13 @@ ZenDNN
          |- doxygen  : doxygen documentation.
          |- examples : tutorial example executables.
          |- gtests   : gtests executables.
+         |- benchdnn : benchdnn executables.
 ```
 
 This installation also includes CMake packaging information in `install/zendnnl/lib/cmake`. Downstream
 packages can use this to find zendnnl using CMake FindPackage().
 
-# 3. ZenDNN* Examples and Tests
+# 3. ZenDNN* Examples, Tests and Benchmarks
 
 ## 3.1. Examples
 
@@ -228,6 +233,15 @@ GTests are found in `install/gtests`, and can be executed as follows:
 ```bash
 ./gtests/gtests
 ```
+
+For detailed usage instructions, refer to the [GTests's README](zendnnl/gtests/Readme.md).
+
+## 3.3. BenchDNN
+
+ZenDNN* includes `benchdnn`, a high-performance benchmarking utility designed to rigorously assess the efficiency of deep learning operators within the ZenDNN library. BenchDNN provides detailed performance analysis capabilities for primitives like matrix multiplication (matmul) and reorder operations.
+
+For detailed usage instructions and configuration options, refer to the [BenchDNN's README](benchdnn/README.md).
+
 # 4. Integrating ZenDNN* with Downstream Packages
 
 As ZenDNN* builds, installs, and exports its dependencies, it is necessary for the downstream to build and install ZenDNN*, and then use its exported targets by using the CMake FindPackage() command.

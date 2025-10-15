@@ -48,9 +48,10 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     else {
       po_index = params.mat.po_index;
     }
-#if LOWOHA
-    po_index = 8;
-#endif
+    use_LOWOHA = params.mat.use_LOWOHA;
+    if (use_LOWOHA) {
+      po_index = 8;
+    }
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
              transA, " TransB: ", transB, " po_index: ",po_index);
   }
@@ -63,6 +64,7 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
   bool     transA, transB;
   tensor_factory_t tensor_factory{};
   float alpha, beta;
+  bool use_LOWOHA;
 };
 
 /** @fn TEST_P
@@ -89,7 +91,7 @@ TEST_P(TestBatchMatmul,4D_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({dummy_group_count, batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -117,7 +119,7 @@ TEST_P(TestBatchMatmul,OUTPUT_LESS_THAN_3D_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -146,7 +148,7 @@ TEST_P(TestBatchMatmul,OUTPUT_ONLY_3D_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -174,7 +176,7 @@ TEST_P(TestBatchMatmul,INPUT_LESS_THAN_2D_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -202,7 +204,7 @@ TEST_P(TestBatchMatmul,WEIGHT_LESS_THAN_2D_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -233,7 +235,7 @@ TEST_P(TestBatchMatmul,DIFFERENT_BATCH_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -263,7 +265,7 @@ TEST_P(TestBatchMatmul,DIFFERENT_ROW_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -293,7 +295,7 @@ TEST_P(TestBatchMatmul,DIFFERENT_COL_INVALID) {
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   bool is_test_failed = (status != status_t::success);
   EXPECT_TRUE(is_test_failed);
 }
@@ -323,9 +325,10 @@ TEST_P(TestBatchMatmul,F32_3D) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -362,9 +365,10 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -401,9 +405,10 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -441,9 +446,10 @@ TEST_P(TestBatchMatmul,BF16_F32_3D) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -481,9 +487,10 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -521,9 +528,10 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -561,9 +569,10 @@ TEST_P(TestBatchMatmul,BF16_BF16_3D) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -601,9 +610,10 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
@@ -641,9 +651,10 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
   auto output_tensor_ref  = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, alpha, beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
-                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor, alpha,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
+                            use_LOWOHA, alpha,
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
