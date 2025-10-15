@@ -170,9 +170,9 @@ jobs:
         if grep -F "Completed 'zendnnl'" "$WORKSPACE/build_output.log" && \
            grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/build_output.log" && \
            grep -F "[100%] Built target gtests" "$WORKSPACE/build_output.log"; then
-          echo "✅ ZenDNNL build passed!"
+          echo " ZenDNNL build passed!"
         else
-          echo "❌ ZenDNNL build failed!"
+          echo " ZenDNNL build failed!"
           cat "$WORKSPACE/build_output.log"
           exit 1
         fi
@@ -194,11 +194,11 @@ jobs:
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
-          echo "❌ ZenDNNL gtests failed!"
+          echo "ZenDNNL gtests failed!"
           cat "$WORKSPACE/gtest_output.log"
           exit 1
         else
-          echo "✅ ZenDNNL gtests passed!"
+          echo "ZenDNNL gtests passed!"
         fi
       shell: bash
 
@@ -411,9 +411,9 @@ jobs:
         if grep -F "Completed 'zendnnl'" "$WORKSPACE/build_output.log" && \
            grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/build_output.log" && \
            grep -F "[100%] Built target gtests" "$WORKSPACE/build_output.log"; then
-          echo "✅ ZenDNNL build passed!"
+          echo "ZenDNNL build passed!"
         else
-          echo "❌ ZenDNNL build failed!"
+          echo "ZenDNNL build failed!"
           cat "$WORKSPACE/build_output.log"
           exit 1
         fi
@@ -450,15 +450,15 @@ jobs:
         
         # Check for test failures and warnings about no tests run
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
-          echo "❌ ZenDNNL gtests failed!"
+          echo "ZenDNNL gtests failed!"
           cat "$WORKSPACE/gtest_output.log"
           exit 1
         elif grep -F -q "WARNING: filter \"\" did not match any test" "$WORKSPACE/gtest_output.log"; then
-          echo "⚠️ No tests were run, please check your filter pattern"
+          echo "No tests were run, please check your filter pattern"
           cat "$WORKSPACE/gtest_output.log"
           exit 1
         else
-          echo "✅ ZenDNNL gtests passed!"
+          echo "ZenDNNL gtests passed!"
         fi
       shell: bash
 
@@ -577,9 +577,9 @@ jobs:
         if grep -F "Completed 'zendnnl'" "$WORKSPACE/asan_build_output.log" && \
            grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/asan_build_output.log" && \
            grep -F "[100%] Built target gtests" "$WORKSPACE/asan_build_output.log"; then
-          echo "✅ ZenDNNL ASAN build passed!"
+          echo "ZenDNNL ASAN build passed!"
         else
-          echo "❌ ZenDNNL ASAN build failed!"
+          echo "ZenDNNL ASAN build failed!"
           cat "$WORKSPACE/asan_build_output.log"
           exit 1
         fi
