@@ -71,58 +71,6 @@ inline void zendnnl_parallel_for(
   }
 }
 
-void matmul_direct_native(char layout, char transA, char transB, int M, int N,
-                          int K, float alpha, const void *A, int lda,
-                          const void *B, int ldb, float beta, void *C, int ldc, data_types dtypes) {
-
-  const bool is_f32_src  = (dtypes.src == data_type_t::f32);
-  const bool is_bf16_src = (dtypes.src == data_type_t::bf16);
-  const bool is_f32_out  = (dtypes.dst == data_type_t::f32);
-  const bool is_bf16_out = (dtypes.dst == data_type_t::bf16);
-
-  const float *A_f32    = is_f32_src ? static_cast<const float *>(A) : nullptr;
-  const float *B_f32    = is_f32_src ? static_cast<const float *>(B) : nullptr;
-  const int16_t *A_bf16 = is_bf16_src ? static_cast<const int16_t *>(A) : nullptr;
-  const int16_t *B_bf16 = is_bf16_src ? static_cast<const int16_t *>(B) : nullptr;
-
-  float *C_f32    = is_f32_out ? static_cast<float *>(C) : nullptr;
-  int16_t *C_bf16 = is_bf16_out ? static_cast<int16_t *>(C) : nullptr;
-
-  for (int m = 0; m < M; ++m) {
-    for (int n = 0; n < N; ++n) {
-      float acc = 0.0f;
-      for (int k = 0; k < K; ++k) {
-        float a_val = 0.0f;
-        float b_val = 0.0f;
-
-        if (is_f32_src) {
-          a_val = (transA == 'n') ? A_f32[m * lda + k] : A_f32[k * lda + m];
-          b_val = (transB == 'n') ? B_f32[k * ldb + n] : B_f32[n * ldb + k];
-        }
-        else if (is_bf16_src) {
-          a_val = bfloat16_t::bf16_to_f32_val((transA == 'n') ? A_bf16[m * lda + k] :
-                                              A_bf16[k * lda + m]);
-          b_val = bfloat16_t::bf16_to_f32_val((transB == 'n') ? B_bf16[k * ldb + n] :
-                                              B_bf16[n * ldb + k]);
-        }
-
-        acc += a_val * b_val;
-      }
-
-      if (is_f32_out) {
-        float c_val        = C_f32[m * ldc + n];
-        C_f32[m * ldc + n] = alpha * acc + beta * c_val;
-      }
-      else if (is_bf16_out) {
-        float c_val         = bfloat16_t::bf16_to_f32_val(C_bf16[m * ldc + n]);
-        float result        = alpha * acc + beta * c_val;
-        C_bf16[m * ldc + n] = bfloat16_t::f32_to_bf16_val(result);
-      }
-    }
-  }
-}
-
-
 #if ZENDNNL_DEPENDS_LIBXSMM
 template<typename TA, typename TB, typename TC>
 void libxsmm_gemm(const TA *A, const TB *B, TC *C,
@@ -202,9 +150,7 @@ static inline void run_blis(char        layout,
                               beta,static_cast<float *>(C),ldc,nullptr);
   }
   else {
-    apilog_info("Data type not supported, falling back native kernel");
-    matmul_direct_native(layout,transA,transB,M,N,K,alpha,
-                         A,lda,B,ldb,beta,C,ldc,dtypes);
+    apilog_info("Data type not supported");
   }
 }
 
@@ -290,11 +236,10 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
       return;
     }
     else {
-      kernel  = zendnnl::ops::matmul_algo_t::aocl_blis;
+      kernel = zendnnl::ops::matmul_algo_t::aocl_blis;
     }
   }
-#endif
-
+  
   if (kernel == zendnnl::ops::matmul_algo_t::aocl_blis) {
     apilog_info("Using BLIS/AOCL kernel");
     run_blis(layout,transA,transB,M,N,K,alpha,beta,
@@ -302,6 +247,14 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
              A,B,C,dtypes);
     return;
   }
+#endif
+  // Use BLIS as fallback
+  apilog_info("Using BLIS/AOCL kernel");
+  run_blis(layout,transA,transB,M,N,K,alpha,beta,
+           lda,ldb,ldc,mem_format_a,mem_format_b,
+           A,B,C,dtypes);
+  return;
+
 //   TODO: To implement native AVX512 BF16 kernel
 //   else if (0) {
 //     if (dtypes.src == data_type_t::bf16 &&
@@ -312,10 +265,6 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 //                            alpha, beta, M, N, K, lda, ldb, ldc, false);
 //     }
 //   }
-
-  apilog_info("Using native kernel");
-  matmul_direct_native(layout,transA,transB,M,N,K,alpha,
-                       A,lda,B,ldb,beta,C,ldc,dtypes);
 }
 
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
@@ -590,8 +539,11 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   const int num_threads = omp_get_max_threads();
   const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
                                      num_threads, params.dtypes.src);
-  matmul_algo_t kernel = static_cast<matmul_algo_t>
-                         (matmul_config_t::instance().get_algo());
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t algo = matmul_config.get_algo();
+
+  matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
+                         matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
   if (kernel==matmul_algo_t::dynamic_dispatch) {
     kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
   }

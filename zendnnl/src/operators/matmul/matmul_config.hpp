@@ -30,7 +30,8 @@ namespace ops {
  *
  * Defines all available matmul backends.
  */
-enum class matmul_algo_t : uint32_t {
+enum class matmul_algo_t : int32_t {
+  none = -1,             /*!< No algorithm selected */
   dynamic_dispatch = 0,  /*!< Dynamic dispatch */
   aocl_blis = 1,         /*!< AOCL */
   aocl_blis_blocked = 2, /*!< Blocked AOCL */
@@ -73,13 +74,13 @@ class matmul_config_t final : public op_config_t {
   *
   * @param algo The MatMul algorithm to set.
   */
-  void set_algo(uint32_t algo);
+  void set_algo(int32_t algo);
 
   /** @brief Get matmul algo.
    *
    * @return matmul algo.
    */
-  uint32_t get_algo();
+  int32_t get_algo();
 
   /** @brief Returns the singleton instance of matmul_config_t.
   *
@@ -108,7 +109,7 @@ class matmul_config_t final : public op_config_t {
   */
   matmul_config_t() = default;
 
-  uint32_t matmul_algo;       /**< Matmul runtime algorithm. */
+  int32_t matmul_algo;       /**< Matmul runtime algorithm. */
 };
 
 }
