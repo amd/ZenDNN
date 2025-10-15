@@ -524,7 +524,7 @@ jobs:
 
            zentorch_zendnnl_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
-            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin ZENDNNL CI") | .state' | tail -n 1)
 
           echo "PyTorch: $pytorch_state | TF: $tf_state | Zentoch_zendnnl: $zentorch_zendnnl_state"
 
