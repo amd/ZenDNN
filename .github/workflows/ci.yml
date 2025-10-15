@@ -231,7 +231,7 @@ jobs:
 
   
 
- zendnn_build:
+ zendnn_build_PR:
     runs-on: zendnn_presub_server
     needs: [jira-id-check, license-header-check]
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
@@ -481,6 +481,26 @@ jobs:
             }
           }'
         shell: bash
+ trigger-zenTorch-ZenDNNL:
+    #needs: [zendnn_build]
+    runs-on: amd-zenai-arc-xsmall-dind
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+     - name: Trigger ZenTorch_ZenDNNL workflow
+       run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-pr",
+            "client_payload": {
+              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+       shell: bash
         
  check_status:
   needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin]
@@ -492,7 +512,7 @@ jobs:
         REPO_ZENDNN: AMD-Zenai/ZenDNN
         COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        echo "Waiting for PyTorch & TensorFlow plugin statuses..."
+        echo "Waiting for PyTorch & TensorFlow & Zentorch_zendnnl plugin statuses..."
         for i in {1..60}; do
           pytorch_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
@@ -502,15 +522,19 @@ jobs:
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
             | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_TensorFlow_Plugin CI") | .state' | tail -n 1)
 
-          echo "PyTorch: $pytorch_state | TF: $tf_state"
+            Zentorch-zendnnl_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+
+          echo "PyTorch: $pytorch_state | TF: $tf_state | Zentoch_zendnnl: $Zentorch-zendnnl_state"
 
           # stop waiting if both are complete
-          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" ]]; then
-            echo " Both plugin workflows succeeded."
+          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" && "$Zentorch-zendnnl_state"=="success"]]; then
+            echo " All plugin workflows succeeded."
             exit 0
           fi
 
-          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ]]; then
+          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ||  "$Zentorch-zendnnl_state"=="failure"]]; then
             echo "One of the plugin workflows failed."
             exit 1
           fi
