@@ -492,7 +492,7 @@ jobs:
           -H "Accept: application/vnd.github.v3+json" \
           -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
           -d '{
-            "event_type": "zendnn1-pr",
+            "event_type": "zendnn-zentorch-zendnnl-pr",
             "client_payload": {
               "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
               "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
