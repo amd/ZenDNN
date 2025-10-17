@@ -665,8 +665,9 @@ tensor_t &tensor_t::create() {
   status = status_t::success;
   hash();
 
-  apilog_info("Tensor create - ",tensor_info());
-
+  if (apilog_verbose_enabled()) {
+    apilog_verbose("Tensor create - ", tensor_info());
+  }
   return (*this);
 }
 

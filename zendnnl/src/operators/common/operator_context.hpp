@@ -263,7 +263,7 @@ OP_CONTEXT_T &op_context_t<OP_CONTEXT_T>::create() {
   status = status_t::success;
   hash();
 
-  if (apilog_verbose_enabled() || profilelog_verbose_enabled()) {
+  if (apilog_verbose_enabled() || (is_log && profilelog_verbose_enabled())) {
     op_info = context_info();
     apilog_verbose(op_info);
     if (is_log) {

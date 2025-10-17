@@ -137,10 +137,6 @@ status_t matmul_operator_t::update_matmul_kernel() {
 status_t matmul_operator_t::validate() {
   LOG_DEBUG_INFO("<", get_name(),
                  "> Validating matmul op parameters matmul_operator_t");
-  if (parent_type::validate() != status_t::success) {
-    return status_t::failure;
-  }
-
   //TODO: Add data type check for input output
 
   auto input        = get_input("matmul_input");
@@ -350,10 +346,10 @@ status_t matmul_operator_t::preprocess() {
   LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
   //get bias tensor
   auto optional_bias_tensor = context.get_param("bias");
-  //get weight tensor for reorder
-  auto weight_tensor = context.get_param("weights");
 
   if (forced_kernel == "aocl_blis_blocked") {
+    //get weight tensor for reorder
+    auto weight_tensor = context.get_param("weights");
     if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor)
         == status_t::failure) {
       return status_t::failure;

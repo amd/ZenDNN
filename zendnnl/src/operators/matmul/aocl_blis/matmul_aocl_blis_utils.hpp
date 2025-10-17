@@ -74,18 +74,18 @@ class aocl_dlp_utils_t {
 
   /** @brief allocate memory for the AOCL post-ops */
   status_t      aocl_post_op_memory_alloc(const std::vector<post_op_t>
-                                          post_op_vec_,
-                                          bool is_bias, std::map<std::string, zendnnl::memory::tensor_t> inputs_);
+                                          &post_op_vec_,
+                                          bool is_bias, std::map<std::string, zendnnl::memory::tensor_t> &inputs_);
 
   /** @brief initialize the post-ops */
-  status_t      aocl_post_op_initialize(const std::vector<post_op_t> post_op_vec_,
+  status_t      aocl_post_op_initialize(const std::vector<post_op_t> &post_op_vec_,
                                         int &post_op_count, bool is_bias,
-                                        std::map<std::string, zendnnl::memory::tensor_t> inputs_);
+                                        std::map<std::string, zendnnl::memory::tensor_t> &inputs_);
 
   /** @brief allocate aocl post op */
-  status_t      alloc_post_op(const std::vector<post_op_t> post_op_vec_,
+  status_t      alloc_post_op(const std::vector<post_op_t> &post_op_vec_,
                               std::optional<tensor_t> optional_bias_tensor_,
-                              std::map<std::string, zendnnl::memory::tensor_t> inputs_);
+                              std::map<std::string, zendnnl::memory::tensor_t> &inputs_);
 
   /** @brief free aocl post op */
   void          free_post_op();

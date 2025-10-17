@@ -370,7 +370,7 @@ OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
     hash();
   }
 
-  if (apilog_verbose_enabled() || profilelog_verbose_enabled()) {
+  if (apilog_verbose_enabled() || (is_log && profilelog_verbose_enabled())) {
     op_info = op_create_info();
     apilog_verbose(op_info);
     if (is_log) {

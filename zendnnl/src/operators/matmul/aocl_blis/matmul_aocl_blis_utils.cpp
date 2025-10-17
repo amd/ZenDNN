@@ -179,8 +179,8 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
 
 status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
     std::vector<post_op_t>
-    post_op_vec_, bool is_bias,
-    std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
+    &post_op_vec_, bool is_bias,
+    std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
   LOG_DEBUG_INFO("Allocating memory for post_ops in aocl_blis_utils_t");
   //Allocate memory
   size_t max_post_ops = post_op_vec_.size();
@@ -266,8 +266,8 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
 }
 
 status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
-    post_op_vec_, int &post_op_count, bool is_bias,
-    std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
+    &post_op_vec_, int &post_op_count, bool is_bias,
+    std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
   LOG_DEBUG_INFO("Initializing aocl post-op in aocl_blis_utils_t");
   //add remaining post-ops
   size_t max_post_ops = post_op_vec_.size();
@@ -390,9 +390,9 @@ status_t aocl_dlp_utils_t::aocl_post_op_initialize(const std::vector<post_op_t>
 }
 
 status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
-    post_op_vec_,
+    &post_op_vec_,
     std::optional<tensor_t> optional_bias_tensor_,
-    std::map<std::string, zendnnl::memory::tensor_t> inputs_) {
+    std::map<std::string, zendnnl::memory::tensor_t> &inputs_) {
   LOG_DEBUG_INFO("Allocating post-ops in aocl_blis_utils_t");
 
   // Iterate through each postop, check and add it if needed.
