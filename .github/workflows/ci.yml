@@ -59,7 +59,7 @@ jobs:
        with:
           repository: AMD-Zenai/ZenDNN_tools
           ref: main
-          token: ${{ secrets.LEPAKSHI_PAT_CLASSIC_NOV8_2025 }}
+          token: ${{ secrets.ZIAIE_PAT}}
           path: ZenDNN_tools
           fetch-depth: 0
           clean: true
@@ -272,7 +272,7 @@ jobs:
         with:
           repository: AMD-Zenai/ZenDNN_tools
           ref: main
-          token: ${{ secrets.LEPAKSHI_PAT_CLASSIC_NOV8_2025 }}
+          token: ${{ secrets.ZIAIE_PAT }}
           path: ZenDNN_tools
           fetch-depth: 0
           clean: true
