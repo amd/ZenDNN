@@ -1,3 +1,7 @@
+GITHUB PARTNER TECHNOLOGY WEIGHED BUISINESS INNOVATION 
+Emergency Directive to Address Vulnerabilities in F5 Devices
+CISA’s Emergency Directive 26-01 calls on federal agencies to identify, analyze, and mitigate vulnerabilities in F5 products to protect against an ongoing exploitation by nation-state threat actors.
+
 CISA Acting Director Gottumukkala on Cybersecurity Awareness Month 2025
 Sep 29, 2025 · For more than 20 years we have spotlighted the importance of taking daily action to reduce risks when …This National Cybersecurity Awareness Month, my Administration renews its commitment to strengthening our Nation’s cybersecurity to improve American lives, defend American sovereignty, and uphold the rights of every American citizen.
 
