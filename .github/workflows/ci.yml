@@ -23,6 +23,15 @@ jobs:
   runs-on: zendnn_presub_server
   if: ${{ github.event_name == 'push' }}
   steps:
+     - name: Clean workspace before checkout
+       run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+       shell: bash
 
      - name: basic_debug
        run: |
@@ -236,7 +245,15 @@ jobs:
     needs: [jira-id-check, license-header-check]
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     steps:
-     
+      - name: Clean workspace before checkout
+        run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+        shell: bash
       - name: basic_debug
         run: |
             pwd
