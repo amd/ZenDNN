@@ -50,6 +50,15 @@ jobs:
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '100' }}
     
     steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
     - name: Verify user account
       run: |
         echo "Running as user: $(whoami)"
@@ -292,6 +301,15 @@ jobs:
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
    steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
     - name: Verify user account
       run: |
         echo "Running as user: $(whoami)"
@@ -502,6 +520,15 @@ jobs:
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
     
    steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
     - name: Verify user account
       run: |
         echo "Running as user: $(whoami)"
