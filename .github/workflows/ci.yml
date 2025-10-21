@@ -1,4 +1,4 @@
-name: Zendnn CI
+name: ZENDNN CI
 
 on:
   push:
@@ -82,6 +82,9 @@ jobs:
      - name: PR INFO
        shell: bash
        run: |
+        ls 
+        pwd
+        cd ZenDNN
         echo "=============================="
         echo "   ZENDNN & ZENDNN_TOOLS INFO  "
         echo "=============================="
