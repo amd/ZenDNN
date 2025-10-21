@@ -276,10 +276,21 @@ static inline void run_libxsmm(char       transA,
 #if ZENDNNL_DEPENDS_LIBXSMM
 static inline bool can_use_libxsmm(char        transA,
                                    char        transB,
+                                   int         M,
+                                   int         N,
                                    int         K,
                                    float       alpha,
                                    float       beta,
                                    const data_types &dtypes) {
+
+  // Check if the matrix dimensions are within acceptable limits for LIBXSMM kernel selection
+  // This heuristic prevents LIBXSMM from being used for matrices that are either:
+  // 1. Too tall (M > 2000) - LIBXSMM throws Segfault on very tall matrices
+  // 2. Too large in terms of element count - when weight matrix B[K×N] > 4.0 Millions elements
+  float Max_Matrix_B_Elements = static_cast<float>(K * N) / 1000000.0f;
+  if ((Max_Matrix_B_Elements > 4.0f) || (M > 2000 && Max_Matrix_B_Elements > 4.0f)) {
+    return false;  // Fallback to BLIS
+  }
 
   const bool scalars_ok = (alpha == 1.0f && beta == 0.0f);
   if (!scalars_ok) {
@@ -312,7 +323,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            char mem_format_a, char mem_format_b) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-    if (can_use_libxsmm(transA,transB,K,alpha,beta,dtypes)) {
+    if (can_use_libxsmm(transA,transB,M,N,K,alpha,beta,dtypes)) {
       log_info("Using libxsmm kernel");
       run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
       return;
@@ -741,7 +752,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 #endif
   }
   else {
-    apilog_info("Executing matmul LOWOHA kernel with AOCL, algo: ",
+    apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
                 static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
