@@ -305,6 +305,7 @@ jobs:
         run: |
          ls 
          pwd
+         cd ZenDNN
          echo "=============================="
          echo "   ZENDNN & ZENDNN_TOOLS INFO  "
          echo "=============================="
