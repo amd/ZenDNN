@@ -303,6 +303,8 @@ jobs:
       - name: PR INFO
         shell: bash
         run: |
+         ls 
+         pwd
          echo "=============================="
          echo "   ZENDNN & ZENDNN_TOOLS INFO  "
          echo "=============================="
