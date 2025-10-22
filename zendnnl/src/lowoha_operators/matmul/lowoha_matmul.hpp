@@ -20,6 +20,8 @@
 #include <omp.h>
 #include "operators/matmul/matmul_context.hpp"
 #include "memory/memory_utils.hpp"
+#include "lowoha_operators/matmul/lru_cache.hpp"
+#include "lowoha_operators/matmul/zendnnl_key.hpp"
 
 #define M_FLOPS 6.0
 

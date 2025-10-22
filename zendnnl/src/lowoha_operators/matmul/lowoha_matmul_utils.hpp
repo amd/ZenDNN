@@ -75,6 +75,28 @@ aocl_post_op* create_blis_post_op(const lowoha_params &lowoha_po, const void *bi
 void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op);
 #endif
 
+using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
+                                       const char, const char, const md_t, const md_t
+#if ZENDNNL_DEPENDS_AOCLDLP
+                                       ,dlp_metadata_t *
+#endif
+                                      );
+
+template <typename T>
+using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
+                                  T *, const md_t, const md_t, const md_t
+#if ZENDNNL_DEPENDS_AOCLDLP
+                                  ,dlp_metadata_t *
+#endif
+                                  );
+
+template <typename T>
+bool reorderAndCacheWeights(Key_matmul key, const void *weights,
+                            void *&reorder_weights, const int k, const int n, const int ldb,
+                            const char order, const char trans, char mem_format_b,
+                            get_reorder_buff_size_func_ptr get_reorder_buf_size,
+                            reorder_func_ptr<T> reorder_func, int weight_cache_type);
+
 } // namespace lowoha
 } // namespace zendnnl
 

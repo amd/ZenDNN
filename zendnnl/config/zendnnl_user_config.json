@@ -26,12 +26,15 @@
         "__description" : "runtime variables for operators",
         "matmul" : {
             "__description" : [
-                "sets matmul algo",
-                "acceptable values are as follows",
+                "sets matmul configs",
+                "acceptable values for kernel are as follows",
                 "none, aocl_blis, aocl_blis_blocked, ",
-                "onednn, onednn_blocked, reference"
+                "onednn, onednn_blocked, reference",
+                "acceptable values for weight_cache are as follows",
+                "0, 1"
                 ],
-            "kernel" : "none"
+            "kernel" : "none",
+            "weight_cache" : 0
         }
     }
 }

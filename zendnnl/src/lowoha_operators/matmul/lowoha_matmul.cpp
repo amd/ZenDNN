@@ -346,9 +346,9 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const lowoha_params &post_op, const void *bias) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-      log_info("Using libxsmm kernel");
-      run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
-      return;
+    log_info("Using libxsmm kernel");
+    run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
+    return;
   }
 #endif
 
@@ -625,6 +625,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
+  char mem_format_b = params.mem_format_b;
 
   size_t src_type_size = is_f32_src ? sizeof(float) : sizeof(int16_t);
   size_t out_type_size = is_f32_out ? sizeof(float) : sizeof(int16_t);
@@ -638,7 +639,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
   //                                    num_threads, params.dtypes.src);
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = params.lowoha_algo == matmul_algo_t::none ? matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
+  int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
+                 matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
@@ -646,6 +648,39 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
   }
 
+  // TODO: Add memory unreordering logic
+  // Unreorder if onednn/ libxsmm is used
+  // Implement the necessary logic for memory reordering here
+  //if (params.mem_format_b) {}
+
+  bool is_weight_blocked = false;
+  void *reordered_mem = nullptr;
+  // AOCL blocked kernel reordering for 2D MatMul
+  if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
+      batch_count == 1) {
+    int32_t weight_cache_type = matmul_config.get_weight_cache();
+    Key_matmul key_(transB, K, N, ldb, weight,
+                    static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
+    //call reorder and cache function
+    char trans = transB ? 't' : 'n';
+    bool blocked_flag = false;
+    if (params.dtypes.wei == data_type_t::f32) {
+      blocked_flag = reorderAndCacheWeights<float>(key_, weight, reordered_mem, K, N, ldb,
+                                            'r', trans, mem_format_b,
+                                            aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                                            weight_cache_type);
+    }
+    else if (params.dtypes.wei == data_type_t::bf16) {
+      blocked_flag = reorderAndCacheWeights<int16_t>(key_, weight, reordered_mem, K, N, ldb,
+                                            'r', trans, mem_format_b,
+                                            aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
+                                            weight_cache_type);
+    }
+    if (blocked_flag) {
+      is_weight_blocked = true;
+      mem_format_b = 'r';
+    }
+  }
   if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
                                    kernel == matmul_algo_t::onednn_blocked)) ||
       (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm)) ||
@@ -715,7 +750,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     }
 
     if (kernel == matmul_algo_t::libxsmm &&
-        !(can_use_libxsmm(trans_input,trans_weight,M_block,N,K,alpha,beta,params.dtypes))) {
+        !(can_use_libxsmm(trans_input,trans_weight,M_block,N,K,alpha,beta,
+                          params.dtypes))) {
       kernel = matmul_algo_t::aocl_blis;
     }
 
@@ -829,10 +865,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
-                            src_ptr, lda, weight_ptr, ldb,
-                            beta, dst_ptr, ldc,
+                            src_ptr, lda, is_weight_blocked ? reordered_mem : weight_ptr,
+                            ldb, beta, dst_ptr, ldc,
                             params.dtypes, kernel,
-                            params.mem_format_a, params.mem_format_b, params, bias);
+                            params.mem_format_a, mem_format_b, params, bias);
     }
   }
   return status_t::success;

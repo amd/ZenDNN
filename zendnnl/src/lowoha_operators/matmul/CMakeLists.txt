@@ -22,7 +22,9 @@ set(lowoha_matmul_sources
 
 set(lowoha_matmul_public_headers
   lowoha_matmul.hpp
-  lowoha_matmul_utils.hpp)
+  lowoha_matmul_utils.hpp
+  lru_cache.hpp
+  zendnnl_key.hpp)
 
 set(lowoha_matmul_private_headers
   matmul_kernel_bf16_avx512.hpp)

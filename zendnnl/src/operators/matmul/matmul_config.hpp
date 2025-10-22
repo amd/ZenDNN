@@ -83,6 +83,18 @@ class matmul_config_t final : public op_config_t {
    */
   int32_t get_algo();
 
+  /** @brief Sets matmul_weight_cache.
+  *
+  * @param weight_cache The matmul_weight_cache type to set.
+  */
+  void set_weight_cache(int32_t weight_cache);
+
+  /** @brief Get matmul_weight_cache.
+   *
+   * @return matmul_weight_cache.
+   */
+  int32_t get_weight_cache();
+
   /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -111,6 +123,7 @@ class matmul_config_t final : public op_config_t {
   matmul_config_t() = default;
 
   int32_t matmul_algo;       /**< Matmul runtime algorithm. */
+  int32_t matmul_weight_cache; /**< Matmul weight cache type. */
 };
 
 }
