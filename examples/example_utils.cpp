@@ -398,6 +398,59 @@ tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
   return ctensor;
 }
 
+tensor_t tensor_factory_t::random_indices_tensor(const std::vector<index_type>
+    size_,
+    uint64_t num_embeddings) {
+  auto indices_tensor = tensor_t()
+                        .set_name("indices_tensor")
+                        .set_size(size_)
+                        .set_data_type(data_type_t::s32)
+                        .set_storage()
+                        .create();
+  void *data = indices_tensor.get_raw_handle_unsafe();
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<uint32_t> dist(0,
+      static_cast<uint32_t>(num_embeddings - 1));
+
+  int num_indices = size_[0];
+
+  for (int i = 0; i < num_indices; ++i) {
+    static_cast<uint32_t *>(data)[i] = dist(gen);
+  }
+
+  return indices_tensor;
+}
+
+tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
+    size_,
+    uint64_t num_indices,
+    bool include_last_offset) {
+  auto tensor = tensor_t()
+                .set_name("offsets_tensor")
+                .set_size(size_)
+                .set_data_type(data_type_t::s32)
+                .set_storage()
+                .create();
+  void *data = tensor.get_raw_handle_unsafe();
+
+  int num_offsets = size_[0];
+  if (include_last_offset) {
+    num_offsets--;
+  }
+
+  for (int i = 0; i < num_offsets; ++i) {
+    static_cast<uint32_t *>(data)[i] = (i * num_indices) / num_offsets;
+  }
+
+  if (include_last_offset) {
+    static_cast<uint32_t *>(data)[num_offsets] = num_indices;
+  }
+
+  return tensor;
+}
+
 void tensor_functions_t::tensor_pretty_print(const tensor_t &tensor_) {
   //works only for 3D as of now
   auto tensor_size = tensor_.get_size();

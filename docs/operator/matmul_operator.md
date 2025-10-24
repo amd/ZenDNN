@@ -770,7 +770,8 @@ To achieve optimal performance for the MatMul operator, you can configure runtim
 | 2    | aocl_blis_blocked  |
 | 3    | onednn             |
 | 4    | onednn_blocked     |
-| 5    | reference          |
+| 5    | libxsmm            |
+| 6    | reference          |
 
 ### Configuration methods
 
@@ -788,9 +789,9 @@ Example: `"kernel": "aocl_blis_blocked"`
 #### 2. Environment Variable
 Set the environment variable before running your application:
 ```
-export ZENDNN_MATMUL_ALGO = <algo>
+export ZENDNNL_MATMUL_ALGO = <algo>
 ```
-Example: `export ZENDNN_MATMUL_ALGO = 2` (for aocl_blis_blocked)
+Example: `export ZENDNNL_MATMUL_ALGO = 2` (for aocl_blis_blocked)
 
 - Note: Runtime variable can be set via either method, precedence is given to JSON configuration if both are provided.
 

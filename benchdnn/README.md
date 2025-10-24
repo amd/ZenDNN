@@ -1,7 +1,7 @@
 (Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Overview
-`benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul and Reorder operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
+`benchdnn` is a high-performance benchmarking utility purpose-built to rigorously assess the `efficiency` of Matmul, Reorder and Embedding Bag operators within the `ZenDNN (Zen Deep Neural Network)` library. It plays a pivotal role in the ZenDNN ecosystem by enabling detailed performance analysis of deep learning primitives.
 
 # Purpose and Audience
 This tool is indispensable for a wide range of users, including `developers`, `researchers`, and `performance engineers`. Whether you're optimizing kernel implementations, experimenting with new data types, or evaluating the impact of various optimization strategies, `benchdnn` provides the precision and flexibility needed to make informed decisions.
@@ -27,7 +27,7 @@ These capabilities help isolate performance bottlenecks and provide a reliable f
 
 | Feature              | Supported Values                        |
 |----------------------|----------------------------------------|
-| Operators            | matmul, reorder                         |
+| Operators            | matmul, reorder, embag                  |
 | Multi-layer Matmul   | Supported                               |
 | Data Types           | f32, bf16                               |
 | Timing Modes         | end-to-end, detailed timing breakdowns  |
@@ -83,10 +83,11 @@ The flow is split into two main sections:
 
 
 ## Features
-- **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`).
+- **Operator Selection via Command-Line**: Use `--op=<operator>` to specify the operation to benchmark (e.g., `--op=matmul`, `--op=reorder`, `--op=embag`).
 - **Flexible Input File**: Use `--input_file=<filename>` to provide a configuration file tailored to the selected operator.
 - **Matmul Benchmarking**: Supports matrix multiplication benchmarks with options for single-layer, multi-layer, and batched matmul.
 - **Reorder Benchmarking**: Supports tensor reorder benchmarks with configurable parameters.
+- **Embag Benchmarking**: Supports embedding bag benchmarks with configurable parameters.
 - **Multiple Data Types**: Supports a range of data types (e.g., `f32`, `bf16`)
 - **Detailed Timing**: Reports total time, GFLOPS, and detailed timing statistics (context creation, operator creation, execution), including percentage breakdowns for each stage (% of total time)
 - **Warmup Iterations**: Optional warmup runs to stabilize measurements
@@ -115,6 +116,7 @@ To run a benchmark, specify the operator and input method as command-line argume
 - `<operator>`: Operator can be one of the following :
   - [matmul](doc/matmul.md)
   - [reorder](doc/reorder.md)
+  - [embag](doc/embag.md)
 - `--input_file=<file>`: Path to a configuration file with one or more test cases.
 - `--input_model_file=<model_file>`: (Optional) Path to a model file for model-based benchmarking.
 - `[command-line options]`: Command-line arguments to specify all required parameters directly. These can be used in combination with model files.

@@ -87,6 +87,14 @@ class tensor_factory_t {
                        StorageParam param, bool trans, bool is_blocked,
                        std::string tensor_name_="copy", tensor_t scale = tensor_t(),
                        tensor_t zp = tensor_t());
+
+  /** @brief Generate random indices tensor with optional padding index */
+  tensor_t random_indices_tensor(const std::vector<index_type> size_,
+                                 uint64_t num_embeddings);
+
+  /** @brief Generate random offsets tensor for bag boundaries */
+  tensor_t random_offsets_tensor(const std::vector<index_type> size_,
+                                 uint64_t num_indices, bool include_last_offset = true);
 };
 
 /** @class tensor_functions

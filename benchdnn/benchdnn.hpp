@@ -66,5 +66,6 @@ struct TimingStats {
 // Include the main matmul and reorder benchmarking interfaces
 #include "matmul/matmul_benchdnn.hpp"
 #include "reorder/reorder_benchdnn.hpp"
+#include "embag/embag_benchdnn.hpp"
 
 #endif // _BENCHDNN_HPP_

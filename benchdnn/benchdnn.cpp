@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
 
   // Validate required arguments
   if (op.empty()) {
-    commonlog_error("Usage: ", argv[0], " --op=<matmul|reorder> ...");
+    commonlog_error("Usage: ", argv[0], " --op=<matmul|reorder|embag> ...");
     return NOT_OK;
   }
 
@@ -131,9 +131,12 @@ int main(int argc, char **argv) {
   else if (op == "reorder") {
     benchdnn::reorder::bench(in_filename, out_filename); ///< Run reorder benchmark
   }
+  else if (op == "embag") {
+    benchdnn::embag::bench(in_filename, out_filename); ///< Run embag benchmark
+  }
   else {
     commonlog_error("Unsupported operator: ", op);
-    commonlog_error("Supported operators: matmul, reorder");
+    commonlog_error("Supported operators: matmul, reorder, embag");
     return NOT_OK;
   }
 

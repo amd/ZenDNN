@@ -53,6 +53,7 @@ ZenDNN
 |   |   |   |- matmul_operator : implements matrix multiplication with optional post-op.
 |   |   |   |- reorder_operator : copies data between different memory formats.
 |   |   |   |- compare_operator : perform element-wise comparision of tensors.
+|   |   |   |- embag_operator : implements embedding bag and embedding operators.
 ```
 ## 1.3. Third Party Libraries
 
@@ -226,6 +227,8 @@ packages can use this to find zendnnl using CMake FindPackage().
 ## 3.1. Examples
 
 ZenDNN* provides many examples demonstrating the usage of the library API. Executables of these examples can be found in the `install/examples/bin/` folder.
+
+For detailed logging support and control, see [logging.md](docs/logging.md).
 
 ## 3.2. GTests
 

@@ -46,11 +46,11 @@ Provide a file with one configuration per line. Each line should contain:
 
 The benchmark prints the following for each input:
 - Total execution time
-- Achieved GFLOPS for matmul operator
 - Detailed timing statistics for all iterations of each input, including:
   - Context creation time
   - Operator creation time
   - Operator execution time
+  - Others time
 
 Output is printed to the console and also saved to a CSV file named `timings_<current timestamp>.csv` in the `build` directory.
 

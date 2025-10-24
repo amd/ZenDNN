@@ -182,7 +182,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
 
       int ret = create_weights_tensor(tensor_factory, cfg, weights, options);
       if (ret != OK) {
-        testlog_error("create_bias_tensor failed");
+        testlog_error("create_weights_tensor failed");
         log_benchmark_failure(cfg);
         continue;
       }
