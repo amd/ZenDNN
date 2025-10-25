@@ -285,15 +285,21 @@ static inline bool can_use_libxsmm(char        transA,
 
   // Check if the matrix dimensions are within acceptable limits for LIBXSMM kernel selection
   // This heuristic prevents LIBXSMM from being used for matrices that are either:
-  // 1. Too tall (M > 2000) - LIBXSMM throws Segfault on very tall matrices
-  // 2. Too large in terms of element count - when weight matrix B[K×N] > 4.0 Millions elements
+  // 1. Too tall (M > 512) - LIBXSMM throws Segfault on very tall matrices
+  // 2. Too large in terms of element count - when weight matrix B[K×N] > 1.0 Millions elements
   float Max_Matrix_B_Elements = static_cast<float>(K * N) / 1000000.0f;
-  if ((Max_Matrix_B_Elements > 4.0f) || (M > 2000 && Max_Matrix_B_Elements > 4.0f)) {
+  if ((Max_Matrix_B_Elements > 1.0f) || (M > 512 &&
+                                         Max_Matrix_B_Elements > 1.0f)) {
     return false;  // Fallback to BLIS
   }
 
   const bool scalars_ok = (alpha == 1.0f && beta == 0.0f);
   if (!scalars_ok) {
+    return false;
+  }
+
+  //LIBXSMM throws segfault for transA='t' cases
+  if (transA == 't') {
     return false;
   }
 
@@ -323,14 +329,9 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            char mem_format_a, char mem_format_b) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-    if (can_use_libxsmm(transA,transB,M,N,K,alpha,beta,dtypes)) {
       log_info("Using libxsmm kernel");
       run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
       return;
-    }
-    else {
-      kernel  = matmul_algo_t::aocl_blis;
-    }
   }
 #endif
 
@@ -621,8 +622,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = omp_get_max_threads();
-  const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
-                                     num_threads, params.dtypes.src);
+  // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
+  //                                    num_threads, params.dtypes.src);
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo = params.lowoha_algo == matmul_algo_t::none ? matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
@@ -639,7 +640,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     kernel = matmul_algo_t::aocl_blis;
   }
 
-  if (kernel == matmul_algo_t::batched_sgemm) {
+  if (kernel == matmul_algo_t::batched_sgemm && batch_count > 1) {
     // Use batch GEMM for multiple batches
     apilog_info("Executing matmul LOWOHA kernel with batch GEMM, algo: ",
                 static_cast<int>(kernel));
@@ -662,10 +663,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                           params.dtypes, batch_count);
   }
 #endif
-  else if ((num_threads > 1 && !use_blis_partitioning) ||
-           kernel == matmul_algo_t::libxsmm) {
-    apilog_info("Executing matmul LOWOHA kernel with parallel partitioning, algo: ",
-                static_cast<int>(kernel));
+  else if (num_threads > 1 && batch_count > 1) {
     /*
     * Parallel partitioning strategy:
     * The total number of available threads is divided across batches to compute `threads_per_batch`,
@@ -682,76 +680,100 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     // TODO: Further refine the tuning based on heuristics
     // involving batch_count, M, and num_threads.
     if ((batch_count >= 1024 && M <= 2048) ||
-        (batch_count >= 512 && M <= 64)) {
-      M_block = std::min(36, M);
+        (batch_count >= 512 && M <= 256)) {
+      if (kernel==matmul_algo_t::libxsmm) {
+        M_block = std::min(128, M);
+      }
+      else {
+        M_block = std::min(36, M);
+      }
     }
-    else if (batch_count == 64 && M >= 512) {
+    else if ((batch_count == 64 && M >= 512) ||
+             (batch_count == 128 && M >= 512)) {
       M_block = std::min(192, M);
     }
     else {
       M_block = std::min(M_block, M);  // Ensure M_block <= M
     }
 
-#if ENABLE_ZENDNNL_PARALLEL_FOR
-    apilog_info("Using zendnnl_parallel_for");
-    // Calculate total number of work items (batch_count * number of M blocks)
-    int total_m_blocks = (M + M_block - 1) / M_block;
-    int total_work_items = batch_count * total_m_blocks;
+    if (kernel == matmul_algo_t::libxsmm &&
+        !(can_use_libxsmm(trans_input,trans_weight,M_block,N,K,alpha,beta,params.dtypes))) {
+      kernel = matmul_algo_t::aocl_blis;
+    }
 
-    zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
-      for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
-        // Convert linear work index back to (batch, m_block) coordinates
-        int b = work_idx / total_m_blocks;
-        int m_block_idx = work_idx % total_m_blocks;
-        int m_start = m_block_idx * M_block;
-        int m_len = std::min(M_block, M - m_start);
+    apilog_info("Executing matmul LOWOHA kernel with parallel partitioning, algo: ",
+                static_cast<int>(kernel));
+    // Decide parallelization strategy based on MFLOPs:
+    // Use zendnn_parallel_for when M_FLOPs > 6.0 for better performance on larger workloads.
+    // Use omp_parallel_for when M_FLOPs <= 6.0 to avoid overhead on smaller tasks.
+    float flops = static_cast<float>(2LL * M * K * N) / 1000000.0f;
 
-        const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                    get_batch_index(b, Batch_A) * src_stride;
-        const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                    get_batch_index(b, Batch_B) * weight_stride;
-        uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+    if (flops > M_FLOPS) {
+      apilog_info("Using zendnnl_parallel_for");
+      // Calculate total number of work items (batch_count * number of M blocks)
+      int total_m_blocks = (M + M_block - 1) / M_block;
+      int total_work_items = batch_count * total_m_blocks;
 
-        const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
-                                         src_type_size);
-        void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+      zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
+        for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+          // Convert linear work index back to (batch, m_block) coordinates
+          int b = work_idx / total_m_blocks;
+          int m_block_idx = work_idx % total_m_blocks;
+          int m_start = m_block_idx * M_block;
+          int m_len = std::min(M_block, M - m_start);
 
-        matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                              m_len, N, K, alpha,
-                              A, lda, weight_ptr, ldb,
-                              beta, C, ldc,
-                              params.dtypes, kernel,
-                              params.mem_format_a, params.mem_format_b);
-      }
-    });
-#else
-    apilog_info("Using OpenMP parallel for");
-    #pragma omp parallel for collapse(2)
-    for (int b = 0; b < batch_count; ++b) {
-      for (int m_start = 0; m_start < M; m_start += M_block) {
-        int m_len = std::min(M_block, M - m_start);
+          const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
+                                      get_batch_index(b, Batch_A) * src_stride;
+          const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
+                                      get_batch_index(b, Batch_B) * weight_stride;
+          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
 
-        const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                    get_batch_index(b, Batch_A) * src_stride;
-        const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                    get_batch_index(b, Batch_B) * weight_stride;
-        uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+          const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
+                                           src_type_size);
+          void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-        const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
-                                         src_type_size);
-        void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+          matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                                m_len, N, K, alpha,
+                                A, lda, weight_ptr, ldb,
+                                beta, C, ldc,
+                                params.dtypes, kernel,
+                                params.mem_format_a, params.mem_format_b);
+        }
+      });
+    }
+    else {
+      apilog_info("Using OpenMP parallel for");
+      #pragma omp parallel for collapse(2)
+      for (int b = 0; b < batch_count; ++b) {
+        for (int m_start = 0; m_start < M; m_start += M_block) {
+          int m_len = std::min(M_block, M - m_start);
 
-        matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                              m_len, N, K, alpha,
-                              A, lda, weight_ptr, ldb,
-                              beta, C, ldc,
-                              params.dtypes, kernel,
-                              params.mem_format_a, params.mem_format_b);
+          const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
+                                      get_batch_index(b, Batch_A) * src_stride;
+          const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
+                                      get_batch_index(b, Batch_B) * weight_stride;
+          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+
+          const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
+                                           src_type_size);
+          void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+
+          matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                                m_len, N, K, alpha,
+                                A, lda, weight_ptr, ldb,
+                                beta, C, ldc,
+                                params.dtypes, kernel,
+                                params.mem_format_a, params.mem_format_b);
+        }
       }
     }
-#endif
   }
   else {
+    if (kernel == matmul_algo_t::libxsmm &&
+        !(can_use_libxsmm(trans_input,trans_weight,M,N,K,alpha,beta,params.dtypes))) {
+      kernel = matmul_algo_t::aocl_blis;
+    }
+
     apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
                 static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {

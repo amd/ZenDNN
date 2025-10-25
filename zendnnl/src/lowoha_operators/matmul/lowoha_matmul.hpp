@@ -21,7 +21,7 @@
 #include "operators/matmul/matmul_context.hpp"
 #include "memory/memory_utils.hpp"
 
-#define ENABLE_ZENDNNL_PARALLEL_FOR 1
+#define M_FLOPS 6.0
 
 namespace zendnnl {
 namespace lowoha {
