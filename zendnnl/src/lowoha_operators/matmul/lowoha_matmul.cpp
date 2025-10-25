@@ -624,7 +624,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
                                      num_threads, params.dtypes.src);
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = matmul_config.get_algo();
+  int32_t algo = params.lowoha_algo == matmul_algo_t::none ? matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);

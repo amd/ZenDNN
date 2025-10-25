@@ -16,7 +16,7 @@
 
 #include "gtest_utils.hpp"
 
-MatmulType::MatmulType() {
+MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
@@ -30,15 +30,24 @@ MatmulType::MatmulType() {
   std::uniform_real_distribution<float> dist(0.0, 10.0);
   alpha    = dist(gen);
   beta     = dist(gen);
-  use_LOWOHA = rand() % 2;
-  if (use_LOWOHA) {
-    bool use_libxsmm = rand() % 2;
-    // LibXSMM currently supports only alpha=1 and beta=0 configurations.
-    // We force these values when using LibXSMM to ensure test case validation.
-    if (use_libxsmm) {
-      alpha = 1;
-      beta = 0;
-    }
+
+  // Control use_LOWOHA and use_LIBXSMM based on test index
+  // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+  uint32_t third = total_tests / TEST_PARTITIONS;
+
+  if (test_index < third) {
+    use_LOWOHA = false;
+    use_LIBXSMM = false;
+  }
+  else if (test_index < 2 * third) {
+    use_LOWOHA = true;
+    use_LIBXSMM = false;
+  }
+  else {
+    use_LOWOHA = true;
+    use_LIBXSMM = true;
+    alpha = 1;
+    beta = 0;
   }
 }
 
@@ -69,13 +78,15 @@ EmbeddingType::EmbeddingType() {
   is_weights = std::rand() % 2;
 }
 
-BatchMatmulType::BatchMatmulType() {
+BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   batch_size = BATCH_START + rand() % BATCH_END;
+  mat = MatmulType(test_index, total_tests);
 }
 
-ReorderType::ReorderType() {
+ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
   inplace_reorder = rand() % 2;
   source_dtype    = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+  mat = MatmulType(test_index, total_tests);
 }
 
 bool is_binary_postop(const std::string post_op) {

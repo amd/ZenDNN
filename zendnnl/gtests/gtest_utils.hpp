@@ -36,6 +36,7 @@
 #define MATMUL_LARGE_SIZE_END 10000
 #define BATCH_START 1
 #define BATCH_END 256
+#define TEST_PARTITIONS 3
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
@@ -57,21 +58,22 @@ struct MatmulType {
   float    alpha;
   float    beta;
   bool     use_LOWOHA;
-  MatmulType();
+  bool     use_LIBXSMM;
+  MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 /** @brief BatchMatmul Op Parameters Structure */
 struct BatchMatmulType {
   uint64_t batch_size;
   MatmulType mat{};
-  BatchMatmulType();
+  BatchMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 struct ReorderType {
   bool inplace_reorder;
   data_type_t source_dtype;
   MatmulType mat{};
-  ReorderType();
+  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 /** @brief Embag Op Parameters Structure */

@@ -114,6 +114,7 @@ struct lowoha_params {
   lowoha_quantization_params_t quant_params;
   const char mem_format_a;
   const char mem_format_b;
+  matmul_algo_t lowoha_algo;
 
   /**
    * @brief Default constructor for `lowoha_params`.
@@ -121,7 +122,8 @@ struct lowoha_params {
    * Initializes all members using their default constructors.
    */
   lowoha_params()
-    : dtypes(), postop_(), quant_params(), mem_format_a('n'), mem_format_b('n') {}
+    : dtypes(), postop_(), quant_params(), mem_format_a('n'), mem_format_b('n'),
+      lowoha_algo(matmul_algo_t::none) {}
 };
 
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
