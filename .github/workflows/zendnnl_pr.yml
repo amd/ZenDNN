@@ -7,6 +7,14 @@ on:
     branches: [zendnnl]
   workflow_dispatch:
     inputs:
+      zendnn_ref:
+        description: 'ZenDNN branch or PR ref (optional, e.g. refs/pull/123/head)'
+        required: false
+        default: ''
+      zendnnl_ref:
+        description: 'Zendnnl branch or PR ref (optional, e.g. refs/pull/123/head)'
+        required: false
+        default: ''
       python_version:
         description: 'Python version'
         required: false
@@ -48,6 +56,9 @@ jobs:
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '100' }}
+      ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
+      ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
+    
     
     steps:
     - name: Clean workspace before checkout
@@ -290,6 +301,41 @@ jobs:
 
           sleep 30
         done
+    - name: Report status back for workflow_dispatch commits
+      if: always() && github.event_name == 'workflow_dispatch'
+      run: |
+          state="success"
+          if [ "${{ job.status }}" != "success" ]; then
+            state="failure"
+          fi
+
+          echo "Final job state: $state"
+          echo "ZenDNN_REF: ${{ github.event.inputs.zendnn_ref }}"
+          echo "ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref }}"
+
+          # Report to ZenDNN repo if zendnn_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnn_ref }}" ]; then
+            echo "Reporting $state to ZenDNN commit ${{ github.event.inputs.zendnn_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnn_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping ZenDNN status update (no commit SHA provided)"
+          fi
+
+          # Report to Zendnnl repo if zendnnl_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnnl_ref }}" ]; then
+            echo "Reporting $state to Zendnnl commit ${{ github.event.inputs.zendnnl_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnnl_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping Zendnnlstatus update (no commit SHA provided)"
+          fi
 
         
   Zendnnl_build_Push: 
@@ -300,6 +346,8 @@ jobs:
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
+      ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
+      ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
    steps:
     - name: Clean workspace before checkout
       run: |
@@ -508,6 +556,41 @@ jobs:
         rm -f $WORKSPACE/gtest_output.log
         echo "Workspace cleanup completed"
       shell: bash
+    - name: Report status back for workflow_dispatch commits
+      if: always() && github.event_name == 'workflow_dispatch'
+      run: |
+          state="success"
+          if [ "${{ job.status }}" != "success" ]; then
+            state="failure"
+          fi
+
+          echo "Final job state: $state"
+          echo "ZenDNN_REF: ${{ github.event.inputs.zendnn_ref }}"
+          echo "ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref }}"
+
+          # Report to ZenDNN repo if zendnn_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnn_ref }}" ]; then
+            echo "Reporting $state to ZenDNN commit ${{ github.event.inputs.zendnn_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnn_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping ZenDNN status update (no commit SHA provided)"
+          fi
+
+          # Report to Zendnnl repo if zendnnl_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnnl_ref }}" ]; then
+            echo "Reporting $state to Zendnnl commit ${{ github.event.inputs.zendnnl_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnnl_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping Zendnnlstatus update (no commit SHA provided)"
+          fi
       
   asan-build:
    runs-on: zendnnl_presub_server
