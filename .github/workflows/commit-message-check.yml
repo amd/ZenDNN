@@ -1,0 +1,54 @@
+name: Commit Message Enforcement
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+jobs:
+  check-commit-messages:
+    runs-on: jira_check_runner
+    steps:
+      - name: Checkout PR commits
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Ensure full history is available
+
+      - name: Check each commit message for Signed-off-by and Change-Id
+        run: |
+          set -e
+          base_ref="${{ github.event.pull_request.base.sha }}"
+          head_ref="${{ github.event.pull_request.head.sha }}"
+          # Get all commits in the PR range (excluding merge base)
+          commits=$(git rev-list ${base_ref}..${head_ref})
+          fail=0
+          for commit in $commits; do
+            msg=$(git log -1 --pretty=%B $commit)
+            if ! grep -qE '^Change-Id: I[a-f0-9]{40}' <<< "$msg"; then
+              echo "::error::Commit $commit is missing a valid Change-Id line."
+              echo "To fix: Use the following shell hook in your repo's .git/hooks/commit-msg:"
+              echo
+              echo "#!/bin/sh"
+              echo "if ! grep -q '^Change-Id: I[a-f0-9]\\{40\\}' \"\$1\"; then"
+              echo "  CHANGE_ID=\$(uuidgen | sha1sum | awk '{print substr(\$1,1,40)}')"
+              echo "  echo \"Change-Id: I\$CHANGE_ID\" >> \"\$1\""
+              echo "fi"
+              fail=1
+            fi
+            if ! grep -qE '^Signed-off-by: ' <<< "$msg"; then
+              echo "::error::Commit $commit is missing a Signed-off-by line."
+              echo "To fix: Use 'git commit -s' to sign off your commit."
+              echo "Or add this check to your repo's .git/hooks/commit-msg:"
+              echo
+              echo "#!/bin/sh"
+              echo "if ! grep -q '^Signed-off-by: ' \"\$1\"; then"
+              echo "  echo \"ERROR: Commit message is missing a Signed-off-by line.\""
+              echo "  echo \"Please use 'git commit -s' to sign off your commit.\""
+              echo "  exit 1"
+              echo "fi"
+              fail=1
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "ERROR: One or more commits in this PR are missing Signed-off-by or Change-Id."
+            exit 1
+          fi
