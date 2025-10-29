@@ -17,8 +17,7 @@
 # ZenDNN CODEOWNERS
 
 # All folders/files except .github
-#*    @AMD-Zenai/zenai_leads @AMD-Zenai/zenai_zendnn_dev
-* @kpendyal_amdeng
+*    @AMD-Zenai/zenai_leads @AMD-Zenai/zenai_zendnn_dev
 
 # .github folder
 .github/    @kpendyal_amdeng
