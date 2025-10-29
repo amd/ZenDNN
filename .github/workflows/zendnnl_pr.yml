@@ -1,0 +1,785 @@
+name: ZenDNNL PR CI 
+
+on:
+  push:
+    branches: [zendnnl]
+  pull_request:
+    branches: [zendnnl]
+  workflow_dispatch:
+    inputs:
+      zendnn_ref:
+        description: 'ZenDNN branch or PR ref (optional, e.g. refs/pull/123/head)'
+        required: false
+        default: ''
+      zendnnl_ref:
+        description: 'Zendnnl branch or PR ref (optional, e.g. refs/pull/123/head)'
+        required: false
+        default: ''
+      python_version:
+        description: 'Python version'
+        required: false
+        default: '3.10'
+        type: string
+      cmake_version:
+        description: 'CMake version'
+        required: false
+        default: '4.0.0'
+        type: string
+      gtest_filter:
+        description: 'GTest filter pattern (e.g. Matmul/*)'
+        required: false
+        default: '*'
+        type: string
+      test_iterations:
+        description: 'Number of test iterations'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  jira-id-check:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'}}
+    name: Check JIRA ID in Commits
+    uses: AMD-Zenai/ZenDNN/.github/workflows/jira_check.yml@main
+
+  license-header-check:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'}}
+    name: Check License Headers
+    uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
+
+  Zendnnl_build_PR:
+    runs-on: zendnnl_presub_server
+    needs: [jira-id-check, license-header-check]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
+      CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '100' }}
+      ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
+      ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
+    
+    
+    steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
+    - name: Verify user account
+      run: |
+        echo "Running as user: $(whoami)"
+        if [ "$(whoami)" != "z1aiebuild" ]; then
+          echo "::warning::Running as $(whoami) instead of expected z1aiebuild user"
+        fi
+      
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+       fetch-depth: 0 
+    - name: PR INFO
+      shell: bash
+      run: |
+        echo "=============================="
+        echo "   ZENDNNL "
+        echo "=============================="
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+         git log --oneline -20 || echo "No commits found"
+        echo ""
+
+      
+    - name: Set up build environment
+      run: |
+        echo "Setting up build environment"
+        echo "WORKSPACE=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+        # Create a unique env name using workflow run ID and job ID to avoid conflicts
+        echo "CONDA_ENV_NAME=zendnnl_build_${GITHUB_RUN_ID}_${GITHUB_JOB}" >> $GITHUB_ENV
+        
+        # Debug path information
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Display build configuration
+        echo "Using Python version: ${{ env.PYTHON_VERSION }}"
+        echo "Using CMake version: ${{ env.CMAKE_VERSION }}"
+        echo "Using GTest filter: ${{ env.GTEST_FILTER }}"
+        echo "Using test iterations: ${{ env.TEST_ITERATIONS }}"
+      
+    - name: Setup Conda environment with CMake
+      run: |
+        # Source miniforge profile
+        source ~/.miniforge_profile
+        
+        # Print Python version being used
+        echo "Creating Conda environment with Python $PYTHON_VERSION"
+        
+        # Create a fresh conda environment
+        conda create -n $CONDA_ENV_NAME python=$PYTHON_VERSION -y
+        
+        # Activate the environment
+        conda activate $CONDA_ENV_NAME
+        
+        # Install specified CMake version in the conda environment
+        conda install -y cmake=$CMAKE_VERSION
+        
+        # Verify Python and CMake versions
+        python --version
+        cmake --version
+      shell: bash
+      
+    - name: Build ZenDNNL
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Debug directory structure
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Ensure we're using the conda-installed cmake
+        which cmake
+        cmake --version
+        
+        # Build ZenDNNL
+        mkdir -p build && cd build
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
+        cmake --build . --target=all |& tee $WORKSPACE/build_output.log
+      shell: bash
+      
+    - name: Verify build output
+      run: |
+        echo "Verifying build output..."
+        if grep -F "Completed 'zendnnl'" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target gtests" "$WORKSPACE/build_output.log"; then
+          echo " ZenDNNL build passed!"
+        else
+          echo " ZenDNNL build failed!"
+          cat "$WORKSPACE/build_output.log"
+          exit 1
+        fi
+      shell: bash
+      
+    - name: Run gtests
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Move to the build directory
+        cd $WORKSPACE/build
+        
+        echo "Running gtests with filter: $GTEST_FILTER and iterations: $TEST_ITERATIONS"
+        
+        # Run the gtests with configurable parameters
+        ./install/gtests/gtests --gtest_filter=$GTEST_FILTER --test $TEST_ITERATIONS |& tee $WORKSPACE/gtest_output.log
+        
+        # Check for test failures
+        if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
+          echo "ZenDNNL gtests failed!"
+          cat "$WORKSPACE/gtest_output.log"
+          exit 1
+        else
+          echo "ZenDNNL gtests passed!"
+        fi
+      shell: bash
+
+    - name: Upload build logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build-logs
+        path: |
+          ${{ env.WORKSPACE }}/build_output.log
+          ${{ env.WORKSPACE }}/gtest_output.log
+        retention-days: 7
+        
+    - name: Cleanup Conda environment
+      if: always()  # Run even if previous steps fail
+      run: |
+        source ~/.miniforge_profile
+        conda deactivate
+        conda env remove -n $CONDA_ENV_NAME -y
+        echo "Removed conda environment: $CONDA_ENV_NAME"
+      shell: bash
+      
+    - name: Cleanup workspace
+      if: always()
+      run: |
+        echo "Cleaning up workspace..."
+        rm -rf $WORKSPACE/build
+        rm -f $WORKSPACE/build_output.log
+        rm -f $WORKSPACE/gtest_output.log
+        echo "Workspace cleanup completed"
+      shell: bash
+  trigger-zenTorch-ZenDNNL:
+    #needs: [Zendnnl_build_PR]
+    runs-on: amd-zenai-arc-xsmall-dind
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+     - name: Trigger ZenTorch_ZenDNNL workflow
+       run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnnl-pr",
+            "client_payload": {
+              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+       shell: bash
+  check-zenTorch-status:
+   needs: [trigger-zenTorch-ZenDNNL]
+   runs-on: amd-zenai-arc-xsmall-dind
+   steps:
+    - name: Check PyTorch & TensorFlow plugin CI statuses
+      env:
+        GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
+        REPO_ZENDNN: AMD-Zenai/ZenDNN
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        echo "Checking ZenTorch_Zendnnl CI status for commit $COMMIT_SHA..."
+
+        while true ; do
+          status=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+
+          echo "Attempt $i: ZenTorch-ZenDNNL CI status = $status"
+
+          if [[ "$status" == "success" ]]; then
+            echo "ZenTorch-ZenDNNL workflow succeeded."
+            exit 0
+          fi
+
+          if [[ "$status" == "failure" ]]; then
+            echo "ZenTorch-ZenDNNL workflow failed."
+            exit 1
+          fi
+
+          sleep 30
+        done
+    - name: Report status back for workflow_dispatch commits
+      if: always() && github.event_name == 'workflow_dispatch'
+      run: |
+          state="success"
+          if [ "${{ job.status }}" != "success" ]; then
+            state="failure"
+          fi
+
+          echo "Final job state: $state"
+          echo "ZenDNN_REF: ${{ github.event.inputs.zendnn_ref }}"
+          echo "ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref }}"
+
+          # Report to ZenDNN repo if zendnn_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnn_ref }}" ]; then
+            echo "Reporting $state to ZenDNN commit ${{ github.event.inputs.zendnn_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnn_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping ZenDNN status update (no commit SHA provided)"
+          fi
+
+          # Report to Zendnnl repo if zendnnl_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnnl_ref }}" ]; then
+            echo "Reporting $state to Zendnnl commit ${{ github.event.inputs.zendnnl_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnnl_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping Zendnnlstatus update (no commit SHA provided)"
+          fi
+
+        
+  Zendnnl_build_Push: 
+   runs-on: zendnnl_presub_server
+   if: ${{ github.event_name == 'push' }}
+   env:
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
+      CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
+      ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
+      ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
+   steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
+    - name: Verify user account
+      run: |
+        echo "Running as user: $(whoami)"
+        if [ "$(whoami)" != "z1aiebuild" ]; then
+          echo "::warning::Running as $(whoami) instead of expected z1aiebuild user"
+        fi
+      
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0 
+    - name: PR INFO
+      shell: bash
+      run: |
+        echo "=============================="
+        echo "   ZENDNNL  "
+        echo "=============================="
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+         git log --oneline -20 || echo "No commits found"
+        echo ""
+      
+    - name: Set up build environment
+      run: |
+        echo "Setting up build environment"
+        echo "WORKSPACE=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+        # Create a unique env name using workflow run ID and job ID to avoid conflicts
+        echo "CONDA_ENV_NAME=zendnnl_build_${GITHUB_RUN_ID}_${GITHUB_JOB}" >> $GITHUB_ENV
+        
+        # Debug path information
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Display build configuration
+        echo "Using Python version: ${{ env.PYTHON_VERSION }}"
+        echo "Using CMake version: ${{ env.CMAKE_VERSION }}"
+        echo "Using GTest filter: ${{ env.GTEST_FILTER }}"
+        echo "Using test iterations: ${{ env.TEST_ITERATIONS }}"
+      
+    - name: Setup Conda environment with CMake
+      run: |
+        # Source miniforge profile
+        source ~/.miniforge_profile
+        
+        # Print Python version being used
+        echo "Creating Conda environment with Python $PYTHON_VERSION"
+        
+        # Create a fresh conda environment
+        conda create -n $CONDA_ENV_NAME python=$PYTHON_VERSION -y
+        
+        # Activate the environment
+        conda activate $CONDA_ENV_NAME
+        
+        # Install specified CMake version in the conda environment
+        conda install -y cmake=$CMAKE_VERSION
+        
+        # Verify Python and CMake versions
+        python --version
+        cmake --version
+      shell: bash
+      
+    - name: Build ZenDNNL
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Debug directory structure
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Ensure we're using the conda-installed cmake
+        which cmake
+        cmake --version
+        
+        # Build ZenDNNL
+        mkdir -p build && cd build
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON
+        cmake --build . --target=all |& tee $WORKSPACE/build_output.log
+      shell: bash
+      
+    - name: Verify build output
+      run: |
+        echo "Verifying build output..."
+        if grep -F "Completed 'zendnnl'" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/build_output.log" && \
+           grep -F "[100%] Built target gtests" "$WORKSPACE/build_output.log"; then
+          echo "ZenDNNL build passed!"
+        else
+          echo "ZenDNNL build failed!"
+          cat "$WORKSPACE/build_output.log"
+          exit 1
+        fi
+      shell: bash
+      
+    - name: Run gtests
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Move to the build directory
+        cd $WORKSPACE/build
+        
+        # Construct gtest command based on parameters
+        cmd="./install/gtests/gtests"
+        
+        # Always add gtest_filter (use * for all tests if not specified)
+        echo "Using GTest filter: $GTEST_FILTER"
+        cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
+        
+        # Only add test iterations if it's not empty
+        if [ -n "$TEST_ITERATIONS" ]; then
+          echo "Running $TEST_ITERATIONS test iterations"
+          cmd="${cmd} --test ${TEST_ITERATIONS}"
+        else
+          echo "Using default test iterations"
+        fi
+        
+        echo "Running command: ${cmd}"
+        
+        # Execute the command
+        eval ${cmd} |& tee $WORKSPACE/gtest_output.log
+        
+        # Check for test failures and warnings about no tests run
+        if grep -F -q "[  FAILED  ]" "$WORKSPACE/gtest_output.log"; then
+          echo "ZenDNNL gtests failed!"
+          cat "$WORKSPACE/gtest_output.log"
+          exit 1
+        elif grep -F -q "WARNING: filter \"\" did not match any test" "$WORKSPACE/gtest_output.log"; then
+          echo "No tests were run, please check your filter pattern"
+          cat "$WORKSPACE/gtest_output.log"
+          exit 1
+        else
+          echo "ZenDNNL gtests passed!"
+        fi
+      shell: bash
+
+    - name: Upload build logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build-logs
+        path: |
+          ${{ env.WORKSPACE }}/build_output.log
+          ${{ env.WORKSPACE }}/gtest_output.log
+        retention-days: 7
+        
+    - name: Cleanup Conda environment
+      if: always()  # Run even if previous steps fail
+      run: |
+        source ~/.miniforge_profile
+        conda deactivate
+        conda env remove -n $CONDA_ENV_NAME -y
+        echo "Removed conda environment: $CONDA_ENV_NAME"
+      shell: bash
+      
+    - name: Cleanup workspace
+      if: always()
+      run: |
+        echo "Cleaning up workspace..."
+        rm -rf $WORKSPACE/build
+        rm -f $WORKSPACE/build_output.log
+        rm -f $WORKSPACE/gtest_output.log
+        echo "Workspace cleanup completed"
+      shell: bash
+    - name: Report status back for workflow_dispatch commits
+      if: always() && github.event_name == 'workflow_dispatch'
+      run: |
+          state="success"
+          if [ "${{ job.status }}" != "success" ]; then
+            state="failure"
+          fi
+
+          echo "Final job state: $state"
+          echo "ZenDNN_REF: ${{ github.event.inputs.zendnn_ref }}"
+          echo "ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref }}"
+
+          # Report to ZenDNN repo if zendnn_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnn_ref }}" ]; then
+            echo "Reporting $state to ZenDNN commit ${{ github.event.inputs.zendnn_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnn_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping ZenDNN status update (no commit SHA provided)"
+          fi
+
+          # Report to Zendnnl repo if zendnnl_ref commit SHA was provided
+          if [ -n "${{ github.event.inputs.zendnnl_ref }}" ]; then
+            echo "Reporting $state to Zendnnl commit ${{ github.event.inputs.zendnnl_ref }}"
+            curl -s -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+              "https://api.github.com/repos/AMD-Zenai/ZenDNN/statuses/${{ github.event.inputs.zendnnl_ref }}" \
+              -d "{\"state\":\"${state}\",\"context\":\"Zendnnl CI\",\"description\":\"Zendnnl run ${state}\"}"
+          else
+            echo "Skipping Zendnnlstatus update (no commit SHA provided)"
+          fi
+      
+  asan-build:
+   runs-on: zendnnl_presub_server
+   if: ${{ github.event_name == 'push' }}
+   #needs: Zendnnl_build_Push
+   env:
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
+      CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
+      GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
+    
+   steps:
+    - name: Clean workspace before checkout
+      run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+      shell: bash
+    - name: Verify user account
+      run: |
+        echo "Running as user: $(whoami)"
+        if [ "$(whoami)" != "z1aiebuild" ]; then
+          echo "::warning::Running as $(whoami) instead of expected z1aiebuild user"
+        fi
+      
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Set up build environment
+      run: |
+        echo "Setting up ASAN build environment"
+        echo "WORKSPACE=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+        # Create a unique env name using workflow run ID and job ID to avoid conflicts
+        echo "CONDA_ENV_NAME=zendnnl_asan_${GITHUB_RUN_ID}_${GITHUB_JOB}" >> $GITHUB_ENV
+        
+        # Debug path information
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Display build configuration
+        echo "Using Python version: ${{ env.PYTHON_VERSION }}"
+        echo "Using CMake version: ${{ env.CMAKE_VERSION }}"
+        echo "Using GTest filter: ${{ env.GTEST_FILTER }}"
+        echo "Using test iterations: ${{ env.TEST_ITERATIONS }}"
+      
+    - name: Setup Conda environment with CMake
+      run: |
+        # Source miniforge profile
+        source ~/.miniforge_profile
+        
+        # Print Python version being used
+        echo "Creating Conda environment with Python $PYTHON_VERSION"
+        
+        # Create a fresh conda environment
+        conda create -n $CONDA_ENV_NAME python=$PYTHON_VERSION -y
+        
+        # Activate the environment
+        conda activate $CONDA_ENV_NAME
+        
+        # Install specified CMake version in the conda environment
+        conda install -y cmake=$CMAKE_VERSION
+        
+        # Verify Python and CMake versions
+        python --version
+        cmake --version
+      shell: bash
+      
+    - name: Build ZenDNNL with ASAN
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Debug directory structure
+        echo "Current directory: $(pwd)"
+        echo "Directory contents: $(ls -la)"
+        
+        # Ensure we're using the conda-installed cmake
+        which cmake
+        cmake --version
+        
+        # Build ZenDNNL with ASAN
+        mkdir -p build && cd build
+        cmake .. -DZENDNNL_BUILD_EXAMPLES=ON -DZENDNNL_BUILD_GTEST=ON -DCMAKE_BUILD_TYPE=Debug -DZENDNNL_BUILD_ASAN=ON
+        cmake --build . --target=all |& tee $WORKSPACE/asan_build_output.log
+      shell: bash
+      
+    - name: Verify ASAN build output
+      run: |
+        echo "Verifying ASAN build output..."
+        if grep -F "Completed 'zendnnl'" "$WORKSPACE/asan_build_output.log" && \
+           grep -F "[100%] Built target zendnnl-examples" "$WORKSPACE/asan_build_output.log" && \
+           grep -F "[100%] Built target gtests" "$WORKSPACE/asan_build_output.log"; then
+          echo "ZenDNNL ASAN build passed!"
+        else
+          echo "ZenDNNL ASAN build failed!"
+          cat "$WORKSPACE/asan_build_output.log"
+          exit 1
+        fi
+      shell: bash
+      
+    - name: Run ASAN gtests
+      run: |
+        # Source miniforge profile and activate conda environment
+        source ~/.miniforge_profile
+        conda activate $CONDA_ENV_NAME
+        
+        # Move to the build directory
+        cd $WORKSPACE/build
+        
+        # Construct gtest command based on parameters
+        cmd="./install/gtests/gtests"
+        
+        # Always add gtest_filter (use * for all tests if not specified)
+        echo "Using GTest filter: $GTEST_FILTER"
+        cmd="${cmd} --gtest_filter=${GTEST_FILTER}"
+        
+        # Only add test iterations if it's not empty
+        if [ -n "$TEST_ITERATIONS" ]; then
+          echo "Running $TEST_ITERATIONS test iterations"
+          cmd="${cmd} --test ${TEST_ITERATIONS}"
+        else
+          echo "Using default test iterations"
+        fi
+        
+        echo "Running command: ${cmd}"
+        
+        # Execute the command
+        eval ${cmd} |& tee $WORKSPACE/asan_gtest_output.log
+        
+        # Check for test failures, ASAN errors, and warnings about no tests run
+        if grep -F -q "[  FAILED  ]" "$WORKSPACE/asan_gtest_output.log" || \
+           grep -F -q "AddressSanitizer" "$WORKSPACE/asan_gtest_output.log"; then
+          echo "❌ ZenDNNL ASAN gtests failed or detected memory issues!"
+          cat "$WORKSPACE/asan_gtest_output.log"
+          exit 1
+        elif grep -F -q "WARNING: filter \"\" did not match any test" "$WORKSPACE/asan_gtest_output.log"; then
+          echo "⚠️ No tests were run, please check your filter pattern"
+          cat "$WORKSPACE/asan_gtest_output.log"
+          exit 1
+        else
+          echo "✅ ZenDNNL ASAN gtests passed!"
+        fi
+      shell: bash
+
+    - name: Upload ASAN logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: asan-build-logs
+        path: |
+          ${{ env.WORKSPACE }}/asan_build_output.log
+          ${{ env.WORKSPACE }}/asan_gtest_output.log
+        retention-days: 7
+        
+    - name: Cleanup Conda environment
+      if: always()  # Run even if previous steps fail
+      run: |
+        source ~/.miniforge_profile
+        conda deactivate
+        conda env remove -n $CONDA_ENV_NAME -y
+        echo "Removed conda environment: $CONDA_ENV_NAME"
+      shell: bash
+      
+    - name: Cleanup workspace
+      if: always()
+      run: |
+        echo "Cleaning up workspace..."
+        rm -rf $WORKSPACE/build
+        rm -f $WORKSPACE/asan_build_output.log
+        rm -f $WORKSPACE/asan_gtest_output.log
+        echo "Workspace cleanup completed"
+      shell: bash
+ 
+ 
+
+
+      
+ 
+ 
+
+
+      
+ 
+ 
+
+
+      
+
