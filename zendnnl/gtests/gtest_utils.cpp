@@ -922,10 +922,10 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
     uint64_t cols               = input_tensor.get_size(1);
     tensor_t output_tensor{};  // Initialize to avoid UNINIT issue
 
-    bool memory_reorder         = (!(input_tensor.get_layout() | uint8_t(
+    bool memory_reorder         = (!(input_tensor.get_layout() | uint16_t(
                                        tensor_layout_t::contiguous)) ||
-                                   (input_tensor.get_layout() & uint8_t(tensor_layout_t::aligned)));
-    bool memory_unreorder       = (input_tensor.get_layout() & uint8_t(
+                                   (input_tensor.get_layout() & uint16_t(tensor_layout_t::aligned)));
+    bool memory_unreorder       = (input_tensor.get_layout() & uint16_t(
                                      tensor_layout_t::blocked));
     bool trans                  = (input_tensor.get_order() == "ba") ? true : false;
 

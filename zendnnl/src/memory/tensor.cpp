@@ -386,12 +386,12 @@ data_type_t tensor_t::get_data_type() const {
 
 tensor_t &tensor_t::set_layout(tensor_layout_t layout_) {
   if (status != status_t::success) {
-    option.layout |= uint8_t(layout_);
+    option.layout |= uint16_t(layout_);
   }
   return (*this);
 }
 
-uint8_t  tensor_t::get_layout() const {
+uint16_t  tensor_t::get_layout() const {
   return option.layout;
 };
 
@@ -454,8 +454,8 @@ float tensor_t::at(const index_vec_type &index_) const {
   LOG_DEBUG_INFO("Getting tensor element");
 
   //check if a tensor is blocked or oblique
-  if ((option.layout & uint8_t(tensor_layout_t::blocked)) ||
-      (option.layout & uint8_t(tensor_layout_t::oblique))) {
+  if ((option.layout & uint16_t(tensor_layout_t::blocked)) ||
+      (option.layout & uint16_t(tensor_layout_t::oblique))) {
     std::string message  = "attempt to get an element of a blocked";
     message += " or oblique tensor.";
     EXCEPTION_WITH_LOC(message);
@@ -793,7 +793,7 @@ status_t tensor_t::aligned_size_sanity_check() {
     }
     else if (option.aligned_size[i] > option.size[i]) {
       //set the tensor layout as strided
-      option.layout |= uint8_t(tensor_layout_t::aligned);
+      option.layout |= uint16_t(tensor_layout_t::aligned);
     }
   }
 
@@ -1030,7 +1030,7 @@ status_t tensor_t::validate_meta_info() {
       return status_t::memory_bad_aligned_size;
     }
     else {
-      option.layout |= uint8_t(tensor_layout_t::aligned);
+      option.layout |= uint16_t(tensor_layout_t::aligned);
     }
   }
 

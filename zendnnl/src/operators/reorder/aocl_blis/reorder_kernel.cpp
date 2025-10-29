@@ -26,7 +26,7 @@ status_t reorder_kernel_t::execute(const context_type &context_,
 
   auto input_iter = inputs_.find("reorder_input");
   auto output_iter = outputs_.find("reorder_output");
-  
+
   if (input_iter == inputs_.end()) {
     log_error("reorder_input tensor not found");
     return status_t::failure;
@@ -35,9 +35,9 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     log_error("reorder_output tensor not found");
     return status_t::failure;
   }
-  
-  const auto& input_tensor = input_iter->second;
-  const auto& output_tensor = output_iter->second;
+
+  const auto &input_tensor = input_iter->second;
+  const auto &output_tensor = output_iter->second;
   const auto input_dtype = input_tensor.get_data_type();
   const auto source_dtype = context_.get_source_dtype();
 
@@ -67,13 +67,13 @@ status_t reorder_kernel_t::execute(const context_type &context_,
     return status_t::unimplemented;
   }
 
-  bool memory_reorder         = ((!(input_tensor.get_layout() | uint8_t(
+  bool memory_reorder         = ((!(input_tensor.get_layout() | uint16_t(
                                       tensor_layout_t::contiguous)) ||
-                                  (input_tensor.get_layout() & uint8_t(tensor_layout_t::aligned))) &&
-                                 (output_tensor.get_layout() & uint8_t(tensor_layout_t::blocked)));
-  bool memory_unreorder       = ((input_tensor.get_layout() & uint8_t(
+                                  (input_tensor.get_layout() & uint16_t(tensor_layout_t::aligned))) &&
+                                 (output_tensor.get_layout() & uint16_t(tensor_layout_t::blocked)));
+  bool memory_unreorder       = ((input_tensor.get_layout() & uint16_t(
                                     tensor_layout_t::blocked)) &&
-                                 !(output_tensor.get_layout() | uint8_t(tensor_layout_t::contiguous)));
+                                 !(output_tensor.get_layout() | uint16_t(tensor_layout_t::contiguous)));
 
   if (memory_reorder) {
     if (input_dtype == data_type_t::f32) {

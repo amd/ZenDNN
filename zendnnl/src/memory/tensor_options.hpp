@@ -37,14 +37,17 @@ using namespace zendnnl::error_handling;
  * Tensor layout refers to how tensor data is layed out in
  * the tensor memory (contiguous, blocked or strided etc.).
  */
-enum class tensor_layout_t : uint8_t {
-  contiguous = 0,    /*!< Contiguous layout */
-  aligned    = 1,    /*!< Memory aligned layout */
-  broadcast  = 2,    /*!< Broadcast tensor */
-  transpose  = 4,    /*!< Transpose tensor */
-  quantized  = 8,    /*!< A quantized tensor */
-  blocked    = 16,   /*!< Blocked layout */
-  oblique    = 32    /*!< Oblique layout */
+enum class tensor_layout_t : uint16_t {
+  contiguous      = 0,   /*!< Contiguous layout */
+  aligned         = 1,   /*!< Memory aligned layout */
+  broadcast       = 2,   /*!< Broadcast tensor */
+  transpose       = 4,   /*!< Transpose tensor */
+  quantized       = 8,   /*!< A quantized tensor */
+  blocked         = 16,  /*!< Blocked layout */
+  blocked_aocl    = 32,  /*!< Blocked layout for AOCL */
+  blocked_onednn  = 64,  /*!< Blocked layout for OneDNN */
+  blocked_libxsmm = 128, /*!< Blocked layout for LibXSMM */
+  oblique         = 256  /*!< Oblique layout */
 };
 
 /** @class tensor_option_t
@@ -110,7 +113,7 @@ private:
   uint64_t           base_offset;    /**< Base offset, computed from @c base
                                         and @c stride */
   data_type_t        data_type;      /**< Tensor data type */
-  uint8_t            layout;         /**< Tensor layout */
+  uint16_t           layout;         /**< Tensor layout */
   bool               is_const;       /**< Tensor constness */
   std::string        order;          /**< Tensor channel order(for example
                                         NCHW or NHCW) */

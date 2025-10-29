@@ -45,7 +45,7 @@ status_t matmul_int8_avx512_kernel_t::execute(const context_type &context_,
   bool is_transpose_weights   = (weight_dim == 2) ? (weight_tensor.get_order() ==
                                 "ba") : (weight_tensor.get_order() == "acb");
   bool is_blocked             = weight_tensor.get_layout()
-                                & uint8_t(tensor_layout_t::blocked);
+                                & uint16_t(tensor_layout_t::blocked);
 
   auto   reorder_weights      = (int8_t *)
                                 context_.get_aocl_dlp_reordered_weights_ptr_unsafe();

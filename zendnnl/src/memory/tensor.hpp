@@ -329,7 +329,7 @@ public:
    * @sa @c tensor_layout_t enum for suppported layouts.
    * @return Tensor layout.
    */
-  uint8_t get_layout() const;
+  uint16_t get_layout() const;
 
   /** @brief Set tensor channel order.
    *

@@ -22,8 +22,8 @@ using namespace zendnnl::error_handling;
 
 size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
   const reorder_context_t &context, const tensor_t &input_tensor) {
-  if (!(input_tensor.get_layout() | uint8_t(tensor_layout_t::contiguous)) ||
-      (input_tensor.get_layout() & uint8_t(tensor_layout_t::aligned))) {
+  if (!(input_tensor.get_layout() | uint16_t(tensor_layout_t::contiguous)) ||
+      (input_tensor.get_layout() & uint16_t(tensor_layout_t::aligned))) {
     size_t reorder_size        = 0;
 
     auto source_dtype          = context.get_source_dtype();
@@ -86,7 +86,7 @@ size_t aocl_dlp_reorder_utils_t::get_aocl_reorder_size(
     }
     return reorder_size;
   }
-  else if (input_tensor.get_layout() & uint8_t(tensor_layout_t::blocked)) {
+  else if (input_tensor.get_layout() & uint16_t(tensor_layout_t::blocked)) {
     // Unreordered size computation is been handled for 2D tensors
     const int k = input_tensor.get_size(0);
     const int n = input_tensor.get_size(1);

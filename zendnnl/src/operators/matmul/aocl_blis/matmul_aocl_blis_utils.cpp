@@ -837,7 +837,7 @@ status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights, data
     return status_t::failure;
   }
   if (reordered_weights_ptr != nullptr ||
-      (weights->get_layout() & uint8_t(tensor_layout_t::blocked))) {
+      (weights->get_layout() & uint16_t(tensor_layout_t::blocked))) {
     return status_t::success;
   }
 

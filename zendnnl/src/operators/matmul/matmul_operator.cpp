@@ -446,7 +446,7 @@ std::string matmul_operator_t::op_execute_info() {
   auto post_op_count = context.get_post_op_count();
 
   if (forced_kernel.empty()) {
-    if (weights.get_layout() & uint8_t(tensor_layout_t::blocked)) {
+    if (weights.get_layout() & uint16_t(tensor_layout_t::blocked)) {
 #if ZENDNNL_DEPENDS_AOCLDLP
       ss << "kernel:aocl_dlp_blocked" << ",";
 #else

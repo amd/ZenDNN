@@ -27,10 +27,10 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   log_info("Executing matmul_fp32_avx512 kernel");
 
   auto   aocl_dlp_po_ptr     = context_.get_aocl_dlp_post_op_ptr_unsafe();
-  
+
   auto input_iter = inputs_.find("matmul_input");
   auto output_iter = outputs_.find("matmul_output");
-  
+
   if (input_iter == inputs_.end()) {
     log_error("matmul_input tensor not found");
     return status_t::failure;
@@ -39,12 +39,12 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
     log_error("matmul_output tensor not found");
     return status_t::failure;
   }
-  
-  const auto& input_tensor = input_iter->second;
-  const auto& output_tensor = output_iter->second;
-  
+
+  const auto &input_tensor = input_iter->second;
+  const auto &output_tensor = output_iter->second;
+
   const auto weight_param = context_.get_param("weights");
-  const auto& weight_tensor = weight_param.value();
+  const auto &weight_tensor = weight_param.value();
 
   float *input_raw_handle     = (float *)input_tensor.get_raw_handle_unsafe();
   float *output_raw_handle    = (float *)output_tensor.get_raw_handle_unsafe();
@@ -59,7 +59,7 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   bool is_transpose_weights   = (weight_dim == 2) ? (weight_tensor.get_order() ==
                                 "ba") : (weight_tensor.get_order() == "acb");
   bool is_blocked             = weight_tensor.get_layout()
-                                & uint8_t(tensor_layout_t::blocked);
+                                & uint16_t(tensor_layout_t::blocked);
 
   auto reorder_weights        = (float *)
                                 context_.get_aocl_dlp_reordered_weights_ptr_unsafe();

@@ -41,14 +41,14 @@ status_t reorder_operator_t::validate() {
   auto input_size  = input->get_size();
   auto output_size = output->get_size();
 
-  bool memory_reorder         = ((!(input->get_layout() | uint8_t(
+  bool memory_reorder         = ((!(input->get_layout() | uint16_t(
                                       tensor_layout_t::contiguous)) ||
-                                  (input->get_layout() & uint8_t(tensor_layout_t::aligned))) &&
-                                 (output->get_layout() & uint8_t(tensor_layout_t::blocked)));
+                                  (input->get_layout() & uint16_t(tensor_layout_t::aligned))) &&
+                                 (output->get_layout() & uint16_t(tensor_layout_t::blocked)));
 
-  bool memory_unreorder       = ((input->get_layout() & uint8_t(
+  bool memory_unreorder       = ((input->get_layout() & uint16_t(
                                     tensor_layout_t::blocked)) &&
-                                 !(output->get_layout() | uint8_t(tensor_layout_t::contiguous)));
+                                 !(output->get_layout() | uint16_t(tensor_layout_t::contiguous)));
 
   if (!(memory_reorder || memory_unreorder)) {
     apilog_error("Mismatch in layout is observed for conversion");
