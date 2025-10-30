@@ -79,7 +79,7 @@ inline void zendnnl_parallel_for(
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 template<typename TA, typename TB, typename TC>
-void libxsmm_gemm(const TA *A, const TB *B, TC *C,
+int libxsmm_gemm(const TA *A, const TB *B, TC *C,
                   int M, int N, int K,
                   int lda, int ldb, int ldc,
                   char transA, char transB,
@@ -115,7 +115,7 @@ void libxsmm_gemm(const TA *A, const TB *B, TC *C,
     libxsmm_dispatch_brgemm(shape, l_flags, 0, brcfg);
 
   if (!ker) {
-    return;
+    return 0;
   }
 
   libxsmm_gemm_param p{};
@@ -124,6 +124,7 @@ void libxsmm_gemm(const TA *A, const TB *B, TC *C,
   p.c.primary = C;
 
   ker(&p);
+  return 1;
 }
 #endif
 
@@ -253,14 +254,15 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 #endif
 
 #if ZENDNNL_DEPENDS_LIBXSMM
-static inline void run_libxsmm(char       transA,
+static inline int run_libxsmm(char       transA,
                                char       transB,
                                int        M, int N, int K,
                                int        lda, int ldb, int ldc,
                                const void *A, const void *B, void *C,
                                const data_types &dtypes) {
+  int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    libxsmm_gemm<float,float,float>(
+    kernel_status = libxsmm_gemm<float,float,float>(
       static_cast<const float *>(A),
       static_cast<const float *>(B),
       static_cast<float *>(C),
@@ -269,7 +271,7 @@ static inline void run_libxsmm(char       transA,
       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
+    kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
       reinterpret_cast<const libxsmm_bfloat16 *>(A),
       reinterpret_cast<const libxsmm_bfloat16 *>(B),
       static_cast<float *>(C),
@@ -278,7 +280,7 @@ static inline void run_libxsmm(char       transA,
       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
+    kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
       reinterpret_cast<const libxsmm_bfloat16 *>(A),
       reinterpret_cast<const libxsmm_bfloat16 *>(B),
       reinterpret_cast<libxsmm_bfloat16 *>(C),
@@ -286,6 +288,7 @@ static inline void run_libxsmm(char       transA,
       LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
       LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
   }
+  return kernel_status;
 }
 #endif
 
@@ -346,13 +349,14 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const lowoha_params &post_op, const void *bias) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-    log_info("Using libxsmm kernel");
-    run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes);
-    return;
+    if(run_libxsmm(transA,transB,M,N,K,lda,ldb,ldc,A,B,C,dtypes)) {
+      log_info("Using libxsmm kernel");
+      return;
+    }
   }
 #endif
 
-  apilog_info("Using BLIS/AOCL kernel");
+  log_info("Using BLIS/AOCL kernel");
   run_blis(layout,transA,transB,M,N,K,alpha,beta,
             lda,ldb,ldc,mem_format_a,mem_format_b,
             A,B,C,dtypes,post_op,bias);
@@ -733,7 +737,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     // TODO: Further refine the tuning based on heuristics
     // involving batch_count, M, and num_threads.
     if ((batch_count >= 1024 && M <= 2048) ||
-        (batch_count >= 512 && M <= 256)) {
+        (batch_count >= 512 && M <= 256) ||
+        (batch_count > 128 && batch_count < 192 && M <= 512)) {
       if (kernel==matmul_algo_t::libxsmm) {
         M_block = std::min(128, M);
       }
