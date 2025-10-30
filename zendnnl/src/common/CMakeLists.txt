@@ -40,6 +40,7 @@ set(common_headers
   config_manager.hpp
   zendnnl_global_block.hpp
   error_status.hpp
+  lru.hpp
   hash_utils.hpp
   zendnnl_global.hpp)
 
