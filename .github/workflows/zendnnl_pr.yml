@@ -282,7 +282,7 @@ jobs:
       run: |
         echo "Checking ZenTorch_Zendnnl CI status for commit $COMMIT_SHA..."
 
-        while true ; do
+        for i in {1..360}; do
           status=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
             | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
@@ -301,6 +301,9 @@ jobs:
 
           sleep 30
         done
+        
+        echo "Timeout: ZenTorch-ZenDNNL CI did not finish within 3 hours."
+        exit 1
     - name: Report status back for workflow_dispatch commits
       if: always() && github.event_name == 'workflow_dispatch'
       run: |
