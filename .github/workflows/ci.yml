@@ -536,7 +536,7 @@ jobs:
         COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         echo "Waiting for PyTorch & TensorFlow & Zentorch_Zendnnl plugin statuses..."
-        for i in {1..60}; do
+        for i in {1..360}; do
           pytorch_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
             | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
