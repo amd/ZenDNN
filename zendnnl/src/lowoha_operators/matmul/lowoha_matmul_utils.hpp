@@ -97,6 +97,48 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             get_reorder_buff_size_func_ptr get_reorder_buf_size,
                             reorder_func_ptr<T> reorder_func, int weight_cache_type);
 
+/**
+ * @brief Convert post-op names to a comma-separated string.
+ *
+ * This function takes a lowoha_params structure and converts all post-op types
+ * to a comma-separated string representation.
+ *
+ * @param params The lowoha_params structure containing post-op information.
+ * @return A string containing comma-separated post-op names, or "none" if no post-ops.
+ */
+std::string post_op_names_to_string(const lowoha_params &params);
+
+/**
+ * @brief Convert matmul_algo_t enum to string representation.
+ *
+ * This function converts a matmul_algo_t enum value to its string representation.
+ *
+ * @param kernel The matmul_algo_t enum value to convert.
+ * @return A const char* pointer to the string representation of the kernel type.
+ */
+const char* kernel_to_string(matmul_algo_t kernel);
+
+/**
+ * @brief Convert data_type_t enum to string representation.
+ *
+ * This function converts a data_type_t enum value to its string representation.
+ *
+ * @param dtype The data_type_t enum value to convert.
+ * @return A const char* pointer to the string representation of the data type.
+ */
+const char* data_type_to_string(data_type_t dtype);
+
+/**
+ * @brief Get post-op data types as a comma-separated string for binary_add/binary_mul.
+ *
+ * This function extracts data types from post-ops that are binary_add or binary_mul
+ * and returns them as a comma-separated string.
+ *
+ * @param params The lowoha_params structure containing post-op information.
+ * @return A string containing comma-separated data types, or empty string if none.
+ */
+std::string post_op_data_types_to_string(const lowoha_params &params);
+
 } // namespace lowoha
 } // namespace zendnnl
 

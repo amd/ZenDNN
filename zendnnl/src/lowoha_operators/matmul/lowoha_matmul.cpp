@@ -596,6 +596,12 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        const float beta, void *dst, const int ldc,
                        lowoha_params params,
                        int Batch_A, int Batch_B) {
+  // Create profiler instance for timing
+  profiler_t profiler;
+  bool is_profile = is_profile_enabled();
+  if (is_profile) {
+    profiler.tbp_start();
+  }
 
   if (!src || !weight || !dst) {
     log_error("Null pointer input to matmul_direct");
@@ -629,6 +635,21 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     log_error("Broadcasting is not compatible with given Batch_A and Batch_B");
     return status_t::failure;
   }
+
+  apilog_info("LOWOHA matmul_direct: M=", M, ", N=", N, ", K=", K,
+                      ", alpha=", alpha, ", beta=", beta,
+                      ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
+                      ", transA=", (transA ? "true" : "false"),
+                      ", transB=", (transB ? "true" : "false"),
+                      ", input_dtype=", data_type_to_string(params.dtypes.src),
+                      ", output_dtype=", data_type_to_string(params.dtypes.dst),
+                      ", bias=", (bias != nullptr ? "true" : "false"),
+                      ", post_op=[", post_op_names_to_string(params), "]",
+                      ", post_op_dtype=[", ([&]() {
+                        std::string dtypes = post_op_data_types_to_string(params);
+                        return dtypes.empty() ? "none" : dtypes;
+                      })(), "]",
+                      ", Batch_A=", Batch_A, ", Batch_B=", Batch_B);
 
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
@@ -893,6 +914,27 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                             params.mem_format_a, mem_format_b, params, bias);
     }
   }
+
+  if (is_profile) {
+    profiler.tbp_stop();
+    profilelog_verbose("LOWOHA matmul_direct completed: M=", M, ", N=", N, ", K=", K,
+                       ", alpha=", alpha, ", beta=", beta,
+                       ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
+                       ", transA=", (transA ? "true" : "false"),
+                       ", transB=", (transB ? "true" : "false"),
+                       ", input_dtype=", data_type_to_string(params.dtypes.src),
+                       ", output_dtype=", data_type_to_string(params.dtypes.dst),
+                       ", bias=", (bias != nullptr ? "true" : "false"),
+                       ", post_op=[", post_op_names_to_string(params), "]",
+                       ", post_op_dtype=[", ([&]() {
+                         std::string dtypes = post_op_data_types_to_string(params);
+                         return dtypes.empty() ? "none" : dtypes;
+                       })(), "]",
+                       ", Batch_A=", Batch_A, ", Batch_B=", Batch_B,
+                       ", kernel=", kernel_to_string(kernel),
+                       ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+  }
+
   return status_t::success;
 }
 

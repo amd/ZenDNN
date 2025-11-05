@@ -17,6 +17,8 @@
 #include "lowoha_matmul_utils.hpp"
 #include <cmath>
 #include <cstring>
+#include <sstream>
+#include <string>
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"
 #else
@@ -824,6 +826,72 @@ template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
 template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<float>, int);
+
+// Helper function to convert post_op_type_t to string
+static const char* post_op_type_to_string(post_op_type_t type) {
+  switch (type) {
+    case post_op_type_t::none: return "none";
+    case post_op_type_t::relu: return "relu";
+    case post_op_type_t::leaky_relu: return "leaky_relu";
+    case post_op_type_t::gelu_tanh: return "gelu_tanh";
+    case post_op_type_t::gelu_erf: return "gelu_erf";
+    case post_op_type_t::sigmoid: return "sigmoid";
+    case post_op_type_t::swish: return "swish";
+    case post_op_type_t::tanh: return "tanh";
+    case post_op_type_t::binary_add: return "binary_add";
+    case post_op_type_t::binary_mul: return "binary_mul";
+    default: return "unknown";
+  }
+}
+
+std::string post_op_names_to_string(const lowoha_params &params) {
+  std::ostringstream post_op_names;
+  if (params.postop_.empty()) {
+    post_op_names << "none";
+  } else {
+    for (size_t i = 0; i < params.postop_.size(); ++i) {
+      if (i > 0) post_op_names << ",";
+      post_op_names << post_op_type_to_string(params.postop_[i].po_type);
+    }
+  }
+  return post_op_names.str();
+}
+
+const char* kernel_to_string(matmul_algo_t kernel) {
+  switch (kernel) {
+    case matmul_algo_t::aocl_blis: return "aocl_blis";
+    case matmul_algo_t::aocl_blis_blocked: return "aocl_blis_blocked";
+    case matmul_algo_t::onednn: return "onednn";
+    case matmul_algo_t::onednn_blocked: return "onednn_blocked";
+    case matmul_algo_t::libxsmm: return "libxsmm";
+    case matmul_algo_t::batched_sgemm: return "batched_sgemm";
+    case matmul_algo_t::dynamic_dispatch: return "dynamic_dispatch";
+    case matmul_algo_t::reference: return "reference";
+    default: return "none";
+  }
+}
+
+const char* data_type_to_string(data_type_t dtype) {
+  switch (dtype) {
+    case data_type_t::none: return "none";
+    case data_type_t::f32: return "f32";
+    case data_type_t::bf16: return "bf16";
+    default: return "unknown";
+  }
+}
+
+std::string post_op_data_types_to_string(const lowoha_params &params) {
+  std::ostringstream post_op_dtypes;
+  bool first = true;
+  for (const auto &po : params.postop_) {
+    if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
+      if (!first) post_op_dtypes << ",";
+      post_op_dtypes << data_type_to_string(po.dtype);
+      first = false;
+    }
+  }
+  return post_op_dtypes.str();
+}
 
 } // namespace lowoha
 } // namespace zendnnl
