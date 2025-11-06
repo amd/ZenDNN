@@ -715,7 +715,8 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
   }
 }
 #else
-void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &lowoha_param) {
+void cleanup_blis_post_op(aocl_post_op *aocl_po,
+                          const lowoha_params &lowoha_param) {
   if (aocl_po) {
     // Clean up eltwise operations
     if (aocl_po->eltwise) {
@@ -779,14 +780,17 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   }
 
   if (weight_cache_type == 0) {
-    commonlog_info("BLIS reorder weights (WEIGHT_CACHE_DISABLE)");
+    apilog_info("AOCL reorder weights (WEIGHT_CACHE_DISABLE)");
     size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                    k, n
 #if ZENDNNL_DEPENDS_AOCLDLP
                                    ,nullptr
 #endif
                                                        );
-    reorder_weights = (T *)aligned_alloc(64, b_reorder_buf_siz_req);
+    size_t alignment      = 64;
+    size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
+                            (alignment - 1);
+    reorder_weights       = (T *)aligned_alloc(alignment, reorder_size);
     reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
 #if ZENDNNL_DEPENDS_AOCLDLP
                  ,nullptr
@@ -797,14 +801,17 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   else if (weight_cache_type == 1) {
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
-      commonlog_info("BLIS reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
       size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                      k, n
 #if ZENDNNL_DEPENDS_AOCLDLP
                                      ,nullptr
 #endif
                                                          );
-      reorder_weights = (T *)aligned_alloc(64, b_reorder_buf_siz_req);
+      size_t alignment      = 64;
+      size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
+                              (alignment - 1);
+      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
       reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
 #if ZENDNNL_DEPENDS_AOCLDLP
                    ,nullptr
@@ -814,12 +821,68 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
       matmul_weight_cache.add(key, reorder_weights);
     }
     else {
-      apilog_info("Read BLIS cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE");
       reorder_weights = matmul_weight_cache.get(key);
     }
   }
   return true;
 }
+
+#if ZENDNNL_DEPENDS_ONEDNN
+void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
+                    dnnl::engine &eng) {
+  dnnl::stream eng_stream(eng);
+  void *reordered_mem = nullptr;
+  dnnl::memory::desc  dnnl_weight_desc   = onednn_utils_t::to_dnnl_tensor(
+        dnnl_params.weights, eng);
+  dnnl::memory        dnnl_weight_mem    = dnnl::memory(dnnl_weight_desc, eng,
+      dnnl_params.weights.buffer);
+
+  dnnl_params.weights.format_tag = (dnnl_params.weights.dtype == data_type_t::f32)
+                                   ? "BA16a64b" : "AB8b64a2b";
+  dnnl::memory::desc  dnnl_blocked_weight_desc   = onednn_utils_t::to_dnnl_tensor(
+        dnnl_params.weights, eng);
+  size_t reordered_size = dnnl_blocked_weight_desc.get_size();
+  size_t alignment      = 64;
+  size_t reorder_size   = (reordered_size + alignment - 1) & ~(alignment - 1);
+  reordered_mem         = (void *)aligned_alloc(alignment, reorder_size);
+  dnnl::memory        dnnl_blocked_weight_mem    = dnnl::memory(
+        dnnl_blocked_weight_desc, eng, reordered_mem);
+
+  reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
+      dnnl_weight_mem, dnnl_blocked_weight_mem);
+  dnnl_params.weights.buffer = dnnl_blocked_weight_mem.get_data_handle();
+}
+
+bool reorderAndCacheWeights(Key_matmul key,
+                            onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
+                            dnnl::engine &eng) {
+  // Weight caching
+  static lru_cache_t<Key_matmul, std::pair<void *, std::string>>
+      matmul_weight_cache;
+
+  if (weight_cache_type == 0) {
+    apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
+    reorderWeights(dnnl_params, eng);
+  }
+  else {
+    auto found_obj = matmul_weight_cache.find_key(key);
+    if (!found_obj) {
+      apilog_info("onednn reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      reorderWeights(dnnl_params, eng);
+      matmul_weight_cache.add(key, {dnnl_params.weights.buffer, dnnl_params.weights.format_tag});
+    }
+    else {
+      apilog_info("Read onednn cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      dnnl_params.weights.buffer = matmul_weight_cache.get(key).first;
+      dnnl_params.weights.format_tag = matmul_weight_cache.get(key).second;
+    }
+  }
+  return true;
+
+}
+#endif
+
 template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<short>, int);
@@ -828,19 +891,30 @@ template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
     reorder_func_ptr<float>, int);
 
 // Helper function to convert post_op_type_t to string
-static const char* post_op_type_to_string(post_op_type_t type) {
+static const char *post_op_type_to_string(post_op_type_t type) {
   switch (type) {
-    case post_op_type_t::none: return "none";
-    case post_op_type_t::relu: return "relu";
-    case post_op_type_t::leaky_relu: return "leaky_relu";
-    case post_op_type_t::gelu_tanh: return "gelu_tanh";
-    case post_op_type_t::gelu_erf: return "gelu_erf";
-    case post_op_type_t::sigmoid: return "sigmoid";
-    case post_op_type_t::swish: return "swish";
-    case post_op_type_t::tanh: return "tanh";
-    case post_op_type_t::binary_add: return "binary_add";
-    case post_op_type_t::binary_mul: return "binary_mul";
-    default: return "unknown";
+  case post_op_type_t::none:
+    return "none";
+  case post_op_type_t::relu:
+    return "relu";
+  case post_op_type_t::leaky_relu:
+    return "leaky_relu";
+  case post_op_type_t::gelu_tanh:
+    return "gelu_tanh";
+  case post_op_type_t::gelu_erf:
+    return "gelu_erf";
+  case post_op_type_t::sigmoid:
+    return "sigmoid";
+  case post_op_type_t::swish:
+    return "swish";
+  case post_op_type_t::tanh:
+    return "tanh";
+  case post_op_type_t::binary_add:
+    return "binary_add";
+  case post_op_type_t::binary_mul:
+    return "binary_mul";
+  default:
+    return "unknown";
   }
 }
 
@@ -848,35 +922,51 @@ std::string post_op_names_to_string(const lowoha_params &params) {
   std::ostringstream post_op_names;
   if (params.postop_.empty()) {
     post_op_names << "none";
-  } else {
+  }
+  else {
     for (size_t i = 0; i < params.postop_.size(); ++i) {
-      if (i > 0) post_op_names << ",";
+      if (i > 0) {
+        post_op_names << ",";
+      }
       post_op_names << post_op_type_to_string(params.postop_[i].po_type);
     }
   }
   return post_op_names.str();
 }
 
-const char* kernel_to_string(matmul_algo_t kernel) {
+const char *kernel_to_string(matmul_algo_t kernel) {
   switch (kernel) {
-    case matmul_algo_t::aocl_blis: return "aocl_blis";
-    case matmul_algo_t::aocl_blis_blocked: return "aocl_blis_blocked";
-    case matmul_algo_t::onednn: return "onednn";
-    case matmul_algo_t::onednn_blocked: return "onednn_blocked";
-    case matmul_algo_t::libxsmm: return "libxsmm";
-    case matmul_algo_t::batched_sgemm: return "batched_sgemm";
-    case matmul_algo_t::dynamic_dispatch: return "dynamic_dispatch";
-    case matmul_algo_t::reference: return "reference";
-    default: return "none";
+  case matmul_algo_t::aocl_blis:
+    return "aocl_blis";
+  case matmul_algo_t::aocl_blis_blocked:
+    return "aocl_blis_blocked";
+  case matmul_algo_t::onednn:
+    return "onednn";
+  case matmul_algo_t::onednn_blocked:
+    return "onednn_blocked";
+  case matmul_algo_t::libxsmm:
+    return "libxsmm";
+  case matmul_algo_t::batched_sgemm:
+    return "batched_sgemm";
+  case matmul_algo_t::dynamic_dispatch:
+    return "dynamic_dispatch";
+  case matmul_algo_t::reference:
+    return "reference";
+  default:
+    return "none";
   }
 }
 
-const char* data_type_to_string(data_type_t dtype) {
+const char *data_type_to_string(data_type_t dtype) {
   switch (dtype) {
-    case data_type_t::none: return "none";
-    case data_type_t::f32: return "f32";
-    case data_type_t::bf16: return "bf16";
-    default: return "unknown";
+  case data_type_t::none:
+    return "none";
+  case data_type_t::f32:
+    return "f32";
+  case data_type_t::bf16:
+    return "bf16";
+  default:
+    return "unknown";
   }
 }
 
@@ -884,8 +974,11 @@ std::string post_op_data_types_to_string(const lowoha_params &params) {
   std::ostringstream post_op_dtypes;
   bool first = true;
   for (const auto &po : params.postop_) {
-    if (po.po_type == post_op_type_t::binary_add || po.po_type == post_op_type_t::binary_mul) {
-      if (!first) post_op_dtypes << ",";
+    if (po.po_type == post_op_type_t::binary_add ||
+        po.po_type == post_op_type_t::binary_mul) {
+      if (!first) {
+        post_op_dtypes << ",";
+      }
       post_op_dtypes << data_type_to_string(po.dtype);
       first = false;
     }

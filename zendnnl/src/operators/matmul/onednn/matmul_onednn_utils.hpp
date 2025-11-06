@@ -60,13 +60,17 @@ class onednn_utils_t {
     // Scaling factors
     float alpha = 1.0f;
     float beta = 0.0f;
+
+    matmul_algo_t algo = matmul_algo_t::none;
+    bool is_blocked = false;
   };
 
 #if ZENDNNL_DEPENDS_ONEDNN
   static dnnl::memory::format_tag to_dnnl_format(std::string tag);
   static dnnl::memory::data_type  to_dnnl_datatype(data_type_t dtype);
 
-  static dnnl::memory             to_dnnl_tensor(const onednn_tensor_params &params,
+  static dnnl::memory::desc       to_dnnl_tensor(const onednn_tensor_params
+      &params,
       dnnl::engine eng);
 #endif
 

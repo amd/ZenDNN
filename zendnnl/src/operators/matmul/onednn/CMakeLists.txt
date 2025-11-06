@@ -19,16 +19,12 @@ set(onednn_matmul_operator_sources
   matmul_onednn_utils.cpp)
 
 set(onednn_matmul_operator_public_headers
-  matmul_onednn_utils.hpp)
-
-set(onednn_matmul_operator_private_headers
+  matmul_onednn_utils.hpp
   matmul_onednn_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
     PRIVATE ${onednn_matmul_operator_sources}
-    PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${onednn_matmul_operator_private_headers}
     PUBLIC  FILE_SET zendnnl_headers
             TYPE HEADERS FILES ${onednn_matmul_operator_public_headers})
 endif()
@@ -36,8 +32,6 @@ endif()
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
     PRIVATE ${onednn_matmul_operator_sources}
-    PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${onednn_matmul_operator_private_headers}
     PUBLIC  FILE_SET zendnnl_headers
             TYPE HEADERS FILES ${onednn_matmul_operator_public_headers})
 endif()

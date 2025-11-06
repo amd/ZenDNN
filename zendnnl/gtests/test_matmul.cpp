@@ -223,7 +223,7 @@ TEST_P(TestMatmul,F32_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked)) {
     GTEST_SKIP();
   }
 
@@ -284,7 +284,7 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked)) {
     GTEST_SKIP();
   }
 
@@ -345,7 +345,7 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn)) {
+  if (use_LOWOHA && (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked)) {
     GTEST_SKIP();
   }
 
@@ -372,7 +372,7 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, INT8) {
-  if (algo == matmul_algo_t::onednn) {
+  if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
     GTEST_SKIP();
   }
 

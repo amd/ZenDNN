@@ -30,51 +30,66 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   alpha    = dist(gen);
   beta     = dist(gen);
 
-  // Algorithm configuration based on command-line input or random selection
-  if (!cmd_backend.empty()) {
-    // Handle oneDNN dependency check for command-line backends
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t algo_ = matmul_config.get_algo();
+  algo = static_cast<matmul_algo_t>(algo_);
+
+  if (algo == matmul_algo_t::none) {
+    // Algorithm configuration based on command-line input or random selection
+    if (!cmd_backend.empty()) {
+      // Handle oneDNN dependency check for command-line backends
 #if ZENDNNL_DEPENDS_ONEDNN
-    algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn : strToAlgo(
-             cmd_backend);
+      algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn : strToAlgo(
+               cmd_backend);
 #else
-    // Fallback to AOCL BLIS if oneDNN backends requested but not available
-    algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
-           ? matmul_algo_t::aocl_blis
-           : strToAlgo(cmd_backend);
+      // Fallback to AOCL BLIS if oneDNN backends requested but not available
+      algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
+             ? matmul_algo_t::aocl_blis
+             : strToAlgo(cmd_backend);
 #endif
-    //TODO: Add command-line arg support for LOWOHA
-    use_LOWOHA = (algo == matmul_algo_t::libxsmm);
-    if (algo == matmul_algo_t::libxsmm) {
-      alpha    = 1.0f;
-      beta     = 0.0f;
-      po_index = 8;
+      //TODO: Add command-line arg support for LOWOHA
+      use_LOWOHA = (algo == matmul_algo_t::libxsmm);
+      if (algo == matmul_algo_t::libxsmm) {
+        alpha    = 1.0f;
+        beta     = 0.0f;
+        po_index = 8;
+      }
+    }
+    else {
+      // Random algorithm selection
+#if ZENDNNL_DEPENDS_ONEDNN
+      int algo_range_max = 3;
+#else
+      int algo_range_max = 2;
+#endif
+      std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
+      algo = static_cast<matmul_algo_t>(algo_dist(gen));
+
+      // Control LOWOHA and LIBXSMM based on test index
+      // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+      uint32_t third = total_tests / TEST_PARTITIONS;
+
+      if (test_index < third) {
+        use_LOWOHA = false;
+      }
+      else if (test_index < 2 * third) {
+        use_LOWOHA = true;
+      }
+      else {
+        use_LOWOHA = true;
+        alpha = 1;
+        beta = 0;
+        algo = matmul_algo_t::libxsmm;
+      }
     }
   }
   else {
-    // Random algorithm selection
-#if ZENDNNL_DEPENDS_ONEDNN
-    int algo_range_max = 3;
-#else
-    int algo_range_max = 2;
-#endif
-    std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
-    algo = static_cast<matmul_algo_t>(algo_dist(gen));
-
-    // Control LOWOHA and LIBXSMM based on test index
-    // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
-    uint32_t third = total_tests / TEST_PARTITIONS;
-
-    if (test_index < third) {
-      use_LOWOHA = false;
-    }
-    else if (test_index < 2 * third) {
+    if (algo == matmul_algo_t::libxsmm) {
+      alpha    = 1.0f;
+      beta     = 0.0f;
       use_LOWOHA = true;
-    }
-    else {
-      use_LOWOHA = true;
-      alpha = 1;
-      beta = 0;
-      algo = matmul_algo_t::libxsmm;
+    } else {
+      use_LOWOHA = rand() % 2;
     }
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;

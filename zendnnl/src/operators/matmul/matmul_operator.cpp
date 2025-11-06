@@ -134,9 +134,11 @@ status_t matmul_operator_t::update_matmul_kernel() {
   else if (algo == static_cast<int>(matmul_algo_t::aocl_blis_blocked)) {
     forced_kernel = "aocl_blis_blocked";
   }
-  else if (algo == static_cast<int>(matmul_algo_t::onednn) ||
-           algo == static_cast<int>(matmul_algo_t::onednn_blocked)) {
+  else if (algo == static_cast<int>(matmul_algo_t::onednn)) {
     forced_kernel = "onednn";
+  }
+  else if (algo == static_cast<int>(matmul_algo_t::onednn_blocked)) {
+    forced_kernel = "onednn_blocked";
   }
   else if (algo == static_cast<int>(matmul_algo_t::reference)) {
     forced_kernel = "reference";
@@ -238,12 +240,15 @@ status_t matmul_operator_t::validate() {
 
   // Input and Output Size Check
   // OneDNN doesn't support broadcasted inputs or weights
-  if (is_broadcast_bmm_sizes && forced_kernel == "onednn") {
+  // TODO: Fallback to reference/supported kernel
+  if (is_broadcast_bmm_sizes && (forced_kernel == "onednn" ||
+                                 forced_kernel == "onednn_blocked")) {
     apilog_error("Input, weight or output size is not valid for onednn");
     return status_t::failure;
   }
 
-  if (input_size.size() == 3 && forced_kernel == "onednn" &&
+  if (input_size.size() == 3 && (forced_kernel == "onednn" ||
+                                 forced_kernel == "onednn_blocked") &&
       (input_size.at(0) != 1 && weights_size.at(0) != 1 &&
        input_size.at(0) != weights_size.at(0))) {
     apilog_error("Broadcast incompatible with onednn for batchmatmul. Input size= ",
@@ -329,7 +334,7 @@ status_t matmul_operator_t::validate_forced_kernel() {
 // TODO: Move optional dependency prerpocessor to respective kernel file.
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
       forced_kernel == "aocl_blis_blocked"
-      || forced_kernel == "onednn"
+      || forced_kernel == "onednn" || forced_kernel == "onednn_blocked"
      ) {
     return status_t::success;
   }
@@ -373,32 +378,36 @@ status_t matmul_operator_t::validate_forced_kernel() {
 }
 
 status_t matmul_operator_t::preprocess() {
-  LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
-  //get bias tensor
-  auto optional_bias_tensor = context.get_param("bias");
+  if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
+      forced_kernel == "aocl_blis_blocked") {
+    LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
+    //get bias tensor
+    auto optional_bias_tensor = context.get_param("bias");
 
-  //get weight tensor for reorder
-  auto weight_tensor = context.get_param("weights");
-  // output tensor
-  auto output_tensor = outputs["matmul_output"];
+    //get weight tensor for reorder
+    auto weight_tensor = context.get_param("weights");
+    // output tensor
+    auto output_tensor = outputs["matmul_output"];
 
-  if (forced_kernel == "aocl_blis_blocked") {
-    // input tensor
-    auto input_dt = inputs["matmul_input"].get_data_type();
-    if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor, input_dt)
+    if (forced_kernel == "aocl_blis_blocked") {
+      // input tensor
+      auto input_dt = inputs["matmul_input"].get_data_type();
+      if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor, input_dt)
+          == status_t::failure) {
+        return status_t::failure;
+      }
+    }
+    //initialize aocl po
+    if (context.aocl_dlp_utils_ptr->alloc_post_op(context.get_post_op(),
+        optional_bias_tensor, *weight_tensor, inputs, output_tensor)
         == status_t::failure) {
       return status_t::failure;
     }
+    //set runtime post ops from inputs
+    return context.aocl_dlp_utils_ptr->set_runtime_post_op_buffer(inputs,
+           optional_bias_tensor ? true : false, output_tensor);
   }
-  //initialize aocl po
-  if (context.aocl_dlp_utils_ptr->alloc_post_op(context.get_post_op(),
-      optional_bias_tensor, *weight_tensor, inputs, output_tensor)
-      == status_t::failure) {
-    return status_t::failure;
-  }
-  //set runtime post ops from inputs
-  return context.aocl_dlp_utils_ptr->set_runtime_post_op_buffer(inputs,
-         optional_bias_tensor ? true : false, output_tensor);
+  return status_t::success;
 }
 
 std::string matmul_operator_t::op_create_info() {
@@ -538,7 +547,7 @@ status_t matmul_operator_t::kernel_factory() {
     if (forced_kernel == "reference") {
       kernel = std::shared_ptr<matmul_ref_kernel_t>(get_matmul_ref_kernel());
     }
-    else if (forced_kernel == "onednn") {
+    else if (forced_kernel == "onednn" || forced_kernel == "onednn_blocked") {
       kernel = std::shared_ptr<matmul_onednn_kernel_t>(get_matmul_onednn_kernel());
     }
     else {

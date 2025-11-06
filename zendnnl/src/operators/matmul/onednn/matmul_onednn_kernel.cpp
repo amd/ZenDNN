@@ -60,6 +60,7 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
 
   auto input_dim               = input_tensor.get_dim();
   auto weight_dim              = weight_tensor.get_dim();
+  auto dst_dim                 = output_tensor.get_dim();
 
   params.src.dtype             = input_tensor.get_data_type();
   params.weights.dtype         = weight_tensor.get_data_type();
@@ -109,6 +110,10 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     const_cast<float *>(&params.alpha));
     matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, alpha_mem});
   }
+
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t algo = matmul_config.get_algo();
+  params.algo = static_cast<matmul_algo_t>(algo);
 
   if (params.beta != 0.0f) {
     matmul_pops.append_sum(params.beta);
@@ -206,14 +211,19 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         auto buff_tensor    = buffer_it->second;
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
+        if (dst_dim == 3 && buff_dims.size() == 2) {
+          buff_dims.insert(buff_dims.begin(), 1);
+        }
         binary_tensor.dims.assign(buff_dims.begin(), buff_dims.end());
         binary_tensor.buffer     = buff_tensor.get_raw_handle_unsafe();
         binary_tensor.dtype      = buff_tensor.get_data_type();
         binary_tensor.format_tag = buff_dims.size() == 3 ? "abc" : "ab";
-        auto dnnl_buff_tensor    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
+                                              binary_tensor.buffer);
         matmul_pops.append_binary(dnnl::algorithm::binary_add,
-                                  dnnl_buff_tensor.get_desc());
-        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_tensor});
+                                  dnnl_buff_desc);
+        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
         break;
       }
       case post_op_type_t::binary_mul: {
@@ -227,14 +237,19 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         auto buff_tensor    = buffer_it->second;
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
+        if (dst_dim == 3 && buff_dims.size() == 2) {
+          buff_dims.insert(buff_dims.begin(), 1);
+        }
         binary_tensor.dims.assign(buff_dims.begin(), buff_dims.end());
         binary_tensor.buffer     = buff_tensor.get_raw_handle_unsafe();
         binary_tensor.dtype      = buff_tensor.get_data_type();
         binary_tensor.format_tag = buff_dims.size() == 3 ? "abc" : "ab";
-        auto dnnl_buff_tensor    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
+                                              binary_tensor.buffer);
         matmul_pops.append_binary(dnnl::algorithm::binary_mul,
-                                  dnnl_buff_tensor.get_desc());
-        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_tensor});
+                                  dnnl_buff_desc);
+        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
         break;
       }
       default:
@@ -257,36 +272,62 @@ void matmul_onednn_kernel_t::execute_matmul(const
     dnnl::primitive_attr &matmul_attr, dnnl::engine &eng) {
 
   dnnl::stream eng_stream(eng);
-  dnnl::memory  dnnl_input_tensor    = onednn_utils_t::to_dnnl_tensor(params.src,
-                                       eng);
-  dnnl::memory  dnnl_weight_tensor   = onednn_utils_t::to_dnnl_tensor(
-                                         params.weights, eng);
-  dnnl::memory  dnnl_output_tensor   = onednn_utils_t::to_dnnl_tensor(params.dst,
-                                       eng);
-  [[maybe_unused]] dnnl::memory  dnnl_bias_tensor  =
+  dnnl::memory::desc  dnnl_input_desc    = onednn_utils_t::to_dnnl_tensor(
+        params.src, eng);
+  dnnl::memory::desc  dnnl_weight_desc   = onednn_utils_t::to_dnnl_tensor(
+        params.weights, eng);
+  dnnl::memory::desc  dnnl_output_desc   = onednn_utils_t::to_dnnl_tensor(
+        params.dst, eng);
+
+  [[maybe_unused]] dnnl::memory::desc  dnnl_bias_desc  =
     onednn_utils_t::to_dnnl_tensor(params.bias, eng);
 
-  auto dnnl_input_desc  = dnnl_input_tensor.get_desc();
-  auto dnnl_output_desc = dnnl_output_tensor.get_desc();
-  auto dnnl_weight_desc = dnnl_weight_tensor.get_desc();
+  dnnl::memory        dnnl_input_tensor  = dnnl::memory(dnnl_input_desc, eng,
+      params.src.buffer);
+  dnnl::memory        dnnl_weight_tensor = dnnl::memory(dnnl_weight_desc, eng,
+      params.weights.buffer);
+  dnnl::memory        dnnl_output_tensor = dnnl::memory(dnnl_output_desc, eng,
+      params.dst.buffer);
+  dnnl::memory        dnnl_bias_tensor   = dnnl::memory(dnnl_bias_desc, eng,
+      params.bias.buffer);
 
+  [[maybe_unused]] dnnl::memory::desc  dnnl_blocked_weight_desc;
+  [[maybe_unused]] dnnl::memory        dnnl_blocked_weight_tensor;
+
+  bool is_reorder = !params.is_blocked && params.weights.dims.size() == 2 &&
+                    params.algo == matmul_algo_t::onednn_blocked;
+
+  if (is_reorder) {
+    // Create a mutable copy of the weights params to change the format tag
+    onednn_utils_t::onednn_tensor_params blocked_weights_params = params.weights;
+    blocked_weights_params.format_tag = "any";
+
+    dnnl_blocked_weight_desc   = onednn_utils_t::to_dnnl_tensor(
+                                   blocked_weights_params, eng);
+  }
   // Create primitive descriptor and primitive
   dnnl::matmul::primitive_desc matmul_pd;
   if (params.bias.buffer != nullptr) {
     matmul_pd = dnnl::matmul::primitive_desc(eng, dnnl_input_desc,
-                dnnl_weight_desc, dnnl_bias_tensor.get_desc(),
+                (is_reorder) ? dnnl_blocked_weight_desc :
+                dnnl_weight_desc, dnnl_bias_desc,
                 dnnl_output_desc, matmul_attr);
   }
   else {
     matmul_pd = dnnl::matmul::primitive_desc(eng, dnnl_input_desc,
+                (is_reorder) ? dnnl_blocked_weight_desc :
                 dnnl_weight_desc,
                 dnnl_output_desc, matmul_attr);
   }
+  if (is_reorder) {
+    dnnl_blocked_weight_tensor   = dnnl::memory(matmul_pd.weights_desc(), eng);
+    reorder(dnnl_weight_tensor, dnnl_blocked_weight_tensor).execute(eng_stream,
+        dnnl_weight_tensor, dnnl_blocked_weight_tensor);
+  }
   auto matmul_prim = dnnl::matmul(matmul_pd);
-
   // Set up arguments
   matmul_args.insert({DNNL_ARG_SRC, dnnl_input_tensor});
-  matmul_args.insert({DNNL_ARG_WEIGHTS, dnnl_weight_tensor});
+  matmul_args.insert({DNNL_ARG_WEIGHTS, (is_reorder) ? dnnl_blocked_weight_tensor : dnnl_weight_tensor});
   if (params.bias.buffer != nullptr) {
     matmul_args.insert({DNNL_ARG_BIAS, dnnl_bias_tensor});
   }

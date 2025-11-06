@@ -90,9 +90,8 @@ TEST_P(TestBatchMatmul,4D_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {GC,MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({dummy_group_count, batch_size, m, n},
                             data_type_t::f32);
@@ -119,9 +118,8 @@ TEST_P(TestBatchMatmul,OUTPUT_LESS_THAN_3D_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {M,N}
   auto output_tensor      = tensor_factory.zero_tensor({m, n},
                             data_type_t::f32);
@@ -149,9 +147,8 @@ TEST_P(TestBatchMatmul,OUTPUT_ONLY_3D_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -178,9 +175,8 @@ TEST_P(TestBatchMatmul,INPUT_LESS_THAN_2D_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -207,9 +203,8 @@ TEST_P(TestBatchMatmul,WEIGHT_LESS_THAN_2D_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -239,9 +234,8 @@ TEST_P(TestBatchMatmul,DIFFERENT_BATCH_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -270,9 +264,8 @@ TEST_P(TestBatchMatmul,DIFFERENT_ROW_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -301,9 +294,8 @@ TEST_P(TestBatchMatmul,DIFFERENT_COL_INVALID) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -330,9 +322,8 @@ TEST_P(TestBatchMatmul,F32_3D) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -371,9 +362,8 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -384,7 +374,8 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }
@@ -419,9 +410,8 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
                             data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -432,7 +422,8 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }
@@ -468,9 +459,8 @@ TEST_P(TestBatchMatmul,BF16_F32_3D) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -510,9 +500,8 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -523,7 +512,8 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }
@@ -559,9 +549,8 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::f32);
@@ -572,7 +561,8 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }
@@ -608,9 +598,8 @@ TEST_P(TestBatchMatmul,BF16_BF16_3D) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -650,9 +639,8 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -663,7 +651,8 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_WEI) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }
@@ -699,9 +688,8 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
                             2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   //Binary Tensor {}
   auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor(
-                              algo == matmul_algo_t::onednn ? std::vector<uint64_t> {batch_size, m, n} :
-                              std::vector<uint64_t> {m, n}, data_type_t::f32, 2.0) : tensor_t();
+                             is_binary_postop(po_arr[po_index].first)) ? tensor_factory.uniform_dist_tensor({m, n},
+                                 data_type_t::f32, 2.0) : tensor_t();
   //OUTPUT {MB,M,N}
   auto output_tensor      = tensor_factory.zero_tensor({batch_size, m, n},
                             data_type_t::bf16);
@@ -712,7 +700,8 @@ TEST_P(TestBatchMatmul,BF16_BF16_2D_INP) {
                             beta);
 
   bool is_test_failed = (status != status_t::success);
-  if (is_test_failed && algo == matmul_algo_t::onednn) {
+  if (is_test_failed && (algo == matmul_algo_t::onednn ||
+                         algo == matmul_algo_t::onednn_blocked)) {
     EXPECT_TRUE(is_test_failed);
     return;
   }

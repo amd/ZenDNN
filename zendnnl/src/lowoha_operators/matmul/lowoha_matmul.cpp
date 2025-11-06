@@ -16,11 +16,6 @@
 
 #include "lowoha_matmul_utils.hpp"
 
-#if ZENDNNL_DEPENDS_ONEDNN
-  #include "operators/matmul/onednn/matmul_onednn_kernel.hpp"
-  using namespace dnnl;
-#endif
-
 namespace zendnnl {
 namespace lowoha {
 
@@ -173,7 +168,7 @@ static inline void run_blis(char        layout,
 static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
     void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-    const void *bias) {
+    const void *bias, int weight_cache_type) {
 
   onednn_utils_t::onednn_matmul_params dnnl_params;
 
@@ -206,6 +201,8 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   dnnl_params.src.is_transposed = (transA == 'n') ? false : true;
   dnnl_params.weights.is_transposed = (transB == 'n') ? false : true;
+  dnnl_params.algo = lowoha_params.lowoha_algo;
+
   if (batch_count == 1) {
     dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
     dnnl_params.weights.format_tag = (transB == 'n') ? "ab" : "ba";
@@ -244,118 +241,156 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
   if (lowoha_params.postop_.size() > 0) {
     for (size_t po = 0; po < lowoha_params.postop_.size(); po++) {
       // float po_alpha = 0.0f, po_beta = 0.0f;
-      switch(lowoha_params.postop_[po].po_type) {
-        case post_op_type_t::elu: {
-          log_info("Adding ELU post-op");
-          lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ? lowoha_params.postop_[po].alpha : 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_elu, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
+      switch (lowoha_params.postop_[po].po_type) {
+      case post_op_type_t::elu: {
+        log_info("Adding ELU post-op");
+        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
+                                          lowoha_params.postop_[po].alpha : 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_elu,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::relu: {
+        log_info("Adding ReLU post-op");
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::leaky_relu: {
+        log_info("Adding Leaky ReLU post-op");
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::gelu_tanh: {
+        log_info("Adding GELU-Tanh post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_tanh,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::gelu_erf: {
+        log_info("Adding GELU-Erf post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::tanh: {
+        log_info("Adding Tanh post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_tanh,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::square: {
+        log_info("Adding Square post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_square,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::abs: {
+        log_info("Adding Abs post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_abs,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::sqrt: {
+        log_info("Adding Sqrt post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_sqrt,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::exp: {
+        log_info("Adding Exp post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_exp,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::log: {
+        log_info("Adding Log post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_log,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::sigmoid: {
+        log_info("Adding Sigmoid post-op");
+        lowoha_params.postop_[po].alpha = 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_logistic,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::swish: {
+        log_info("Adding Swish post-op");
+        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
+                                          lowoha_params.postop_[po].alpha : 1.0f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_swish,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::clip: {
+        log_info("Adding Clip post-op");
+        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
+                                          lowoha_params.postop_[po].alpha : -0.5f;
+        lowoha_params.postop_[po].beta = lowoha_params.postop_[po].beta ?
+                                         lowoha_params.postop_[po].beta : 0.5f;
+        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip,
+                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
+        break;
+      }
+      case post_op_type_t::binary_add: {
+        log_info("Adding Binary Add post-op");
+        std::vector<int64_t> binary_dims;
+        if (lowoha_params.postop_[po].dims.size() == 2 && batch_count > 1) {
+          binary_dims = {1, lowoha_params.postop_[po].dims[0], lowoha_params.postop_[po].dims[1]};
         }
-        case post_op_type_t::relu: {
-          log_info("Adding ReLU post-op");
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
+        else {
+          binary_dims = lowoha_params.postop_[po].dims;
         }
-        case post_op_type_t::leaky_relu: {
-          log_info("Adding Leaky ReLU post-op");
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::gelu_tanh: {
-          log_info("Adding GELU-Tanh post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_tanh, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::gelu_erf: {
-          log_info("Adding GELU-Erf post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::tanh: {
-          log_info("Adding Tanh post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_tanh, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::square: {
-          log_info("Adding Square post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_square, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::abs: {
-          log_info("Adding Abs post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_abs, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::sqrt: {
-          log_info("Adding Sqrt post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_sqrt, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::exp: {
-          log_info("Adding Exp post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_exp, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::log: {
-          log_info("Adding Log post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_log, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::sigmoid: {
-          log_info("Adding Sigmoid post-op");
-          lowoha_params.postop_[po].alpha = 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_logistic, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::swish: {
-          log_info("Adding Swish post-op");
-          lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ? lowoha_params.postop_[po].alpha : 1.0f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_swish, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::clip: {
-          log_info("Adding Clip post-op");
-          lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ? lowoha_params.postop_[po].alpha : -0.5f;
-          lowoha_params.postop_[po].beta = lowoha_params.postop_[po].beta ? lowoha_params.postop_[po].beta : 0.5f;
-          matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip, lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-          break;
-        }
-        case post_op_type_t::binary_add: {
-          log_info("Adding Binary Add post-op");
-          onednn_utils_t::onednn_tensor_params binary_tensor;
-          binary_tensor.dims = lowoha_params.postop_[po].dims;
-          binary_tensor.buffer = lowoha_params.postop_[po].buff;
-          binary_tensor.dtype = lowoha_params.postop_[po].dtype;
-          binary_tensor.format_tag = lowoha_params.postop_[po].dims.size() == 3 ? "abc" : "ab";
+        onednn_utils_t::onednn_tensor_params binary_tensor;
+        binary_tensor.dims = binary_dims;
+        binary_tensor.buffer = lowoha_params.postop_[po].buff;
+        binary_tensor.dtype = lowoha_params.postop_[po].dtype;
+        binary_tensor.format_tag = binary_dims.size() == 3 ? "abc" :
+                                   "ab";
 
-          auto dnnl_buff_tensor    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
-          matmul_pops.append_binary(dnnl::algorithm::binary_add, dnnl_buff_tensor.get_desc());
-          matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_tensor});
-          break;
+        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
+                                              binary_tensor.buffer);
+        matmul_pops.append_binary(dnnl::algorithm::binary_add, dnnl_buff_desc);
+        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
+        break;
+      }
+      case post_op_type_t::binary_mul: {
+        log_info("Adding Binary Mul post-op");
+        std::vector<int64_t> binary_dims;
+        if (lowoha_params.postop_[po].dims.size() == 2 && batch_count > 1) {
+          binary_dims = {1, lowoha_params.postop_[po].dims[0], lowoha_params.postop_[po].dims[1]};
         }
-        case post_op_type_t::binary_mul: {
-          log_info("Adding Binary Mul post-op");
-          onednn_utils_t::onednn_tensor_params binary_tensor;
-          binary_tensor.dims = lowoha_params.postop_[po].dims;
-          binary_tensor.buffer = lowoha_params.postop_[po].buff;
-          binary_tensor.dtype = lowoha_params.postop_[po].dtype;
-          binary_tensor.format_tag = lowoha_params.postop_[po].dims.size() == 3 ? "abc" : "ab";
+        else {
+          binary_dims = lowoha_params.postop_[po].dims;
+        }
+        onednn_utils_t::onednn_tensor_params binary_tensor;
+        binary_tensor.dims = binary_dims;
+        binary_tensor.buffer = lowoha_params.postop_[po].buff;
+        binary_tensor.dtype = lowoha_params.postop_[po].dtype;
+        binary_tensor.format_tag = binary_dims.size() == 3 ? "abc" :
+                                   "ab";
 
-          auto dnnl_buff_tensor    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
-          matmul_pops.append_binary(dnnl::algorithm::binary_mul, dnnl_buff_tensor.get_desc());
-          matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_tensor});
-          break;
-        }
-        default:
-          break;
+        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
+        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
+                                              binary_tensor.buffer);
+        matmul_pops.append_binary(dnnl::algorithm::binary_mul, dnnl_buff_desc);
+        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
+        break;
+      }
+      default:
+        break;
       }
       post_op_index++;
     }
@@ -363,6 +398,14 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   if (matmul_pops.len() > 0) {
     matmul_attr.set_post_ops(matmul_pops);
+  }
+
+  if (dnnl_params.weights.dims.size() == 2 &&
+      dnnl_params.algo == matmul_algo_t::onednn_blocked) {
+    Key_matmul key_(transB, K, N, ldb, dnnl_params.weights.buffer,
+                    static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
+    dnnl_params.is_blocked = reorderAndCacheWeights(key_, dnnl_params,
+                             weight_cache_type, eng);
   }
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
@@ -758,20 +801,21 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   if (apilog_info_enabled()) {
     apilog_info("LOWOHA matmul_direct: M=", M, ", N=", N, ", K=", K,
-                      ", alpha=", alpha, ", beta=", beta,
-                      ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
-                      ", transA=", (transA ? "true" : "false"),
-                      ", transB=", (transB ? "true" : "false"),
-                      ", input_dtype=", data_type_to_string(params.dtypes.src),
-                      ", output_dtype=", data_type_to_string(params.dtypes.dst),
-                      ", bias=", (bias != nullptr ? "true" : "false"),
-                      ", post_op=[", post_op_names_to_string(params), "]",
-                      ", post_op_dtype=[", ([&]() {
-                        std::string dtypes = post_op_data_types_to_string(params);
-                        return dtypes.empty() ? "none" : dtypes;
-                      })(), "]",
-                      ", Batch_A=", Batch_A, ", Batch_B=", Batch_B);
+                ", alpha=", alpha, ", beta=", beta,
+                ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
+                ", transA=", (transA ? "true" : "false"),
+                ", transB=", (transB ? "true" : "false"),
+                ", input_dtype=", data_type_to_string(params.dtypes.src),
+                ", output_dtype=", data_type_to_string(params.dtypes.dst),
+                ", bias=", (bias != nullptr ? "true" : "false"),
+                ", post_op=[", post_op_names_to_string(params), "]",
+    ", post_op_dtype=[", ([&]() {
+      std::string dtypes = post_op_data_types_to_string(params);
+      return dtypes.empty() ? "none" : dtypes;
+    })(), "]",
+    ", Batch_A=", Batch_A, ", Batch_B=", Batch_B);
   }
+
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
   char mem_format_b = params.mem_format_b;
@@ -794,19 +838,24 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
 
-  if (kernel == matmul_algo_t::onednn && (Batch_A != 1 && Batch_B != 1 &&
-                                          Batch_A != Batch_B)) {
+  // TODO: Fallback to reference/supported kernel
+  if ((kernel == matmul_algo_t::onednn ||
+       kernel == matmul_algo_t::onednn_blocked) && (Batch_A != 1 && Batch_B != 1 &&
+           Batch_A != Batch_B)) {
     log_error("OneDNN kernel is not supported for the given batch sizes");
     return status_t::failure;
   }
 
   if (kernel==matmul_algo_t::dynamic_dispatch) {
-    if (batch_count > 1)
+    if (batch_count > 1) {
       kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
-    else
+    }
+    else {
       kernel = matmul_algo_t::aocl_blis;
+    }
   }
 
+  params.lowoha_algo = kernel;
   // TODO: Add memory unreordering logic
   // Unreorder if onednn/ libxsmm is used
   // Implement the necessary logic for memory reordering here
@@ -814,10 +863,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   bool is_weight_blocked = false;
   void *reordered_mem = nullptr;
+  [[maybe_unused]] int32_t weight_cache_type = matmul_config.get_weight_cache();
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
       batch_count == 1) {
-    int32_t weight_cache_type = matmul_config.get_weight_cache();
     Key_matmul key_(transB, K, N, ldb, weight,
                     static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
     //call reorder and cache function
@@ -849,7 +898,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     kernel = matmul_algo_t::aocl_blis;
   }
   // TODO: Remove condition, when libxsmm supports bias and post_ops.
-  if (kernel == matmul_algo_t::libxsmm && (params.postop_.size() > 0 || bias != nullptr)) {
+  if (kernel == matmul_algo_t::libxsmm && (params.postop_.size() > 0 ||
+      bias != nullptr)) {
     kernel = matmul_algo_t::aocl_blis;
   }
 
@@ -870,11 +920,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
            kernel == matmul_algo_t::onednn_blocked) {
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
-    matmul_onednn_wrapper(trans_input, trans_weight,
-                          M, N, K, alpha,
-                          src, lda, weight, ldb,
-                          beta, dst, ldc,
-                          params, Batch_A, Batch_B, bias);
+    matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
+                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, weight_cache_type);
   }
 #endif
   else if (num_threads > 1 && batch_count > 1) {
@@ -1040,7 +1087,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose("LOWOHA matmul_direct completed: M=", M, ", N=", N, ", K=", K,
+    profilelog_verbose("LOWOHA matmul_direct completed: M=", M, ", N=", N, ", K=",
+                       K,
                        ", alpha=", alpha, ", beta=", beta,
                        ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
                        ", transA=", (transA ? "true" : "false"),
@@ -1049,14 +1097,14 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        ", output_dtype=", data_type_to_string(params.dtypes.dst),
                        ", bias=", (bias != nullptr ? "true" : "false"),
                        ", post_op=[", post_op_names_to_string(params), "]",
-                       ", post_op_dtype=[", ([&]() {
-                         std::string dtypes = post_op_data_types_to_string(params);
-                         return dtypes.empty() ? "none" : dtypes;
-                       })(), "]",
-                       ", Batch_A=", Batch_A, ", Batch_B=", Batch_B,
-                       ", kernel=", kernel_to_string(kernel),
-                       ", weight_address=", static_cast<const void *>(weight),
-                       ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+    ", post_op_dtype=[", ([&]() {
+      std::string dtypes = post_op_data_types_to_string(params);
+      return dtypes.empty() ? "none" : dtypes;
+    })(), "]",
+    ", Batch_A=", Batch_A, ", Batch_B=", Batch_B,
+    ", kernel=", kernel_to_string(kernel),
+    ", weight_address=", static_cast<const void *>(weight),
+    ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
   }
 
   return status_t::success;
