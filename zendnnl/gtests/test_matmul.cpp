@@ -51,7 +51,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     }
     use_LOWOHA = params.use_LOWOHA;
     algo = params.algo;
-    if (use_LOWOHA && (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::onednn)) {
+    if (use_LOWOHA && algo == matmul_algo_t::libxsmm) {
       po_index = 8;
     }
     log_info("m: ", m, " k: ", k, " n: ", n, " TransA: ", transA, " TransB: ", transB,

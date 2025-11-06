@@ -733,6 +733,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               po_arr[index].second == post_op_type_t::binary_mul) {
             postop_item.buff = binary_tensor.get_raw_handle_unsafe();
             postop_item.dtype = binary_tensor.get_data_type();
+            auto binary_tensor_dims = binary_tensor.get_size();
+            postop_item.dims.assign(binary_tensor_dims.begin(), binary_tensor_dims.end());
           }
           else {
             postop_item.buff = nullptr; // For element-wise operations
