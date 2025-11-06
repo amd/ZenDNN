@@ -35,7 +35,6 @@
 namespace zendnnl {
 namespace lowoha {
 
-using namespace zendnnl::common;
 using namespace zendnnl::ops;
 
 struct data_types {

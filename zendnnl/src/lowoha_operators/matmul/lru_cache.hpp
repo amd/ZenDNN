@@ -25,7 +25,8 @@
 #include <stdexcept>
 #include <algorithm>
 namespace zendnnl {
-namespace common {
+namespace lowoha {
+
 template <typename KEY_T, typename VALUE_T>
 class lru_cache_t {
   using lru_key_t = KEY_T;
@@ -188,7 +189,7 @@ lru_cache_t<KEY_T, VALUE_T>::get(
 
 namespace interface {
 template<typename KEY_T, typename VALUE_T>
-using lru_cache_t = zendnnl::common::lru_cache_t<KEY_T, VALUE_T>;
+using lru_cache_t = zendnnl::lowoha::lru_cache_t<KEY_T, VALUE_T>;
 } //export
 
 #endif // ZENDNN_LRU_CACHE_HPP
