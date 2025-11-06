@@ -290,7 +290,6 @@ static inline int run_libxsmm(char       transA,
 }
 #endif
 
-#if ZENDNNL_DEPENDS_LIBXSMM
 static inline bool can_use_libxsmm(char        transA,
                                    char        transB,
                                    int         M,
@@ -304,6 +303,7 @@ static inline bool can_use_libxsmm(char        transA,
   // This heuristic prevents LIBXSMM from being used for matrices that are either:
   // 1. Too tall (M > 512) - LIBXSMM throws Segfault on very tall matrices
   // 2. Too large in terms of element count - when weight matrix B[K×N] > 1.0 Millions elements
+#if ZENDNNL_DEPENDS_LIBXSMM
   float Max_Matrix_B_Elements = static_cast<float>(K * N) / 1000000.0f;
   if ((Max_Matrix_B_Elements > 1.0f) || (M > 512 &&
                                          Max_Matrix_B_Elements > 1.0f)) {
@@ -331,8 +331,9 @@ static inline bool can_use_libxsmm(char        transA,
     (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16);
 
   return dtype_ok;
-}
 #endif
+  return false;
+}
 
 void matmul_kernel_wrapper(char layout, char transA, char transB,
                            int M, int N, int K,

@@ -67,10 +67,6 @@ function parse_args() {
                 ZENDNNL_DEPENDS_LIBXSMM=1
                 shift
 		;;
-        --disable-libxsmm )
-                ZENDNNL_DEPENDS_LIBXSMM=0
-                shift
-        ;;
         --enable-parlooper )
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
@@ -136,7 +132,6 @@ function parse_args() {
                 echo " --local-onednn     : use local onednn."
                 echo " --local-libxsmm    : use local libxsmm."
                 echo " --local-parlooper  : use local parlooper."
-                echo " --disable-libxsmm  : disable libxsmm."
                 echo " --nproc            : number of processes for parallel build."
                 echo
                 echo " examples :"
@@ -167,7 +162,7 @@ ZENDNNL_BENCHDNN=0
 ZENDNNL_DOXYGEN=0
 ZENDNNL_NODEPS=0
 ZENDNNL_DEPENDS_ONEDNN=0
-ZENDNNL_DEPENDS_LIBXSMM=1
+ZENDNNL_DEPENDS_LIBXSMM=0
 ZENDNNL_DEPENDS_PARLOOPER=0
 ZENDNNL_DEPENDS_AMDBLIS=0
 ZENDNNL_LOCAL_AMDBLIS=0
