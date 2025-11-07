@@ -799,7 +799,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     return status_t::failure;
   }
 
-  if (kernel==matmul_algo_t::dynamic_dispatch) {
+  if (kernel==matmul_algo_t::dynamic_dispatch && batch_count > 1) {
     kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
   }
 
