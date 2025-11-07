@@ -123,8 +123,8 @@ struct lowoha_params {
   data_types dtypes;
   std::vector<postop> postop_;
   lowoha_quantization_params_t quant_params;
-  const char mem_format_a;
-  const char mem_format_b;
+  char mem_format_a;
+  char mem_format_b;
   matmul_algo_t lowoha_algo;
 
   /**
