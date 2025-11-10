@@ -21,122 +21,40 @@
 #include <cmath>
 #include <cstring>
 
+#include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "operators/matmul/matmul_context.hpp"
-#include "memory/memory_utils.hpp"
-#include "lowoha_operators/matmul/lru_cache.hpp"
-#include "lowoha_operators/matmul/zendnnl_key.hpp"
-
-#if ZENDNNL_DEPENDS_LIBXSMM
-  #include "libxsmm.h"
-#endif
 
 #define M_FLOPS 6.0
 
 namespace zendnnl {
 namespace lowoha {
 
-using namespace zendnnl::ops;
-
-struct data_types {
-  data_type_t src = data_type_t::none;
-  data_type_t wei = data_type_t::none;
-  data_type_t dst = data_type_t::none;
-  data_type_t bias = data_type_t::none;
-  data_type_t compute = data_type_t::none;
-};
-
-struct postop {
-  post_op_type_t po_type;
-  void *buff;
-  data_type_t dtype;
-  std::vector<int64_t> dims;
-  float alpha;
-  float beta;
-
-  /**
-  * @brief Default constructor for `postop`.
-  *
-  * Initializes the post-op type to `none`, buffer to `nullptr`,
-  * data type to `none`, creates an empty dims vector, alpha to `0.0f`,
-  * and beta to `0.0f`.
-  */
-  postop() : po_type(post_op_type_t::none), buff(nullptr),
-    dtype(data_type_t::none), dims(), alpha(0.0f), beta(0.0f) {}
-};
-
 /**
- * @struct lowoha_quantization_params_t
- * @brief A structure to encapsulate scale and zero-point information for quantized operations.
+ * @brief Execute matrix multiplication with automatic kernel selection and optimization
  *
- * This structure is used to store the scale and zero-point params for both the source
- * and weight tensors in quantized operations. It contains an inner structure `quant_t` to
- * represent individual scale or zero-point data, and the outer structure aggregates these
- * for the source and weight tensors.
+ * This function performs C = alpha * op(A) * op(B) + beta * C + fused post-ops.
  *
- * @details
- * The `lowoha_quantization_params_t` structure is designed to handle the following:
- * - Scale values for the source and weight tensors.
- * - Zero-point values for the source and weight tensors.
- * - Data type and size information for each scale and zero-point.
+ * @param layout    Memory layout ('r' for row-major, 'c' for column-major)
+ * @param transA    Whether to transpose matrix A
+ * @param transB    Whether to transpose matrix B
+ * @param M         Number of rows in A and C
+ * @param N         Number of columns in B and C
+ * @param K         Number of columns in A and rows in B
+ * @param alpha     Scaling factor for A*B
+ * @param src       Pointer to matrix A data
+ * @param lda       Leading dimension of A
+ * @param weight    Pointer to matrix B data
+ * @param ldb       Leading dimension of B
+ * @param bias      Optional bias vector (can be nullptr)
+ * @param beta      Scaling factor for existing C values
+ * @param dst       Pointer to matrix C data
+ * @param ldc       Leading dimension of C
+ * @param params    Additional parameters including post-ops and data types
+ * @param Batch_A   Batch size for matrix A (default: 1)
+ * @param Batch_B   Batch size for matrix B (default: 1)
  *
- * The structure is initialized with default values to ensure safe usage.
+ * @return status_t::success on successful execution, status_t::failure otherwise
  */
-struct lowoha_quantization_params_t {
-  /**
-   * @struct quant_t
-   * @brief A nested structure to represent individual scale or zero-point data.
-   *
-   * This inner structure contains a pointer to the data buffer, the data type,
-   * and the size of the buffer. It is used to represent scale or zero-point
-   * information for a single tensor.
-   */
-  struct quant_t {
-    const void *buff;    /**< Pointer to the buffer holding scale or
-                              zero-point data. */
-    data_type_t dt;      /**< Data type of the buffer (e.g., float, int32_t). */
-    size_t size;         /**< Size of the buffer in bytes. */
-    /**
-     * @brief Default constructor for `quant_t`.
-     *
-     * Initializes the buffer pointer to `nullptr`, the data type to `none`,
-     * and the size to `0`.
-     */
-    quant_t() : buff(nullptr), dt(data_type_t::none), size(0) {}
-  };
-  quant_t src_scale;  /**< Scale information for the source tensor. */
-  quant_t wei_scale;  /**< Scale information for the weight tensor. */
-  quant_t dst_scale;  /**< Scale information for the destination tensor. */
-  quant_t src_zp;     /**< Zero-point information for the source tensor. */
-  quant_t wei_zp;     /**< Zero-point information for the weight tensor. */
-  quant_t dst_zp;     /**< Zero-point information for the destination tensor. */
-  /**
-   * @brief Default constructor for `lowoha_quantization_params_t`.
-   *
-   * Initializes all members (`src_scale`, `wei_scale`, `dst_scale`, `src_zp`, `wei_zp`, `dst_zp`)
-   * using the default constructor of `quant_t`.
-   */
-  lowoha_quantization_params_t() : src_scale(), wei_scale(), dst_scale(),
-    src_zp(), wei_zp(), dst_zp() {}
-};
-
-struct lowoha_params {
-  data_types dtypes;
-  std::vector<postop> postop_;
-  lowoha_quantization_params_t quant_params;
-  char mem_format_a;
-  char mem_format_b;
-  matmul_algo_t lowoha_algo;
-
-  /**
-   * @brief Default constructor for `lowoha_params`.
-   *
-   * Initializes all members using their default constructors.
-   */
-  lowoha_params()
-    : dtypes(), postop_(), quant_params(), mem_format_a('n'), mem_format_b('n'),
-      lowoha_algo(matmul_algo_t::none) {}
-};
-
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,

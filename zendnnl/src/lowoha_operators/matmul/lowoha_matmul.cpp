@@ -15,492 +15,14 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include "lowoha_operators/matmul/libxsmm_kernel.hpp"
+#include "lowoha_operators/matmul/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/onednn_kernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 
 using namespace zendnnl::ops;
-
-inline int64_t divup(int64_t x, int64_t y) {
-  return (x + y - 1) / y;
-}
-
-template <class F>
-inline void zendnnl_parallel_for(
-  const int64_t begin,
-  const int64_t end,
-  const int64_t grain_size,
-  const F &f) {
-
-  if (begin >= end) {
-    return;
-  }
-  std::atomic_flag err_flag = ATOMIC_FLAG_INIT;
-  std::exception_ptr eptr;
-  // choose number of tasks based on grain size and number of threads
-  int64_t num_threads = omp_in_parallel() ? 1 : omp_get_max_threads();
-  if (grain_size > 0) {
-    num_threads = std::min(num_threads, divup((end - begin), grain_size));
-  }
-
-  #pragma omp parallel num_threads(num_threads)
-  {
-    int64_t num_threads = omp_get_num_threads();
-    int64_t tid = omp_get_thread_num();
-    int64_t chunk_size = divup((end - begin), num_threads);
-    int64_t begin_tid = begin + tid * chunk_size;
-    if (begin_tid < end) {
-      try {
-        f(begin_tid, std::min(end, chunk_size + begin_tid));
-      }
-      catch (...) {
-        if (!err_flag.test_and_set()) {
-          eptr = std::current_exception();
-        }
-      }
-    }
-  }
-  if (eptr) {
-    std::rethrow_exception(eptr);
-  }
-}
-
-#if ZENDNNL_DEPENDS_LIBXSMM
-template<typename TA, typename TB, typename TC>
-int libxsmm_gemm(const TA *A, const TB *B, TC *C,
-                 int M, int N, int K,
-                 int lda, int ldb, int ldc,
-                 char transA, char transB,
-                 libxsmm_datatype a_type,
-                 libxsmm_datatype b_type,
-                 libxsmm_datatype c_type,
-                 libxsmm_datatype comp_type) {
-  libxsmm_bitfield l_flags = 0;
-  if (transA == 'T' || transA == 't') {
-    l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
-  }
-  if (transB == 'T' || transB == 't') {
-    l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
-  }
-  l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
-
-  libxsmm_gemm_shape shape{};
-  shape.m   = N;
-  shape.n   = M;
-  shape.k   = K;
-  shape.lda = ldb;
-  shape.ldb = lda;
-  shape.ldc = ldc;
-  shape.a_in_type = a_type;
-  shape.b_in_type = b_type;
-  shape.out_type  = c_type;
-  shape.comp_type = comp_type;
-
-  libxsmm_gemm_batch_reduce_config brcfg{};
-  brcfg.br_type = LIBXSMM_GEMM_BATCH_REDUCE_NONE;
-
-  libxsmm_gemmfunction ker =
-    libxsmm_dispatch_brgemm(shape, l_flags, 0, brcfg);
-
-  if (!ker) {
-    return 0;
-  }
-
-  libxsmm_gemm_param p{};
-  p.a.primary = const_cast<TB *>(B);
-  p.b.primary = const_cast<TA *>(A);
-  p.c.primary = C;
-
-  ker(&p);
-  return 1;
-}
-#endif
-
-static inline void run_blis(char        layout,
-                            char        transA,
-                            char        transB,
-                            int         M, int N, int K,
-                            float       alpha, float beta,
-                            int         lda, int ldb, int ldc,
-                            char        mem_format_a,
-                            char        mem_format_b,
-                            const void *A, const void *B, void *C,
-                            const data_types &dtypes,
-                            const lowoha_params &lowoha_param, const void *bias) {
-
-  // Create aocl_post_op structure for bias and post-ops
-#if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N);
-#else
-  aocl_post_op *aocl_po = create_blis_post_op(lowoha_param, bias, dtypes, N);
-#endif
-
-  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    aocl_gemm_f32f32f32of32(layout,transA,transB,M,N,K,alpha,
-                            static_cast<const float *>(A),lda,mem_format_a,
-                            static_cast<const float *>(B),ldb,mem_format_b,
-                            beta,static_cast<float *>(C),ldc,aocl_po);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    aocl_gemm_bf16bf16f32obf16(layout,transA,transB,M,N,K,alpha,
-                               static_cast<const int16_t *>(A),lda,mem_format_a,
-                               static_cast<const int16_t *>(B),ldb,mem_format_b,
-                               beta,static_cast<int16_t *>(C),ldc,aocl_po);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    aocl_gemm_bf16bf16f32of32(layout,transA,transB,M,N,K,alpha,
-                              static_cast<const int16_t *>(A),lda,mem_format_a,
-                              static_cast<const int16_t *>(B),ldb,mem_format_b,
-                              beta,static_cast<float *>(C),ldc,aocl_po);
-  }
-  else {
-    log_info("Data type not supported");
-  }
-  // Clean up aocl_post_op structure
-#if ZENDNNL_DEPENDS_AOCLDLP
-  cleanup_dlp_post_op(aocl_po, lowoha_param);
-#else
-  cleanup_blis_post_op(aocl_po, lowoha_param);
-#endif
-}
-
-#if ZENDNNL_DEPENDS_ONEDNN
-static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
-    int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-    void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-    const void *bias, int weight_cache_type) {
-
-  onednn_utils_t::onednn_matmul_params dnnl_params;
-
-  dnnl_params.src.buffer = const_cast<void *>(A);
-  dnnl_params.weights.buffer = const_cast<void *>(B);
-  dnnl_params.dst.buffer = C;
-
-  dnnl_params.src.dtype = lowoha_params.dtypes.src;
-  dnnl_params.weights.dtype = lowoha_params.dtypes.wei;
-  dnnl_params.dst.dtype = lowoha_params.dtypes.dst;
-
-  if (bias != nullptr)  {
-    dnnl_params.bias.buffer = const_cast<void *>(bias);
-    dnnl_params.bias.dtype = lowoha_params.dtypes.bias;
-  }
-
-  int batch_count = std::max(batchA, batchB);
-  if (batch_count == 1) {
-    dnnl_params.src.dims = {M, K};
-    dnnl_params.weights.dims = {K, N};
-    dnnl_params.dst.dims = {M, N};
-    if (bias != nullptr) dnnl_params.bias.dims = {1, N};
-  }
-  else {
-    dnnl_params.src.dims = {batchA, M, K};
-    dnnl_params.weights.dims = {batchB, K, N};
-    dnnl_params.dst.dims = {batch_count, M, N};
-    if (bias != nullptr) dnnl_params.bias.dims = {1, 1, N};
-  }
-
-  dnnl_params.src.is_transposed = (transA == 'n') ? false : true;
-  dnnl_params.weights.is_transposed = (transB == 'n') ? false : true;
-  dnnl_params.algo = lowoha_params.lowoha_algo;
-
-  if (batch_count == 1) {
-    dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
-    dnnl_params.weights.format_tag = (transB == 'n') ? "ab" : "ba";
-    dnnl_params.dst.format_tag = "ab";
-    if (bias != nullptr) {
-      dnnl_params.bias.format_tag = "ab";
-    }
-  }
-  else {
-    dnnl_params.src.format_tag = (transA == 'n') ? "abc" : "acb";
-    dnnl_params.weights.format_tag = (transB == 'n') ? "abc" : "acb";
-    dnnl_params.dst.format_tag = "abc";
-    if (bias != nullptr) {
-      dnnl_params.bias.format_tag = "abc";
-    }
-  }
-
-  dnnl::engine eng(dnnl::engine::kind::cpu, 0);
-  std::unordered_map<int, dnnl::memory> matmul_args;
-  dnnl::primitive_attr matmul_attr;
-  dnnl::post_ops matmul_pops;
-  int post_op_index = 0;
-
-  if (alpha != 1.0f) {
-    matmul_attr.set_scales_mask(DNNL_ARG_SRC, 0);
-    auto alpha_mem = dnnl::memory({{1}, dnnl::memory::data_type::f32, {1}}, eng,
-    const_cast<float *>(&alpha));
-    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, alpha_mem});
-  }
-
-  if (beta != 0.0f) {
-    matmul_pops.append_sum(beta);
-    post_op_index++;
-  }
-
-  if (lowoha_params.postop_.size() > 0) {
-    for (size_t po = 0; po < lowoha_params.postop_.size(); po++) {
-      // float po_alpha = 0.0f, po_beta = 0.0f;
-      switch (lowoha_params.postop_[po].po_type) {
-      case post_op_type_t::elu: {
-        log_info("Adding ELU post-op");
-        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
-                                          lowoha_params.postop_[po].alpha : 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_elu,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::relu: {
-        log_info("Adding ReLU post-op");
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::leaky_relu: {
-        log_info("Adding Leaky ReLU post-op");
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_relu,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::gelu_tanh: {
-        log_info("Adding GELU-Tanh post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_tanh,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::gelu_erf: {
-        log_info("Adding GELU-Erf post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::tanh: {
-        log_info("Adding Tanh post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_tanh,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::square: {
-        log_info("Adding Square post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_square,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::abs: {
-        log_info("Adding Abs post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_abs,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::sqrt: {
-        log_info("Adding Sqrt post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_sqrt,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::exp: {
-        log_info("Adding Exp post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_exp,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::log: {
-        log_info("Adding Log post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_log,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::sigmoid: {
-        log_info("Adding Sigmoid post-op");
-        lowoha_params.postop_[po].alpha = 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_logistic,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::swish: {
-        log_info("Adding Swish post-op");
-        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
-                                          lowoha_params.postop_[po].alpha : 1.0f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_swish,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::clip: {
-        log_info("Adding Clip post-op");
-        lowoha_params.postop_[po].alpha = lowoha_params.postop_[po].alpha ?
-                                          lowoha_params.postop_[po].alpha : -0.5f;
-        lowoha_params.postop_[po].beta = lowoha_params.postop_[po].beta ?
-                                         lowoha_params.postop_[po].beta : 0.5f;
-        matmul_pops.append_eltwise(dnnl::algorithm::eltwise_clip,
-                                   lowoha_params.postop_[po].alpha, lowoha_params.postop_[po].beta);
-        break;
-      }
-      case post_op_type_t::binary_add: {
-        log_info("Adding Binary Add post-op");
-        std::vector<int64_t> binary_dims;
-        if (lowoha_params.postop_[po].dims.size() == 2 && batch_count > 1) {
-          binary_dims = {1, lowoha_params.postop_[po].dims[0], lowoha_params.postop_[po].dims[1]};
-        }
-        else {
-          binary_dims = lowoha_params.postop_[po].dims;
-        }
-        onednn_utils_t::onednn_tensor_params binary_tensor;
-        binary_tensor.dims = binary_dims;
-        binary_tensor.buffer = lowoha_params.postop_[po].buff;
-        binary_tensor.dtype = lowoha_params.postop_[po].dtype;
-        binary_tensor.format_tag = binary_dims.size() == 3 ? "abc" :
-                                   "ab";
-
-        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
-        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
-                                              binary_tensor.buffer);
-        matmul_pops.append_binary(dnnl::algorithm::binary_add, dnnl_buff_desc);
-        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
-        break;
-      }
-      case post_op_type_t::binary_mul: {
-        log_info("Adding Binary Mul post-op");
-        std::vector<int64_t> binary_dims;
-        if (lowoha_params.postop_[po].dims.size() == 2 && batch_count > 1) {
-          binary_dims = {1, lowoha_params.postop_[po].dims[0], lowoha_params.postop_[po].dims[1]};
-        }
-        else {
-          binary_dims = lowoha_params.postop_[po].dims;
-        }
-        onednn_utils_t::onednn_tensor_params binary_tensor;
-        binary_tensor.dims = binary_dims;
-        binary_tensor.buffer = lowoha_params.postop_[po].buff;
-        binary_tensor.dtype = lowoha_params.postop_[po].dtype;
-        binary_tensor.format_tag = binary_dims.size() == 3 ? "abc" :
-                                   "ab";
-
-        auto dnnl_buff_desc    = onednn_utils_t::to_dnnl_tensor(binary_tensor, eng);
-        auto dnnl_buff_mem     = dnnl::memory(dnnl_buff_desc, eng,
-                                              binary_tensor.buffer);
-        matmul_pops.append_binary(dnnl::algorithm::binary_mul, dnnl_buff_desc);
-        matmul_args.insert({DNNL_ARG_ATTR_MULTIPLE_POST_OP(post_op_index) | DNNL_ARG_SRC_1, dnnl_buff_mem});
-        break;
-      }
-      default:
-        break;
-      }
-      post_op_index++;
-    }
-  }
-
-  if (matmul_pops.len() > 0) {
-    matmul_attr.set_post_ops(matmul_pops);
-  }
-
-  bool is_blocked = dnnl_params.weights.dims.size() == 2 &&
-                    dnnl_params.algo == matmul_algo_t::onednn_blocked;
-  if (is_blocked) {
-    Key_matmul key_(transB, K, N, ldb, dnnl_params.weights.buffer,
-                    static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
-    dnnl_params.is_blocked = reorderAndCacheWeights(key_, dnnl_params,
-                             weight_cache_type, eng);
-  }
-
-  matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
-                                         eng);
-  if (weight_cache_type == 0 && is_blocked) {
-    free(dnnl_params.weights.buffer);
-  }
-}
-#endif
-
-#if ZENDNNL_DEPENDS_LIBXSMM
-static inline int run_libxsmm(char       transA,
-                              char       transB,
-                              int        M, int N, int K,
-                              int        lda, int ldb, int ldc,
-                              const void *A, const void *B, void *C,
-                              const data_types &dtypes) {
-  int kernel_status = 0;
-  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    kernel_status = libxsmm_gemm<float,float,float>(
-                      static_cast<const float *>(A),
-                      static_cast<const float *>(B),
-                      static_cast<float *>(C),
-                      M,N,K, lda,ldb,ldc, transA,transB,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
-                      reinterpret_cast<const libxsmm_bfloat16 *>(A),
-                      reinterpret_cast<const libxsmm_bfloat16 *>(B),
-                      static_cast<float *>(C),
-                      M,N,K, lda,ldb,ldc, transA,transB,
-                      LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    kernel_status =
-      libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
-        reinterpret_cast<const libxsmm_bfloat16 *>(A),
-        reinterpret_cast<const libxsmm_bfloat16 *>(B),
-        reinterpret_cast<libxsmm_bfloat16 *>(C),
-        M,N,K, lda,ldb,ldc, transA,transB,
-        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
-  }
-  return kernel_status;
-}
-#endif
-
-static inline bool can_use_libxsmm(char        transA,
-                                   char        transB,
-                                   int         M,
-                                   int         N,
-                                   int         K,
-                                   float       alpha,
-                                   float       beta,
-                                   const data_types &dtypes) {
-
-  // Check if the matrix dimensions are within acceptable limits for LIBXSMM kernel selection
-  // This heuristic prevents LIBXSMM from being used for matrices that are either:
-  // 1. Too tall (M > 512) - LIBXSMM throws Segfault on very tall matrices
-  // 2. Too large in terms of element count - when weight matrix B[K×N] > 1.0 Millions elements
-#if ZENDNNL_DEPENDS_LIBXSMM
-  float Max_Matrix_B_Elements = static_cast<float>(K * N) / 1000000.0f;
-  if ((Max_Matrix_B_Elements > 1.0f) || (M > 512 &&
-                                         Max_Matrix_B_Elements > 1.0f)) {
-    return false;  // Fallback to BLIS
-  }
-
-  const bool scalars_ok = (alpha == 1.0f && beta == 0.0f);
-  if (!scalars_ok) {
-    return false;
-  }
-
-  //LIBXSMM throws segfault for transA='t' cases
-  if (transA == 't') {
-    return false;
-  }
-
-  if (transA == 't' && transB == 'n' &&
-      dtypes.src == data_type_t::bf16 && (K & 1)) {
-    return false;
-  }
-
-  const bool dtype_ok =
-    (dtypes.src == data_type_t::f32  && dtypes.dst == data_type_t::f32) ||
-    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) ||
-    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16);
-
-  return dtype_ok;
-#endif
-  return false;
-}
 
 void matmul_kernel_wrapper(char layout, char transA, char transB,
                            int M, int N, int K,
@@ -540,223 +62,6 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 //   }
 }
 
-void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
-                               int N,
-                               int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                               void *C, int ldc, data_types &dtypes, int batch_count,
-                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride,
-                               const lowoha_params &lowoha_param, const void *bias) {
-
-#if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
-                                   N);
-  md_t m_ = M;
-  md_t n_ = N;
-  md_t k_ = K;
-  md_t lda_ = lda;
-  md_t ldb_ = ldb;
-  md_t ldc_ = ldc;
-  md_t group_size = batch_count;
-#else
-  aocl_post_op *metadata_array = create_blis_post_op(lowoha_param, bias, dtypes,
-                                 N);
-  dim_t m_ = M;
-  dim_t n_ = N;
-  dim_t k_ = K;
-  dim_t lda_ = lda;
-  dim_t ldb_ = ldb;
-  dim_t ldc_ = ldc;
-  dim_t group_size = batch_count;
-#endif
-
-  // Prepare pointer arrays for matrices
-  std::vector<const void *> a_ptrs(batch_count);
-  std::vector<const void *> b_ptrs(batch_count);
-  std::vector<void *> c_ptrs(batch_count);
-
-  // Set up pointers for each batch
-  #pragma omp parallel for
-  for (int b = 0; b < batch_count; ++b) {
-    a_ptrs[b] = static_cast<const uint8_t *>(A) + b * src_stride;
-    b_ptrs[b] = static_cast<const uint8_t *>(B) + b * weight_stride;
-    c_ptrs[b] = static_cast<uint8_t *>(C) + b * dst_stride;
-  }
-
-  // Call appropriate batch GEMM based on data types
-  if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_f32f32f32of32");
-    aocl_batch_gemm_f32f32f32of32(
-      &layout, &transA, &transB,
-      &m_, &n_, &k_,
-      &alpha,
-      reinterpret_cast<const float **>(a_ptrs.data()), &lda_,
-      reinterpret_cast<const float **>(b_ptrs.data()), &ldb_,
-      &beta,
-      reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
-      1, // single group
-      &group_size,
-      &mem_format_a, &mem_format_b,
-      &metadata_array);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32of32");
-    aocl_batch_gemm_bf16bf16f32of32(
-      &layout, &transA, &transB,
-      &m_, &n_, &k_,
-      &alpha,
-      reinterpret_cast<const bfloat16 **>(a_ptrs.data()), &lda_,
-      reinterpret_cast<const bfloat16 **>(b_ptrs.data()), &ldb_,
-      &beta,
-      reinterpret_cast<float **>(c_ptrs.data()), &ldc_,
-      1, // single group
-      &group_size,
-      &mem_format_a, &mem_format_b,
-      &metadata_array);
-  }
-  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32obf16");
-    aocl_batch_gemm_bf16bf16f32obf16(
-      &layout, &transA, &transB,
-      &m_, &n_, &k_,
-      &alpha,
-      reinterpret_cast<const bfloat16 **>(a_ptrs.data()), &lda_,
-      reinterpret_cast<const bfloat16 **>(b_ptrs.data()), &ldb_,
-      &beta,
-      reinterpret_cast<bfloat16 **>(c_ptrs.data()), &ldc_,
-      1, // single group
-      &group_size,
-      &mem_format_a, &mem_format_b,
-      &metadata_array);
-  }
-  else {
-    log_info("Unsupported data type combination for batch GEMM, falling back to native");
-    // Fall back to native implementation for each batch
-    for (int b = 0; b < batch_count; ++b) {
-      matmul_kernel_wrapper(layout, transA, transB, M, N, K, alpha,
-                            a_ptrs[b], lda, b_ptrs[b], ldb, beta, c_ptrs[b], ldc,
-                            dtypes, matmul_algo_t::aocl_blis, mem_format_a, mem_format_b, lowoha_param,
-                            bias);
-    }
-  }
-
-  // Clean up aocl_post_op structure
-#if ZENDNNL_DEPENDS_AOCLDLP
-  cleanup_dlp_post_op(metadata_array, lowoha_param);
-#else
-  cleanup_blis_post_op(metadata_array, lowoha_param);
-#endif
-}
-
-inline const void *get_matrix_block(const void *base, int row_start,
-                                    int col_start,
-                                    int lda, bool trans, size_t type_size) {
-  if (trans) {
-    // Accessing column-major layout when transposed
-    return static_cast<const uint8_t *>(base) + (col_start * lda + row_start) *
-           type_size;
-  }
-  else {
-    return static_cast<const uint8_t *>(base) + (row_start * lda + col_start) *
-           type_size;
-  }
-}
-
-inline void *get_output_block(void *base, int row_start, int col_start,
-                              int ldc, size_t type_size) {
-  return static_cast<uint8_t *>(base) + (row_start * ldc + col_start) * type_size;
-}
-
-inline int get_batch_index(int b, int batch_size) {
-  return (batch_size == 1) ? 0 : (b % batch_size);
-}
-
-inline bool may_i_use_blis_partition(int batch_count, int M, int N,
-                                     int num_threads, data_type_t dtype) {
-
-  // Set thresholds based on thread count and data type (powers of 2 only)
-  int M_threshold = 0, N_threshold = 0, work_threshold = 0;
-
-  /*BLIS performs better when M and N are large and thread count is moderate to high.
-   It uses internal tiling and cache-aware scheduling,
-   where each 8-core cluster shares a 32MB L3 cache. Manual OpenMP partitioning
-   can disrupt BLIS's optimized workload distribution, leading to contention.
-   Delegating to BLIS ensures better throughput and efficient hardware utilization.*/
-  // TODO: Tune it more based on heuristics (threshold relies on problem size and data type)
-  if (num_threads <= 16) {
-    M_threshold    = 512;
-    N_threshold    = 256;
-    work_threshold = 128;
-  }
-  else if (num_threads <= 32) {
-    M_threshold    = 1024;
-    N_threshold    = 512;
-    work_threshold = 256;
-  }
-  else {
-    M_threshold    = 2048;
-    N_threshold    = 1024;
-    work_threshold = 512;
-  }
-  // Estimate effective workload per thread
-  int work_per_thread = (batch_count * M) / num_threads;
-
-  // Allow BLIS if batch size is small and M is reasonably large
-  bool small_batch_override = (batch_count <= 8 && M >= 1024);
-
-  return ((M >= M_threshold &&
-           N >= N_threshold &&
-           work_per_thread >= work_threshold)
-          || small_batch_override);
-}
-
-// TODO: Further tune the heuristics based on num_threads and other params
-inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
-    int num_threads) {
-  if (BS <= 512) {
-    if (N <= 512) {
-      if (N <= 48) {
-        if (M <= 196) {
-          return matmul_algo_t::libxsmm;
-        }
-        else {
-          return matmul_algo_t::aocl_blis;
-        }
-      }
-      else {
-        return matmul_algo_t::libxsmm;
-      }
-    }
-    else {
-      if (K <= 512) {
-        return matmul_algo_t::libxsmm;
-      }
-      else {
-        return matmul_algo_t::aocl_blis;
-      }
-    }
-  }
-  else {
-    if (K <= 48) {
-      return matmul_algo_t::libxsmm;
-    }
-    else {
-      if (K < 50) {
-        return matmul_algo_t::aocl_blis;
-      }
-      else {
-        if (K <= 196) {
-          return matmul_algo_t::libxsmm;
-        }
-        else {
-          return matmul_algo_t::aocl_blis;
-        }
-      }
-    }
-  }
-}
-
-
 status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        const int M, const int N, const int K,const float alpha, const void *src,
                        const int lda, const void *weight,const int ldb,const void *bias,
@@ -770,55 +75,33 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     profiler.tbp_start();
   }
 
-  if (!src || !weight || !dst) {
-    log_error("Null pointer input to matmul_direct");
+  if (validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A, Batch_B,
+                                    params) != status_t::success) {
     return status_t::failure;
   }
 
-  if (M <= 0 || N <= 0 || K <= 0 || Batch_A <= 0 || Batch_B <= 0) {
-    log_error("Invalid matrix dimensions/Batch size");
-    return status_t::failure;
-  }
+  [[maybe_unused]] std::ostringstream ss;
+  if (apilog_info_enabled() || is_profile) {
+    ss << "LOWOHA matmul_direct: M=" << M << ", N=" << N << ", K=" << K
+       << ", alpha=" << alpha << ", beta=" << beta
+       << ", lda=" << lda << ", ldb=" << ldb << ", ldc=" << ldc
+       << ", transA=" << (transA ? "true" : "false")
+       << ", transB=" << (transB ? "true" : "false")
+       << ", input_dtype=" << data_type_to_string(params.dtypes.src)
+       << ", output_dtype=" << data_type_to_string(params.dtypes.dst)
+       << ", bias=" << (bias != nullptr ? "true" : "false")
+       << ", post_op=[" << post_op_names_to_string(params) << "]"
+    << ", post_op_dtype=[" << ([&]() {
+      std::string dtypes = post_op_data_types_to_string(params);
+      return dtypes.empty() ? "none" : dtypes;
+    })() << "]"
+         << ", Batch_A=" << Batch_A << ", Batch_B=" << Batch_B;
 
-  if (params.quant_params.src_scale.buff || params.quant_params.wei_scale.buff ||
-      params.quant_params.dst_scale.buff ||
-      params.quant_params.src_zp.buff || params.quant_params.wei_zp.buff ||
-      params.quant_params.dst_zp.buff) {
-    log_error("Quantization params are not supported in LOWOHA matmul_direct yet");
-    return status_t::failure;
+    apilog_info(ss.str());
   }
 
   const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
-  const bool is_bf16_src = (params.dtypes.src == data_type_t::bf16);
   const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
-  const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
-
-  if ((!is_f32_src && !is_bf16_src) || (!is_f32_out && !is_bf16_out)) {
-    log_error("Unsupported data type combination");
-    return status_t::failure;
-  }
-
-  if (std::max(Batch_A, Batch_B) % std::min(Batch_A, Batch_B) != 0) {
-    log_error("Broadcasting is not compatible with given Batch_A and Batch_B");
-    return status_t::failure;
-  }
-
-  if (apilog_info_enabled()) {
-    apilog_info("LOWOHA matmul_direct: M=", M, ", N=", N, ", K=", K,
-                ", alpha=", alpha, ", beta=", beta,
-                ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
-                ", transA=", (transA ? "true" : "false"),
-                ", transB=", (transB ? "true" : "false"),
-                ", input_dtype=", data_type_to_string(params.dtypes.src),
-                ", output_dtype=", data_type_to_string(params.dtypes.dst),
-                ", bias=", (bias != nullptr ? "true" : "false"),
-                ", post_op=[", post_op_names_to_string(params), "]",
-    ", post_op_dtype=[", ([&]() {
-      std::string dtypes = post_op_data_types_to_string(params);
-      return dtypes.empty() ? "none" : dtypes;
-    })(), "]",
-    ", Batch_A=", Batch_A, ", Batch_B=", Batch_B);
-  }
 
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
@@ -835,31 +118,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   const int num_threads = omp_get_max_threads();
   // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
   //                                    num_threads, params.dtypes.src);
-  matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
-                 matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
-
-  matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
-                         matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
-
-  // TODO: Fallback to reference/supported kernel
-  if ((kernel == matmul_algo_t::onednn ||
-       kernel == matmul_algo_t::onednn_blocked) && (Batch_A != 1 && Batch_B != 1 &&
-           Batch_A != Batch_B)) {
-    log_error("OneDNN kernel is not supported for the given batch sizes");
-    return status_t::failure;
-  }
-
-  if (kernel==matmul_algo_t::dynamic_dispatch) {
-    if (batch_count > 1) {
-      kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
-    }
-    else {
-      kernel = matmul_algo_t::aocl_blis;
-    }
-  }
-
-  params.lowoha_algo = kernel;
+  matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
+                                       N, K, num_threads, bias);
   // TODO: Add memory unreordering logic
   // Unreorder if onednn/ libxsmm is used
   // Implement the necessary logic for memory reordering here
@@ -867,6 +127,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   bool is_weight_blocked = false;
   void *reordered_mem = nullptr;
+  matmul_config_t &matmul_config = matmul_config_t::instance();
   [[maybe_unused]] int32_t weight_cache_type = matmul_config.get_weight_cache();
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
@@ -894,17 +155,6 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       is_weight_blocked = true;
       mem_format_b = 'r';
     }
-  }
-  if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
-                                   kernel == matmul_algo_t::onednn_blocked)) ||
-      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm)) ||
-      (kernel >= matmul_algo_t::algo_count)) {
-    kernel = matmul_algo_t::aocl_blis;
-  }
-  // TODO: Remove condition, when libxsmm supports bias and post_ops.
-  if (kernel == matmul_algo_t::libxsmm && (params.postop_.size() > 0 ||
-      bias != nullptr)) {
-    kernel = matmul_algo_t::aocl_blis;
   }
 
   if (kernel == matmul_algo_t::batched_sgemm && batch_count > 1) {
@@ -1099,24 +349,9 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose("LOWOHA matmul_direct completed: M=", M, ", N=", N, ", K=",
-                       K,
-                       ", alpha=", alpha, ", beta=", beta,
-                       ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
-                       ", transA=", (transA ? "true" : "false"),
-                       ", transB=", (transB ? "true" : "false"),
-                       ", input_dtype=", data_type_to_string(params.dtypes.src),
-                       ", output_dtype=", data_type_to_string(params.dtypes.dst),
-                       ", bias=", (bias != nullptr ? "true" : "false"),
-                       ", post_op=[", post_op_names_to_string(params), "]",
-    ", post_op_dtype=[", ([&]() {
-      std::string dtypes = post_op_data_types_to_string(params);
-      return dtypes.empty() ? "none" : dtypes;
-    })(), "]",
-    ", Batch_A=", Batch_A, ", Batch_B=", Batch_B,
-    ", kernel=", kernel_to_string(kernel),
-    ", weight_address=", static_cast<const void *>(weight),
-    ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+    profilelog_verbose(ss.str(), ", kernel=", kernel_to_string(kernel),
+                       ", weight_address=", static_cast<const void *>(weight),
+                       ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
   }
 
   return status_t::success;

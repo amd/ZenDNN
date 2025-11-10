@@ -28,738 +28,72 @@
 namespace zendnnl {
 namespace lowoha {
 
-// Helper function to create post_op structure for bias and post-ops
-#if ZENDNNL_DEPENDS_AOCLDLP
-dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N) {
-  // Count total operations (bias + post-ops)
-  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
-
-  if (total_ops == 0) {
-    return nullptr;
+status_t validate_matmul_direct_inputs(const void *src, const void *weight,
+                                       const void *dst,
+                                       const int M, const int N, const int K,
+                                       const int Batch_A, const int Batch_B,
+                                       const lowoha_params &params) {
+  // Check for null pointers
+  if (!src || !weight || !dst) {
+    log_error("Null pointer input to matmul_direct: src=",
+              static_cast<const void *>(src),
+              ", weight=", static_cast<const void *>(weight), ", dst=",
+              static_cast<const void *>(dst));
+    return status_t::failure;
   }
 
-  dlp_metadata_t *dlp_metadata = static_cast<dlp_metadata_t *>(calloc(1,
-                                 sizeof(dlp_metadata_t)));
-  if (!dlp_metadata) {
-    return nullptr;
+  // Validate matrix dimensions and batch sizes
+  if (M <= 0 || N <= 0 || K <= 0) {
+    log_error("Invalid matrix dimensions: M=", M, ", N=", N, ", K=", K);
+    return status_t::failure;
   }
 
-  // Initialize all pointers to null
-  dlp_metadata->eltwise = nullptr;
-  dlp_metadata->bias = nullptr;
-  dlp_metadata->scale = nullptr;
-  dlp_metadata->matrix_add = nullptr;
-  dlp_metadata->matrix_mul = nullptr;
-  dlp_metadata->pre_ops = nullptr;
-  dlp_metadata->post_op_grp = nullptr;
-
-  // Count different types of operations
-  int eltwise_count = 0;
-  int matrix_add_count = 0;
-  int matrix_mul_count = 0;
-  int bias_count = bias ? 1 : 0;
-
-  // Count post-ops by type
-  for (const auto &po : lowoha_param.postop_) {
-    switch (po.po_type) {
-    case post_op_type_t::relu:
-    case post_op_type_t::leaky_relu:
-    case post_op_type_t::gelu_tanh:
-    case post_op_type_t::gelu_erf:
-    case post_op_type_t::sigmoid:
-    case post_op_type_t::swish:
-    case post_op_type_t::tanh:
-      eltwise_count++;
-      break;
-    case post_op_type_t::binary_add:
-      matrix_add_count++;
-      break;
-    case post_op_type_t::binary_mul:
-      matrix_mul_count++;
-      break;
-    default:
-      // Skip unsupported post-ops
-      break;
-    }
+  if (Batch_A <= 0 || Batch_B <= 0) {
+    log_error("Invalid batch sizes: Batch_A=", Batch_A, ", Batch_B=", Batch_B);
+    return status_t::failure;
   }
 
-  // Allocate seq_vector first
-  dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
-                             sizeof(DLP_POST_OP_TYPE)));
-  if (!dlp_metadata->seq_vector) {
-    free(dlp_metadata);
-    return nullptr;
+  // Check quantization parameters (not supported yet)
+  if (params.quant_params.src_scale.buff || params.quant_params.wei_scale.buff ||
+      params.quant_params.dst_scale.buff ||
+      params.quant_params.src_zp.buff || params.quant_params.wei_zp.buff ||
+      params.quant_params.dst_zp.buff) {
+    log_error("Quantization params are not supported in LOWOHA matmul_direct yet");
+    return status_t::failure;
   }
 
-  // Allocate memory for different post-op types
-  if (bias_count > 0) {
-    dlp_metadata->bias = static_cast<dlp_post_op_bias *>(calloc(bias_count,
-                         sizeof(dlp_post_op_bias)));
-    if (!dlp_metadata->bias) {
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
+  // Validate data types
+  const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
+  const bool is_bf16_src = (params.dtypes.src == data_type_t::bf16);
+  const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
+  const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
+
+  if ((!is_f32_src && !is_bf16_src)) {
+    log_error("Unsupported source data type: ",
+              data_type_to_string(params.dtypes.src));
+    return status_t::failure;
   }
 
-  if (eltwise_count > 0) {
-    dlp_metadata->eltwise = static_cast<dlp_post_op_eltwise *>(calloc(eltwise_count,
-                            sizeof(dlp_post_op_eltwise)));
-    if (!dlp_metadata->eltwise) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
+  if ((!is_f32_out && !is_bf16_out)) {
+    log_error("Unsupported destination data type: ",
+              data_type_to_string(params.dtypes.dst));
+    return status_t::failure;
+  }
+  // F32 src and dst BF16 is not supported
+  if (is_f32_src && is_bf16_out) {
+    log_error("Unsupported GEMM configuration: F32 source with BF16 destination");
+    return status_t::failure;
   }
 
-  if (matrix_add_count > 0) {
-    dlp_metadata->matrix_add = static_cast<dlp_post_op_matrix_add *>(calloc(
-                                 matrix_add_count, sizeof(dlp_post_op_matrix_add)));
-    if (!dlp_metadata->matrix_add) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-    // Allocate sf structures for matrix_add operations
-    for (int i = 0; i < matrix_add_count; ++i) {
-      dlp_metadata->matrix_add[i].sf = static_cast<dlp_sf_t *>(calloc(1,
-                                       sizeof(dlp_sf_t)));
-      if (!dlp_metadata->matrix_add[i].sf) {
-        // Clean up partially allocated sf structures
-        for (int j = 0; j < i; ++j) {
-          free(dlp_metadata->matrix_add[j].sf);
-        }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
-        free(dlp_metadata->matrix_add);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
-        return nullptr;
-      }
-    }
+  // Validate batch broadcasting compatibility
+  if (std::max(Batch_A, Batch_B) % std::min(Batch_A, Batch_B) != 0) {
+    log_error("Broadcasting is not compatible with given batch sizes: Batch_A=",
+              Batch_A, ", Batch_B=", Batch_B);
+    return status_t::failure;
   }
 
-  if (matrix_mul_count > 0) {
-    dlp_metadata->matrix_mul = static_cast<dlp_post_op_matrix_mul *>(calloc(
-                                 matrix_mul_count, sizeof(dlp_post_op_matrix_mul)));
-    if (!dlp_metadata->matrix_mul) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
-      if (dlp_metadata->matrix_add) {
-        for (int i = 0; i < matrix_add_count; ++i) {
-          if (dlp_metadata->matrix_add[i].sf) {
-            free(dlp_metadata->matrix_add[i].sf);
-          }
-        }
-        free(dlp_metadata->matrix_add);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-    // Allocate sf structures for matrix_mul operations
-    for (int i = 0; i < matrix_mul_count; ++i) {
-      dlp_metadata->matrix_mul[i].sf = static_cast<dlp_sf_t *>(calloc(1,
-                                       sizeof(dlp_sf_t)));
-      if (!dlp_metadata->matrix_mul[i].sf) {
-        // Clean up partially allocated sf structures
-        for (int j = 0; j < i; ++j) {
-          free(dlp_metadata->matrix_mul[j].sf);
-        }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
-        if (dlp_metadata->matrix_add) {
-          for (int k = 0; k < matrix_add_count; ++k) {
-            if (dlp_metadata->matrix_add[k].sf) {
-              free(dlp_metadata->matrix_add[k].sf);
-            }
-          }
-          free(dlp_metadata->matrix_add);
-        }
-        free(dlp_metadata->matrix_mul);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
-        return nullptr;
-      }
-    }
-  }
-
-  int op_index = 0;
-  int eltwise_index = 0;
-  int matrix_add_index = 0;
-  int matrix_mul_index = 0;
-
-  // Add bias if present
-  if (bias && bias_count > 0) {
-    dlp_metadata->seq_vector[op_index++] = BIAS;
-    dlp_metadata->bias[0].bias = const_cast<void *>(bias);
-
-    // Set storage type based on bias data type
-    switch (dtypes.bias) {
-    case data_type_t::f32:
-      dlp_metadata->bias[0].stor_type = DLP_F32;
-      break;
-    case data_type_t::bf16:
-      dlp_metadata->bias[0].stor_type = DLP_BF16;
-      break;
-    default:
-      dlp_metadata->bias[0].stor_type = DLP_F32;
-      break;
-    }
-    dlp_metadata->bias[0].sf = nullptr; // No scale factor for bias
-  }
-
-  // Add post-ops
-  for (const auto &po : lowoha_param.postop_) {
-    switch (po.po_type) {
-    case post_op_type_t::relu:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = RELU;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = nullptr;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::leaky_relu:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = PRELU;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      *static_cast<float *>(dlp_metadata->eltwise[eltwise_index].algo.alpha) = 0.01f;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::gelu_tanh:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = GELU_TANH;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = nullptr;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::gelu_erf:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = GELU_ERF;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = nullptr;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::sigmoid:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = SIGMOID;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = nullptr;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::swish:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = SWISH;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      *static_cast<float *>(dlp_metadata->eltwise[eltwise_index].algo.alpha) = 1.0f;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::tanh:
-      if (eltwise_index >= eltwise_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = ELTWISE;
-      dlp_metadata->eltwise[eltwise_index].algo.algo_type = TANH;
-      dlp_metadata->eltwise[eltwise_index].algo.alpha = nullptr;
-      dlp_metadata->eltwise[eltwise_index].algo.beta = nullptr;
-      dlp_metadata->eltwise[eltwise_index].sf = nullptr;
-      eltwise_index++;
-      break;
-    case post_op_type_t::binary_add:
-      if (matrix_add_index >= matrix_add_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = MATRIX_ADD;
-      dlp_metadata->matrix_add[matrix_add_index].matrix = po.buff;
-      dlp_metadata->matrix_add[matrix_add_index].ldm = N;
-      dlp_metadata->matrix_add[matrix_add_index].stor_type = po.dtype ==
-          data_type_t::bf16 ? DLP_BF16 : DLP_F32;
-      // sf structure is already allocated, initialize with default values
-      dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(
-            float));
-      if (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) {
-        *static_cast<float *>
-        (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
-      }
-      dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_len = 1;
-      matrix_add_index++;
-      break;
-    case post_op_type_t::binary_mul:
-      if (matrix_mul_index >= matrix_mul_count) {
-        break;
-      }
-      dlp_metadata->seq_vector[op_index++] = MATRIX_MUL;
-      dlp_metadata->matrix_mul[matrix_mul_index].matrix = po.buff;
-      dlp_metadata->matrix_mul[matrix_mul_index].ldm = N;
-      dlp_metadata->matrix_mul[matrix_mul_index].stor_type = po.dtype ==
-          data_type_t::bf16 ? DLP_BF16 : DLP_F32;
-      // sf structure is already allocated, initialize with default values
-      dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor = malloc(sizeof(
-            float));
-      if (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) {
-        *static_cast<float *>
-        (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) = 1.0f;
-      }
-      dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor_len = 1;
-      matrix_mul_index++;
-      break;
-    default:
-      // Skip unsupported post-ops
-      break;
-    }
-  }
-
-  dlp_metadata->seq_length = op_index;
-  dlp_metadata->num_eltwise = eltwise_count;
-
-  return dlp_metadata;
+  return status_t::success;
 }
-#else
-aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
-                                  const void *bias, const data_types &dtypes, int N) {
-  // Count total operations (bias + post-ops)
-  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
-
-  if (total_ops == 0) {
-    return nullptr;
-  }
-
-  aocl_post_op *aocl_po = static_cast<aocl_post_op *>(calloc(1,
-                          sizeof(aocl_post_op)));
-  if (!aocl_po) {
-    return nullptr;
-  }
-
-  // Count different types of operations
-  int eltwise_count = 0;
-  int matrix_add_count = 0;
-  int matrix_mul_count = 0;
-  int bias_count = bias ? 1 : 0;
-
-  // Count post-ops by type
-  for (const auto &po : lowoha_param.postop_) {
-    switch (po.po_type) {
-    case post_op_type_t::relu:
-    case post_op_type_t::leaky_relu:
-    case post_op_type_t::gelu_tanh:
-    case post_op_type_t::gelu_erf:
-    case post_op_type_t::sigmoid:
-    case post_op_type_t::swish:
-    case post_op_type_t::tanh:
-      eltwise_count++;
-      break;
-    case post_op_type_t::binary_add:
-      matrix_add_count++;
-      break;
-    case post_op_type_t::binary_mul:
-      matrix_mul_count++;
-      break;
-    default:
-      // Skip unsupported post-ops
-      break;
-    }
-  }
-
-  // Allocate memory for different post-op types
-  if (bias_count > 0) {
-    aocl_po->bias = static_cast<aocl_post_op_bias *>(calloc(bias_count,
-                    sizeof(aocl_post_op_bias)));
-    if (!aocl_po->bias) {
-      free(aocl_po);
-      return nullptr;
-    }
-  }
-
-  if (eltwise_count > 0) {
-    aocl_po->eltwise = static_cast<aocl_post_op_eltwise *>(calloc(eltwise_count,
-                       sizeof(aocl_post_op_eltwise)));
-    if (!aocl_po->eltwise) {
-      if (aocl_po->bias) {
-        free(aocl_po->bias);
-      }
-      free(aocl_po);
-      return nullptr;
-    }
-  }
-
-  if (matrix_add_count > 0) {
-    aocl_po->matrix_add = static_cast<aocl_post_op_matrix_add *>(calloc(
-                            matrix_add_count, sizeof(aocl_post_op_matrix_add)));
-    if (!aocl_po->matrix_add) {
-      if (aocl_po->bias) {
-        free(aocl_po->bias);
-      }
-      if (aocl_po->eltwise) {
-        free(aocl_po->eltwise);
-      }
-      free(aocl_po);
-      return nullptr;
-    }
-  }
-
-  if (matrix_mul_count > 0) {
-    aocl_po->matrix_mul = static_cast<aocl_post_op_matrix_mul *>(calloc(
-                            matrix_mul_count, sizeof(aocl_post_op_matrix_mul)));
-    if (!aocl_po->matrix_mul) {
-      if (aocl_po->bias) {
-        free(aocl_po->bias);
-      }
-      if (aocl_po->eltwise) {
-        free(aocl_po->eltwise);
-      }
-      if (aocl_po->matrix_add) {
-        free(aocl_po->matrix_add);
-      }
-      free(aocl_po);
-      return nullptr;
-    }
-  }
-
-  // Set up sequence vector
-  aocl_po->seq_vector = static_cast<AOCL_POST_OP_TYPE *>(calloc(total_ops,
-                        sizeof(AOCL_POST_OP_TYPE)));
-  if (!aocl_po->seq_vector) {
-    if (aocl_po->bias) {
-      free(aocl_po->bias);
-    }
-    if (aocl_po->eltwise) {
-      free(aocl_po->eltwise);
-    }
-    if (aocl_po->matrix_add) {
-      free(aocl_po->matrix_add);
-    }
-    if (aocl_po->matrix_mul) {
-      free(aocl_po->matrix_mul);
-    }
-    free(aocl_po);
-    return nullptr;
-  }
-
-  int op_index = 0;
-  int eltwise_index = 0;
-  int matrix_add_index = 0;
-  int matrix_mul_index = 0;
-
-  // Add bias if present
-  if (bias) {
-    aocl_po->seq_vector[op_index++] = BIAS;
-    aocl_po->bias[0].bias = const_cast<void *>(bias);
-
-    // Set storage type based on bias data type
-    switch (dtypes.bias) {
-    case data_type_t::f32:
-      aocl_po->bias[0].stor_type = AOCL_GEMM_F32;
-      break;
-    case data_type_t::bf16:
-      aocl_po->bias[0].stor_type = AOCL_GEMM_BF16;
-      break;
-    default:
-      aocl_po->bias[0].stor_type = AOCL_GEMM_F32;
-      break;
-    }
-  }
-
-  // Add post-ops
-  for (const auto &po : lowoha_param.postop_) {
-    switch (po.po_type) {
-    case post_op_type_t::relu:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = RELU;
-      aocl_po->eltwise[eltwise_index].algo.alpha = nullptr;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::leaky_relu:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = PRELU;
-      aocl_po->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      // Use default slope of 0.01 for leaky_relu
-      *static_cast<float *>(aocl_po->eltwise[eltwise_index].algo.alpha) = 0.01f;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::gelu_tanh:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = GELU_TANH;
-      aocl_po->eltwise[eltwise_index].algo.alpha = nullptr;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::gelu_erf:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = GELU_ERF;
-      aocl_po->eltwise[eltwise_index].algo.alpha = nullptr;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::sigmoid:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = SIGMOID;
-      aocl_po->eltwise[eltwise_index].algo.alpha = nullptr;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::swish:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = SWISH;
-      aocl_po->eltwise[eltwise_index].algo.alpha = malloc(sizeof(float));
-      // Use default scale of 1.0 for swish
-      *static_cast<float *>(aocl_po->eltwise[eltwise_index].algo.alpha) = 1.0f;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::tanh:
-      aocl_po->seq_vector[op_index++] = ELTWISE;
-      aocl_po->eltwise[eltwise_index].algo.algo_type = TANH;
-      aocl_po->eltwise[eltwise_index].algo.alpha = nullptr;
-      aocl_po->eltwise[eltwise_index].algo.beta = nullptr;
-      aocl_po->eltwise[eltwise_index].is_power_of_2 = false;
-      aocl_po->eltwise[eltwise_index].scale_factor = nullptr;
-      aocl_po->eltwise[eltwise_index].scale_factor_len = 0;
-      eltwise_index++;
-      break;
-    case post_op_type_t::binary_add:
-      aocl_po->seq_vector[op_index++] = MATRIX_ADD;
-      aocl_po->matrix_add[matrix_add_index].matrix = po.buff;
-      aocl_po->matrix_add[matrix_add_index].scale_factor = malloc(sizeof(float));
-      *static_cast<float *>(aocl_po->matrix_add[matrix_add_index].scale_factor) =
-        1.0f; // Default scale
-      aocl_po->matrix_add[matrix_add_index].scale_factor_len = 1;
-      aocl_po->matrix_add[matrix_add_index].ldm = N; // Set leading dimension to N
-      aocl_po->matrix_add[matrix_add_index].stor_type = po.dtype == data_type_t::bf16
-          ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
-      matrix_add_index++;
-      break;
-    case post_op_type_t::binary_mul:
-      aocl_po->seq_vector[op_index++] = MATRIX_MUL;
-      aocl_po->matrix_mul[matrix_mul_index].matrix = po.buff;
-      aocl_po->matrix_mul[matrix_mul_index].scale_factor = malloc(sizeof(float));
-      *static_cast<float *>(aocl_po->matrix_mul[matrix_mul_index].scale_factor) =
-        1.0f; // Default scale
-      aocl_po->matrix_mul[matrix_mul_index].scale_factor_len = 1;
-      aocl_po->matrix_mul[matrix_mul_index].ldm = N; // Set leading dimension to N
-      aocl_po->matrix_mul[matrix_mul_index].stor_type = po.dtype == data_type_t::bf16
-          ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
-      matrix_mul_index++;
-      break;
-    default:
-      // Skip unsupported post-ops
-      break;
-    }
-  }
-
-  aocl_po->seq_length = op_index;
-  aocl_po->num_eltwise = eltwise_count;
-
-  return aocl_po;
-}
-#endif
-// Cleanup functions for post-op structures
-#if ZENDNNL_DEPENDS_AOCLDLP
-void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
-                         const lowoha_params &lowoha_param) {
-  if (aocl_po) {
-    // Count operations for proper cleanup
-    int eltwise_count = 0;
-    int matrix_add_count = 0;
-    int matrix_mul_count = 0;
-
-    // Count post-ops by type for cleanup
-    for (const auto &po : lowoha_param.postop_) {
-      switch (po.po_type) {
-      case post_op_type_t::relu:
-      case post_op_type_t::leaky_relu:
-      case post_op_type_t::gelu_tanh:
-      case post_op_type_t::gelu_erf:
-      case post_op_type_t::sigmoid:
-      case post_op_type_t::swish:
-      case post_op_type_t::tanh:
-        eltwise_count++;
-        break;
-      case post_op_type_t::binary_add:
-        matrix_add_count++;
-        break;
-      case post_op_type_t::binary_mul:
-        matrix_mul_count++;
-        break;
-      default:
-        break;
-      }
-    }
-
-    // Clean up eltwise operations
-    if (aocl_po->eltwise) {
-      for (int i = 0; i < eltwise_count; i++) {
-        if (aocl_po->eltwise[i].algo.alpha) {
-          free(aocl_po->eltwise[i].algo.alpha);
-        }
-        if (aocl_po->eltwise[i].algo.beta) {
-          free(aocl_po->eltwise[i].algo.beta);
-        }
-      }
-      free(aocl_po->eltwise);
-    }
-
-    // Clean up bias operations
-    if (aocl_po->bias) {
-      free(aocl_po->bias);
-    }
-
-    // Clean up matrix operations
-    if (aocl_po->matrix_add) {
-      for (int i = 0; i < matrix_add_count; i++) {
-        if (aocl_po->matrix_add[i].sf) {
-          if (aocl_po->matrix_add[i].sf->scale_factor) {
-            free(aocl_po->matrix_add[i].sf->scale_factor);
-          }
-          free(aocl_po->matrix_add[i].sf);
-        }
-      }
-      free(aocl_po->matrix_add);
-    }
-
-    if (aocl_po->matrix_mul) {
-      for (int i = 0; i < matrix_mul_count; i++) {
-        if (aocl_po->matrix_mul[i].sf) {
-          if (aocl_po->matrix_mul[i].sf->scale_factor) {
-            free(aocl_po->matrix_mul[i].sf->scale_factor);
-          }
-          free(aocl_po->matrix_mul[i].sf);
-        }
-      }
-      free(aocl_po->matrix_mul);
-    }
-
-    if (aocl_po->scale) {
-      free(aocl_po->scale);
-    }
-
-    if (aocl_po->pre_ops) {
-      free(aocl_po->pre_ops);
-    }
-
-    if (aocl_po->post_op_grp) {
-      free(aocl_po->post_op_grp);
-    }
-
-    if (aocl_po->seq_vector) {
-      free(aocl_po->seq_vector);
-    }
-    free(aocl_po);
-  }
-}
-#else
-void cleanup_blis_post_op(aocl_post_op *aocl_po,
-                          const lowoha_params &lowoha_param) {
-  if (aocl_po) {
-    // Clean up eltwise operations
-    if (aocl_po->eltwise) {
-      for (int i = 0; i < aocl_po->num_eltwise; i++) {
-        if (aocl_po->eltwise[i].algo.alpha) {
-          free(aocl_po->eltwise[i].algo.alpha);
-        }
-        if (aocl_po->eltwise[i].algo.beta) {
-          free(aocl_po->eltwise[i].algo.beta);
-        }
-      }
-      free(aocl_po->eltwise);
-    }
-
-    // Clean up matrix operations
-    if (aocl_po->matrix_add) {
-      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
-        if (aocl_po->matrix_add[i].scale_factor) {
-          free(aocl_po->matrix_add[i].scale_factor);
-        }
-      }
-      free(aocl_po->matrix_add);
-    }
-
-    if (aocl_po->matrix_mul) {
-      for (int i = 0; i < (lowoha_param.postop_.size() > 0 ? 1 : 0); i++) {
-        if (aocl_po->matrix_mul[i].scale_factor) {
-          free(aocl_po->matrix_mul[i].scale_factor);
-        }
-      }
-      free(aocl_po->matrix_mul);
-    }
-
-    if (aocl_po->bias) {
-      free(aocl_po->bias);
-    }
-    if (aocl_po->seq_vector) {
-      free(aocl_po->seq_vector);
-    }
-    free(aocl_po);
-  }
-}
-#endif
 
 template <typename T>
 bool reorderAndCacheWeights(Key_matmul key, const void *weights,
@@ -828,61 +162,6 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   return true;
 }
 
-#if ZENDNNL_DEPENDS_ONEDNN
-void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
-                    dnnl::engine &eng) {
-  dnnl::stream eng_stream(eng);
-  void *reordered_mem = nullptr;
-  dnnl::memory::desc  dnnl_weight_desc   = onednn_utils_t::to_dnnl_tensor(
-        dnnl_params.weights, eng);
-  dnnl::memory        dnnl_weight_mem    = dnnl::memory(dnnl_weight_desc, eng,
-      dnnl_params.weights.buffer);
-
-  dnnl_params.weights.format_tag = (dnnl_params.weights.dtype == data_type_t::f32)
-                                   ? "BA16a64b" : "BA16a64b2a";
-  dnnl::memory::desc  dnnl_blocked_weight_desc   = onednn_utils_t::to_dnnl_tensor(
-        dnnl_params.weights, eng);
-  size_t reordered_size = dnnl_blocked_weight_desc.get_size();
-  size_t alignment      = 64;
-  size_t reorder_size   = (reordered_size + alignment - 1) & ~(alignment - 1);
-  reordered_mem         = (void *)aligned_alloc(alignment, reorder_size);
-  dnnl::memory        dnnl_blocked_weight_mem    = dnnl::memory(
-        dnnl_blocked_weight_desc, eng, reordered_mem);
-
-  reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
-      dnnl_weight_mem, dnnl_blocked_weight_mem);
-  dnnl_params.weights.buffer = dnnl_blocked_weight_mem.get_data_handle();
-}
-
-bool reorderAndCacheWeights(Key_matmul key,
-                            onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::engine &eng) {
-  // Weight caching
-  static lru_cache_t<Key_matmul, std::pair<void *, std::string>>
-      matmul_weight_cache;
-
-  if (weight_cache_type == 0) {
-    apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
-    reorderWeights(dnnl_params, eng);
-  }
-  else {
-    auto found_obj = matmul_weight_cache.find_key(key);
-    if (!found_obj) {
-      apilog_info("onednn reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
-      reorderWeights(dnnl_params, eng);
-      matmul_weight_cache.add(key, {dnnl_params.weights.buffer, dnnl_params.weights.format_tag});
-    }
-    else {
-      apilog_info("Read onednn cached weights WEIGHT_CACHE_OUT_OF_PLACE");
-      dnnl_params.weights.buffer = matmul_weight_cache.get(key).first;
-      dnnl_params.weights.format_tag = matmul_weight_cache.get(key).second;
-    }
-  }
-  return true;
-
-}
-#endif
-
 template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<short>, int);
@@ -891,7 +170,7 @@ template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
     reorder_func_ptr<float>, int);
 
 // Helper function to convert post_op_type_t to string
-static const char *post_op_type_to_string(post_op_type_t type) {
+inline const char *post_op_type_to_string(post_op_type_t type) {
   switch (type) {
   case post_op_type_t::none:
     return "none";
@@ -936,10 +215,17 @@ std::string post_op_names_to_string(const lowoha_params &params) {
 
 const char *kernel_to_string(matmul_algo_t kernel) {
   switch (kernel) {
+#if ZENDNNL_DEPENDS_AOCLDLP
+  case matmul_algo_t::aocl_blis:
+    return "aocl_dlp";
+  case matmul_algo_t::aocl_blis_blocked:
+    return "aocl_dlp_blocked";
+#else
   case matmul_algo_t::aocl_blis:
     return "aocl_blis";
   case matmul_algo_t::aocl_blis_blocked:
     return "aocl_blis_blocked";
+#endif
   case matmul_algo_t::onednn:
     return "onednn";
   case matmul_algo_t::onednn_blocked:
@@ -984,6 +270,143 @@ std::string post_op_data_types_to_string(const lowoha_params &params) {
     }
   }
   return post_op_dtypes.str();
+}
+
+inline bool may_i_use_blis_partition(int batch_count, int M, int N,
+                                     int num_threads, data_type_t dtype) {
+
+  // Set thresholds based on thread count and data type (powers of 2 only)
+  int M_threshold = 0, N_threshold = 0, work_threshold = 0;
+
+  /*BLIS performs better when M and N are large and thread count is moderate to high.
+   It uses internal tiling and cache-aware scheduling,
+   where each 8-core cluster shares a 32MB L3 cache. Manual OpenMP partitioning
+   can disrupt BLIS's optimized workload distribution, leading to contention.
+   Delegating to BLIS ensures better throughput and efficient hardware utilization.*/
+  // TODO: Tune it more based on heuristics (threshold relies on problem size and data type)
+  if (num_threads <= 16) {
+    M_threshold    = 512;
+    N_threshold    = 256;
+    work_threshold = 128;
+  }
+  else if (num_threads <= 32) {
+    M_threshold    = 1024;
+    N_threshold    = 512;
+    work_threshold = 256;
+  }
+  else {
+    M_threshold    = 2048;
+    N_threshold    = 1024;
+    work_threshold = 512;
+  }
+  // Estimate effective workload per thread
+  int work_per_thread = (batch_count * M) / num_threads;
+
+  // Allow BLIS if batch size is small and M is reasonably large
+  bool small_batch_override = (batch_count <= 8 && M >= 1024);
+
+  return ((M >= M_threshold &&
+           N >= N_threshold &&
+           work_per_thread >= work_threshold)
+          || small_batch_override);
+}
+
+// TODO: Further tune the heuristics based on num_threads and other params
+inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
+    int num_threads) {
+  if (BS <= 512) {
+    if (N <= 512) {
+      if (N <= 48) {
+        if (M <= 196) {
+          return matmul_algo_t::libxsmm;
+        }
+        else {
+          return matmul_algo_t::aocl_blis;
+        }
+      }
+      else {
+        return matmul_algo_t::libxsmm;
+      }
+    }
+    else {
+      if (K <= 512) {
+        return matmul_algo_t::libxsmm;
+      }
+      else {
+        return matmul_algo_t::aocl_blis;
+      }
+    }
+  }
+  else {
+    if (K <= 48) {
+      return matmul_algo_t::libxsmm;
+    }
+    else {
+      if (K < 50) {
+        return matmul_algo_t::aocl_blis;
+      }
+      else {
+        if (K <= 196) {
+          return matmul_algo_t::libxsmm;
+        }
+        else {
+          return matmul_algo_t::aocl_blis;
+        }
+      }
+    }
+  }
+}
+
+matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
+                            int batch_count, int M, int N, int K, int num_threads, const void *bias) {
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
+                 matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
+
+  matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
+                         matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
+
+  // TODO: Fallback to reference/supported kernel
+  if ((kernel == matmul_algo_t::onednn ||
+       kernel == matmul_algo_t::onednn_blocked) && (Batch_A != 1 && Batch_B != 1 &&
+           Batch_A != Batch_B)) {
+    log_info("OneDNN kernel is not supported for the given batch sizes");
+    kernel = matmul_algo_t::aocl_blis;
+  }
+
+  if (kernel==matmul_algo_t::dynamic_dispatch) {
+    if (batch_count > 1) {
+      kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
+    }
+    else {
+      kernel = matmul_algo_t::aocl_blis;
+    }
+  }
+  if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
+                                   kernel == matmul_algo_t::onednn_blocked)) ||
+      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm)) ||
+      (kernel >= matmul_algo_t::algo_count)) {
+    kernel = matmul_algo_t::aocl_blis;
+  }
+  // TODO: Remove condition, when libxsmm supports bias and post_ops.
+  if (kernel == matmul_algo_t::libxsmm && (params.postop_.size() > 0 ||
+      bias != nullptr)) {
+    kernel = matmul_algo_t::aocl_blis;
+  }
+
+  // AOCL blocked kernel is not supported for batched matmul
+  if ((Batch_A > 1 || Batch_B > 1) &&
+      kernel == matmul_algo_t::aocl_blis_blocked) {
+    kernel = matmul_algo_t::aocl_blis;
+  }
+  // TODO: Update the conditon once prepack supports other formats
+  // Current prepack supports only AOCL blocked kernel
+  if (params.mem_format_b == 'r') {
+    kernel = matmul_algo_t::aocl_blis_blocked;
+  }
+
+  params.lowoha_algo = kernel;
+  return kernel;
 }
 
 } // namespace lowoha

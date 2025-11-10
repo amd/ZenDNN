@@ -154,8 +154,11 @@ status_t matmul_operator_t::update_matmul_kernel() {
 status_t matmul_operator_t::validate() {
   LOG_DEBUG_INFO("<", get_name(),
                  "> Validating matmul op parameters matmul_operator_t");
-  //TODO: Add data type check for input output
+  if (parent_type::validate() != status_t::success) {
+    return status_t::failure;
+  }
 
+  //TODO: Add data type check for input output
   auto input        = get_input("matmul_input");
   auto output       = get_output("matmul_output");
 
@@ -507,8 +510,8 @@ status_t matmul_operator_t::kernel_factory() {
       forced_kernel == "aocl_blis") {
     /**TODO: check Use of blocked BMM weights with new AOCL BMM API */
     if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_blis_blocked") {
-      apilog_error("<", name, "> kernel unimplemented using aocl_blis_blocked.");
-      return status_t::unimplemented;
+      apilog_info("<", name, "> kernel unimplemented using aocl_blis_blocked.");
+      forced_kernel = "aocl_blis";
     }
 
     /**TODO: move the preprocess to specific kernel */

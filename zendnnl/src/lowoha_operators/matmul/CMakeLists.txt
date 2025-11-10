@@ -18,15 +18,21 @@
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
-  lowoha_matmul_utils.cpp)
+  lowoha_matmul_utils.cpp
+  aocl_kernel.cpp
+  onednn_kernel.cpp)
 
 set(lowoha_matmul_public_headers
+  lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
   lru_cache.hpp
   zendnnl_key.hpp)
 
 set(lowoha_matmul_private_headers
+  libxsmm_kernel.hpp
+  aocl_kernel.hpp
+  onednn_kernel.hpp
   matmul_kernel_bf16_avx512.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
