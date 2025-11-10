@@ -285,7 +285,7 @@ jobs:
         for i in {1..360}; do
           status=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
-            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin ZENDNNL CI") | .state' | tail -n 1)
 
           echo "Attempt $i: ZenTorch-ZenDNNL CI status = $status"
 
