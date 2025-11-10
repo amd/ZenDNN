@@ -400,8 +400,9 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     matmul_attr.set_post_ops(matmul_pops);
   }
 
-  if (dnnl_params.weights.dims.size() == 2 &&
-      dnnl_params.algo == matmul_algo_t::onednn_blocked) {
+  bool is_blocked = dnnl_params.weights.dims.size() == 2 &&
+                    dnnl_params.algo == matmul_algo_t::onednn_blocked;
+  if (is_blocked) {
     Key_matmul key_(transB, K, N, ldb, dnnl_params.weights.buffer,
                     static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
     dnnl_params.is_blocked = reorderAndCacheWeights(key_, dnnl_params,
@@ -410,6 +411,9 @@ static inline void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
                                          eng);
+  if (weight_cache_type == 0 && is_blocked) {
+    free(dnnl_params.weights.buffer);
+  }
 }
 #endif
 
@@ -1082,6 +1086,14 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                             ldb, beta, dst_ptr, ldc,
                             params.dtypes, kernel,
                             params.mem_format_a, mem_format_b, params, bias);
+    }
+    // Free reordered buffer for AOCL blocked non-cached
+    bool free_buff = (weight_cache_type == 0 && reordered_mem != nullptr &&
+                      params.mem_format_b != 'r'
+                      && kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked && batch_count == 1);
+    if (free_buff)  {
+      free(reordered_mem);
+      reordered_mem = nullptr;
     }
   }
 

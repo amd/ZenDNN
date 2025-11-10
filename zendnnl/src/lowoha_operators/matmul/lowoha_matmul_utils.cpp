@@ -839,7 +839,7 @@ void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
       dnnl_params.weights.buffer);
 
   dnnl_params.weights.format_tag = (dnnl_params.weights.dtype == data_type_t::f32)
-                                   ? "BA16a64b" : "AB8b64a2b";
+                                   ? "BA16a64b" : "BA16a64b2a";
   dnnl::memory::desc  dnnl_blocked_weight_desc   = onednn_utils_t::to_dnnl_tensor(
         dnnl_params.weights, eng);
   size_t reordered_size = dnnl_blocked_weight_desc.get_size();

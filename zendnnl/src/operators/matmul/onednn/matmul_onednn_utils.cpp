@@ -80,7 +80,7 @@ dnnl::memory::desc onednn_utils_t::to_dnnl_tensor(const onednn_tensor_params
 
   dnnl::memory::desc tensor_md;
   if (params.format_tag == "any" || params.format_tag == "BA16a64b" ||
-      params.format_tag == "AB8b64a2b" || stride_dims.empty()) {
+      params.format_tag == "BA16a64b2a" || params.format_tag == "AB8b64a2b" || stride_dims.empty()) {
     tensor_md = dnnl::memory::desc(tensor_dims, tensor_dtype, tensor_tag);
   }
   else {

@@ -211,8 +211,10 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         auto buff_tensor    = buffer_it->second;
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
-        if (dst_dim == 3 && buff_dims.size() == 2) {
+        auto dim = buff_dims.size();
+        while(dst_dim > dim) {
           buff_dims.insert(buff_dims.begin(), 1);
+          dim++;
         }
         binary_tensor.dims.assign(buff_dims.begin(), buff_dims.end());
         binary_tensor.buffer     = buff_tensor.get_raw_handle_unsafe();
@@ -237,8 +239,10 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         auto buff_tensor    = buffer_it->second;
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
-        if (dst_dim == 3 && buff_dims.size() == 2) {
+        auto dim = buff_dims.size();
+        while(dst_dim > dim) {
           buff_dims.insert(buff_dims.begin(), 1);
+          dim++;
         }
         binary_tensor.dims.assign(buff_dims.begin(), buff_dims.end());
         binary_tensor.buffer     = buff_tensor.get_raw_handle_unsafe();
