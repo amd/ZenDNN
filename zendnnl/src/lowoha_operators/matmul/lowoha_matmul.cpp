@@ -756,7 +756,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     return status_t::failure;
   }
 
-  apilog_info("LOWOHA matmul_direct: M=", M, ", N=", N, ", K=", K,
+  if (apilog_info_enabled()) {
+    apilog_info("LOWOHA matmul_direct: M=", M, ", N=", N, ", K=", K,
                       ", alpha=", alpha, ", beta=", beta,
                       ", lda=", lda, ", ldb=", ldb, ", ldc=", ldc,
                       ", transA=", (transA ? "true" : "false"),
@@ -770,7 +771,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                         return dtypes.empty() ? "none" : dtypes;
                       })(), "]",
                       ", Batch_A=", Batch_A, ", Batch_B=", Batch_B);
-
+  }
   const char trans_input  = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
   char mem_format_b = params.mem_format_b;
@@ -799,8 +800,11 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     return status_t::failure;
   }
 
-  if (kernel==matmul_algo_t::dynamic_dispatch && batch_count > 1) {
-    kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
+  if (kernel==matmul_algo_t::dynamic_dispatch) {
+    if (batch_count > 1)
+      kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
+    else
+      kernel = matmul_algo_t::aocl_blis;
   }
 
   // TODO: Add memory unreordering logic
@@ -1051,6 +1055,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        })(), "]",
                        ", Batch_A=", Batch_A, ", Batch_B=", Batch_B,
                        ", kernel=", kernel_to_string(kernel),
+                       ", weight_address=", static_cast<const void *>(weight),
                        ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
   }
 

@@ -481,6 +481,7 @@ std::string matmul_operator_t::op_execute_info() {
       ss << ":" <<zen_po.post_op_info(zen_po);
     }
   }
+  ss << ",weight_address:" << weights.get_raw_handle_unsafe();
 
   return ss.str();
 }
