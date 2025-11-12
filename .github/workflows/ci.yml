@@ -1,0 +1,569 @@
+name: ZenDNN CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+ jira-id-check:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'}}
+    name: Check JIRA ID in Commits
+    uses: AMD-Zenai/ZenDNN/.github/workflows/jira_check.yml@main
+   
+
+ license-header-check:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    name: Check License Headers
+    uses: AMD-Zenai/ZenDNN/.github/workflows/header_check.yml@main
+    
+ zendnn_build_push:   
+  runs-on: zendnn_presub_server
+  if: ${{ github.event_name == 'push' }}
+  steps:
+     - name: Clean workspace before checkout
+       run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+       shell: bash
+
+     - name: basic_debug
+       run: |
+            pwd
+            echo "WORKSPACE, $GITHUB_WORKSPACE"
+            echo "HOME,$HOME"
+            ls -al $GITHUB_WORKSPACE
+       shell: bash
+
+     - name: checkout repository
+       uses: actions/checkout@v3
+       with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+          path: ZenDNN
+          fetch-depth: 0
+          clean: true
+          
+     - name: show GITHUB_WORKSPACE
+       run: |
+          echo "WORKSPACE, $GITHUB_WORKSPACE"
+          ls -al $GITHUB_WORKSPACE
+       shell: bash
+
+     - name: show checked out branch for ZenDNN
+       run: |
+          cd ZenDNN
+          pwd
+          git branch --show-current
+       shell: bash
+
+     - name: checkout repository
+       uses: actions/checkout@v3
+       with:
+          repository: AMD-Zenai/ZenDNN_tools
+          ref: main
+          token: ${{ secrets.ZIAIE_PAT}}
+          path: ZenDNN_tools
+          fetch-depth: 0
+          clean: true
+
+     - name: show checked out branch for ZenDNN_tools
+       run: |
+          cd ZenDNN_tools
+          pwd
+          git branch --show-current
+       shell: bash
+     - name: PR INFO
+       shell: bash
+       run: |
+        ls 
+        pwd
+        cd ZenDNN
+        echo "=============================="
+        echo "   ZENDNN & ZENDNN_TOOLS INFO  "
+        echo "=============================="
+
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+         BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+         BASE_SHA="${{ github.event.pull_request.base.sha }}"
+         SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+         HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+         echo "=== PULL REQUEST INFO ==="
+        elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main)"
+         SOURCE_BRANCH="${GITHUB_REF_NAME}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== PUSH EVENT INFO ==="
+        else
+         BASE_BRANCH="main"
+         BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+         SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+         HEAD_SHA="$(git rev-parse HEAD)"
+         echo "=== WORKFLOW DISPATCH INFO ==="
+        fi
+
+        echo "PR BASE BRANCH   : $BASE_BRANCH"
+        echo "PR BASE SHA      : $BASE_SHA"
+        echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+        echo "PR HEAD SHA      : $HEAD_SHA"
+        echo ""
+
+        echo "Fetching branches..."
+        git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+        git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+        echo ""
+
+        echo "COMMITS BETWEEN BASE AND HEAD"
+        git log --oneline -20 || echo "No commits found"
+        echo ""
+
+        echo "=============================="
+        echo "   ZENDNN_TOOLS INFO"
+        echo "=============================="
+        
+        if [ -d "$GITHUB_WORKSPACE/ZenDNN_tools" ]; then
+         cd "$GITHUB_WORKSPACE/ZenDNN_tools"
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/AMD-Zenai/ZenDNN_tools.git
+         git fetch --all --no-tags || true
+
+         BRANCH=${GITHUB_REF_NAME:-main}
+         HEAD_SHA=$(git rev-parse HEAD)
+         BASE_BRANCH="main"
+         BASE_SHA=$(git rev-parse origin/main || echo "N/A")
+
+         echo "CURRENT BRANCH   : $BRANCH"
+         echo "HEAD SHA         : $HEAD_SHA"
+         echo "BASE BRANCH      : $BASE_BRANCH"
+         echo "BASE SHA         : $BASE_SHA"
+         echo ""
+
+         echo "LAST 20 COMMITS (ZenDNN_tools)"
+         git log --oneline -20 || echo "No commits found"
+        else
+         echo "ZenDNN_tools directory not found"
+        fi
+     - name: setup_env
+       run: |
+          mkdir -p BLIS
+          echo "PATH,$PATH"
+          PYTHON_PATH=$(which python)
+          echo "ZENDNN_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "ZENDNN_GCC_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "FBGEMM_INSTALL_PATH=${GITHUB_WORKSPACE}/FBGEMM" >> $GITHUB_ENV
+          echo "ZENDNN_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN" >> $GITHUB_ENV
+          echo "ZENDNN_TOOLS_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN_tools" >> $GITHUB_ENV
+          echo "PYTHON_PATH=${PYTHON_PATH}" >> $GITHUB_ENV
+       shell: bash
+
+     - name: build zendnn
+       run: | 
+          cd ZenDNN
+          cmake -D_GLIBCXX_USE_CXX11_ABI=1 -DBUILD_SHARED_LIBS=ON -DAMDBLIS_TAG=AOCL-Sep2025-b1 -DAMDBLIS_ENABLE_BLAS=ON -DLPGEMM_V5_0=1 -DFBGEMM_ENABLE=1 -DBLIS_API=1 -DCMAKE_BUILD_TYPE=Release -DFBGEMM_BUILD_TESTS=0 -B build .
+          cmake --build build --parallel $(nproc)
+          mkdir -p _out
+          mkdir -p _out/lib
+          mkdir -p _out/tests
+          cp build/libamdZenDNN.so _out/lib/libamdZenDNN.so
+          cp build/third_party/amdblis-build/libblis-mt.so.* _out/lib/
+          cp build/third_party/fbgemm/libfbgemm.so _out/lib/
+          cp -r build/tests/* _out/tests/
+          ls -al _out/lib
+          ls -al _out/tests
+       shell: bash
+
+     - name: build tests
+       run: | 
+          cd ZenDNN
+          bash scripts/zendnn_gcc_env_setup.sh
+          cd ../ZenDNN_tools
+          export FBGEMM_ENABLE=1
+          export ZENDNN_STANDALONE_BUILD=1
+          export ZENDNN_ENABLE_TPP=1
+          sed -i '/sshpass/ s/^/#/' $ZENDNN_TOOLS_GIT_ROOT/scripts/zendnn_build_tests.sh
+          chmod 755 ./scripts/zendnn_build_tests.sh
+          bash ./scripts/zendnn_build_tests.sh gcc
+          echo "Building tests completed"
+       shell: bash
+
+     - name: run tests
+       run: |
+          cd ZenDNN
+          ./scripts/zendnn_gcc_env_setup.sh
+          env
+          cd ../ZenDNN_tools
+          chmod 755 ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh
+          ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh > $GITHUB_WORKSPACE/gcc_output.log 2>&1
+          # Check for the specific string in the log file
+          if grep "No such file or directory" $GITHUB_WORKSPACE/gcc_output.log; 
+          then
+             echo "zendnn gcc tests failed"
+             exit 1
+          else
+             echo "zendnn gcc tests passed"
+          fi
+          echo "Smoke test for GCC is done"
+                                    
+          cd ../ZenDNN
+          #bash -c "source ./scripts/zendnn_gcc_env_setup.sh"
+          export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/ZenDNN/build/:$GITHUB_WORKSPACE/ZenDNN/_out/lib/:$GITHUB_WORKSPACE/ZenDNN/external/googletest/lib:$GITHUB_WORKSPACE/BLIS/lib/LP64
+          chmod 755 ./scripts/runApiTest.sh
+          bash ./scripts/runApiTest.sh > $GITHUB_WORKSPACE/api_output.log 2>&1
+          cat $GITHUB_WORKSPACE/api_output.log
+          # Check for the specific string in the log file
+          if grep "error while loading shared libraries: libamdZenDNN.so" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          elif grep "FAILED" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          else 
+              echo "zendnn api tests passed"
+          fi
+       shell: bash
+
+     - name: clean zendnn
+       if: always()
+       run: | 
+          pwd
+          rm -rf ${GITHUB_WORKSPACE}/BLIS
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN_tools
+       shell: bash
+
+  
+
+ zendnn_build_PR:
+    runs-on: zendnn_presub_server
+    needs: [jira-id-check, license-header-check]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Clean workspace before checkout
+        run: |
+         echo "Cleaning old workspace data..."
+         ls -al $GITHUB_WORKSPACE || true
+         rm -rf $GITHUB_WORKSPACE/* || true
+         rm -rf $GITHUB_WORKSPACE/.[!.]* || true
+         echo "Workspace cleaned."
+         ls -al $GITHUB_WORKSPACE
+        shell: bash
+      - name: basic_debug
+        run: |
+            pwd
+            echo "WORKSPACE, $GITHUB_WORKSPACE"
+            echo "HOME,$HOME"
+            ls -al $GITHUB_WORKSPACE
+        shell: bash
+
+      - name: checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+          path: ZenDNN
+          fetch-depth: 0
+          clean: true
+
+      - name: show GITHUB_WORKSPACE
+        run: |
+          echo "WORKSPACE, $GITHUB_WORKSPACE"
+          ls -al $GITHUB_WORKSPACE
+        shell: bash
+
+      - name: show checked out branch for ZenDNN
+        run: |
+          cd ZenDNN
+          pwd
+          git branch --show-current
+        shell: bash
+
+      - name: checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: AMD-Zenai/ZenDNN_tools
+          ref: main
+          token: ${{ secrets.ZIAIE_PAT }}
+          path: ZenDNN_tools
+          fetch-depth: 0
+          clean: true
+
+      - name: show checked out branch for ZenDNN_tools
+        run: |
+          cd ZenDNN_tools
+          pwd
+          git branch --show-current
+        shell: bash
+      - name: PR INFO
+        shell: bash
+        run: |
+         ls 
+         pwd
+         cd ZenDNN
+         echo "=============================="
+         echo "   ZENDNN & ZENDNN_TOOLS INFO  "
+         echo "=============================="
+
+         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+         if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "=== PULL REQUEST INFO ==="
+         elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+          BASE_BRANCH="main"
+          BASE_SHA="$(git rev-parse origin/main)"
+          SOURCE_BRANCH="${GITHUB_REF_NAME}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "=== PUSH EVENT INFO ==="
+         else
+          BASE_BRANCH="main"
+          BASE_SHA="$(git rev-parse origin/main || echo 'N/A')"
+          SOURCE_BRANCH="${GITHUB_REF_NAME:-workflow_dispatch}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "=== WORKFLOW DISPATCH INFO ==="
+         fi
+
+         echo "PR BASE BRANCH   : $BASE_BRANCH"
+         echo "PR BASE SHA      : $BASE_SHA"
+         echo "PR SOURCE BRANCH : $SOURCE_BRANCH"
+         echo "PR HEAD SHA      : $HEAD_SHA"
+         echo ""
+
+         echo "Fetching branches..."
+         git fetch --no-tags origin +refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH || true
+         git fetch --no-tags origin +refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH || true
+         echo ""
+
+         echo "COMMITS BETWEEN BASE AND HEAD"
+         git log --oneline -20 || echo "No commits found"
+         echo ""
+
+         echo "=============================="
+         echo "   ZENDNN_TOOLS INFO"
+         echo "=============================="
+         if [ -d "$GITHUB_WORKSPACE/ZenDNN_tools" ]; then
+          cd "$GITHUB_WORKSPACE/ZenDNN_tools"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/AMD-Zenai/ZenDNN_tools.git
+          git fetch --all --no-tags || true
+
+          BRANCH=${GITHUB_REF_NAME:-main}
+          HEAD_SHA=$(git rev-parse HEAD)
+          BASE_BRANCH="main"
+          BASE_SHA=$(git rev-parse origin/main || echo "N/A")
+
+          echo "CURRENT BRANCH   : $BRANCH"
+          echo "HEAD SHA         : $HEAD_SHA"
+          echo "BASE BRANCH      : $BASE_BRANCH"
+          echo "BASE SHA         : $BASE_SHA"
+          echo ""
+
+          echo "LAST 20 COMMITS (ZenDNN_tools)"
+          git log --oneline -20 || echo "No commits found"
+         else
+          echo "ZenDNN_tools directory not found"
+         fi
+     
+      - name: setup_env
+        run: |
+          mkdir -p BLIS
+          echo "PATH,$PATH"
+          PYTHON_PATH=$(which python)
+          echo "ZENDNN_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "ZENDNN_GCC_BLIS_PATH=${GITHUB_WORKSPACE}/BLIS" >> $GITHUB_ENV
+          echo "FBGEMM_INSTALL_PATH=${GITHUB_WORKSPACE}/FBGEMM" >> $GITHUB_ENV
+          echo "ZENDNN_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN" >> $GITHUB_ENV
+          echo "ZENDNN_TOOLS_GIT_ROOT=${GITHUB_WORKSPACE}/ZenDNN_tools" >> $GITHUB_ENV
+          echo "PYTHON_PATH=${PYTHON_PATH}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: build zendnn
+        run: | 
+          cd ZenDNN
+          cmake -D_GLIBCXX_USE_CXX11_ABI=1 -DBUILD_SHARED_LIBS=ON -DAMDBLIS_TAG=AOCL-Sep2025-b1 -DAMDBLIS_ENABLE_BLAS=ON -DLPGEMM_V5_0=1 -DFBGEMM_ENABLE=1 -DBLIS_API=1 -DCMAKE_BUILD_TYPE=Release -DFBGEMM_BUILD_TESTS=0 -B build .
+          cmake --build build --parallel $(nproc)
+          mkdir -p _out
+          mkdir -p _out/lib
+          mkdir -p _out/tests
+          cp build/libamdZenDNN.so _out/lib/libamdZenDNN.so
+          cp build/third_party/amdblis-build/libblis-mt.so.* _out/lib/
+          cp build/third_party/fbgemm/libfbgemm.so _out/lib/
+          cp -r build/tests/* _out/tests/
+          ls -al _out/lib
+          ls -al _out/tests
+        shell: bash
+
+      - name: build tests
+        run: | 
+          cd ZenDNN
+          bash scripts/zendnn_gcc_env_setup.sh
+          cd ../ZenDNN_tools
+          export FBGEMM_ENABLE=1
+          export ZENDNN_STANDALONE_BUILD=1
+          export ZENDNN_ENABLE_TPP=1
+          sed -i '/sshpass/ s/^/#/' $ZENDNN_TOOLS_GIT_ROOT/scripts/zendnn_build_tests.sh
+          chmod 755 ./scripts/zendnn_build_tests.sh
+          bash ./scripts/zendnn_build_tests.sh gcc
+          echo "Building tests completed"
+        shell: bash
+
+      - name: run tests
+        run: |
+          cd ZenDNN
+          ./scripts/zendnn_gcc_env_setup.sh
+          env
+          cd ../ZenDNN_tools
+          chmod 755 ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh
+          ./scripts/ci/zendnn_ci_gcc_smoke_tests.sh > $GITHUB_WORKSPACE/gcc_output.log 2>&1
+          # Check for the specific string in the log file
+          if grep "No such file or directory" $GITHUB_WORKSPACE/gcc_output.log; 
+          then
+             echo "zendnn gcc tests failed"
+             exit 1
+          else
+             echo "zendnn gcc tests passed"
+          fi
+          echo "Smoke test for GCC is done"
+                                    
+          cd ../ZenDNN
+          #bash -c "source ./scripts/zendnn_gcc_env_setup.sh"
+          export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/ZenDNN/build/:$GITHUB_WORKSPACE/ZenDNN/_out/lib/:$GITHUB_WORKSPACE/ZenDNN/external/googletest/lib:$GITHUB_WORKSPACE/BLIS/lib/LP64
+          chmod 755 ./scripts/runApiTest.sh
+          bash ./scripts/runApiTest.sh > $GITHUB_WORKSPACE/api_output.log 2>&1
+          cat $GITHUB_WORKSPACE/api_output.log
+          # Check for the specific string in the log file
+          if grep "error while loading shared libraries: libamdZenDNN.so" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          elif grep "FAILED" $GITHUB_WORKSPACE/api_output.log; 
+          then
+             echo "zendnn api tests failed"
+             exit 1
+          else 
+              echo "zendnn api tests passed"
+          fi
+        shell: bash
+
+      - name: clean zendnn
+        if: always()
+        run: | 
+          pwd
+          rm -rf ${GITHUB_WORKSPACE}/BLIS
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN
+          rm -rf ${GITHUB_WORKSPACE}/ZenDNN_tools
+        shell: bash
+ trigger_pytorch_plugin:
+    #needs: [zendnn_build]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: amd-zenai-arc-xsmall-dind
+    steps:
+      - name: Trigger ZenDNN_PyTorch_Plugin workflow
+        run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-pr",
+            "client_payload": {
+              "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+               "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTORCH_USE_LOCAL_ZENDNN": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+        shell: bash
+ trigger_tensorflow_plugin:
+    #needs: [zendnn_build]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: amd-zenai-arc-xsmall-dind
+    steps:
+      - name: Trigger ZenDNN_Tensorflow_Plugin workflow
+        run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_TensorFlow_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-pr",
+            "client_payload": {
+              "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTF_USE_LOCAL_ZENDNN": "1",
+              "ZENTF_USE_LOCAL_BLIS": "1"
+            }
+          }'
+        shell: bash
+ trigger-zenTorch-ZenDNNL:
+    #needs: [zendnn_build]
+    runs-on: amd-zenai-arc-xsmall-dind
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+     - name: Trigger ZenTorch_ZenDNNL workflow
+       run: |
+          curl -X POST https://api.github.com/repos/AMD-Zenai/ZenDNN_PyTorch_Plugin/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
+          -d '{
+            "event_type": "zendnn-zentorch-zendnnl-pr",
+            "client_payload": {
+              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
+              "ZENTORCH_USE_LOCAL_BLIS": "1"
+            }
+          }'
+       shell: bash
+        
+ check_status:
+  needs: [trigger_pytorch_plugin, trigger_tensorflow_plugin, trigger-zenTorch-ZenDNNL]
+  runs-on: amd-zenai-arc-xsmall-dind
+  steps:
+    - name: PyTorch & TensorFlow & Zentorch_Zendnnl plugin CI statuses
+      env:
+        GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
+        REPO_ZENDNN: AMD-Zenai/ZenDNN
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        echo "Waiting for PyTorch & TensorFlow & Zentorch_Zendnnl plugin statuses..."
+        for i in {1..360}; do
+          pytorch_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
+          
+          tf_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_TensorFlow_Plugin CI") | .state' | tail -n 1)
+
+           zentorch_zendnnl_state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin ZENDNNL CI") | .state' | tail -n 1)
+
+          echo "PyTorch: $pytorch_state | TF: $tf_state | Zentoch_zendnnl: $zentorch_zendnnl_state"
+
+          # stop waiting if both are complete
+          if [[ "$pytorch_state" == "success" && "$tf_state" == "success" && "$zentorch_zendnnl_state" == "success" ]]; then
+            echo " All plugin workflows succeeded."
+            exit 0
+          fi
+
+          if [[ "$pytorch_state" == "failure" || "$tf_state" == "failure" ||  "$zentorch_zendnnl_state" == "failure" ]]; then
+            echo "One of the plugin workflows failed."
+            exit 1
+          fi
+
+          sleep 30
+        done
+
+        echo " Timeout: waited too long for statuses."
+        exit 1
