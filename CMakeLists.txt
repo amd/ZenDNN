@@ -227,24 +227,6 @@ message(STATUS "FBGEMM, INCLUDE_DIRS/LIBRARIES, ${FBGEMM_INCLUDE_DIRS}, ${FBGEMM
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
-# Set Composable Kernel paths
-# Check if DEPEND_ON_CK is set to 1
-if(DEPEND_ON_CK EQUAL 1)
-    set(CK_PATH ${ZENDNN_CK_PATH})
-
-    # Set link flags
-    set(CK_LINK_FLAGS "-L${CK_PATH}/build/lib -lck_cpu_instance -lhost_tensor")
-
-    # Set defines
-    add_definitions(-DCK_NOGPU -DENABLE_CK)
-
-    # Set common flags
-    set(CK_COMMON_FLAGS "-Wno-attributes -Wno-ignored-attributes -Wno-write-strings")
-
-    # Set include directories
-    include_directories(${CK_PATH} ${CK_PATH}/include ${CK_PATH}/library/include)
-endif()
-
 # Check if uProf is enabled
 if(ZENDNN_ENABLE_UPROF)
     set(UPROF_PATH "${UPROF_INSTALL_PATH}")
