@@ -53,7 +53,7 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
     return false;  // Fallback to BLIS
   }
 
-  const bool scalars_ok = (alpha == 1.0f && beta == 0.0f);
+  const bool scalars_ok = ((alpha == 1.0f &&  (beta == 0.0f || beta == 1.0f)));
   if (!scalars_ok) {
     return false;
   }
@@ -83,8 +83,8 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
  * @brief Template function for LibXSMM GEMM dispatch and execution
  */
 template<typename TA, typename TB, typename TC>
-int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K, int lda,
-                 int ldb, int ldc,
+int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
+                 float beta, int lda, int ldb, int ldc,
                  char transA, char transB, libxsmm_datatype a_type, libxsmm_datatype b_type,
                  libxsmm_datatype c_type, libxsmm_datatype comp_type) {
   libxsmm_bitfield l_flags = 0;
@@ -94,7 +94,9 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K, int lda,
   if (transB == 'T' || transB == 't') {
     l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
   }
-  l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+  if (beta == 0.0f) {
+    l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+  }
 
   libxsmm_gemm_shape shape{};
   shape.m   = N;
@@ -131,7 +133,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K, int lda,
  * @brief Run LibXSMM GEMM with automatic type dispatch
  */
 static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
-                              int lda, int ldb, int ldc,
+                              float beta, int lda, int ldb, int ldc,
                               const void *A, const void *B, void *C,
                               const data_types &dtypes) {
   int kernel_status = 0;
@@ -140,7 +142,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       static_cast<const float *>(A),
                       static_cast<const float *>(B),
                       static_cast<float *>(C),
-                      M,N,K, lda,ldb,ldc, transA,transB,
+                      M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
@@ -149,7 +151,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       reinterpret_cast<const libxsmm_bfloat16 *>(A),
                       reinterpret_cast<const libxsmm_bfloat16 *>(B),
                       static_cast<float *>(C),
-                      M,N,K, lda,ldb,ldc, transA,transB,
+                      M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
   }
@@ -159,7 +161,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
         reinterpret_cast<const libxsmm_bfloat16 *>(A),
         reinterpret_cast<const libxsmm_bfloat16 *>(B),
         reinterpret_cast<libxsmm_bfloat16 *>(C),
-        M,N,K, lda,ldb,ldc, transA,transB,
+        M,N,K, beta, lda,ldb,ldc, transA,transB,
         LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
         LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
   }

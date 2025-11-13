@@ -38,8 +38,9 @@ enum class matmul_algo_t : int32_t {
   onednn = 3,            /*!< OneDNN */
   onednn_blocked = 4,    /*!< Blocked OneDNN */
   libxsmm = 5,           /*!< LIBXSMM */
-  reference = 6,         /*!< Reference */
-  batched_sgemm = 7,     /*!< Batched SGEMM */
+  libxsmm_blocked = 6,   /*!< Blocked LIBXSMM */
+  reference = 7,         /*!< Reference */
+  batched_sgemm = 8,     /*!< Batched SGEMM */
   algo_count             /*!< Algo count */
 };
 

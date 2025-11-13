@@ -77,16 +77,17 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       }
       else {
         use_LOWOHA = true;
-        alpha = 1;
-        beta = 0;
-        algo = matmul_algo_t::libxsmm;
+        alpha = 1.0f;
+        beta = rand() % 2;
+        algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
       }
     }
   }
   else {
-    if (algo == matmul_algo_t::libxsmm) {
+    if (algo == matmul_algo_t::libxsmm ||
+        algo == matmul_algo_t::libxsmm_blocked) {
       alpha    = 1.0f;
-      beta     = 0.0f;
+      beta     = rand() % 2;
       use_LOWOHA = true;
     } else {
       use_LOWOHA = rand() % 2;
@@ -697,7 +698,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         void *B_data = weight_tensor.get_raw_handle_unsafe();
         void *C_data = output_tensor.get_raw_handle_unsafe();
         void *bias_data = nullptr;
-        if (algo != matmul_algo_t::libxsmm) {
+        if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::libxsmm_blocked) {
           bias_data = bias_tensor.get_raw_handle_unsafe();
         }
 
@@ -865,7 +866,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                       .set_param("weights", weight_tensor)
                                       .set_alpha(alpha)
                                       .set_beta(beta);
-    if (!(algo == matmul_algo_t::libxsmm)) {
+    if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::libxsmm_blocked) {
       matmul_context = matmul_context.set_param("bias", bias_tensor);
     }
 

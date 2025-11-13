@@ -127,6 +127,12 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   else if ((algo == "onednn") || (algo == "onednn_blocked")) {
     return matmul_algo_t::onednn;
   }
+  else if (algo == "libxsmm") {
+    return matmul_algo_t::libxsmm;
+  }
+  else if (algo == "libxsmm_blocked") {
+    return matmul_algo_t::libxsmm_blocked;
+  }
   else if (algo == "reference") {
     return matmul_algo_t::reference;
   }

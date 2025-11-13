@@ -384,13 +384,14 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
   }
   if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||
                                    kernel == matmul_algo_t::onednn_blocked)) ||
-      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm)) ||
+      (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm ||
+                                    kernel == matmul_algo_t::libxsmm_blocked)) ||
       (kernel >= matmul_algo_t::algo_count)) {
     kernel = matmul_algo_t::aocl_blis;
   }
   // TODO: Remove condition, when libxsmm supports bias and post_ops.
-  if (kernel == matmul_algo_t::libxsmm && (params.postop_.size() > 0 ||
-      bias != nullptr)) {
+  if ((kernel == matmul_algo_t::libxsmm || kernel == matmul_algo_t::libxsmm_blocked) &&
+      (params.postop_.size() > 0 || bias != nullptr)) {
     kernel = matmul_algo_t::aocl_blis;
   }
 
