@@ -303,6 +303,16 @@ jobs:
           pwd
           git branch --show-current
         shell: bash
+      - name: Checkout PR tip commit
+        if: github.event_name == 'pull_request'
+        working-directory: ZenDNN
+        run: |
+         echo " Checking out PR tip commit..."
+         echo "Current commit: $(git rev-parse HEAD)"
+         echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
+         git checkout ${{ github.event.pull_request.head.sha }}
+         echo " Now on commit: $(git rev-parse HEAD)"
+         echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
       - name: PR INFO
         shell: bash
         run: |
@@ -479,8 +489,14 @@ jobs:
             "client_payload": {
               "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
                "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
-              "ZENTORCH_USE_LOCAL_ZENDNN": "1",
-              "ZENTORCH_USE_LOCAL_BLIS": "1"
+               "ZENTORCH_USE_LOCAL_ZENDNN": "1",
+               "ZENTORCH_USE_LOCAL_BLIS": "1",
+               "zendnn_pr_number": "${{ github.event.pull_request.number }}",
+               "zendnn_pr_title": "${{ github.event.pull_request.title }}",
+               "zendnn_pr_author": "${{ github.event.pull_request.user.login }}",
+               "zendnn_pr_url": "${{ github.event.pull_request.html_url }}",
+               "triggering_repo": "AMD-Zenai/ZenDNN",
+               "triggering_event": "${{ github.event_name }}"
             }
           }'
         shell: bash
@@ -500,7 +516,13 @@ jobs:
               "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
               "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
               "ZENTF_USE_LOCAL_ZENDNN": "1",
-              "ZENTF_USE_LOCAL_BLIS": "1"
+              "ZENTF_USE_LOCAL_BLIS": "1",
+              "zendnn_pr_number": "${{ github.event.pull_request.number }}",
+              "zendnn_pr_title": "${{ github.event.pull_request.title }}",
+              "zendnn_pr_author": "${{ github.event.pull_request.user.login }}",
+              "zendnn_pr_url": "${{ github.event.pull_request.html_url }}",
+              "triggering_repo": "AMD-Zenai/ZenDNN",
+              "triggering_event": "${{ github.event_name }}"
             }
           }'
         shell: bash
@@ -517,10 +539,16 @@ jobs:
           -d '{
             "event_type": "zendnn-zentorch-zendnnl-pr",
             "client_payload": {
-              "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
-              "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
+              "zendnn_ref": "${{ github.event.pull_request.head.ref }}",
+              "zendnn_ref_sha": "${{ github.event.pull_request.head.sha }}",
               "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
-              "ZENTORCH_USE_LOCAL_BLIS": "1"
+              "ZENTORCH_USE_LOCAL_BLIS": "1",
+              "zendnn_pr_number": "${{ github.event.pull_request.number }}",
+              "zendnn_pr_title": "${{ github.event.pull_request.title }}",
+              "zendnn_pr_author": "${{ github.event.pull_request.user.login }}",
+              "zendnn_pr_url": "${{ github.event.pull_request.html_url }}",
+              "triggering_repo": "AMD-Zenai/ZenDNN",
+              "triggering_event": "${{ github.event_name }}"
             }
           }'
        shell: bash
