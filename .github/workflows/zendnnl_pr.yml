@@ -81,6 +81,16 @@ jobs:
       uses: actions/checkout@v3
       with:
        fetch-depth: 0 
+    - name: Checkout PR tip commit
+      if: github.event_name == 'pull_request'
+      run: |
+       echo " Checking out PR tip commit..."
+       echo "Current commit: $(git rev-parse HEAD)"
+       echo "PR HEAD SHA: ${{ github.event.pull_request.head.sha }}"
+       git checkout ${{ github.event.pull_request.head.sha }}
+       echo " Now on commit: $(git rev-parse HEAD)"
+       echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+      shell: bash
     - name: PR INFO
       shell: bash
       run: |
@@ -266,7 +276,13 @@ jobs:
               "zendnnl_ref": "${{ github.event.pull_request.head.ref }}",
               "zendnnl_ref_sha": "${{ github.event.pull_request.head.sha }}",
               "ZENTORCH_USE_LOCAL_ZENDNNL": "1",
-              "ZENTORCH_USE_LOCAL_BLIS": "1"
+              "ZENTORCH_USE_LOCAL_BLIS": "1",
+              "zendnnl_pr_number": "${{ github.event.pull_request.number }}",
+              "zendnnl_pr_title": "${{ github.event.pull_request.title }}",
+              "zendnnl_pr_author": "${{ github.event.pull_request.user.login }}",
+              "zendnnl_pr_url": "${{ github.event.pull_request.html_url }}",
+              "triggering_repo": "AMD-Zenai/ZenDNN",
+              "triggering_event": "${{ github.event_name }}"
             }
           }'
        shell: bash
