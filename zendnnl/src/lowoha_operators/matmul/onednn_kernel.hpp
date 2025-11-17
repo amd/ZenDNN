@@ -46,7 +46,7 @@ namespace lowoha {
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-                           const void *bias, int weight_cache_type);
+                           const void *bias, int weight_cache_type, bool is_weights_const);
 /**
  * @brief Reorder weights to OneDNN's optimal format with caching
  *

@@ -23,7 +23,7 @@ namespace lowoha {
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-                           const void *bias, int weight_cache_type) {
+                           const void *bias, int weight_cache_type, bool is_weights_const) {
 
   onednn_utils_t::onednn_matmul_params dnnl_params;
 
@@ -256,7 +256,8 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
   }
 
   bool is_blocked = dnnl_params.weights.dims.size() == 2 &&
-                    dnnl_params.algo == matmul_algo_t::onednn_blocked;
+                    dnnl_params.algo == matmul_algo_t::onednn_blocked &&
+                    is_weights_const;
   if (is_blocked) {
     Key_matmul key_(transB, K, N, ldb, dnnl_params.weights.buffer,
                     static_cast<uint32_t>(matmul_algo_t::onednn_blocked));

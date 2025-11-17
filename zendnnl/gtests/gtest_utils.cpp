@@ -734,10 +734,37 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                  batchB, " M:", M, " N:", N, " K:", K,
                  " alpha:", alpha, " beta:", beta);
 
+        // Extract batch strides from tensors if they have batch dimension (3D)
+        // Batch strides are in elements, not bytes
+        size_t batch_stride_src = static_cast<size_t>(-1);
+        size_t batch_stride_wei = static_cast<size_t>(-1);
+        size_t batch_stride_dst = static_cast<size_t>(-1);
+
+        if (input_dim == 3) {
+          // For 3D input tensor, get stride of batch dimension (dimension 0) in elements
+          batch_stride_src = input_tensor.get_stride(0);
+        }
+        if (weight_dim == 3) {
+          // For 3D weight tensor, get stride of batch dimension (dimension 0) in elements
+          batch_stride_wei = weight_tensor.get_stride(0);
+        }
+        if (output_dim == 3) {
+          // For 3D output tensor, get stride of batch dimension (dimension 0) in elements
+          batch_stride_dst = output_tensor.get_stride(0);
+        }
+
         // Create lowoha_post_op structure
         lowoha_params params;
         params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
+
+        // Create batch_params structure
+        batch_params_t batch_params;
+        batch_params.Batch_A = batchA;
+        batch_params.Batch_B = batchB;
+        batch_params.batch_stride_src = batch_stride_src;
+        batch_params.batch_stride_wei = batch_stride_wei;
+        batch_params.batch_stride_dst = batch_stride_dst;
 
         // Add post-ops based on index
         if (index < po_size) {
@@ -764,10 +791,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
-                            beta, C_data, ldc,
-                            params,
-                            batchA, batchB  // Batch_A, Batch_B
-                          );
+                            beta, C_data, ldc, rand() % 2 == 0 ? true : false,
+                            batch_params, params);
         if (status != status_t::success) {
           log_error("LOWOHA matmul_direct execution failed.");
           return status_t::failure;

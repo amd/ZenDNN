@@ -91,6 +91,33 @@ struct lowoha_quantization_params_t {
 };
 
 /**
+ * @struct batch_params_t
+ * @brief A structure to encapsulate batch dimensions and batch strides.
+ *
+ * This structure contains batch sizes (Batch_A and Batch_B) and batch strides
+ * for source, weight, and destination tensors. The batch strides specify the
+ * byte offset between consecutive batches in memory.
+ */
+ struct batch_params_t {
+  int Batch_A = 1;              /**< Batch size for source tensor. */
+  int Batch_B = 1;              /**< Batch size for weight tensor. */
+  size_t batch_stride_src =
+    -1;  /**< Byte stride between batches for source tensor (-1 means calculate from dimensions). */
+  size_t batch_stride_wei =
+    -1;  /**< Byte stride between batches for weight tensor (-1 means calculate from dimensions). */
+  size_t batch_stride_dst =
+    -1;  /**< Byte stride between batches for destination tensor (-1 means calculate from dimensions). */
+
+  /**
+   * @brief Default constructor for `batch_params_t`.
+   *
+   * Initializes Batch_A and Batch_B to 1, and all strides to -1.
+   */
+  batch_params_t() : Batch_A(1), Batch_B(1), batch_stride_src(-1),
+    batch_stride_wei(-1), batch_stride_dst(-1) {}
+};
+
+/**
  * @brief Main parameter structure for LOWOHA matrix multiplication
  */
 struct lowoha_params {
@@ -100,12 +127,12 @@ struct lowoha_params {
   char mem_format_a;                              ///< Memory format for matrix A
   char mem_format_b;                              ///< Memory format for matrix B
   matmul_algo_t lowoha_algo;                      ///< Selected algorithm
-
+  uint64_t num_threads;                            ///< Number of threads
   /**
    * @brief Default constructor for lowoha_params
    */
   lowoha_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
-    mem_format_b('n'), lowoha_algo(matmul_algo_t::none) {}
+    mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0) {}
 };
 
 } // namespace lowoha

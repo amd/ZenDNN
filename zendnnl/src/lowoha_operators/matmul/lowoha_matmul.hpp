@@ -35,33 +35,32 @@ namespace lowoha {
  *
  * This function performs C = alpha * op(A) * op(B) + beta * C + fused post-ops.
  *
- * @param layout    Memory layout ('r' for row-major, 'c' for column-major)
- * @param transA    Whether to transpose matrix A
- * @param transB    Whether to transpose matrix B
- * @param M         Number of rows in A and C
- * @param N         Number of columns in B and C
- * @param K         Number of columns in A and rows in B
- * @param alpha     Scaling factor for A*B
- * @param src       Pointer to matrix A data
- * @param lda       Leading dimension of A
- * @param weight    Pointer to matrix B data
- * @param ldb       Leading dimension of B
- * @param bias      Optional bias vector (can be nullptr)
- * @param beta      Scaling factor for existing C values
- * @param dst       Pointer to matrix C data
- * @param ldc       Leading dimension of C
- * @param params    Additional parameters including post-ops and data types
- * @param Batch_A   Batch size for matrix A (default: 1)
- * @param Batch_B   Batch size for matrix B (default: 1)
+ * @param layout           Memory layout ('r' for row-major, 'c' for column-major)
+ * @param transA           Whether to transpose matrix A
+ * @param transB           Whether to transpose matrix B
+ * @param M                Number of rows in A and C
+ * @param N                Number of columns in B and C
+ * @param K                Number of columns in A and rows in B
+ * @param alpha            Scaling factor for A*B
+ * @param src              Pointer to matrix A data
+ * @param lda              Leading dimension of A
+ * @param weight           Pointer to matrix B data
+ * @param ldb              Leading dimension of B
+ * @param bias             Optional bias vector (can be nullptr)
+ * @param beta             Scaling factor for existing C values
+ * @param dst              Pointer to matrix C data
+ * @param ldc              Leading dimension of C
+ * @param is_weights_const Whether the weights are constant (enables caching)
+ * @param batch_params     Batch parameters including batch sizes and strides
+ * @param params           Additional parameters including post-ops and data types
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
-                       const float beta, void *dst, const int ldc,
-                       lowoha_params params,
-                       int Batch_A = 1, int Batch_B = 1);
+                       const float beta, void *dst, const int ldc, const bool is_weights_const,
+                       batch_params_t batch_params, lowoha_params params);
 
 } // namespace lowoha
 } // namespace zendnnl

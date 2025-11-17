@@ -56,14 +56,28 @@ status_t matmul_direct(
   const float beta,            // Scaling factor for output C
   void *dst,                   // Output matrix C
   const int ldc,               // Leading dimension of C
-  lowoha_params params,        // LowOHA parameters (dtypes, post-ops, quantization)
-  int Batch_A = 1,             // Number of batches in A (default: 1)
-  int Batch_B = 1              // Number of batches in B (default: 1)
+  const bool is_weights_const, // Whether weights are constant (enables caching)
+  batch_params_t batch_params, // Batch parameters (batch sizes and strides)
+  lowoha_params params         // LowOHA parameters (dtypes, post-ops, quantization)
 );
 ```
 
 
 ## Parameters Structure
+
+### `batch_params_t`
+
+Structure for batch dimensions and strides:
+
+```cpp
+struct batch_params_t {
+  int Batch_A;                    // Batch size for source tensor (default: 1)
+  int Batch_B;                    // Batch size for weight tensor (default: 1)
+  size_t batch_stride_src;        // Byte stride between batches for source (-1 = auto-calculate)
+  size_t batch_stride_wei;        // Byte stride between batches for weight (-1 = auto-calculate)
+  size_t batch_stride_dst;        // Byte stride between batches for destination (-1 = auto-calculate)
+};
+```
 
 ### `lowoha_params`
 
@@ -77,6 +91,7 @@ struct lowoha_params {
   char mem_format_a;                       // Memory format for A ('n'=reordered, 'r'=non-reordered)
   char mem_format_b;                       // Memory format for B ('n'=reordered, 'r'=non-reordered)
   matmul_algo_t lowoha_algo;               // Preferred backend algorithm
+  uint64_t num_threads;                    // Number of threads (0 = auto)
 };
 ```
 
@@ -202,6 +217,11 @@ int lowoha_matmul_bf16_fused_ops_example() {
   add_op.dims = {M, N};
   params.postop_.push_back(add_op);
   
+  // Configure batch parameters
+  batch_params_t batch_params;
+  batch_params.Batch_A = 1;
+  batch_params.Batch_B = 1;
+  
   // Execute MatMul
   status_t status = matmul_direct(
     'r', false, false,
@@ -212,8 +232,9 @@ int lowoha_matmul_bf16_fused_ops_example() {
     bias.data(),
     0.0f,
     C_bf16.data(), ldc,
-    params,
-    1, 1
+    true,  // is_weights_const (enables caching)
+    batch_params,
+    params
   );
   
   return (status == status_t::success) ? 0 : -1;
@@ -247,6 +268,11 @@ int lowoha_batched_matmul_example() {
   lowoha_params params;
   params.dtypes = dtypes;
   
+  // Configure batch parameters
+  batch_params_t batch_params;
+  batch_params.Batch_A = batch_size;  // Batched input
+  batch_params.Batch_B = 1;           // Shared weights
+  
   // Execute batched MatMul
   status_t status = matmul_direct(
     'r', false, false,
@@ -257,9 +283,9 @@ int lowoha_batched_matmul_example() {
     bias.data(),
     0.0f,
     C.data(), ldc,
-    params,
-    batch_size,  // Batch_A = 16 (batched input)
-    1            // Batch_B = 1 (shared weights)
+    true,  // is_weights_const (enables caching)
+    batch_params,
+    params
   );
   
   return (status == status_t::success) ? 0 : -1;

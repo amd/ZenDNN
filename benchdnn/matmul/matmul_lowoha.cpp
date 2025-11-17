@@ -102,6 +102,10 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       lowoha_params params;
       params.dtypes = matmul_dtypes;
 
+      batch_params_t batch_params;
+      batch_params.Batch_A = batchA;
+      batch_params.Batch_B = batchB;
+
       // Validate data types
       if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16) {
         testlog_error("LOWOHA: Unsupported source data type");
@@ -133,10 +137,8 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                               alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
-                              beta, C_data, ldc,
-                              params,
-                              batchA, batchB  // Batch_A, Batch_B
-                            );
+                              beta, C_data, ldc, true,
+                              batch_params, params);
           if (status != status_t::success) {
             testlog_error("LOWOHA: Matmul execution failed.");
             skip = true;
@@ -173,10 +175,8 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                               alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
-                              beta, C_data, ldc,
-                              params,
-                              batchA, batchB  // Batch_A, Batch_B
-                            );
+                              beta, C_data, ldc, true,
+                              batch_params, params);
           if (status != status_t::success) {
             testlog_error("LOWOHA: Matmul execution failed.");
             skip = true;

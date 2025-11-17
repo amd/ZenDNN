@@ -51,6 +51,10 @@ int run_lowoha_matmul_fp32_test() {
     lowoha_params params;
     params.dtypes = matmul_dtype;
 
+    batch_params_t batch_params;
+    batch_params.Batch_A = 1;
+    batch_params.Batch_B = 1;
+
     zendnnl::lowoha::postop op1;
     op1.po_type = post_op_type_t::none;
     op1.buff = nullptr;
@@ -72,10 +76,8 @@ int run_lowoha_matmul_fp32_test() {
                         M, N, K,
                         1.0f, A.data(), lda, B.data(), ldb,
                         nullptr,  // alpha, src, lda, weight, ldb, bias
-                        0.0f, C.data(), ldc,  // beta, dst, ldc
-                        params,
-                        1, 1  // Batch_A, Batch_B
-                      );
+                        0.0f, C.data(), ldc, true,  // beta, dst, ldc, is_weights_const
+                        batch_params, params);
     if (status != status_t::success) {
       log_error("LOWOHA: Execution failed");
       return NOT_OK;

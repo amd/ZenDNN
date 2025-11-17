@@ -65,15 +65,18 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 status_t matmul_direct(const char layout,const bool transA,const bool transB,
                        const int M, const int N, const int K,const float alpha, const void *src,
                        const int lda, const void *weight,const int ldb,const void *bias,
-                       const float beta, void *dst, const int ldc,
-                       lowoha_params params,
-                       int Batch_A, int Batch_B) {
+                       const float beta, void *dst, const int ldc, const bool is_weights_const,
+                       batch_params_t batch_params, lowoha_params params) {
   // Create profiler instance for timing
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
   if (is_profile) {
     profiler.tbp_start();
   }
+
+  int Batch_A = batch_params.Batch_A;
+  int Batch_B = batch_params.Batch_B;
+
 
   if (validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A, Batch_B,
                                     params) != status_t::success) {
@@ -90,6 +93,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
        << ", input_dtype=" << data_type_to_string(params.dtypes.src)
        << ", output_dtype=" << data_type_to_string(params.dtypes.dst)
        << ", bias=" << (bias != nullptr ? "true" : "false")
+       << ", is_weights_const=" << (is_weights_const ? "true" : "false")
        << ", post_op=[" << post_op_names_to_string(params) << "]"
     << ", post_op_dtype=[" << ([&]() {
       std::string dtypes = post_op_data_types_to_string(params);
@@ -110,12 +114,18 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   size_t src_type_size = is_f32_src ? sizeof(float) : sizeof(int16_t);
   size_t out_type_size = is_f32_out ? sizeof(float) : sizeof(int16_t);
 
-  size_t src_stride = (transA ? K *lda : M * lda) * src_type_size;
-  size_t weight_stride = (transB ? N *ldb : K * ldb) * src_type_size;
-  size_t dst_stride = M * ldc * out_type_size;
+  size_t src_batch_stride = batch_params.batch_stride_src ==
+                            static_cast<size_t>(-1) ? (transA ? K *lda : M * lda) * src_type_size :
+                            batch_params.batch_stride_src * src_type_size;
+  size_t weight_batch_stride = batch_params.batch_stride_wei ==
+                               static_cast<size_t>(-1) ? (transB ? N *ldb : K * ldb) * src_type_size :
+                               batch_params.batch_stride_wei * src_type_size;
+  size_t dst_batch_stride = batch_params.batch_stride_dst ==
+                            static_cast<size_t>(-1) ? M * ldc * out_type_size :
+                            batch_params.batch_stride_dst * out_type_size;
 
   const int batch_count = std::max(Batch_A, Batch_B);
-  const int num_threads = omp_get_max_threads();
+  const int num_threads = params.num_threads > 0 ? params.num_threads : omp_get_max_threads();
   // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
   //                                    num_threads, params.dtypes.src);
   matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
@@ -131,7 +141,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   [[maybe_unused]] int32_t weight_cache_type = matmul_config.get_weight_cache();
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
-      batch_count == 1) {
+      batch_count == 1 && is_weights_const) {
     Key_matmul key_(transB, K, N, ldb, weight,
                     static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
     //call reorder and cache function
@@ -166,7 +176,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                               src, lda, weight, ldb, beta, dst, ldc,
                               params.dtypes, batch_count,
                               params.mem_format_a, params.mem_format_b,
-                              src_stride, weight_stride, dst_stride,
+                              src_batch_stride, weight_batch_stride, dst_batch_stride,
                               params, bias);
   }
 #if ZENDNNL_DEPENDS_ONEDNN
@@ -175,7 +185,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, weight_cache_type);
+                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, weight_cache_type, is_weights_const);
   }
 #endif
   else if (num_threads > 1 && batch_count > 1) {
@@ -240,10 +250,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
           int m_len = std::min(M_block, M - m_start);
 
           const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                      get_batch_index(b, Batch_A) * src_stride;
+                                      get_batch_index(b, Batch_A) * src_batch_stride;
           const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, Batch_B) * weight_stride;
-          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+                                      get_batch_index(b, Batch_B) * weight_batch_stride;
+          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
 
           const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                            src_type_size);
@@ -281,10 +291,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
           int m_len = std::min(M_block, M - m_start);
 
           const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                      get_batch_index(b, Batch_A) * src_stride;
+                                      get_batch_index(b, Batch_A) * src_batch_stride;
           const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, Batch_B) * weight_stride;
-          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+                                      get_batch_index(b, Batch_B) * weight_batch_stride;
+          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
 
           const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                            src_type_size);
@@ -419,10 +429,10 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                 static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                  get_batch_index(b, Batch_A) * src_stride;
+                                  get_batch_index(b, Batch_A) * src_batch_stride;
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                  get_batch_index(b, Batch_B) * weight_stride;
-      uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_stride;
+                                  get_batch_index(b, Batch_B) * weight_batch_stride;
+      uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
