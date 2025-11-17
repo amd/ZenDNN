@@ -358,7 +358,8 @@ inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
 }
 
 matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
-                            int batch_count, int M, int N, int K, int num_threads, const void *bias) {
+                            int batch_count, int M, int N, int K, int num_threads, const void *bias,
+                            const bool is_weights_const) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
                  matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
@@ -379,7 +380,13 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
       kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
     }
     else {
-      kernel = matmul_algo_t::aocl_blis;
+      if (M >= 4096 && M <= 8192 && K == 1024 && N == 1024 &&
+          is_weights_const == false) {
+        kernel = matmul_algo_t::libxsmm_blocked;
+      }
+      else {
+        kernel = matmul_algo_t::aocl_blis;
+      }
     }
   }
   if ((!ZENDNNL_DEPENDS_ONEDNN && (kernel == matmul_algo_t::onednn ||

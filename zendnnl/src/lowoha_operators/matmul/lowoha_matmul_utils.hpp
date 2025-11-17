@@ -221,10 +221,12 @@ inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
 * @param K Number of columns in matrix A and rows in matrix B
 * @param num_threads Number of available threads for parallel execution
 * @param bias Pointer to bias data; nullptr if no bias is used
+* @param is_weights_const Indicates if the weights are constant
 * @return matmul_algo_t The selected kernel algorithm (e.g., AOCL BLIS, OneDNN, LibXSMM)
 */
 matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
-                            int batch_count, int M, int N, int K, int num_threads, const void *bias);
+                            int batch_count, int M, int N, int K, int num_threads, const void *bias,
+                            const bool is_weights_const);
 
 } // namespace lowoha
 } // namespace zendnnl

@@ -129,7 +129,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
   //                                    num_threads, params.dtypes.src);
   matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
-                                       N, K, num_threads, bias);
+                                       N, K, num_threads, bias, is_weights_const);
   // TODO: Add memory unreordering logic
   // Unreorder if onednn/ libxsmm is used
   // Implement the necessary logic for memory reordering here
@@ -379,8 +379,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       }
     }
 #else
-    constexpr int M_BLOCK = 64;
-    constexpr int N_BLOCK = 64;
+    int M_BLOCK = (M>=8192) ? 128 : 64;
+    int N_BLOCK = 64;
 
     const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
     const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
