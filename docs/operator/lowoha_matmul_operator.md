@@ -30,7 +30,7 @@ Let:
 The computation can be expressed as:
 
 $$
-C = \text{Post\_Ops}(\alpha \cdot (A \cdot B) + \text{Bias} + \beta \cdot C)
+C = \text{PostOps}(\alpha \cdot (A \cdot B) + \text{Bias} + \beta \cdot C)
 $$
 
 
@@ -88,8 +88,8 @@ struct lowoha_params {
   data_types dtypes;                       // Data types for tensors
   std::vector<postop> postop_;             // Post-operations
   lowoha_quantization_params_t quant_params; // Quantization parameters
-  char mem_format_a;                       // Memory format for A ('n'=reordered, 'r'=non-reordered)
-  char mem_format_b;                       // Memory format for B ('n'=reordered, 'r'=non-reordered)
+  char mem_format_a;                       // Memory format for A ('n'=non-reordered, 'r'=reordered)
+  char mem_format_b;                       // Memory format for B ('n'=non-reordered, 'r'=reordered)
   matmul_algo_t lowoha_algo;               // Preferred backend algorithm
   uint64_t num_threads;                    // Number of threads (0 = auto)
 };
@@ -102,17 +102,17 @@ Specifies the data types for each tensor:
 
 ```cpp
 struct data_types {
-  data_type_t src;      // Input data type (f32, bf16, s8, u8)
-  data_type_t wei;      // Weight data type (f32, bf16, s8, u8)
-  data_type_t dst;      // Output data type (f32, bf16, s8, u8, s32)
-  data_type_t bias;     // Bias data type (f32, bf16, s8)
-  data_type_t compute;  // Computation type (usually same as dst)
+  data_type_t src;      // Input data type
+  data_type_t wei;      // Weight data type
+  data_type_t dst;      // Output data type
+  data_type_t bias;     // Bias data type
+  data_type_t compute;  // Computation type
 };
 ```
 
 **Supported Combinations:**
 
-| Src Type | Weight Type | Bias Type | Output Type | Notes |
+| Src Type | Weight Type | Bias Type | dst Type | Notes |
 |----------|-------------|-----------|-------------|-------|
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
@@ -147,7 +147,7 @@ struct postop {
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
 
-### `lowoha_quantization_params_t`
+### `lowoha_quantization_params_t(Not supported yet)`
 
 Quantization scale and zero-point parameters:
 

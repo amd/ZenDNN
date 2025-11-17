@@ -20,6 +20,7 @@
 
 using zendnnl::lowoha::data_types;
 using zendnnl::lowoha::lowoha_params;
+using zendnnl::lowoha::batch_params_t;
 using zendnnl::lowoha::matmul_direct;
 
 namespace zendnnl {
