@@ -595,3 +595,32 @@ jobs:
 
         echo " Timeout: waited too long for statuses."
         exit 1
+        
+ notify_teams:
+    name: Send PR Notification to Teams
+    if: ${{ github.event_name == 'pull_request' }}
+    needs: [zendnn_build_PR]     
+
+    runs-on: amd-zenai-arc-xsmall-dind
+
+    steps:
+      - name: Prepare PR message
+        id: msg
+        run: |
+          STATUS="🟢 SUCCESS"
+          if [ "${{ needs.build.result }}" = "failure" ]; then
+            STATUS="🔴 FAILURE"
+          fi
+
+          echo "text=PR #${{ github.event.pull_request.number }} by *${{ github.actor }}*  
+          Status: ${STATUS}  
+          Title: ${{ github.event.pull_request.title }}  
+          Link: ${{ github.event.pull_request.html_url }}" >> message.txt
+
+      - name: Send Notification to Teams
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d "{\"text\": \"$(cat message.txt)\"}" \
+            "${{ secrets.TEAMS_WEBHOOK_URL }}"
+ 
+    
