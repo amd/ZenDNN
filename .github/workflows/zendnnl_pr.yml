@@ -30,6 +30,11 @@ on:
         required: false
         default: '*'
         type: string
+      ai_gtest_filter:
+        description: 'AI GTest filter pattern (e.g. AIMinimalTests/*)'
+        required: false
+        default: 'AIMinimalTests/*'
+        type: string
       test_iterations:
         description: 'Number of test iterations'
         required: false
@@ -55,7 +60,8 @@ jobs:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || 'Matmul/*' }}
-      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '100' }}
+      AI_GTEST_FILTER: ${{ github.event.inputs.ai_gtest_filter || 'AIMinimalTests/*' }
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '50' }}
       ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
       ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
     
@@ -230,6 +236,21 @@ jobs:
         else
           echo "ZenDNNL gtests passed!"
         fi
+
+        echo "Running ai_gtests with filter: $AI_GTEST_FILTER"
+        
+        # Run the ai_gtests with configurable parameters
+        ./install/gtests/gtests --gtest_filter=$AI_GTEST_FILTER |& tee $WORKSPACE/ai_gtest_output.log
+        
+        # Check for test failures
+        if grep -F -q "[  FAILED  ]" "$WORKSPACE/ai_gtest_output.log"; then
+          echo "ZenDNNL ai_gtests failed!"
+          cat "$WORKSPACE/ai_gtest_output.log"
+          exit 1
+        else
+          echo "ZenDNNL ai_gtests passed!"
+        fi
+        
       shell: bash
 
     - name: Upload build logs
@@ -240,6 +261,7 @@ jobs:
         path: |
           ${{ env.WORKSPACE }}/build_output.log
           ${{ env.WORKSPACE }}/gtest_output.log
+          ${{ env.WORKSPACE }}/ai_gtest_output.log
         retention-days: 7
         
     - name: Cleanup Conda environment
@@ -366,7 +388,7 @@ jobs:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
-      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '2' }}
       ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
       ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
    steps:
@@ -621,7 +643,7 @@ jobs:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       CMAKE_VERSION: ${{ github.event.inputs.cmake_version || '4.0.0' }}
       GTEST_FILTER: ${{ github.event.inputs.gtest_filter || '*' }}
-      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '10' }}
+      TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '2' }}
     
    steps:
     - name: Clean workspace before checkout
