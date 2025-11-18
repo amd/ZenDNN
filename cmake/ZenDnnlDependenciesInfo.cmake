@@ -31,8 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp tag AOCL-Weekly-241025
-set(AOCLDLP_GIT_TAG "a0dcfcb0ca3677bc1d2de355b983557788dbdf89")
+# aocl-dlp tag AOCL-Weekly-071125
+set(AOCLDLP_GIT_TAG "881300ca2bbf650b42f788401b4fc68982beb38a")
 option(AOCLDLP_GIT_PROGRESS ON)
 
 # amdblis repo information
