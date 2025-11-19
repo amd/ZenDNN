@@ -29,7 +29,7 @@ jobs:
             const ev = context.payload;
             let pr = null;
             if (context.eventName === 'check_suite') {
-              pr = ev.check_suite && ev.check_suite.pull_requests && ev.check_suite.pull_requests[0];
+              pr = ev.check_suite?.pull_requests?.[0];
               if (!pr) return { number: null };
             } else {
               pr = ev.pull_request;
@@ -39,7 +39,7 @@ jobs:
               title: pr.title || '',
               url: pr.html_url || '',
               head_sha: pr.head_sha || (pr.head && pr.head.sha) || null,
-              author: pr.user && pr.user.login ? pr.user.login : ''
+              author: pr.user?.login || ''
             };
 
       - name: Get failed check (if any) and status
@@ -50,9 +50,12 @@ jobs:
             const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const ref = pr.head_sha || context.payload.check_suite && context.payload.check_suite.head_sha || context.payload.pull_request && context.payload.pull_request.head.sha;
+            const ref =
+              pr.head_sha ||
+              context.payload.check_suite?.head_sha ||
+              context.payload.pull_request?.head?.sha;
             if (!ref) {
-              return { status: 'unknown', reason: 'No commit SHA found' };
+              return { status: 'unknown', failures: ["No commit SHA found"] };
             }
 
             // list check runs for the commit (paginated if necessary)
@@ -64,26 +67,19 @@ jobs:
             });
             const runs = resp.data.check_runs || [];
 
-            // prefer conclusion=failure first, else neutral/ cancelled, else success
-            const failed = runs.find(r => r.conclusion === 'failure');
-            if (failed) {
-              // assemble a concise reason from available fields
-              const summary = (failed.output && (failed.output.summary || failed.output.title || failed.output.text)) || failed.name || 'Check failed';
-              return { status: 'failure', reason: summary, failed_job: failed.name || '' };
-            }
+            // Collect all failures
+            const failures = runs
+              .filter(r => r.conclusion === 'failure')
+              .map(r => `❌ ${r.name}: ${(r.output?.summary || r.output?.title || "").substr(0,200)}`);
 
-            const cancelled = runs.find(r => r.conclusion === 'cancelled');
-            if (cancelled) {
-              return { status: 'cancelled', reason: cancelled.name || 'Cancelled' };
-            }
+            const cancelled = runs.some(r => r.conclusion === 'cancelled');
 
-            const action_needed = runs.find(r => r.conclusion === 'action_required');
-            if (action_needed) {
-              return { status: 'action_required', reason: action_needed.name || 'Action required' };
-            }
-
-            // if no failures found
-            return { status: 'success', reason: 'All checks passed' };
+            return {
+              status: failures.length > 0 ? 'failure' :
+                      cancelled ? 'cancelled' :
+                      'success',
+              failures: failures
+            };
 
       - name: Send Adaptive Card to Teams
         env:
@@ -94,12 +90,18 @@ jobs:
           check_json='${{ steps.check_info.outputs.result }}'
 
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
-          PR_TITLE=$(echo "$pr_json" | jq -r '.title' | sed 's/"/\\"/g')
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title' )
           PR_URL=$(echo "$pr_json" | jq -r '.url')
           PR_AUTHOR=$(echo "$pr_json" | jq -r '.author')
 
           STATUS=$(echo "$check_json" | jq -r '.status')
-          REASON=$(echo "$check_json" | jq -r '.reason' | sed 's/"/\\"/g')
+          FAILURE_LIST=$(echo "$check_json" | jq -r '.failures[]?')
+          if [ "$STATUS" = "failure" ]; then
+            FAIL_TEXT=$(printf "%s\n" $FAILURE_LIST | sed 's/"/\\"/g')
+          else
+            FAIL_TEXT="No failures"
+          fi
+
 
           if [ "$STATUS" = "success" ]; then
             COLOR="#22C55E"
@@ -145,10 +147,15 @@ jobs:
                               "type": "FactSet",
                               "facts": [
                                   { "title": "Status:", "value": "$STATUS_TEXT" },
-                                  { "title": "Failure Reason:", "value": "$REASON" },
                                   { "title": "Author:", "value": "$PR_AUTHOR" },
                                   { "title": "Link:", "value": "$PR_URL" }
                                ]
+                              },
+                              {
+                                "type": "TextBlock",
+                                "text": "**Failure Details:**\n$FAIL_TEXT",
+                                "wrap": true,
+                                "color": "Attention"
                               }
                             ]
                           }
@@ -166,7 +173,6 @@ jobs:
           }
           EOF
 
-          # send to Teams
           curl -s -H "Content-Type: application/json" \
             -d @card.json \
             "$TEAMS_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
