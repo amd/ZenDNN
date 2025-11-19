@@ -1,3 +1,7 @@
+# ******************************************************************************
+# Copyright (c) 2025 Advanced Micro Devices, Inc.
+# All rights reserved.
+# ******************************************************************************
 name: PR Status Notification
 on:
   pull_request:
@@ -116,51 +120,51 @@ jobs:
           fi
 
           # build adaptive card JSON (simple and compatible)
-          cat > card.json << 'EOF'
+          cat > card.json <<EOF
           {
-           "type": "message",
-           "attachments": [
-           {
-             "contentType": "application/vnd.microsoft.card.adaptive",
-             "content": {
-             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-             "type": "AdaptiveCard",
-             "version": "1.4",
-             "body": [
-             {
-               "type": "Container",
-               "items": [
-                {
-                 "type": "TextBlock",
-                 "text": "'"$ICON"'  PR #'"$PR_NUMBER"' — '"$PR_TITLE"'",
-                 "wrap": true,
-                 "weight": "Bolder",
-                 "size": "Medium"
-                },
-                {
-                  "type": "FactSet",
-                 "facts": [
-                   { "title": "Status:", "value": "'"$STATUS_TEXT"'" },
-                   { "title": "Failure Reason:", "value": "'"$REASON"'" },
-                   { "title": "Author:", "value": "'"$PR_AUTHOR"'" },
-                   { "title": "Link:", "value": "'"$PR_URL"'" }
-                 ]
-                }
-               ]
-              }
-            ],
-           "actions": [
-            {
-             "type": "Action.OpenUrl",
-             "title": "Open Pull Request",
-             "url": "'"$PR_URL"'"
-            }
-           ]
-          }
-          }
-          ]
-          }
-          EOF
+            "type": "message",
+            "attachments": [
+              {
+                 "contentType": "application/vnd.microsoft.card.adaptive",
+                 "content": {
+                    "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                      {
+                         "type": "Container",
+                         "items": [
+                           {
+                              "type": "TextBlock",
+                              "text": "$ICON  PR #$PR_NUMBER — $PR_TITLE",
+                              "wrap": true,
+                              "weight": "Bolder",
+                              "size": "Medium"
+                           },
+                           {
+                              "type": "FactSet",
+                              "facts": [
+                                  { "title": "Status:", "value": "$STATUS_TEXT" },
+                                  { "title": "Failure Reason:", "value": "$REASON" },
+                                  { "title": "Author:", "value": "$PR_AUTHOR" },
+                                  { "title": "Link:", "value": "$PR_URL" }
+                               ]
+                              }
+                            ]
+                          }
+                        ],
+                        "actions": [
+                          {
+                             "type": "Action.OpenUrl",
+                             "title": "Open Pull Request",
+                             "url": "$PR_URL"
+                          }
+                        ]
+                       }
+                      }
+                     ]
+                    }
+                    EOF
 
           # send to Teams
           curl -s -H "Content-Type: application/json" \
