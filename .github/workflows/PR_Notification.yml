@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   notify_teams:
-    runs-on: ubuntu-latest
+    runs-on: amd-zenai-arc-xsmall-dind
     steps:
 
 
