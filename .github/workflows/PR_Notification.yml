@@ -159,12 +159,12 @@ jobs:
                              "title": "Open Pull Request",
                              "url": "$PR_URL"
                           }
-                        ]
-                       }
-                      }
-                     ]
-                    }
-                    EOF
+                       ]
+                   }
+              }
+             ]
+          }
+          EOF
 
           # send to Teams
           curl -s -H "Content-Type: application/json" \
