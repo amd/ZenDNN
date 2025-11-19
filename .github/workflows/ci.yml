@@ -581,7 +581,7 @@ jobs:
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
             | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin ZENDNNL CI") | .state' | tail -n 1)
 
-          echo "PyTorch: $pytorch_state | TF: $tf_state | Zentoch_zendnnl: $zentorch_zendnnl_state"
+          echo "PyTorch: $pytorch_state | TF: $tf_state | Zentorch_zendnnl: $zentorch_zendnnl_state"
 
           # stop waiting if both are complete
           if [[ "$pytorch_state" == "success" && "$tf_state" == "success" && "$zentorch_zendnnl_state" == "success" ]]; then
