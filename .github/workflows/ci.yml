@@ -600,47 +600,47 @@ jobs:
         echo " Timeout: waited too long for statuses."
         exit 1
         
- notify_teams:
-   name: Send PR Notification to Teams
-   if: ${{ github.event_name == 'pull_request' }}
-   needs: 
-    - jira-id-check
-    - license-header-check
-    - zendnn_build_PR
-    - trigger_pytorch_plugin
-    - trigger_tensorflow_plugin
-    - trigger-zenTorch-ZenDNNL
-    - check_status
+ # notify_teams:
+ #   name: Send PR Notification to Teams
+ #   if: ${{ github.event_name == 'pull_request' }}
+ #   needs: 
+ #    - jira-id-check
+ #    - license-header-check
+ #    - zendnn_build_PR
+ #    - trigger_pytorch_plugin
+ #    - trigger_tensorflow_plugin
+ #    - trigger-zenTorch-ZenDNNL
+ #    - check_status
 
-   runs-on: amd-zenai-arc-xsmall-dind
+ #   runs-on: amd-zenai-arc-xsmall-dind
 
-   steps:
-     - name: Prepare PR message
-       run: |
-        STATUS="🟢 SUCCESS"
-        FAILED_JOBS=""
-        # Loop through all jobs in needs
-        for job in jira-id-check license-header-check zendnn_build_PR trigger_pytorch_plugin trigger_tensorflow_plugin trigger-zenTorch-ZenDNNL check_status; do
-         result="${{ needs[job].result }}"
-         if [ "$result" = "failure" ]; then
-           STATUS="🔴 FAILURE"
-           FAILED_JOBS="${FAILED_JOBS}\n❌ $job"
-         fi
-         done
+ #   steps:
+ #     - name: Prepare PR message
+ #       run: |
+ #        STATUS="🟢 SUCCESS"
+ #        FAILED_JOBS=""
+ #        # Loop through all jobs in needs
+ #        for job in jira-id-check license-header-check zendnn_build_PR trigger_pytorch_plugin trigger_tensorflow_plugin trigger-zenTorch-ZenDNNL check_status; do
+ #         result="${{ needs[job].result }}"
+ #         if [ "$result" = "failure" ]; then
+ #           STATUS="🔴 FAILURE"
+ #           FAILED_JOBS="${FAILED_JOBS}\n❌ $job"
+ #         fi
+ #         done
 
-        if [ "$FAILED_JOBS" = "" ]; then
-         FAILED_JOBS="All jobs passed successfully."
-        fi
+ #        if [ "$FAILED_JOBS" = "" ]; then
+ #         FAILED_JOBS="All jobs passed successfully."
+ #        fi
 
-        echo "text=PR #${{ github.event.pull_request.number }} by *${{ github.actor }}*
-        Status: ${STATUS}
-        Title: ${{ github.event.pull_request.title }}
-        Link: ${{ github.event.pull_request.html_url }}
-        --Job Status Summary:--
-        ${FAILED_JOBS}" > message.txt
-     - name: Send Notification to Teams
-       run: |
-        curl -H "Content-Type: application/json" \
-          -d "{\"text\": \"$(cat message.txt)\"}" \
-          "${{ secrets.TEAMS_WEBHOOK_URL }}"
+ #        echo "text=PR #${{ github.event.pull_request.number }} by *${{ github.actor }}*
+ #        Status: ${STATUS}
+ #        Title: ${{ github.event.pull_request.title }}
+ #        Link: ${{ github.event.pull_request.html_url }}
+ #        --Job Status Summary:--
+ #        ${FAILED_JOBS}" > message.txt
+ #     - name: Send Notification to Teams
+ #       run: |
+ #        curl -H "Content-Type: application/json" \
+ #          -d "{\"text\": \"$(cat message.txt)\"}" \
+ #          "${{ secrets.TEAMS_WEBHOOK_URL }}"
     
