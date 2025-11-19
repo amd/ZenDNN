@@ -1,0 +1,169 @@
+name: PR Status Notification
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  check_suite:
+    types: [completed]
+
+
+permissions:
+  checks: read
+  pull-requests: read
+  contents: read
+
+jobs:
+  notify_teams:
+    runs-on: ubuntu-latest
+    steps:
+
+
+      - name: Get PR info
+        id: pr_info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ev = context.payload;
+            let pr = null;
+            if (context.eventName === 'check_suite') {
+              pr = ev.check_suite && ev.check_suite.pull_requests && ev.check_suite.pull_requests[0];
+              if (!pr) return { number: null };
+            } else {
+              pr = ev.pull_request;
+            }
+            return {
+              number: pr.number,
+              title: pr.title || '',
+              url: pr.html_url || '',
+              head_sha: pr.head_sha || (pr.head && pr.head.sha) || null,
+              author: pr.user && pr.user.login ? pr.user.login : ''
+            };
+
+      - name: Get failed check (if any) and status
+        id: check_info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = pr.head_sha || context.payload.check_suite && context.payload.check_suite.head_sha || context.payload.pull_request && context.payload.pull_request.head.sha;
+            if (!ref) {
+              return { status: 'unknown', reason: 'No commit SHA found' };
+            }
+
+            // list check runs for the commit (paginated if necessary)
+            const resp = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref,
+              per_page: 100
+            });
+            const runs = resp.data.check_runs || [];
+
+            // prefer conclusion=failure first, else neutral/ cancelled, else success
+            const failed = runs.find(r => r.conclusion === 'failure');
+            if (failed) {
+              // assemble a concise reason from available fields
+              const summary = (failed.output && (failed.output.summary || failed.output.title || failed.output.text)) || failed.name || 'Check failed';
+              return { status: 'failure', reason: summary, failed_job: failed.name || '' };
+            }
+
+            const cancelled = runs.find(r => r.conclusion === 'cancelled');
+            if (cancelled) {
+              return { status: 'cancelled', reason: cancelled.name || 'Cancelled' };
+            }
+
+            const action_needed = runs.find(r => r.conclusion === 'action_required');
+            if (action_needed) {
+              return { status: 'action_required', reason: action_needed.name || 'Action required' };
+            }
+
+            // if no failures found
+            return { status: 'success', reason: 'All checks passed' };
+
+      - name: Send Adaptive Card to Teams
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          # get JSON outputs from previous steps
+          pr_json='${{ steps.pr_info.outputs.result }}'
+          check_json='${{ steps.check_info.outputs.result }}'
+
+          PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title' | sed 's/"/\\"/g')
+          PR_URL=$(echo "$pr_json" | jq -r '.url')
+          PR_AUTHOR=$(echo "$pr_json" | jq -r '.author')
+
+          STATUS=$(echo "$check_json" | jq -r '.status')
+          REASON=$(echo "$check_json" | jq -r '.reason' | sed 's/"/\\"/g')
+
+          if [ "$STATUS" = "success" ]; then
+            COLOR="#22C55E"
+            ICON="🟢"
+            STATUS_TEXT="Success"
+          elif [ "$STATUS" = "failure" ]; then
+            COLOR="#EF4444"
+            ICON="🔴"
+            STATUS_TEXT="Failure"
+          elif [ "$STATUS" = "cancelled" ]; then
+            COLOR="#F59E0B"
+            ICON="🟠"
+            STATUS_TEXT="Cancelled"
+          else
+            COLOR="#6B7280"
+            ICON="⚪"
+            STATUS_TEXT="Unknown"
+          fi
+
+          # build adaptive card JSON (simple and compatible)
+          cat > card.json << 'EOF'
+          {
+           "type": "message",
+           "attachments": [
+           {
+             "contentType": "application/vnd.microsoft.card.adaptive",
+             "content": {
+             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+             "type": "AdaptiveCard",
+             "version": "1.4",
+             "body": [
+             {
+               "type": "Container",
+               "items": [
+                {
+                 "type": "TextBlock",
+                 "text": "'"$ICON"'  PR #'"$PR_NUMBER"' — '"$PR_TITLE"'",
+                 "wrap": true,
+                 "weight": "Bolder",
+                 "size": "Medium"
+                },
+                {
+                  "type": "FactSet",
+                 "facts": [
+                   { "title": "Status:", "value": "'"$STATUS_TEXT"'" },
+                   { "title": "Failure Reason:", "value": "'"$REASON"'" },
+                   { "title": "Author:", "value": "'"$PR_AUTHOR"'" },
+                   { "title": "Link:", "value": "'"$PR_URL"'" }
+                 ]
+                }
+               ]
+              }
+            ],
+           "actions": [
+            {
+             "type": "Action.OpenUrl",
+             "title": "Open Pull Request",
+             "url": "'"$PR_URL"'"
+            }
+           ]
+          }
+          }
+          ]
+          }
+          EOF
+
+          # send to Teams
+          curl -s -H "Content-Type: application/json" \
+            -d @card.json \
+            "$TEAMS_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
+
