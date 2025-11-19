@@ -65,24 +65,28 @@ if (ZENDNNL_DEPENDS_LIBXSMM)
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/libxsmm")
     set(SYMLNK_SRC "${ZENDNNL_LIBXSMM_FWK_DIR}")
 
-    if (EXISTS ${SYMLNK_DST})
-      file(REMOVE_RECURSE ${SYMLNK_DST})
-    endif()
+    # blocked for consistency with onednn
+    # if (EXISTS ${SYMLNK_DST})
+    #   file(REMOVE_RECURSE ${SYMLNK_DST})
+    # endif()
 
     message(DEBUG
       "${ZENDNNL_MSG_PREFIX}LIBXSMM symlink from ${SYMLNK_SRC} to ${SYMLNK_DST} will be created."
     )
 
-    if (EXISTS ${SYMLNK_DST})
-      add_custom_target(zendnnl-deps-libxsmm ALL
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
-        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}"
-      )
-    else()
-      add_custom_target(zendnnl-deps-libxsmm ALL
-        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}"
-      )
-    endif()
+    # removed if condition for consistency with onednn
+    # if (EXISTS ${SYMLNK_DST})
+    #   add_custom_target(zendnnl-deps-libxsmm ALL
+    #     COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+    #     COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    # else()
+    #   add_custom_target(zendnnl-deps-libxsmm ALL
+    #     COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    # endif()
+
+    add_custom_target(zendnnl-deps-libxsmm ALL
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
   endif()
 
   list(APPEND ZENDNNL_DEPS "zendnnl-deps-libxsmm")

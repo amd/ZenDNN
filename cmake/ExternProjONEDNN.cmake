@@ -75,21 +75,29 @@ if (ZENDNNL_DEPENDS_ONEDNN)
     set(SYMLNK_DST "${CMAKE_INSTALL_PREFIX}/deps/onednn")
     set(SYMLNK_SRC "${ZENDNNL_ONEDNN_FWK_DIR}")
 
-    if(EXISTS ${SYMLNK_DST})
-      file(REMOVE_RECURSE ${SYMLNK_DST})
-    endif()
+    # blocked to test pytorch integration
+    # if(EXISTS ${SYMLNK_DST})
+    #   file(REMOVE_RECURSE ${SYMLNK_DST})
+    # endif()
 
     message(DEBUG
       "${ZENDNNL_MSG_PREFIX}ONEDNN symlink from ${SYMLNK_SRC} to ${SYMLNK_DST} will be created.")
 
-    if(EXISTS ${SYMLNK_DST})
-      ADD_CUSTOM_TARGET(zendnnl-deps-onednn ALL
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
-        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
-    else()
-      ADD_CUSTOM_TARGET(zendnnl-deps-onednn ALL
-        COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
-    endif()
+    # removed if statement to test pytorch build
+    # if(EXISTS ${SYMLNK_DST})
+    #   ADD_CUSTOM_TARGET(zendnnl-deps-onednn ALL
+    #     COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+    #     COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    # else()
+    #   ADD_CUSTOM_TARGET(zendnnl-deps-onednn ALL
+    #     COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+    #     COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+    # endif()
+
+    ADD_CUSTOM_TARGET(zendnnl-deps-onednn ALL
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "${SYMLNK_DST}"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink "${SYMLNK_SRC}" "${SYMLNK_DST}")
+
   endif()
 
   list(APPEND ZENDNNL_DEPS "zendnnl-deps-onednn")
