@@ -312,8 +312,8 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
 }
 
 // TODO: Further tune the heuristics based on num_threads and other params
-inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
-    int num_threads) {
+inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
+    int K, int num_threads) {
   if (BS <= 512) {
     if (N <= 512) {
       if (N <= 48) {
@@ -357,6 +357,65 @@ inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
   }
 }
 
+inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
+  if (M <= 12288) {
+    if (M <= 3072) {
+      if (M <= 768) {
+        return matmul_algo_t::aocl_blis_blocked;
+      }
+      else {
+        if (K <= 1280) {
+          if (K <= 256) {
+            return matmul_algo_t::onednn_blocked;
+          }
+          else {
+            return matmul_algo_t::aocl_blis_blocked;
+          }
+        }
+        else {
+          if (N <= 1280) {
+            return matmul_algo_t::aocl_blis_blocked;
+          }
+          else {
+            return matmul_algo_t::onednn_blocked;
+          }
+        }
+      }
+    }
+    else {
+      return matmul_algo_t::onednn_blocked;
+    }
+  }
+  else {
+    if (K <= 320) {
+      if (K <= 192) {
+        if (N <= 15517) {
+          return matmul_algo_t::aocl_blis_blocked;
+        }
+        else {
+          return matmul_algo_t::onednn_blocked;
+        }
+      }
+      else {
+        return matmul_algo_t::onednn_blocked;
+      }
+    }
+    else {
+      if (K <= 896) {
+        return matmul_algo_t::aocl_blis_blocked;
+      }
+      else {
+        if (K <= 2048) {
+          return matmul_algo_t::onednn_blocked;
+        }
+        else {
+          return matmul_algo_t::aocl_blis_blocked;
+        }
+      }
+    }
+  }
+}
+
 matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const) {
@@ -365,7 +424,8 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                  matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
-                         matmul_algo_t::dynamic_dispatch : static_cast<matmul_algo_t>(algo);
+                         (batch_count == 1 ? matmul_algo_t::aocl_blis : matmul_algo_t::dynamic_dispatch)
+                         : static_cast<matmul_algo_t>(algo);
 
   // TODO: Fallback to reference/supported kernel
   if ((kernel == matmul_algo_t::onednn ||
@@ -377,15 +437,15 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
 
   if (kernel==matmul_algo_t::dynamic_dispatch) {
     if (batch_count > 1) {
-      kernel = select_algo_by_heuristics_bf16(batch_count, M, N, K, num_threads);
+      kernel = select_algo_by_heuristics_bf16_bmm(batch_count, M, N, K, num_threads);
     }
     else {
-      if (M >= 4096 && M <= 8192 && K == 1024 && N == 1024 &&
-          is_weights_const == false) {
+      if (is_weights_const == false && M >= 4096 && M <= 8192 && K == 1024 &&
+          N == 1024) {
         kernel = matmul_algo_t::libxsmm_blocked;
       }
       else {
-        kernel = matmul_algo_t::aocl_blis;
+        kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
       }
     }
   }
@@ -397,7 +457,8 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_blis;
   }
   // TODO: Remove condition, when libxsmm supports bias and post_ops.
-  if ((kernel == matmul_algo_t::libxsmm || kernel == matmul_algo_t::libxsmm_blocked) &&
+  if ((kernel == matmul_algo_t::libxsmm ||
+       kernel == matmul_algo_t::libxsmm_blocked) &&
       (params.postop_.size() > 0 || bias != nullptr)) {
     kernel = matmul_algo_t::aocl_blis;
   }

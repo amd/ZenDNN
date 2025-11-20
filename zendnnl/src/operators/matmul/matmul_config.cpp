@@ -44,8 +44,16 @@ status_t matmul_config_t::set_user_config(json config_json) {
       }
     }
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
+    [[maybe_unused]] int32_t matmul_weight_cache = 0;
+    if ((static_cast<matmul_algo_t>(matmul_algo) ==
+         matmul_algo_t::aocl_blis_blocked) ||
+        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
+        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)) {
+      matmul_weight_cache = 1;
+    }
     if (! matmul_weight_cache_json.empty()) {
-      auto matmul_weight_cache_str = matmul_weight_cache_json.template get<std::string>();
+      auto matmul_weight_cache_str = matmul_weight_cache_json.template
+                                     get<std::string>();
       if (! matmul_weight_cache_str.empty()) {
         matmul_weight_cache = (matmul_weight_cache_str == "0") ? 0 : 1;
       }
@@ -72,7 +80,13 @@ void matmul_config_t::set_env_config() {
   }
   set_algo(matmul_algo);
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
-  int32_t matmul_weight_cache = 0;
+  [[maybe_unused]] int32_t matmul_weight_cache = 0;
+  if ((static_cast<matmul_algo_t>(matmul_algo) ==
+       matmul_algo_t::aocl_blis_blocked) ||
+      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
+      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)) {
+    matmul_weight_cache = 1;
+  }
   if (weight_cache_env) {
     int32_t weight_cache = std::stoi(weight_cache_env);
     if (weight_cache == 0 || weight_cache == 1) {

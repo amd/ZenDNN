@@ -201,8 +201,10 @@ std::string post_op_data_types_to_string(const lowoha_params &params);
 inline bool may_i_use_blis_partition(int batch_count, int M, int N,
                                      int num_threads, data_type_t dtype);
 
-inline matmul_algo_t select_algo_by_heuristics_bf16(int BS, int M, int N, int K,
+inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N, int K,
     int num_threads);
+
+inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 
 /**
 * @brief Selects the optimal matrix multiplication kernel algorithm.
