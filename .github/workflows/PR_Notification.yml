@@ -83,7 +83,7 @@ jobs:
 
       - name: Send Adaptive Card to Teams
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ZENDNNL_WEBHOOK_URL: ${{ secrets.ZENDNNL_WEBHOOK_URL }}
         run: |
           # get JSON outputs from previous steps
           pr_json='${{ steps.pr_info.outputs.result }}'
