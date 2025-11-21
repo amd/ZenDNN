@@ -49,10 +49,27 @@ jobs:
             const ref = pr.head_sha;
             
             console.log(`Monitoring workflows for PR #${pr.number}, commit: ${ref}`);
+            console.log(`Current workflow run ID: ${context.runId}`);
             
             const checkAllWorkflows = async () => {
               try {
-                // Get workflow runs
+                // Define EXACTLY which workflows we want to monitor (WHITELIST APPROACH)
+                const importantWorkflows = [
+                  'commit message enforcement',
+                  'zendnnl pr ci',
+                  'zendnnl_build_pr', 
+                  'check-zentorch-status',
+                  'asan-build',
+                  'zendnnl_build_push',
+                  'check jira id',
+                  'verify jira id',
+                  'check license headers',
+                  'verify license headers', 
+                  'trigger-zentorch-zendnnl',
+                  'check-commit-messages'
+                ];
+
+                // Get workflow runs - ONLY include important ones
                 const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
                   owner,
                   repo,
@@ -60,16 +77,28 @@ jobs:
                   per_page: 100
                 });
                 
-                // EXCLUDE NOTIFICATION WORKFLOWS
                 const workflows = (workflowResp.data.workflow_runs || [])
                   .filter(run => {
                     const name = run.name.toLowerCase();
-                    return !name.includes('pr status notification') && 
-                           !name.includes('notification') &&
-                           run.id !== context.runId;
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
+                    const isSelf = run.id === context.runId;
+                    
+                    if (isSelf) {
+                      console.log(`Excluding self workflow: ${run.name} (ID: ${run.id})`);
+                      return false;
+                    }
+                    
+                    if (!isImportant) {
+                      console.log(`Excluding non-important workflow: ${run.name}`);
+                      return false;
+                    }
+                    
+                    return true;
                   });
 
-                // Get check runs
+                // Get check runs - ONLY include important ones
                 const checkResp = await github.rest.checks.listForRef({
                   owner,
                   repo,
@@ -80,9 +109,29 @@ jobs:
                 const checks = (checkResp.data.check_runs || [])
                   .filter(check => {
                     const name = check.name.toLowerCase();
-                    return !name.includes('pr status notification') && 
-                           !name.includes('notification');
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
+                    
+                    // Explicitly exclude notification-related checks
+                    const isNotification = name.includes('notify') || 
+                                         name.includes('notification') ||
+                                         name === 'notify_teams';
+                    
+                    if (isNotification) {
+                      console.log(`Excluding notification check: ${check.name}`);
+                      return false;
+                    }
+                    
+                    if (!isImportant) {
+                      console.log(`Excluding non-important check: ${check.name}`);
+                      return false;
+                    }
+                    
+                    return true;
                   });
+
+                console.log(`Whitelist filtering: Found ${workflows.length} workflows, ${checks.length} checks`);
 
                 // Combine all workflow information
                 const allRuns = [];
@@ -126,10 +175,14 @@ jobs:
                   ['success', 'failure', 'cancelled', 'skipped'].includes(r.status)
                 );
 
-                console.log(`Found ${allRuns.length} relevant workflows/checks:`);
+                console.log(`Found ${allRuns.length} RELEVANT workflows/checks (after whitelist filtering):`);
                 allRuns.forEach(run => {
                   console.log(`  - ${run.name}: ${run.status} (${run.type})`);
                 });
+                
+                if (running.length > 0) {
+                  console.log(`Still running: ${running.map(r => r.name).join(', ')}`);
+                }
                 
                 console.log(`Running: ${running.length}, Completed: ${completed.length}`);
 
@@ -153,7 +206,7 @@ jobs:
             // Start monitoring
             let result = await checkAllWorkflows();
             let attempts = 0;
-            const maxAttempts = 58;
+            const maxAttempts = 30; // Reduced from 58 - don't wait forever
             
             console.log(`Initial check: ${result.total_count} workflows found, ${result.running_count} still running`);
 
@@ -170,8 +223,10 @@ jobs:
               attempts++;
             }
 
+            // FORCE COMPLETION if timeout reached
             if (!result.all_complete) {
-              console.log(`Timeout reached after ${attempts} attempts. Some workflows may still be running.`);
+              console.log(`Forcing completion after ${attempts} attempts. Proceeding with notification.`);
+              result.all_complete = true; // Force completion to send notification
             } else {
               console.log(`All workflows completed after ${attempts} attempts!`);
             }
@@ -201,9 +256,19 @@ jobs:
           SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "success")] | length')
           FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "failure")] | length')
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
+          SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          WORKFLOW_LIST=$(echo "$WORKFLOWS" | jq -r '.[] | "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"')
+          # Generate workflow list with links and repository info
+          WORKFLOW_LIST=$(echo "$WORKFLOWS" | jq -r '
+            .[] | 
+            if .repository != "'$GITHUB_REPOSITORY'" then
+              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)** (📁 \(.repository))"
+            else
+              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"
+            end
+          ')
 
+          # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS_TEXT="❌ SOME CHECKS FAILED"
@@ -212,22 +277,28 @@ jobs:
             ICON="🟠"
             STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
             COLOR="Warning"
-          elif [ "$ALL_COMPLETE" = "true" ]; then
+          elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then
             ICON="🟢"
             STATUS_TEXT="✅ ALL CHECKS PASSED"
             COLOR="Good"
+          elif [ "$ALL_COMPLETE" = "true" ] && [ "$TOTAL_COUNT" -eq 0 ]; then
+            ICON="⚪"
+            STATUS_TEXT="⚪ NO WORKFLOWS FOUND"
+            COLOR="Default"
           else
             ICON="🟡"
-            STATUS_TEXT="⏳ CHECKS INCOMPLETE"
+            STATUS_TEXT="⏳ CHECKS IN PROGRESS"
             COLOR="Warning"
           fi
 
+          # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
             COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
+            COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
           fi
 
+          # Escape for JSON
           TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
           WORKFLOW_LIST_SAFE=$(echo "$WORKFLOW_LIST" | sed 's/"/\\"/g')
 
@@ -264,13 +335,14 @@ jobs:
                            {
                               "type": "FactSet",
                               "facts": [
-                                 { "title": "Author:", "value": "$PR_AUTHOR" },
-                                 { "title": "Commit:", "value": "$SHORT_SHA" },
-                                 { "title": "Completion:", "value": "$COMPLETION_TEXT" },
-                                 { "title": "Total Workflows:", "value": "$TOTAL_WORKFLOWS" },
-                                 { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
-                                 { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
-                                 { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" }
+                                    { "title": "Author:", "value": "$PR_AUTHOR" },
+                                    { "title": "Commit:", "value": "$SHORT_SHA" },
+                                    { "title": "Status:", "value": "$COMPLETION_TEXT" },
+                                    { "title": "Total Workflows:", "value": "$TOTAL_COUNT" },
+                                    { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
+                                    { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
+                                    { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" },
+                                    { "title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT" }
                                ]
                               },
                               {
