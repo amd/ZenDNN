@@ -4,11 +4,7 @@
 # ******************************************************************************
 name: PR Status Notification
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
   check_suite:
-    types: [completed]
-  workflow_run:
     types: [completed]
 
 permissions:
@@ -20,11 +16,8 @@ permissions:
 jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
-    # Only run if there's a PR associated with the event
-    if: |
-      (github.event_name == 'pull_request') ||
-      (github.event_name == 'check_suite' && github.event.check_suite.pull_requests[0]) ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0])
+    # Only run if there's a PR associated with the check suite
+    if: github.event.check_suite.pull_requests[0]
     
     steps:
       - name: Get PR info
@@ -32,46 +25,119 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const ev = context.payload;
-            let pr = null;
-            
-            if (context.eventName === 'pull_request') {
-              pr = ev.pull_request;
-            } else if (context.eventName === 'check_suite') {
-              pr = ev.check_suite?.pull_requests?.[0];
-            } else if (context.eventName === 'workflow_run') {
-              pr = ev.workflow_run?.pull_requests?.[0];
-            }
-            
+            const pr = context.payload.check_suite.pull_requests[0];
             if (!pr) return { number: null };
             
             return {
               number: pr.number,
               title: pr.title || '',
               url: pr.html_url || '',
-              head_sha: pr.head?.sha || pr.head_sha,
+              head_sha: pr.head.sha,
               author: pr.user?.login || '',
               base_ref: pr.base?.ref || '',
               head_ref: pr.head?.ref || ''
             };
 
-      - name: Get all PR workflow runs and checks
-        id: workflow_info
+      - name: Wait and check if all workflows are complete
+        id: workflow_status
         uses: actions/github-script@v7
         with:
           script: |
             const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
-            if (!pr.number) return { workflows: [], status: 'unknown' };
+            if (!pr.number) return { all_complete: false };
             
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const ref = pr.head_sha;
             
-            if (!ref) {
-              return { workflows: [], status: 'unknown', failures: [] };
+            // Function to check workflow status
+            const checkWorkflowStatus = async () => {
+              // Get all workflow runs for this commit
+              const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                head_sha: ref,
+                per_page: 100
+              });
+              
+              const workflows = workflowResp.data.workflow_runs || [];
+              
+              // Filter out notification workflows
+              const relevantWorkflows = workflows.filter(run => 
+                !run.name.includes('PR Status Notification') &&
+                !run.name.includes('notification')
+              );
+
+              // Get check runs
+              const checkResp = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref,
+                per_page: 100
+              });
+              const checks = checkResp.data.check_runs || [];
+              
+              // Filter out notification checks
+              const relevantChecks = checks.filter(check => 
+                !check.name.includes('PR Status Notification') &&
+                !check.name.includes('notification')
+              );
+
+              // Check if any are still running
+              const runningWorkflows = relevantWorkflows.filter(w => 
+                ['in_progress', 'queued', 'pending', 'waiting'].includes(w.status)
+              );
+              
+              const runningChecks = relevantChecks.filter(c => 
+                ['in_progress', 'queued', 'pending', 'waiting'].includes(c.status)
+              );
+
+              const allComplete = runningWorkflows.length === 0 && runningChecks.length === 0;
+              
+              return {
+                all_complete: allComplete,
+                workflows: relevantWorkflows,
+                checks: relevantChecks,
+                running_workflows: runningWorkflows.length,
+                running_checks: runningChecks.length
+              };
+            };
+
+            // Initial check
+            let result = await checkWorkflowStatus();
+            
+            // If not all complete, wait and check again (up to 5 minutes)
+            let attempts = 0;
+            const maxAttempts = 30; // 30 attempts * 10 seconds = 5 minutes
+            
+            while (!result.all_complete && attempts < maxAttempts) {
+              console.log(`Attempt ${attempts + 1}: ${result.running_workflows} workflows and ${result.running_checks} checks still running. Waiting...`);
+              await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds
+              result = await checkWorkflowStatus();
+              attempts++;
             }
 
-            // Get all workflow runs for this commit
+            if (!result.all_complete) {
+              console.log(`Timeout reached. Some workflows/checks may still be running.`);
+            }
+
+            return result;
+
+      - name: Get final workflow results
+        id: final_results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
+            const workflowStatus = JSON.parse(`\${{ steps.workflow_status.outputs.result }}`);
+            
+            if (!pr.number) return { workflows: [], status: 'unknown' };
+            
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = pr.head_sha;
+
+            // Get fresh data for final results
             const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
               owner,
               repo,
@@ -79,9 +145,8 @@ jobs:
               per_page: 100
             });
             
-            let allWorkflows = workflowResp.data.workflow_runs || [];
+            const workflows = workflowResp.data.workflow_runs || [];
             
-            // Get check runs (includes external/triggered workflows)
             const checkResp = await github.rest.checks.listForRef({
               owner,
               repo,
@@ -90,36 +155,37 @@ jobs:
             });
             const checks = checkResp.data.check_runs || [];
 
-            // Get check suites for more comprehensive data
-            const suitesResp = await github.rest.checks.listSuitesForRef({
-              owner,
-              repo,
-              ref,
-              per_page: 100
-            });
-            const suites = suitesResp.data.check_suites || [];
-
-            // Combine all workflow information
-            const workflowMap = new Map();
+            // Combine workflow and check information
+            const allRuns = [];
             
             // Add workflow runs
-            allWorkflows.forEach(run => {
-              workflowMap.set(run.id, {
-                id: run.id,
-                name: run.name,
-                status: run.conclusion || run.status,
-                url: run.html_url,
-                type: 'workflow_run',
-                repository: `${owner}/${repo}`,
-                created_at: run.created_at,
-                updated_at: run.updated_at
+            workflows
+              .filter(run => 
+                !run.name.includes('PR Status Notification') &&
+                !run.name.includes('notification')
+              )
+              .forEach(run => {
+                allRuns.push({
+                  id: run.id,
+                  name: run.name,
+                  status: run.conclusion || run.status,
+                  url: run.html_url,
+                  type: 'workflow_run',
+                  repository: `${owner}/${repo}`,
+                  created_at: run.created_at,
+                  completed_at: run.updated_at
+                });
               });
-            });
 
-            // Add check runs (may include cross-repo triggered workflows)
-            checks.forEach(check => {
-              if (!workflowMap.has(check.id)) {
-                workflowMap.set(check.id, {
+            // Add check runs that aren't already covered by workflow runs
+            checks
+              .filter(check => 
+                !check.name.includes('PR Status Notification') &&
+                !check.name.includes('notification') &&
+                !allRuns.find(run => run.name === check.name)
+              )
+              .forEach(check => {
+                allRuns.push({
                   id: check.id,
                   name: check.name,
                   status: check.conclusion || check.status,
@@ -127,71 +193,58 @@ jobs:
                   type: 'check_run',
                   repository: check.repository?.full_name || `${owner}/${repo}`,
                   created_at: check.started_at,
-                  updated_at: check.completed_at
+                  completed_at: check.completed_at
                 });
-              }
-            });
+              });
 
-            // Add check suites
-            suites.forEach(suite => {
-              if (!workflowMap.has(suite.id)) {
-                workflowMap.set(suite.id, {
-                  id: suite.id,
-                  name: suite.app?.name || 'Check Suite',
-                  status: suite.conclusion || suite.status,
-                  url: suite.url,
-                  type: 'check_suite',
-                  repository: `${owner}/${repo}`,
-                  created_at: suite.created_at,
-                  updated_at: suite.updated_at
-                });
-              }
-            });
+            // Sort by completion time
+            allRuns.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
-            // Convert to array and sort by creation time
-            const workflows = Array.from(workflowMap.values())
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            // Calculate final status
+            const failed = allRuns.filter(r => r.status === 'failure');
+            const cancelled = allRuns.filter(r => r.status === 'cancelled');
+            const success = allRuns.filter(r => r.status === 'success');
+            const skipped = allRuns.filter(r => r.status === 'skipped');
+            const stillRunning = allRuns.filter(r => 
+              ['in_progress', 'queued', 'pending', 'waiting'].includes(r.status)
+            );
 
-            // Calculate overall status
-            const failed = workflows.filter(w => w.status === 'failure');
-            const cancelled = workflows.filter(w => w.status === 'cancelled');
-            const success = workflows.filter(w => w.status === 'success');
-            const inProgress = workflows.filter(w => ['in_progress', 'queued', 'pending'].includes(w.status));
-
-            let overallStatus = 'unknown';
+            let finalStatus = 'success';
             if (failed.length > 0) {
-              overallStatus = 'failure';
+              finalStatus = 'failure';
             } else if (cancelled.length > 0) {
-              overallStatus = 'cancelled';
-            } else if (inProgress.length > 0) {
-              overallStatus = 'in_progress';
-            } else if (success.length > 0) {
-              overallStatus = 'success';
+              finalStatus = 'cancelled';
+            } else if (stillRunning.length > 0) {
+              finalStatus = 'in_progress';
             }
 
-            // Create failure details
-            const failures = failed.map(w => `❌ ${w.name} (${w.repository}): ${w.status}`);
+            // Create detailed results
+            const failures = failed.map(r => `❌ ${r.name}: Failed`);
+            const successes = success.map(r => `✅ ${r.name}: Passed`);
 
             return {
-              workflows: workflows,
-              status: overallStatus,
+              workflows: allRuns,
+              status: finalStatus,
               failures: failures,
+              successes: successes,
               summary: {
-                total: workflows.length,
+                total: allRuns.length,
                 success: success.length,
                 failed: failed.length,
                 cancelled: cancelled.length,
-                in_progress: inProgress.length
-              }
+                skipped: skipped.length,
+                still_running: stillRunning.length
+              },
+              all_complete: stillRunning.length === 0
             };
 
-      - name: Send Adaptive Card to Teams
+      - name: Send Final Status Teams Notification
         env:
           ZENDNNL_WEBHOOK_URL: ${{ secrets.ZENDNNL_WEBHOOK_URL }}
         run: |
-          # get JSON outputs from previous steps
+          # Get JSON outputs
           pr_json='${{ steps.pr_info.outputs.result }}'
-          check_json='${{ steps.check_info.outputs.result }}'
+          results_json='${{ steps.final_results.outputs.result }}'
 
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number // "N/A"')
           PR_TITLE=$(echo "$pr_json" | jq -r '.title // "N/A"' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
@@ -199,46 +252,55 @@ jobs:
           PR_AUTHOR=$(echo "$pr_json" | jq -r '.author // "N/A"')
           HEAD_SHA=$(echo "$pr_json" | jq -r '.head_sha // "N/A"')
           SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-7)
+
+          STATUS=$(echo "$results_json" | jq -r '.status // "unknown"')
+          TOTAL_WORKFLOWS=$(echo "$results_json" | jq -r '.summary.total // 0')
+          SUCCESS_COUNT=$(echo "$results_json" | jq -r '.summary.success // 0')
+          FAILED_COUNT=$(echo "$results_json" | jq -r '.summary.failed // 0')
+          CANCELLED_COUNT=$(echo "$results_json" | jq -r '.summary.cancelled // 0')
+          STILL_RUNNING_COUNT=$(echo "$results_json" | jq -r '.summary.still_running // 0')
+          ALL_COMPLETE=$(echo "$results_json" | jq -r '.all_complete // false')
+
+          # Get workflow list with final status
+          WORKFLOW_LIST=$(echo "$results_json" | jq -r '.workflows[] | "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"')
           
-          STATUS=$(echo "$workflow_json" | jq -r '.status // "unknown"')
-          TOTAL_WORKFLOWS=$(echo "$workflow_json" | jq -r '.summary.total // 0')
-          SUCCESS_COUNT=$(echo "$workflow_json" | jq -r '.summary.success // 0')
-          FAILED_COUNT=$(echo "$workflow_json" | jq -r '.summary.failed // 0')
-          IN_PROGRESS_COUNT=$(echo "$workflow_json" | jq -r '.summary.in_progress // 0')
+          # Get success and failure summaries
+          SUCCESS_LIST=$(echo "$results_json" | jq -r '.successes[]?' 2>/dev/null | head -5)
+          FAILURE_LIST=$(echo "$results_json" | jq -r '.failures[]?' 2>/dev/null | head -5)
 
-          # Get workflow list
-          WORKFLOW_LIST=$(echo "$workflow_json" | jq -r '.workflows[] | "• [\(.name)](\(.url)) - \(.status) (\(.repository))"' | head -10)
-          
-          # Get failure details
-          FAILURE_LIST=$(echo "$workflow_json" | jq -r '.failures[]?' 2>/dev/null || echo "")
-          if [ -n "$FAILURE_LIST" ]; then
-            FAIL_TEXT=$(echo "$FAILURE_LIST" | sed 's/"/\\"/g')
-          else
-            FAIL_TEXT="No failures"
-          fi
-
-
-          # Set status display
+          # Set final status display
           if [ "$STATUS" = "success" ]; then
             ICON="🟢"
-            STATUS_TEXT="All Checks Passed"
+            STATUS_TEXT="✅ ALL CHECKS PASSED"
+            COLOR="Good"
           elif [ "$STATUS" = "failure" ]; then
             ICON="🔴"
-            STATUS_TEXT="Some Checks Failed"
+            STATUS_TEXT="❌ SOME CHECKS FAILED"
+            COLOR="Attention"
           elif [ "$STATUS" = "cancelled" ]; then
             ICON="🟠"
-            STATUS_TEXT="Some Checks Cancelled"
-          elif [ "$STATUS" = "in_progress" ]; then
-            ICON="🟡"
-            STATUS_TEXT="Checks In Progress"
+            STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
+            COLOR="Warning"
           else
-            ICON="⚪"
-            STATUS_TEXT="Status Unknown"
+            ICON="🟡"
+            STATUS_TEXT="🟡 CHECKS INCOMPLETE"
+            COLOR="Warning"
           fi
+
+          # Add completion status
+          if [ "$ALL_COMPLETE" = "true" ]; then
+            COMPLETION_TEXT="🏁 All workflows completed"
+          else
+            COMPLETION_TEXT="⏳ $STILL_RUNNING_COUNT workflows still running"
+          fi
+
           # Escape for JSON
           TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
           WORKFLOW_LIST_SAFE=$(echo "$WORKFLOW_LIST" | sed 's/"/\\"/g')
-          FAIL_TEXT_SAFE=$(echo "$FAIL_TEXT" | sed 's/"/\\"/g')
+          SUCCESS_LIST_SAFE=$(echo "$SUCCESS_LIST" | sed 's/"/\\"/g')
+          FAILURE_LIST_SAFE=$(echo "$FAILURE_LIST" | sed 's/"/\\"/g')
+
+          # Create final status notification
           cat > card.json <<EOF
           {
             "type": "message",
@@ -261,28 +323,29 @@ jobs:
                               "size": "Medium"
                            },
                            {
+                              "type": "TextBlock",
+                              "text": "$STATUS_TEXT",
+                              "wrap": true,
+                              "weight": "Bolder",
+                              "color": "$COLOR",
+                              "size": "Large"
+                           },
+                           {
                               "type": "FactSet",
                               "facts": [
-                                 { "title": "Status:", "value": "$STATUS_TEXT" },
                                  { "title": "Author:", "value": "$PR_AUTHOR" },
                                  { "title": "Commit:", "value": "$SHORT_SHA" },
+                                 { "title": "Completion:", "value": "$COMPLETION_TEXT" },
                                  { "title": "Total Workflows:", "value": "$TOTAL_WORKFLOWS" },
                                  { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
                                  { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
-                                 { "title": "🟡 In Progress:", "value": "$IN_PROGRESS_COUNT" }
+                                 { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" }
                                ]
                               },
                               {
-                                "type": "TextBlock",
-                                "text": "**Failure Details:**\n$FAIL_TEXT",
-                                "wrap": true,
-                                "size": "Small"
-                              },
-                              {
                                  "type": "TextBlock",
-                                 "text": "**Failures:**\\n$FAIL_TEXT_SAFE",
+                                 "text": "**All Workflow Results:**\\n$WORKFLOW_LIST_SAFE",
                                  "wrap": true,
-                                 "color": "Attention",
                                  "size": "Small"
                               }
                             ]
@@ -315,4 +378,4 @@ jobs:
             -d @card.json \
             "$ZENDNNL_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
 
-          echo "Comprehensive PR notification sent for PR #$PR_NUMBER with $TOTAL_WORKFLOWS workflows"
+          echo "Final status notification sent for PR #$PR_NUMBER: $STATUS_TEXT"
