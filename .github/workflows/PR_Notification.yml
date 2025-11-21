@@ -5,7 +5,7 @@
 name: PR Status Notification
 on:
   pull_request:
-    types: [opened, reopened, synchronize]  # Start immediately when PR updated
+    types: [opened, reopened, synchronize]
 
 permissions:
   checks: read
@@ -16,7 +16,9 @@ permissions:
 jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
-    timeout-minutes: 60  # Allow up to 1 hour for all workflows to complete
+    timeout-minutes: 60
+    # PREVENT SELF-TRIGGERING
+    if: github.actor != 'github-actions[bot]'
     
     steps:
       - name: Get PR info
@@ -58,10 +60,16 @@ jobs:
                   per_page: 100
                 });
                 
+                // EXCLUDE NOTIFICATION WORKFLOWS
                 const workflows = (workflowResp.data.workflow_runs || [])
-                  .filter(run => !run.name.includes('PR Status Notification'));
+                  .filter(run => {
+                    const name = run.name.toLowerCase();
+                    return !name.includes('pr status notification') && 
+                           !name.includes('notification') &&
+                           run.id !== context.runId;
+                  });
 
-                // Get check runs (includes cross-repo workflows like zendtorch_zendnnl)
+                // Get check runs
                 const checkResp = await github.rest.checks.listForRef({
                   owner,
                   repo,
@@ -70,7 +78,11 @@ jobs:
                 });
                 
                 const checks = (checkResp.data.check_runs || [])
-                  .filter(check => !check.name.includes('PR Status Notification'));
+                  .filter(check => {
+                    const name = check.name.toLowerCase();
+                    return !name.includes('pr status notification') && 
+                           !name.includes('notification');
+                  });
 
                 // Combine all workflow information
                 const allRuns = [];
@@ -114,7 +126,7 @@ jobs:
                   ['success', 'failure', 'cancelled', 'skipped'].includes(r.status)
                 );
 
-                console.log(`Found ${allRuns.length} total workflows/checks:`);
+                console.log(`Found ${allRuns.length} relevant workflows/checks:`);
                 allRuns.forEach(run => {
                   console.log(`  - ${run.name}: ${run.status} (${run.type})`);
                 });
@@ -136,12 +148,12 @@ jobs:
 
             // Give workflows time to start
             console.log('Waiting 2 minutes for workflows to initialize...');
-            await new Promise(resolve => setTimeout(resolve, 120000)); // Wait 2 minutes initially
+            await new Promise(resolve => setTimeout(resolve, 120000));
 
             // Start monitoring
             let result = await checkAllWorkflows();
             let attempts = 0;
-            const maxAttempts = 58; // ~1 hour total (2 min initial + 58 min monitoring)
+            const maxAttempts = 58;
             
             console.log(`Initial check: ${result.total_count} workflows found, ${result.running_count} still running`);
 
@@ -153,7 +165,6 @@ jobs:
                 console.log(`Attempt ${attempts + 1}: ${result.running_count}/${result.total_count} workflows still running`);
               }
               
-              // Wait 1 minute between checks
               await new Promise(resolve => setTimeout(resolve, 60000));
               result = await checkAllWorkflows();
               attempts++;
@@ -171,7 +182,6 @@ jobs:
         env:
           ZENDNNL_WEBHOOK_URL: ${{ secrets.ZENDNNL_WEBHOOK_URL }}
         run: |
-          # Get results
           pr_json='${{ steps.pr_info.outputs.result }}'
           completion_json='${{ steps.wait_for_completion.outputs.result }}'
 
@@ -186,17 +196,14 @@ jobs:
           TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
           RUNNING_COUNT=$(echo "$completion_json" | jq -r '.running_count // 0')
 
-          # Get workflow results
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
           
           SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "success")] | length')
           FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "failure")] | length')
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
 
-          # Generate workflow list with links
           WORKFLOW_LIST=$(echo "$WORKFLOWS" | jq -r '.[] | "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"')
 
-          # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS_TEXT="❌ SOME CHECKS FAILED"
@@ -215,14 +222,12 @@ jobs:
             COLOR="Warning"
           fi
 
-          # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
             COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
           else
             COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
           fi
 
-          # Escape for JSON
           TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
           WORKFLOW_LIST_SAFE=$(echo "$WORKFLOW_LIST" | sed 's/"/\\"/g')
 
@@ -304,4 +309,4 @@ jobs:
             -d @card.json \
             "$ZENDNNL_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
 
-          echo "Final status notification sent for PR #$PR_NUMBER: $STATUS_TEXT"
+         
