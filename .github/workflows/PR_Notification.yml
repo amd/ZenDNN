@@ -34,12 +34,17 @@ jobs:
             } else {
               pr = ev.pull_request;
             }
+             // Get the workflow run URL
+             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             return {
               number: pr.number,
               title: pr.title || '',
               url: pr.html_url || '',
               head_sha: pr.head_sha || (pr.head && pr.head.sha) || null,
-              author: pr.user?.login || ''
+              author: pr.user?.login || '',
+              run_url: runUrl,
+              commit_sha: pr.head_sha || (pr.head && pr.head.sha) || context.sha,
+              commit_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${pr.head_sha || (pr.head && pr.head.sha) || context.sha}`
             };
 
       - name: Get failed check (if any) and status
@@ -90,10 +95,14 @@ jobs:
           check_json='${{ steps.check_info.outputs.result }}'
 
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
-          PR_TITLE=$(echo "$pr_json" | jq -r '.title' )
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title' | sed "s/'/\\'/g" | sed 's/"/\\"/g')
           PR_URL=$(echo "$pr_json" | jq -r '.url')
           PR_AUTHOR=$(echo "$pr_json" | jq -r '.author')
-
+          RUN_URL=$(echo "$pr_json" | jq -r '.run_url')
+          COMMIT_SHA=$(echo "$pr_json" | jq -r '.commit_sha')
+          COMMIT_URL=$(echo "$pr_json" | jq -r '.commit_url')
+          SHORT_SHA=$(echo "$COMMIT_SHA" | cut -c1-7)
+          
           STATUS=$(echo "$check_json" | jq -r '.status')
           FAILURE_LIST=$(echo "$check_json" | jq -r '.failures[]?')
           if [ "$STATUS" = "failure" ]; then
@@ -120,7 +129,9 @@ jobs:
             ICON="⚪"
             STATUS_TEXT="Unknown"
           fi
-
+          # Properly escape content for JSON
+          PR_TITLE_SAFE=$(echo "$PR_TITLE" | sed 's/\\/\\\\/g')
+          FAIL_TEXT_SAFE=$(echo "$FAIL_TEXT" | sed 's/\\/\\\\/g')
           # build adaptive card JSON (simple and compatible)
           cat > card.json <<EOF
           {
@@ -148,7 +159,8 @@ jobs:
                               "facts": [
                                   { "title": "Status:", "value": "$STATUS_TEXT" },
                                   { "title": "Author:", "value": "$PR_AUTHOR" },
-                                  { "title": "Link:", "value": "$PR_URL" }
+                                  { "title": "Commit:", "value": "$SHORT_SHA" },
+                                  { "title": "Workflow Run:", "value": "[View Actions Run]($RUN_URL)" }
                                ]
                               },
                               {
@@ -165,6 +177,16 @@ jobs:
                              "type": "Action.OpenUrl",
                              "title": "Open Pull Request",
                              "url": "$PR_URL"
+                          },
+                          {
+                             "type": "Action.OpenUrl",
+                             "title": "View Actions Run",
+                             "url": "$RUN_URL"
+                          },
+                          {
+                             "type": "Action.OpenUrl",
+                             "title": "View Commit",
+                             "url": "$COMMIT_URL"
                           }
                        ]
                    }
@@ -176,3 +198,5 @@ jobs:
           curl -s -H "Content-Type: application/json" \
             -d @card.json \
             "$ZENDNNL_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
+
+          echo "Teams notification sent successfully"
