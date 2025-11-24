@@ -22,8 +22,6 @@ namespace matmul {
 
 
 // TODO:
-// - Add bias support.
-// - Add post-op support.
 // - Add pipeline (multi-layer) support.
 int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                            std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>>
@@ -37,6 +35,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       tensor_factory_t tensor_factory;
       tensor_t input_tensor;
       std::vector<tensor_t> weight_tensor, bias, output_tensor;
+      std::vector<std::vector<tensor_t>> binary_post_ops_tensors;
 
       int ret = create_weights_tensor(tensor_factory, cfg, weight_tensor, options);
       if (ret != OK) {
@@ -62,6 +61,14 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       ret = create_output_tensor(tensor_factory, cfg, output_tensor, options);
       if (ret != OK) {
         testlog_error("create_output_tensor failed");
+        log_benchmark_failure(cfg);
+        continue;
+      }
+
+      ret = create_binary_post_ops_tensors(tensor_factory, cfg,
+                                           binary_post_ops_tensors);
+      if (ret != OK) {
+        testlog_error("create_binary_post_ops_tensors failed");
         log_benchmark_failure(cfg);
         continue;
       }
@@ -123,6 +130,24 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
+      for (auto k = 0; k < cfg.n_values.size(); k++) {
+        const auto &binary_post_op = binary_post_ops_tensors[k];
+        for (auto j = 0; j < cfg.post_ops.size(); j++) {
+          zendnnl::lowoha::postop postop_item;
+          postop_item.po_type = cfg.post_ops[j];
+          for (auto i = 0; i < binary_post_op.size(); i++) {
+            if (j == cfg.binary_post_ops_pos[i]) {
+              postop_item.buff = binary_post_op[i].get_raw_handle_unsafe();
+              postop_item.dtype = binary_post_op[i].get_data_type();
+              auto binary_tensor_dims = binary_post_op[i].get_size();
+              postop_item.dims.assign(binary_tensor_dims.begin(), binary_tensor_dims.end());
+              break;
+            }
+          }
+          params.postop_.push_back(postop_item);
+        }
+      }
+
       TimingStats time_stats;
       // warm-up iterations
       for (auto j = 0; j < cfg.warmup_iters && !skip; j++) {
@@ -131,12 +156,16 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                          output_tensor[i - 1].get_raw_handle_unsafe();
           void *B_data = weight_tensor[i].get_raw_handle_unsafe();
           void *C_data = output_tensor[i].get_raw_handle_unsafe();
+          void *bias_data = nullptr;
+          if (cfg.isBiasEnabled) {
+            bias_data = bias[i].get_raw_handle_unsafe();
+          }
 
           status_t status = matmul_direct(
                               'r',  // layout: row-major
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
-                              alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                              alpha, A_data, lda, B_data, ldb, bias_data,
                               beta, C_data, ldc, true,
                               batch_params, params);
           if (status != status_t::success) {
@@ -170,11 +199,15 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                          output_tensor[i - 1].get_raw_handle_unsafe();
           void *B_data = weight_tensor[i].get_raw_handle_unsafe();
           void *C_data = output_tensor[i].get_raw_handle_unsafe();
+          void *bias_data = nullptr;
+          if (cfg.isBiasEnabled) {
+            bias_data = bias[i].get_raw_handle_unsafe();
+          }
           status_t status = matmul_direct(
                               'r',  // layout: row-major
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
-                              alpha, A_data, lda, B_data, ldb, nullptr,  // No bias
+                              alpha, A_data, lda, B_data, ldb, bias_data,
                               beta, C_data, ldc, true,
                               batch_params, params);
           if (status != status_t::success) {

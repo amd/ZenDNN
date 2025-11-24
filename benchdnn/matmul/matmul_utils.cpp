@@ -285,6 +285,10 @@ void inputModelFileParser(std::ifstream &infile,
         cfg.m = options.m;
       }
       else if (fields_size == 4) {
+        if (options.ndims != 2) {
+          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ", line);
+          continue;
+        }
         if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
           commonlog_error("M value cannot be empty or <= 0. Please provide a valid number.");
           continue;
@@ -294,6 +298,10 @@ void inputModelFileParser(std::ifstream &infile,
         }
       }
       else if (fields_size == 5) {
+        if (options.ndims <= 2) {
+          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ", line);
+          continue;
+        }
         if (fields[id].empty()) {
           commonlog_error("Field for bs is empty. Please provide a value.");
           continue;
