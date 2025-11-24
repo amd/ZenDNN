@@ -266,7 +266,15 @@ jobs:
             else
               "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"
             end
-          ')
+          ' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
+
+          # Debug: Show what we're building
+          echo "=== Workflow List Debug ==="
+          echo "Raw output:"
+          echo "$WORKFLOW_LIST"
+          echo "Formatted preview:"
+          echo -e "$WORKFLOW_LIST" | sed 's/\\n/\n/g'
+          echo "=== End Debug ==="
 
           # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
@@ -293,9 +301,9 @@ jobs:
 
           # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
-            COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
+            COMPLETION_TEXT=" All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
+            COMPLETION_TEXT=" $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
           fi
 
           # Escape for JSON
