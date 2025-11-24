@@ -260,23 +260,36 @@ jobs:
 
           # FIXED: Generate workflow list with proper line breaks
           if [ "$TOTAL_COUNT" -gt 0 ]; then
-           WORKFLOW_LIST=""
-           while IFS= read -r workflow; do
-             NAME=$(echo "$workflow" | jq -r '.name')
-             STATUS=$(echo "$workflow" | jq -r '.status | ascii_upcase')
-             URL=$(echo "$workflow" | jq -r '.url')
-             REPO=$(echo "$workflow" | jq -r '.repository // ""')
-               if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ]; then
-                 WORKFLOW_LIST="${WORKFLOW_LIST}• [$NAME]($URL) - **$STATUS** (📁 $REPO)\\n"
-               else
-                 WORKFLOW_LIST="${WORKFLOW_LIST}• [$NAME]($URL) - **$STATUS**\\n"
-               fi
-            done < <(echo "$WORKFLOWS" | jq -c '.[]')
-            # Remove trailing \\n
-            WORKFLOW_LIST=$(echo "$WORKFLOW_LIST" | sed 's/\\n$//')
+              # Create temporary file
+              > /tmp/workflows.txt
+              echo "$WORKFLOWS" | jq -c '.[]' | while read -r workflow; do
+                 NAME=$(echo "$workflow" | jq -r '.name')
+                 STATUS=$(echo "$workflow" | jq -r '.status | ascii_upcase')
+                 URL=$(echo "$workflow" | jq -r '.url')
+                 REPO=$(echo "$workflow" | jq -r '.repository // ""')
+                 if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ]; then
+                   echo "• [$NAME]($URL) - **$STATUS** (📁 $REPO)" >> /tmp/workflows.txt
+                 else
+                   echo "• [$NAME]($URL) - **$STATUS**" >> /tmp/workflows.txt
+                 fi
+              done
+              # Convert to Teams format with proper line breaks
+              WORKFLOW_LIST=""
+              while IFS= read -r line; do
+                if [ -z "$WORKFLOW_LIST" ]; then
+                   WORKFLOW_LIST="$line"
+                else
+                   WORKFLOW_LIST="$WORKFLOW_LIST\\n$line"
+                fi
+              done < /tmp/workflows.txt
+              rm -f /tmp/workflows.txt
           else
-            WORKFLOW_LIST="• No workflows found"
+              WORKFLOW_LIST="• No workflows found"
           fi
+          echo "=== Workflow List Preview ==="
+          echo -e "$WORKFLOW_LIST" | sed 's/\\n/\n/g'
+          echo "=== End Preview ==="
+
 
           # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
@@ -310,7 +323,6 @@ jobs:
 
           # Escape for JSON
           TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
-          WORKFLOW_LIST_SAFE=$(echo "$WORKFLOW_LIST" | sed 's/"/\\"/g')
 
           # Create final status notification
           cat > card.json <<EOF
@@ -386,6 +398,8 @@ jobs:
              ]
           }
           EOF
+           echo "Generated card.json:"
+           cat card.json
 
           curl -s -H "Content-Type: application/json" \
             -d @card.json \
