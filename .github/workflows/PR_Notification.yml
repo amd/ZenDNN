@@ -65,8 +65,8 @@ jobs:
                   'verify jira id',
                   'check license headers',
                   'verify license headers', 
-                  'trigger-zentorch-zendnnl',
-                  'check-commit-messages'
+                  'trigger-zentorch-zendnnl'
+                  
                 ];
 
                 // Get workflow runs - ONLY include important ones
@@ -258,38 +258,41 @@ jobs:
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          # FIXED: Generate workflow list with proper line breaks
+          # FIXED: Generate workflow list without subshell issues
           if [ "$TOTAL_COUNT" -gt 0 ]; then
-              # Create temporary file
-              > /tmp/workflows.txt
-              echo "$WORKFLOWS" | jq -c '.[]' | while read -r workflow; do
-                 NAME=$(echo "$workflow" | jq -r '.name')
-                 STATUS=$(echo "$workflow" | jq -r '.status | ascii_upcase')
-                 URL=$(echo "$workflow" | jq -r '.url')
-                 REPO=$(echo "$workflow" | jq -r '.repository // ""')
-                 if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ]; then
-                   echo "• [$NAME]($URL) - **$STATUS** (📁 $REPO)" >> /tmp/workflows.txt
-                 else
-                   echo "• [$NAME]($URL) - **$STATUS**" >> /tmp/workflows.txt
-                 fi
-              done
-              # Convert to Teams format with proper line breaks
+              # Use index-based iteration to avoid subshell
+              WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
               WORKFLOW_LIST=""
-              while IFS= read -r line; do
-                if [ -z "$WORKFLOW_LIST" ]; then
-                   WORKFLOW_LIST="$line"
-                else
-                   WORKFLOW_LIST="$WORKFLOW_LIST\\n$line"
-                fi
-              done < /tmp/workflows.txt
-              rm -f /tmp/workflows.txt
+              
+              echo "Building workflow list for $WORKFLOW_COUNT workflows..."
+              
+              for i in $(seq 0 $((WORKFLOW_COUNT - 1))); do
+                  NAME=$(echo "$WORKFLOWS" | jq -r ".[$i].name")
+                  STATUS=$(echo "$WORKFLOWS" | jq -r ".[$i].status | ascii_upcase")
+                  URL=$(echo "$WORKFLOWS" | jq -r ".[$i].url")
+                  REPO=$(echo "$WORKFLOWS" | jq -r ".[$i].repository // \"\"")
+                  
+                  echo "Processing: $NAME ($STATUS)"
+                  
+                  if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
+                      WORKFLOW_LINE="• [$NAME]($URL) - **$STATUS** (📁 $REPO)"
+                  else
+                      WORKFLOW_LINE="• [$NAME]($URL) - **$STATUS**"
+                  fi
+                  
+                  if [ -z "$WORKFLOW_LIST" ]; then
+                      WORKFLOW_LIST="$WORKFLOW_LINE"
+                  else
+                      WORKFLOW_LIST="$WORKFLOW_LIST\\n$WORKFLOW_LINE"
+                  fi
+              done
           else
               WORKFLOW_LIST="• No workflows found"
           fi
+          
           echo "=== Workflow List Preview ==="
           echo -e "$WORKFLOW_LIST" | sed 's/\\n/\n/g'
           echo "=== End Preview ==="
-
 
           # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
@@ -316,9 +319,9 @@ jobs:
 
           # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
-            COMPLETION_TEXT=" All $TOTAL_COUNT workflows completed"
+            COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT=" $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
+            COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
           fi
 
           # Escape for JSON
@@ -369,7 +372,7 @@ jobs:
                               },
                               {
                                  "type": "TextBlock",
-                                 "text": "**All Workflow Results:**\\n$WORKFLOW_LIST_SAFE",
+                                 "text": "**All Workflow Results:**\\n\\n$WORKFLOW_LIST",
                                  "wrap": true,
                                  "size": "Small"
                               }
@@ -401,8 +404,10 @@ jobs:
            echo "Generated card.json:"
            cat card.json
 
-          curl -s -H "Content-Type: application/json" \
+           curl -s -H "Content-Type: application/json" \
             -d @card.json \
             "$ZENDNNL_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
+
+           echo "✅ Final status notification sent for PR #$PR_NUMBER: $STATUS_TEXT"
 
          
