@@ -258,15 +258,25 @@ jobs:
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          # Generate workflow list with links and repository info
-          WORKFLOW_LIST=$(echo "$WORKFLOWS" | jq -r '
-            .[] | 
-            if .repository != "'$GITHUB_REPOSITORY'" then
-              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)** (📁 \(.repository))"
-            else
-              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"
-            end
-          ')
+          # FIXED: Generate workflow list with proper line breaks
+          if [ "$TOTAL_COUNT" -gt 0 ]; then
+           WORKFLOW_LIST=""
+           while IFS= read -r workflow; do
+             NAME=$(echo "$workflow" | jq -r '.name')
+             STATUS=$(echo "$workflow" | jq -r '.status | ascii_upcase')
+             URL=$(echo "$workflow" | jq -r '.url')
+             REPO=$(echo "$workflow" | jq -r '.repository // ""')
+               if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ]; then
+                 WORKFLOW_LIST="${WORKFLOW_LIST}• [$NAME]($URL) - **$STATUS** (📁 $REPO)\\n"
+               else
+                 WORKFLOW_LIST="${WORKFLOW_LIST}• [$NAME]($URL) - **$STATUS**\\n"
+               fi
+            done < <(echo "$WORKFLOWS" | jq -c '.[]')
+            # Remove trailing \\n
+            WORKFLOW_LIST=$(echo "$WORKFLOW_LIST" | sed 's/\\n$//')
+          else
+            WORKFLOW_LIST="• No workflows found"
+          fi
 
           # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
@@ -293,9 +303,9 @@ jobs:
 
           # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
-            COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
+            COMPLETION_TEXT=" All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT="⏳ $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
+            COMPLETION_TEXT=" $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
           fi
 
           # Escape for JSON
