@@ -56,7 +56,6 @@ jobs:
                 // Define EXACTLY which workflows we want to monitor (WHITELIST APPROACH)
                 const importantWorkflows = [
                   'commit message enforcement',
-                  'zendnnl pr ci',
                   'zendnnl_build_pr', 
                   'check-zentorch-status',
                   'asan-build',
@@ -65,8 +64,7 @@ jobs:
                   'verify jira id',
                   'check license headers',
                   'verify license headers', 
-                  'trigger-zentorch-zendnnl',
-                  'check-commit-messages'
+                  'trigger-zentorch-zendnnl'
                 ];
 
                 // Get workflow runs - ONLY include important ones
@@ -258,23 +256,44 @@ jobs:
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          # Generate workflow list with links and repository info
-          WORKFLOW_LIST=$(echo "$WORKFLOWS" | jq -r '
-            .[] | 
-            if .repository != "'$GITHUB_REPOSITORY'" then
-              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)** (📁 \(.repository))"
-            else
-              "• [\(.name)](\(.url)) - **\(.status | ascii_upcase)**"
-            end
-          ' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
-
-          # Debug: Show what we're building
-          echo "=== Workflow List Debug ==="
-          echo "Raw output:"
-          echo "$WORKFLOW_LIST"
-          echo "Formatted preview:"
-          echo -e "$WORKFLOW_LIST" | sed 's/\\n/\n/g'
-          echo "=== End Debug ==="
+          WORKFLOW_TEXTBLOCKS=""
+          if [ "$TOTAL_COUNT" -gt 0 ]; then
+             echo "Building individual TextBlocks for workflows..."
+             WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
+             for i in $(seq 0 $((WORKFLOW_COUNT - 1))); do
+               NAME=$(echo "$WORKFLOWS" | jq -r ".[$i].name")
+               STATUS=$(echo "$WORKFLOWS" | jq -r ".[$i].status | ascii_upcase")
+               URL=$(echo "$WORKFLOWS" | jq -r ".[$i].url")
+               REPO=$(echo "$WORKFLOWS" | jq -r ".[$i].repository // \"\"")
+               # Escape quotes for JSON
+               NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
+               if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
+                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS** (📁 $REPO)"
+               else
+                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS**"
+               fi
+               # Add TextBlock for this workflow
+               TEXTBLOCK='{
+                 "type": "TextBlock",
+                 "text": "'$WORKFLOW_TEXT'",
+                 "wrap": true,
+                 "size": "Small",
+                 "spacing": "None"
+               }'
+               if [ -z "$WORKFLOW_TEXTBLOCKS" ]; then
+                 WORKFLOW_TEXTBLOCKS="$TEXTBLOCK"
+               else
+                 WORKFLOW_TEXTBLOCKS="$WORKFLOW_TEXTBLOCKS,$TEXTBLOCK"
+               fi
+             done
+           else
+            WORKFLOW_TEXTBLOCKS='{
+              "type": "TextBlock",
+              "text": "• No workflows found",
+              "wrap": true,
+              "size": "Small"
+              }'
+            fi
 
           # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
@@ -308,7 +327,7 @@ jobs:
 
           # Escape for JSON
           TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
-          WORKFLOW_LIST_SAFE=$(echo "$WORKFLOW_LIST" | sed 's/"/\\"/g')
+         
 
           # Create final status notification
           cat > card.json <<EOF
@@ -355,10 +374,13 @@ jobs:
                               },
                               {
                                  "type": "TextBlock",
-                                 "text": "**All Workflow Results:**\\n\\n$WORKFLOW_LIST_SAFE",
+                                 "text": "**All Workflow Results:**",
                                  "wrap": true,
-                                 "size": "Small"
-                              }
+                                 "weight": "Bolder",
+                                 "size": "Small",
+                                 "spacing": "Medium"
+                              },
+                              $WORKFLOW_TEXTBLOCKS
                             ]
                           }
                         ],
