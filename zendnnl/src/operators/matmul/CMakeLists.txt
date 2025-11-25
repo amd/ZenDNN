@@ -19,12 +19,13 @@ add_subdirectory(onednn)
 
 set(matmul_operator_sources
   matmul_context.cpp
-  matmul_operator.cpp
+  matmul_operator_impl.cpp
   matmul_config.cpp
   matmul_ref_kernel.cpp)
 
 set(matmul_operator_public_headers
   matmul_context.hpp
+  matmul_operator_impl.hpp
   matmul_operator.hpp
   matmul_config.hpp)
 

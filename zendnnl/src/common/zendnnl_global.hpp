@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -110,6 +110,14 @@ static inline platform_info_t &zendnnl_platform_info() {
  */
 static inline config_manager_t &zendnnl_config_manager() {
   return (zendnnl_global_block_t::get())->get_config_manager();
+}
+
+/** @fn zendnnl_lru_cache()
+ * @brief Get a reference to zendnnl global lru cache
+ * @return A reference to zendnnl global lru cache
+ */
+static inline sptr_lru_cache_t &zendnnl_lru_cache() {
+  return (zendnnl_global_block_t::get())->get_lru_cache();
 }
 
 /** @fn get_relative_path

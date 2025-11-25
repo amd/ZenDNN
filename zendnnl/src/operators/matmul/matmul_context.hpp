@@ -87,6 +87,7 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
 
   std::shared_ptr<aocl_dlp_utils_t> aocl_dlp_utils_ptr; /**< aocl blis utils */
   friend class matmul_operator_t;
+  friend class matmul_impl_t;
 
  private:
   float _alpha; /**< alpha parameter */

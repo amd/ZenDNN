@@ -21,6 +21,7 @@
 #include <string>
 #include <cctype>
 #include <cstdlib>
+#include <climits>
 #include <algorithm>
 #include "nlohmann/json.hpp"
 #include "common/error_status.hpp"
@@ -80,16 +81,19 @@ class config_manager_t final {
    *  @return Logger configuration.
    */
   const config_logger_t      &get_logger_config() const;
-  /**@}*/
 
-  /** @name Get Configurations
-   */
-  /**@{*/
   /** @brief Get profiler configuration
    *
    *  @return Profiler configuration.
    */
   const config_profiler_t   &get_profiler_config() const;
+
+  /** @brief Get profiler configuration
+   *
+   *  @return Profiler configuration.
+   */
+  const config_lru_cache_t   &get_lru_cache_config() const;
+
   /**@}*/
 
  private:
@@ -148,12 +152,31 @@ class config_manager_t final {
    *
    * @return success.
    */
-  status_t          set_env_profiler_config();
+  status_t           set_env_profiler_config();
 
-  json              config_json;     /**< JSON object read from
+  /** @brief Set default profiler config.
+   *
+   * @return success.
+   */
+  status_t          set_default_lru_cache_config();
+
+  /** @brief Set profiler config from JSON file.
+   *
+   * @return success.
+   */
+  status_t          set_user_lru_cache_config();
+
+  /** @brief Set profiler config from environment variables.
+   *
+   * @return success.
+   */
+  status_t           set_env_lru_cache_config();
+
+  json               config_json;     /**< JSON object read from
                                        config file */
-  config_logger_t   config_logger;   /**< Logger config */
-  config_profiler_t config_profiler; /**< Profiler config */
+  config_logger_t    config_logger;   /**< Logger config */
+  config_profiler_t  config_profiler; /**< Profiler config */
+  config_lru_cache_t config_lru_cache; /**< Global LRU cache config */
 };
 
 

@@ -55,7 +55,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                               .set_input("reorder_input", input_tensor);
 
       // Check if reorder operation creation is successful.
-      if (! reorder_operator.check()) {
+      if (reorder_operator.is_bad_object()) {
         testlog_error("operator ", reorder_operator.get_name(), " creation failed");
         return NOT_OK;
       }

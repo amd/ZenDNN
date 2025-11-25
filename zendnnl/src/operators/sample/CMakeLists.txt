@@ -16,12 +16,13 @@
 
 set(sample_operator_sources
   sample_context.cpp
-  sample_operator.cpp
+  sample_operator_impl.cpp
   sample_fp32_avx512_kernel.cpp
   sample_bf16_avx512_kernel.cpp)
 
 set(sample_operator_public_headers
   sample_context.hpp
+  sample_operator_impl.hpp
   sample_operator.hpp)
 
 set(sample_operator_private_headers

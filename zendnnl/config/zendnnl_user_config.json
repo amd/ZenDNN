@@ -22,6 +22,12 @@
         ],
         "enable_profiler" : false
     },
+    "lru_cache" : {
+        "__description" : [
+            "configuration for global lru cache."
+        ],
+        "capacity" : 1024
+    },
     "runtime_variables" : {
         "__description" : "runtime variables for operators",
         "matmul" : {

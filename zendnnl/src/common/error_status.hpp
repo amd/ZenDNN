@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ enum class status_t : int32_t {
   success                  = 1,  /*!< Success. Also used to represent a valid object */
   failure                  = 0,  /*!< Unknown failure */
   unimplemented            = -1, /*!< Unimplemented function,kernel or feature */
-  bad_hash_object          = -2, /*!< Bad or ill formed hashable object */
+  bad_object               = -2, /*!< Bad or ill formed hashable object */
   op_bad_context           = -3, /*!< Bad operator context */
   op_bad_io                = -4, /*!< Bad input-output to operator */
   op_bad_forced_kernel     = -5, /*!< Bad or inconsistant forced kernel */
@@ -48,9 +48,11 @@ enum class status_t : int32_t {
   memory_bad_index         = -13, /*!< bad tensor index */
   memory_bad_storage       = -14, /*!< bad tensor index */
   config_bad_json_file     = -15, /*!< bad json file */
-  memory_bad_meta          = -16,  /*!< bad quantization input to tensor */
-  memory_bad_quant         = -17  /*!< bad quantization input to tensor */
-
+  memory_bad_meta          = -16, /*!< bad quantization input to tensor */
+  memory_bad_quant         = -17, /*!< bad quantization input to tensor */
+  lru_node_not_found       = -18, /*!< LRU node not found */
+  lru_node_exists          = -19, /*!< LRU node not found */
+  bad_hash_object          = -20  /*!< Bad or ill formed hashable object */
 };
 
 } //error_handling

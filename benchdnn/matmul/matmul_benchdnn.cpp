@@ -53,7 +53,7 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
                            .set_context(matmul_context)
                            .create();
 
-    if (! matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }

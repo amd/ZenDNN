@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "compare_operator.hpp"
+#include "compare_operator_impl.hpp"
 #include "compare_kernel_list.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-status_t compare_operator_t::validate() {
+status_t compare_impl_t::validate() {
   LOG_DEBUG_INFO("Validating compare op parameters");
   if (parent_type::validate() != status_t::success) {
     return status_t::failure;
@@ -112,7 +112,7 @@ status_t compare_operator_t::validate() {
   return status_t::success;
 }
 
-std::string compare_operator_t::op_create_info() {
+std::string compare_impl_t::op_create_info() {
   std::stringstream ss;
 
   ss << "Compare operator create - ";
@@ -126,7 +126,7 @@ std::string compare_operator_t::op_create_info() {
   return ss.str();
 }
 
-std::string compare_operator_t::op_execute_info() {
+std::string compare_impl_t::op_execute_info() {
   std::stringstream ss;
 
   ss << "Compare operator execute - ";
@@ -147,7 +147,7 @@ std::string compare_operator_t::op_execute_info() {
   return ss.str();
 }
 
-status_t compare_operator_t::kernel_factory() {
+status_t compare_impl_t::kernel_factory() {
   LOG_DEBUG_INFO("Executing compare operator");
 
   kernel = std::shared_ptr<compare_ref_kernel_t>(get_compare_kernel());
@@ -160,7 +160,7 @@ status_t compare_operator_t::kernel_factory() {
   return status_t::success;
 }
 
-compare_stats_t compare_operator_t::get_compare_stats() {
+compare_stats_t compare_impl_t::get_compare_stats() {
   return *(get_context().get_compare_stats());
 }
 

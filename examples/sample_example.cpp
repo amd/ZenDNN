@@ -49,7 +49,7 @@ int sample_f32_kernel_example() {
       .set_context(sample_context)
       .create();
 
-    if (! sample_operator.check()) {
+    if (sample_operator.is_bad_object()) {
       log_error("operator ", sample_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -88,17 +88,28 @@ int sample_bf16_kernel_example() {
     auto sample_operator = sample_operator_t()
       .set_name("sample operator")
       .set_context(sample_context)
+      .cache(true)
       .create();
 
-    if (! sample_operator.check()) {
+    if (sample_operator.is_bad_object()) {
       log_error("operator ", sample_operator.get_name(), " creation failed");
       return NOT_OK;
     }
+
+    auto sample_hash_key = sample_operator.get_hash();
 
     sample_operator
       .set_input("sample_input", input_tensor)
       .set_output("sample_output", output_tensor)
       .execute();
+
+    /* get the sample operator from hash */
+    auto cached_sample_operator = sample_operator_t().load(sample_hash_key);
+    cached_sample_operator
+      .set_input("sample_input", input_tensor)
+      .set_output("sample_output", output_tensor)
+      .execute();
+
   }  catch(const exception_t& ex) {
     std::cout << ex.what() << std::endl;
     return NOT_OK;
@@ -106,6 +117,7 @@ int sample_bf16_kernel_example() {
 
   return OK;
 }
+
 
 } //examples
 } //zendnnl

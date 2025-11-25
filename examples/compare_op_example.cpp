@@ -42,7 +42,7 @@ int compare_operator_execute(tensor_t &input1, tensor_t &input2) {
                             .set_context(compare_context)
                             .create();
 
-    if (! compare_operator.check()) {
+    if (compare_operator.is_bad_object()) {
       testlog_error("operator ", compare_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -165,7 +165,7 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                                .set_context(matmul_context)
                                .create();
 
-    if (! matmul_operator_ref.check()) {
+    if (matmul_operator_ref.is_bad_object()) {
       testlog_error(" operator ", matmul_operator_ref.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -190,7 +190,7 @@ int compare_ref_and_aocl_matmul_kernel_example() {
                            .set_name("matmul_f32_operator")
                            .set_context(matmul_context)
                            .create();
-    if (! matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       testlog_error(" operator ", matmul_operator.get_name(), " creation failed");
       return NOT_OK;
     }

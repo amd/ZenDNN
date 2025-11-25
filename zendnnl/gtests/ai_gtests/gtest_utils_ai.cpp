@@ -162,7 +162,7 @@ tensor_t AITensorFactory::create_uniform_tensor(const std::vector<uint64_t>
                 .set_data_type(dtype)
                 .set_storage()
                 .create();
-  if (!tensor.check()) {
+  if (! tensor.check()) {
     std::cerr << "[ERROR] Failed to create tensor: " << tensor_name << std::endl;
     throw std::runtime_error("Failed to create tensor: " + tensor_name);
   }
@@ -207,7 +207,7 @@ tensor_t AITensorFactory::create_zero_tensor(const std::vector<uint64_t> &dims,
                 .set_data_type(dtype)
                 .set_storage()
                 .create();
-  if (!tensor.check()) {
+  if (! tensor.check()) {
     std::cerr << "[ERROR] Failed to create tensor: " << tensor_name << std::endl;
     throw std::runtime_error("Failed to create tensor: " + tensor_name);
   }
@@ -291,7 +291,7 @@ tensor_t AITensorFactory::create_boundary_tensor(const std::vector<uint64_t>
                 .set_data_type(dtype)
                 .set_storage()
                 .create();
-  if (!tensor.check()) {
+  if (! tensor.check()) {
     std::cerr << "[ERROR] Failed to create tensor: " << tensor_name << std::endl;
     throw std::runtime_error("Failed to create tensor: " + tensor_name);
   }
@@ -890,7 +890,7 @@ status_t AITestUtils::run_reference_matmul(
       matmul_context = matmul_context.set_post_op(post_op);
     }
     matmul_context = matmul_context.create();
-    if (!matmul_context.check()) {
+    if (! matmul_context.check()) {
       return status_t::failure;
     }
 
@@ -923,7 +923,7 @@ status_t AITestUtils::run_reference_matmul(
                            .set_name("matmul_forced_ref_operator")
                            .set_context(matmul_context)
                            .create();
-    if (!matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       return status_t::failure;
     }
 

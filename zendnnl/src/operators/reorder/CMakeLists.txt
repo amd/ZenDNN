@@ -18,10 +18,11 @@ add_subdirectory(aocl_blis)
 
 set(reorder_operator_sources
   reorder_context.cpp
-  reorder_operator.cpp)
+  reorder_operator_impl.cpp)
 
 set(reorder_operator_public_headers
   reorder_context.hpp
+  reorder_operator_impl.hpp
   reorder_operator.hpp)
 
 set(reorder_operator_private_headers

@@ -13,8 +13,9 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "reorder_operator.hpp"
+#include "reorder_operator_impl.hpp"
 #include "reorder_kernel_list.hpp"
+#include "aocl_blis/reorder_utils.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"
@@ -25,7 +26,7 @@
 namespace zendnnl {
 namespace ops {
 
-status_t reorder_operator_t::validate() {
+status_t reorder_impl_t::validate() {
   if (parent_type::validate() != status_t::success) {
     return status_t::failure;
   }
@@ -98,7 +99,7 @@ status_t reorder_operator_t::validate() {
   return status_t::success;
 }
 
-std::string reorder_operator_t::op_create_info() {
+std::string reorder_impl_t::op_create_info() {
   std::stringstream ss;
 
   ss << "Reorder operator create - ";
@@ -112,7 +113,7 @@ std::string reorder_operator_t::op_create_info() {
   return ss.str();
 }
 
-std::string reorder_operator_t::op_execute_info() {
+std::string reorder_impl_t::op_execute_info() {
   std::stringstream ss;
 
   ss << "Reorder operator execute - ";
@@ -131,7 +132,7 @@ std::string reorder_operator_t::op_execute_info() {
   return ss.str();
 }
 
-status_t reorder_operator_t::kernel_factory() {
+status_t reorder_impl_t::kernel_factory() {
   auto algo_format = context.get_algo_format();
 
   if (algo_format == "aocl") {
@@ -153,7 +154,7 @@ status_t reorder_operator_t::kernel_factory() {
   return status_t::success;
 }
 
-size_t reorder_operator_t::get_reorder_size() {
+size_t reorder_impl_t::get_reorder_size() {
   auto algo_format   = context.get_algo_format();
 
   if (algo_format == "aocl") {

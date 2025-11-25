@@ -16,11 +16,12 @@
 
 set(compare_operator_sources
   compare_context.cpp
-  compare_operator.cpp
+  compare_operator_impl.cpp
   compare_ref_kernel.cpp)
 
 set(compare_operator_public_headers
   compare_context.hpp
+  compare_operator_impl.hpp
   compare_operator.hpp)
 
 set(compare_operator_private_headers

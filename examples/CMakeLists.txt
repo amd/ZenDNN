@@ -52,28 +52,28 @@ if(zendnnl_FOUND)
   message(STATUS "zendnnl forund at ${zendnnl_ROOT}")
 endif()
 
-set(examples_sources
-  examples.cpp
-  example_utils.cpp
-  tensor_example.cpp
-  sample_example.cpp
-  matmul_example.cpp
-  lowoha_matmul_example.cpp
-  batchmatmul_example.cpp
-  compare_op_example.cpp
-  reorder_example.cpp
-  embedding_bag_example.cpp)
+ set(examples_sources
+   examples.cpp
+   example_utils.cpp
+   tensor_example.cpp
+   sample_example.cpp
+   matmul_example.cpp
+   lowoha_matmul_example.cpp
+   batchmatmul_example.cpp
+   compare_op_example.cpp
+   reorder_example.cpp
+   embedding_bag_example.cpp)
 
-set(example_headers
-  example_utils.hpp
-  tensor_example.hpp
-  sample_example.hpp
-  matmul_example.hpp
-  lowoha_matmul_example.hpp
-  batchmatmul_example.hpp
-  compare_op_example.hpp
-  reorder_example.hpp
-  embedding_bag_example.hpp)
+ set(example_headers
+   example_utils.hpp
+   tensor_example.hpp
+   sample_example.hpp
+   matmul_example.hpp
+   lowoha_matmul_example.hpp
+   batchmatmul_example.hpp
+   compare_op_example.hpp
+   reorder_example.hpp
+   embedding_bag_example.hpp)
 
 add_executable(examples ${examples_sources})
 # target_link_libraries(examples

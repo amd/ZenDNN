@@ -18,6 +18,7 @@
 #define _MATMUL_ONEDNN_UTILS_HPP_
 
 #include "memory/tensor.hpp"
+#include "operators/matmul/matmul_config.hpp"
 #include <string>
 
 #if ZENDNNL_DEPENDS_ONEDNN

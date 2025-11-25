@@ -78,7 +78,7 @@ int embedding_bag_f32_kernel_example() {
                                   .set_context(embedding_bag_context)
                                   .create();
 
-    if (! embedding_bag_operator.check()) {
+    if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -147,7 +147,7 @@ int embedding_bag_f32_forced_ref_kernel_example() {
                                   .set_context(embedding_bag_context)
                                   .create();
 
-    if (! embedding_bag_operator.check()) {
+    if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -220,7 +220,7 @@ int embedding_f32_kernel_example() {
                               .set_context(embedding_context)
                               .create();
 
-    if (! embedding_operator.check()) {
+    if (embedding_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_operator.get_name(),
                     " creation failed.");
       return NOT_OK;

@@ -50,7 +50,7 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -139,7 +139,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -217,7 +217,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
                             .set_input("reorder_input", weight_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -283,7 +283,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
                            .create();
 
     // Check if matmul operation creation is successful.
-    if (! matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
@@ -354,7 +354,7 @@ int reorder_inplace_bf16_kernel_contiguous_blocked_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -438,7 +438,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
     size_t input_buffer_size = weight_tensor.get_buffer_sz_bytes();
 
     // Check if inplace reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -511,7 +511,7 @@ int reorder_inplace_matmul_relu_bf16_kernel_contiguous_blocked_example() {
                            .create();
 
     // Check if matmul operation creation is successful.
-    if (! matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       testlog_error(" operator ", matmul_operator.get_name(), " creation failed.");
       return NOT_OK;
     }
@@ -581,7 +581,7 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -668,7 +668,7 @@ int reorder_inplace_s8_kernel_blocked_contiguous_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -733,7 +733,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
                             .set_input("reorder_input", input_tensor);
 
     // Check if reorder operation creation is successful.
-    if (! reorder_operator.check()) {
+    if (reorder_operator.is_bad_object()) {
       testlog_error("operator ", reorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }
@@ -776,7 +776,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
                               .set_input("reorder_input", output_tensor);
 
     // Check if unreorder operation creation is successful.
-    if (! unreorder_operator.check()) {
+    if (unreorder_operator.is_bad_object()) {
       testlog_error("operator ", unreorder_operator.get_name(), " creation failed");
       return NOT_OK;
     }

@@ -495,9 +495,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -522,9 +522,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -547,9 +547,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -571,9 +571,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t bias = AITensorFactory::create_uniform_tensor(bias_dims, output_dtype,
                       "bias_accuracy");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -597,9 +597,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -622,9 +622,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor({params.m, params.n, 2},
                         output_dtype, "output3d_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -653,9 +653,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       }
       catch (...) {}
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -681,10 +681,10 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                         "output_zero");
       try {
         tensor_t forced_kernel_tensor; // must be lvalue
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).set_param("forced_kernel",
-                                              forced_kernel_tensor).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).set_param("forced_kernel",
+                                  forced_kernel_tensor).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -758,7 +758,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
         matmul_context_t matmul_context = matmul_context_t().set_param("weights",
                                           weights).set_param("bias", bias).create();
         matmul_context = matmul_context.set_post_op(bad_post_op).create();
-        if (!matmul_context.check()) {
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -788,7 +788,7 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                                           weights).set_param("bias", bias).create();
         matmul_context = matmul_context.set_post_op(relu_post_op).set_post_op(
                            bad_post_op).create();
-        if (!matmul_context.check()) {
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -814,9 +814,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                         "output_zero");
       try {
         post_op_t binary_add_post_op(post_op_type_t::binary_add);
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).set_post_op(binary_add_post_op).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).set_post_op(binary_add_post_op).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -842,9 +842,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims, output_dtype,
                         "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -869,9 +869,9 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
       tensor_t output = AITensorFactory::create_zero_tensor(output_dims,
                         data_type_t::s4, "output_zero");
       try {
-        matmul_context_t matmul_context = matmul_context_t().set_param("weights",
-                                          weights).set_param("bias", bias).create();
-        if (!matmul_context.check()) {
+        auto matmul_context = matmul_context_t().set_param("weights",
+                              weights).set_param("bias", bias).create();
+        if (! matmul_context.check()) {
           return status_t::failure;
         }
         matmul_operator_t matmul_operator = matmul_operator_t().set_context(
@@ -946,11 +946,11 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                   std::endl;
         return status_t::failure;
       }
-      matmul_operator_t matmul_operator = matmul_operator_t()
-                                          .set_name(AITestUtils::generate_unique_name("matmul_ai_op"))
-                                          .set_context(matmul_context)
-                                          .create();
-      if (!matmul_operator.check()) {
+      auto matmul_operator = matmul_operator_t()
+                             .set_name(AITestUtils::generate_unique_name("matmul_ai_op"))
+                             .set_context(matmul_context)
+                             .create();
+      if (matmul_operator.is_bad_object()) {
         std::cout << "[AI_TEST] Operator creation failed for " << params.test_name <<
                   std::endl;
         return status_t::failure;

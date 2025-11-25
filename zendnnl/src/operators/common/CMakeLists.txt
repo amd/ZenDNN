@@ -18,6 +18,7 @@ set(ops_common_sources
 
 set(ops_common_headers
   operator_context.hpp
+  operator_impl.hpp
   operator.hpp
   operator_kernel.hpp
   operator_config.hpp

@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "matmul_onednn_kernel.hpp"
+#include "operators/matmul/matmul_config.hpp"
 
 namespace zendnnl {
 namespace ops {

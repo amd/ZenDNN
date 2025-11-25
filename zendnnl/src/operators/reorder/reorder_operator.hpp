@@ -16,28 +16,30 @@
 #ifndef _REORDER_OPERATOR_HPP_
 #define _REORDER_OPERATOR_HPP_
 
-#include "aocl_blis/reorder_utils.hpp"
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator.hpp"
 #include "reorder_context.hpp"
+#include "reorder_operator_impl.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-class reorder_operator_t final : public
-  operator_t<reorder_operator_t, reorder_context_t> {
- public:
+class reorder_operator_t final : public operator_t<reorder_operator_t,
+                                                    reorder_context_t,
+                                                    reorder_impl_t> {
+public:
+  /** @brief Self type **/
+  using self_type = reorder_operator_t;
   /** @brief Parent type **/
-  using parent_type = operator_t<reorder_operator_t, reorder_context_t>;
-  size_t get_reorder_size();
-  size_t reorder_size;
+  using parent_type = operator_t<reorder_operator_t, reorder_context_t, reorder_impl_t>;
+  /** @brief context type **/
+  using context_type = parent_type::context_type;
+  /** @brief impl type **/
+  using impl_type = parent_type::impl_type;
+  /** @brief impl pointer type **/
+  using impl_sptr_type = parent_type::impl_sptr_type;
 
- protected:
-  status_t validate() override;
-  std::string op_create_info() override;
-  std::string op_execute_info() override;
-  status_t kernel_factory() override;
-
+  size_t get_reorder_size() { return impl->get_reorder_size(); }
 };
 
 } //namespace ops

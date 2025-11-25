@@ -26,6 +26,7 @@
 #include "common/logging.hpp"
 #include "common/config_manager.hpp"
 #include "common/profiler.hpp"
+#include "common/lru.hpp"
 
 namespace zendnnl {
 namespace common {
@@ -78,6 +79,11 @@ public:
    */
   logger_t&        get_logger();
 
+  /** @brief Get lru_cache
+   * @return A reference to lru cache.
+   */
+  sptr_lru_cache_t&        get_lru_cache();
+
 private:
   /** @brief private constructor
    *
@@ -103,6 +109,7 @@ private:
   config_manager_t               config_manager; /*!< config manager */
   platform_info_t                platform_info; /*!< platform info */
   logger_t                       logger; /*!< logger */
+  sptr_lru_cache_t               lru_cache; /*!< global lru cache */
 };
 
 }//common

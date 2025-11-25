@@ -53,7 +53,7 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
                           .set_name("embedding_bag")
                           .set_context(embag_context)
                           .create();
-    if (! embag_operator.check()) {
+    if (embag_operator.is_bad_object()) {
       testlog_error(" operator ", embag_operator.get_name(), " creation failed.");
       return NOT_OK;
     }

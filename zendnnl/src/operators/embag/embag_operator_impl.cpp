@@ -14,23 +14,23 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-#include "embag_operator.hpp"
+#include "embag_operator_impl.hpp"
 #include "embag_kernel_list.hpp"
 #include "common/platform_info.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-status_t embag_operator_t::preprocess() {
+status_t embag_impl_t::preprocess() {
   LOG_DEBUG_INFO("Preprocessing embag_operator_t");
 
   return status_t::success;
 }
 
-status_t embag_operator_t::validate() {
+status_t embag_impl_t::validate() {
   LOG_DEBUG_INFO("<", get_name(), "> Validating kernel input/output");
   if (!get_input("indices") || !get_output("output")) {
-    apilog_error(name, " required input/output missing.");
+    apilog_error(obj_name, " required input/output missing.");
     return status_t::failure;
   }
 
@@ -47,7 +47,7 @@ status_t embag_operator_t::validate() {
   auto output_data_type  = get_output("output")->get_data_type();
 
   if (output_sizes[1] != table_sizes[1]) {
-    log_error(name, ": size mismatch in input/output/params. ", name,
+    log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
               " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
     return status_t::failure;
   }
@@ -56,13 +56,13 @@ status_t embag_operator_t::validate() {
        table_data_type != data_type_t::bf16) ||
       (output_data_type != data_type_t::f32 &&
        output_data_type != data_type_t::bf16)) {
-    apilog_error(name, ": table and output datatype must be float32 or bfloat16");
+    apilog_error(obj_name, ": table and output datatype must be float32 or bfloat16");
     return status_t::failure;
   }
 
   if (indices_data_type != data_type_t::s64 &&
       indices_data_type != data_type_t::s32) {
-    apilog_error(name, ": indices datatype must be int64 or int32");
+    apilog_error(obj_name, ": indices datatype must be int64 or int32");
     return status_t::failure;
   }
 
@@ -71,7 +71,7 @@ status_t embag_operator_t::validate() {
     auto offsets_data_type = get_input("offsets")->get_data_type();
     if (offsets_data_type != data_type_t::s64 &&
         offsets_data_type != data_type_t::s32) {
-      apilog_error(name, ": offsets datatype must be int64 or int32");
+      apilog_error(obj_name, ": offsets datatype must be int64 or int32");
       return status_t::failure;
     }
 
@@ -96,21 +96,21 @@ status_t embag_operator_t::validate() {
   if (get_input("weights")) {
     auto weights_data_type = get_input("weights")->get_data_type();
     if (weights_data_type != data_type_t::f32) {
-      apilog_error(name, ": weights datatype must be float32");
+      apilog_error(obj_name, ": weights datatype must be float32");
       return status_t::failure;
     }
   }
 
   if ((is_weights && !get_input("weights")) ||
       (!is_weights && get_input("weights"))) {
-    apilog_error(name, ": weights input is missing or is_weights is not enabled.");
+    apilog_error(obj_name, ": weights input is missing or is_weights is not enabled.");
     return status_t::failure;
   }
 
   return status_t::success;
 }
 
-status_t embag_operator_t::validate_forced_kernel() {
+status_t embag_impl_t::validate_forced_kernel() {
   LOG_DEBUG_INFO("<", get_name(), "> Validating forced kernel input/output");
 
   if (forced_kernel.empty()) {
@@ -119,7 +119,7 @@ status_t embag_operator_t::validate_forced_kernel() {
 
   if (forced_kernel == "reference") {
     if (!get_input("indices") || !get_output("output")) {
-      apilog_error(name, " required input/output missing.");
+      apilog_error(obj_name, " required input/output missing.");
       return status_t::failure;
     }
 
@@ -136,7 +136,7 @@ status_t embag_operator_t::validate_forced_kernel() {
     auto output_data_type  = get_output("output")->get_data_type();
 
     if (output_sizes[1] != table_sizes[1]) {
-      log_error(name, ": size mismatch in input/output/params. ", name,
+      log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
                 " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
       return status_t::failure;
     }
@@ -145,13 +145,13 @@ status_t embag_operator_t::validate_forced_kernel() {
          table_data_type != data_type_t::bf16) ||
         (output_data_type != data_type_t::f32 &&
          output_data_type != data_type_t::bf16)) {
-      apilog_error(name, ": table and output datatype must be float32 or bfloat16");
+      apilog_error(obj_name, ": table and output datatype must be float32 or bfloat16");
       return status_t::failure;
     }
 
     if (indices_data_type != data_type_t::s64 &&
         indices_data_type != data_type_t::s32) {
-      apilog_error(name, ": indices datatype must be int64 or int32");
+      apilog_error(obj_name, ": indices datatype must be int64 or int32");
       return status_t::failure;
     }
 
@@ -160,7 +160,7 @@ status_t embag_operator_t::validate_forced_kernel() {
       auto offsets_data_type = get_input("offsets")->get_data_type();
       if (offsets_data_type != data_type_t::s64 &&
           offsets_data_type != data_type_t::s32) {
-        apilog_error(name, ": offsets datatype must be int64 or int32");
+        apilog_error(obj_name, ": offsets datatype must be int64 or int32");
         return status_t::failure;
       }
 
@@ -185,14 +185,14 @@ status_t embag_operator_t::validate_forced_kernel() {
     if (get_input("weights")) {
       auto weights_data_type = get_input("weights")->get_data_type();
       if (weights_data_type != data_type_t::f32) {
-        apilog_error(name, ": weights datatype must be float32");
+        apilog_error(obj_name, ": weights datatype must be float32");
         return status_t::failure;
       }
     }
 
     if ((is_weights && !get_input("weights")) ||
         (!is_weights && get_input("weights"))) {
-      apilog_error(name, ": weights input is missing or is_weights is not enabled.");
+      apilog_error(obj_name, ": weights input is missing or is_weights is not enabled.");
       return status_t::failure;
     }
 
@@ -206,7 +206,7 @@ status_t embag_operator_t::validate_forced_kernel() {
   return status_t::success;
 }
 
-std::string embag_operator_t::op_create_info() {
+std::string embag_impl_t::op_create_info() {
   std::stringstream ss;
 
   auto table = context.get_param("table").value();
@@ -238,7 +238,7 @@ std::string embag_operator_t::op_create_info() {
   return ss.str();
 }
 
-std::string embag_operator_t::op_execute_info() {
+std::string embag_impl_t::op_execute_info() {
   std::stringstream ss;
 
   auto indices  = get_input("indices");
@@ -285,7 +285,7 @@ std::string embag_operator_t::op_execute_info() {
   return ss.str();
 }
 
-status_t embag_operator_t::kernel_factory() {
+status_t embag_impl_t::kernel_factory() {
   LOG_DEBUG_INFO("<", get_name(), "> Executing kernel_factory embag_operator_t");
   try {
     auto table_dtype   = context.get_param("table")->get_data_type();
@@ -319,7 +319,7 @@ status_t embag_operator_t::kernel_factory() {
         }
       }
       else {
-        apilog_error("<", name, "> kernel unimplemented.");
+        apilog_error("<", obj_name, "> kernel unimplemented.");
         return status_t::unimplemented;
       }
     }
@@ -328,7 +328,7 @@ status_t embag_operator_t::kernel_factory() {
         kernel = std::shared_ptr<embag_ref_kernel_t>(get_embag_ref_kernel());
       }
       else {
-        apilog_error("<", name, "> kernel unimplemented using forced kernel ",
+        apilog_error("<", obj_name, "> kernel unimplemented using forced kernel ",
                      forced_kernel);
         return status_t::unimplemented;
       }

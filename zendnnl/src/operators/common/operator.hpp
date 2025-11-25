@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -21,13 +21,10 @@
 #include <string>
 #include <memory>
 
-#include "common/zendnnl_global.hpp"
-#include "common/platform_info.hpp"
-#include "common/dynamic_module.hpp"
-#include "common/hash_object.hpp"
 #include "memory/tensor.hpp"
-#include "operators/common/operator_context.hpp"
-#include "operators/common/operator_kernel.hpp"
+#include "common/zendnnl_global.hpp"
+#include "common/zendnnl_api_object.hpp"
+#include "operators/common/operator_impl.hpp"
 
 // static_assert(std::is_base_of_v<op_context_base_t<OP_CONTEXT_T>, OP_CONTEXT_T>,
 //               "OP_CONTEXT_T should be derived from op_context_base_t");
@@ -76,28 +73,24 @@ using namespace zendnnl::error_handling;
  *
  * @todo Add support for reference kernel and user overriding kernel selection.
  */
-template<typename OP_T, typename OP_CONTEXT_T>
-class operator_t : public hash_object_t {
+template<typename SELF_T,
+         typename OP_CONTEXT_T,
+         typename OP_IMPL_T= operator_impl_t<OP_CONTEXT_T>>
+class operator_t : public api_object_t<SELF_T, OP_IMPL_T> {
  public:
-  /** @brief Parent type */
-  using   parent_type                =  hash_object_t;
   /** @brief Operator type */
-  using   operator_type              =  OP_T;
+  using   self_type =  SELF_T;
   /** @brief Context type */
-  using   context_type               =  OP_CONTEXT_T;
-  /** @brief Kernel type */
-  using   kernel_type                =  op_kernel_t<OP_CONTEXT_T>;
-  /** @brief Shared pointer to kernels */
-  using   kernel_sptr_type           =  std::shared_ptr<kernel_type>;
-  /** @brief A map type from strings to tensors */
-  using   tensor_map_type            =  std::map<std::string, tensor_t>;
-  /** @brief Kernel handle type */
-  using   create_kernel_handle_type  =  kernel_sptr_type(*)();
+  using   context_type =  OP_CONTEXT_T;
+  /** @brief Parent type */
+  using   parent_type =  api_object_t<SELF_T, OP_IMPL_T>;
+  /** @brief implementation type */
+  using  impl_type = typename parent_type::impl_type;
+  /** @brief implementation type */
+  using  impl_sptr_type = typename parent_type::impl_sptr_type;
 
-  /** @brief Virtual destructor
-   *
-   *  Virtual since this class acts as virtual base class.
-   */
+public:
+  /** @brief Virtual destructor */
   virtual ~operator_t() = default;
 
   /**@name Create
@@ -115,7 +108,7 @@ class operator_t : public hash_object_t {
    * @param context_ : operator context.
    * @return A reference to self.
    */
-  OP_T         &set_context(const context_type &context_);
+  self_type&  set_context(const context_type& context_);
 
   /** @brief Get operator context.
    *
@@ -136,7 +129,7 @@ class operator_t : public hash_object_t {
    * creation. The status can be checked using @c hash_object_t.check().
    * @return A reference to self.
    */
-  virtual OP_T       &create();
+  self_type& create() override;
   /**@}*/
 
   /**@name Execute
@@ -149,7 +142,7 @@ class operator_t : public hash_object_t {
    * validation and return status_t::op_bad_io error. All mandatory inputs
    * and outputs need to be given before @c execute().
    */
-  OP_T         &set_input(std::string key_, tensor_t &input_tensor_);
+  self_type& set_input(const std::string& key_, const tensor_t& input_tensor_);
 
   /** @brief Get an input tensor.
    *
@@ -159,22 +152,7 @@ class operator_t : public hash_object_t {
    * @param key_ : input tensor key.
    * @return (optional) input tensor.
    */
-  std::optional<tensor_t> get_input(std::string key_);
-
-  /** @brief Set forced kernel.
-   *
-   * A forced kernel is a kernel enforced by the user. If this kernel is
-   * consistent with the inputs and outputs, else status_t::bad_forced_kernel
-   * will be returned.
-   */
-  OP_T         &set_forced_kernel(std::string forced_kernel_name_);
-
-  /** @brief Get forced kernel.
-   *
-   * Returns forced kernel name.
-   * @return forced kernel name.
-   */
-  std::string get_forced_kernel();
+  std::optional<tensor_t> get_input(const std::string& key_) const;
 
   /** @brief Set an output tensor.
    *
@@ -183,8 +161,31 @@ class operator_t : public hash_object_t {
    * validation and return status_t::op_bad_io error. All mandatory inputs
    * and outputs need to be given before @c execute().
    */
-  OP_T         &set_output(std::string key_, tensor_t &input_tensor_);
-  std::optional<tensor_t> get_output(std::string key_);
+  self_type& set_output(const std::string& key_, const tensor_t& input_tensor_);
+
+  /** @brief Set an output tensor.*/
+  std::optional<tensor_t> get_output(const std::string& key_) const;
+
+  /** @brief Set forced kernel.
+   *
+   * A forced kernel is a kernel enforced by the user. If this kernel is
+   * consistent with the inputs and outputs, else status_t::bad_forced_kernel
+   * will be returned.
+   */
+  self_type& set_forced_kernel(const std::string& forced_kernel_);
+
+  /** @brief Get forced kernel.
+   *
+   * Returns forced kernel name.
+   * @return forced kernel name.
+   */
+  std::string get_forced_kernel() const;
+
+  /** @brief set validation. */
+  self_type& set_validation(bool validation_flag_);
+
+  /** @brief get validation. */
+  bool get_validation() const;
 
   /** @brief Execute an operator
    *
@@ -194,428 +195,127 @@ class operator_t : public hash_object_t {
    *
    * @return Exexution status. Returns status_t::success on success.
    */
-  virtual status_t    execute();
+  virtual status_t execute();
   /**@}*/
 
-  /** @name Profiling and Diagnostics
-   */
-  /**@{*/
-  /** @brief Set name.
-   *
-   * Name is relevant only for object identification in logging, profiling
-   * and diagnostics. Default is "unknown operator".
-   * @param name_ : object name.
-   * @return A reference to self.
-   */
-  OP_T         &set_name(std::string name_);
-
-  /** @brief Get name.
-   * @return Object name.
-   */
-  std::string   get_name();
-  /**@}*/
-
-  std::size_t   hash() override;
-
- protected:
+protected:
   /** @brief Default constructor.
    *
    * ZenDNNL follows the convension of making constructors protected (or private),
    * where the class need to serve as a virtual base class, and no object of
    * the class should be created.
    */
-  operator_t();
-
-  /** @brief Load dynamic module
-   *
-   * This is useful only if the operator is loading
-   * kernel modules at runtime. please see @c dynamic_module_t further.
-   * @se Raises an exception if module is not found on the disk.
-   * @param module_ : module name.
-   * @return status_t::success for success.
-   */
-  status_t load_module(std::string module_);
-
-  /** @brief Load a kernel from a dynamic module.
-   *
-   * This is useful only if the operator is loading
-   * kernel modules at runtime. The module should already have been loaded
-   * with @c load_module(). please see @c dynamic_module_t further.
-   * @se Raises an exception if the kernel is not found in the module.
-   * @param module_ : module name.
-   * @return status_t::success for success.
-   */
-  status_t load_kernel(std::string symbol_);
-
-  /** @brief Validate input and output tensors.
-   *
-   * Basic validation consists of checking if all inputs and outputs are
-   * valid tensors. Any other validation can be implemented by overriding.
-   * @return status_t::success if successful, else status_t::failure.
-   */
-  virtual status_t    validate();
-
-  /** @brief Validate forced kernel.
-   *
-   * Basic validation includes only validating that forced kernel is
-   * empty. If a forced kernel is given, it returns failure and subsequently
-   * execute will fail. Derived operators need to override this and implement
-   * their own validation.
-   * @return status_t::success if successful, else status_t::failure.
-   */
-  virtual status_t    validate_forced_kernel();
-
-  /** @brief Select a kernel for execution.
-   *
-   * Kernel selection depends on multiple factors like input/parameters
-   * quantization, machine ISA, problem size or backend library. An
-   * operator overrides this to provide its own implementation.
-   * @se A kernel is selected for execution.
-   * @return status_t::success if successful, else status_t::failure.
-   */
-  virtual status_t    kernel_factory()  = 0;
-
-  /** @brief Returns operator information.
-   *
-   * Returns a string containing operator meta data.
-   * This includes operator name, context information, input and
-   * output tensor information. This is used for logging and profiling.
-   * @return std:string containing operator information.
-   */
-  virtual std::string op_create_info();
-
-  /** @brief Returns operator information.
-   *
-   * Returns a string containing operator meta data.
-   * This includes operator name, context information, input and
-   * output tensor information. This is used for logging and profiling.
-   * @return std:string containing operator information.
-   */
-  virtual std::string op_execute_info();
-
-  //data
-  tensor_map_type                      inputs; /**< Input tensors. */
-  tensor_map_type                      outputs; /**< Output tensors. */
-  context_type                         context; /**< Operator context. */
-  std::string                          name; /**< Name for diagnostic purpose */
-  kernel_sptr_type                     kernel; /**< Pointer to the kernel chosen
-                                                  for execution. */
-  std::shared_ptr<dynamic_module_t>
-  dynamic_module; /**< To load dynamic modules. */
-  std::string                          forced_kernel;
-  platform_info_t                      platform_info; /**< HW platform info. */
+  operator_t() = default;
 };
 
-//implementation
-template<typename OP_T, typename OP_CONTEXT_T>
-operator_t<OP_T, OP_CONTEXT_T>::operator_t():
-  context{}, name{}, kernel{nullptr},
-  dynamic_module{std::make_shared<dynamic_module_t>()},
-  forced_kernel{} {
-  platform_info = zendnnl_platform_info();
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_context(const OP_CONTEXT_T
-    &context_) {
-  LOG_DEBUG_INFO("<", name, "> Setting context for operator_t");
-  if (status != status_t::success) {
-    context = context_;
-  }
-
-  return dynamic_cast<OP_T &>(*this);
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_CONTEXT_T operator_t<OP_T, OP_CONTEXT_T>::get_context() {
-  LOG_DEBUG_INFO("<", name, "> Getting context for operator_t");
-  return context;
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_name(std::string name_) {
-  LOG_DEBUG_INFO("<", name, "> Setting name for operator_t as ", name_);
-  name = name_;
-  return dynamic_cast<OP_T &>(*this);
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-std::string operator_t<OP_T, OP_CONTEXT_T>::get_name() {
-  LOG_DEBUG_INFO("<", name, "> Getting name for operator_t");
-  return name;
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::create() {
-  LOG_DEBUG_INFO("<", name, "> Creating operator");
-
-  // create a profiler instance
-  profiler_t obj;
-  std::string op_info;
-  bool is_log = is_profile_enabled();
-  if (is_log) {
-    //start the timer
-    obj.tbp_start();
-  }
-
-  if (status != status_t::success) {
-    if (! context.check()) {
-      log_error("operator <", name, "> : bad context");
-      status =  status_t::op_bad_context;
-      return static_cast<OP_T &>(*this);
+/* implementation */
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::set_context(const context_type& context_) {
+  /* check the cache before context copy */
+  this->hash_key  = context_.get_hash();
+  if (this->hash_key) {
+    auto cached_value = zendnnl_lru_cache().get_value(this->hash_key);
+    if (cached_value) {
+      this->impl = std::static_pointer_cast<impl_type>(cached_value.value());
     }
-
-    // make operator complete
-    status = status_t::success;
-    hash();
-  }
-
-  if (apilog_verbose_enabled() || (is_log && profilelog_verbose_enabled())) {
-    op_info = op_create_info();
-    apilog_verbose(op_info);
-    if (is_log) {
-      //stop the timer
-      obj.tbp_stop();
-      profilelog_verbose(op_info,
-                        ",time:", obj.tbp_elapsedtime(), obj.get_res_str());
+    else {
+      this->hash_key = 0;
+      this->impl->set_context(context_);
     }
   }
-  return dynamic_cast<OP_T &>(*this);
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-status_t operator_t<OP_T, OP_CONTEXT_T>::execute() {
-  LOG_DEBUG_INFO("<",name, "> Executing operator");
-
-  try {
-    std::string op_info;
-    bool is_log = is_profile_enabled();
-
-    // create a profiler instance
-    profiler_t obj;
-    if (is_log) {
-      //start the timer
-      obj.tbp_start();
-    }
-    // check if pre_processing is successful
-    if (status != status_t::success) {
-      apilog_error("<", name, "> bad object");
-      return status;
-    }
-
-    //sanity check on io
-    if (validate() != status_t::success) {
-      apilog_error("<", name, "> bad input or output");
-      return status_t::op_bad_io;
-    }
-
-    //sanity chck forced kernel
-    if (validate_forced_kernel() != status_t::success) {
-      apilog_error("<", name, "> bad or inconsistent forced kernel");
-      return status_t::op_bad_forced_kernel;
-    }
-
-    //kernel factory assigns a kernel
-    if (kernel_factory() != status_t::success) {
-      apilog_error("<", name, "> failed to generate kernel");
-      return status_t::failure;
-    }
-
-    //execute kernel
-    if (kernel->execute(context, inputs, outputs) != status_t::success) {
-      apilog_error("<", name, "> kernel execution failed");
-      return status_t::failure;
-    }
-
-    if (apilog_verbose_enabled() || (is_log && profilelog_verbose_enabled())) {
-      op_info = op_execute_info();
-      apilog_verbose(op_info);
-    }
-    //cleanup
-    kernel.reset();
-    inputs.clear();
-    outputs.clear();
-
-    if (is_log) {
-      //stop the timer
-      obj.tbp_stop();
-      profilelog_verbose(op_info,
-                         ",time:",obj.tbp_elapsedtime(),obj.get_res_str());
-    }
-  }
-  catch (const exception_t &ex) {
-    EXCEPTION_WITH_LOC(ex.what());
+  else {
+    this->impl->set_context(context_);
   }
 
-  return status_t::success;
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_input(std::string key_,
-    tensor_t &input_tensor_) {
-  LOG_DEBUG_INFO("<", name, "> Setting input tensor for ", key_,
-                 " for operator_t");
-  if (status == status_t::success) {
-    inputs[key_] = input_tensor_;
-  }
-
-  return dynamic_cast<OP_T &>(*this);
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::context_type
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::get_context() {
+  return this->impl->get_context();
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_input(
-  std::string key_) {
-  LOG_DEBUG_INFO("<", name, "> Getting input tensor for ", key_,
-                 " for operator_t");
-  if (status == status_t::success) {
-    for (const auto& [k, v] : inputs) {
-      if (k == key_) {
-        return v;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::create() {
+  if (! this->hash_key) {
+    this->impl->create();
+
+    if (this->cache_flag) {
+      if (! this->impl->is_bad_object()) {
+      auto hash_key         = this->impl->get_hash();
+      auto type_erased_impl = std::static_pointer_cast<void>(this->impl);
+      zendnnl_lru_cache().insert(hash_key, type_erased_impl);
+      }
+      else {
+        apilog_error("<", this->get_name(), "> unable to cache a bad object.");
       }
     }
   }
+  else {
+    apilog_info("< ", this->get_name(), " > operator loaded from cache.");
+  }
 
-  return std::nullopt;
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_output(std::string key_,
-    tensor_t &output_tensor_) {
-  LOG_DEBUG_INFO("<", name, "> Setting output tensor for ", key_,
-                 " for operator_t");
-  if (status == status_t::success) {
-    outputs[key_] = output_tensor_;
-  }
-
-  return dynamic_cast<OP_T &>(*this);
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::set_input(const std::string& key_,
+                                            const tensor_t& input_tensor_) {
+  this->impl->set_input(key_, input_tensor_);
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-std::optional<tensor_t> operator_t<OP_T, OP_CONTEXT_T>::get_output(
-  std::string key_) {
-  LOG_DEBUG_INFO("<", name, "> Getting output tensor for ", key_,
-                 " for operator_t");
-  if (status == status_t::success) {
-    for (const auto& [k, v] : outputs) {
-      if (k == key_) {
-        return v;
-      }
-    }
-  }
-
-  return std::nullopt;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+std::optional<tensor_t>
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::get_input(const std::string& key_) const {
+  return this->impl->get_input(key_);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-OP_T &operator_t<OP_T, OP_CONTEXT_T>::set_forced_kernel(
-  std::string forced_kernel_) {
-  LOG_DEBUG_INFO("<", name, "> Setting forced kernel operaor_t");
-  if (status == status_t::success) {
-    forced_kernel = forced_kernel_;
-  }
-
-  return dynamic_cast<OP_T &>(*this);
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::set_output(const std::string& key_,
+                                             const tensor_t& output_tensor_) {
+  this->impl->set_output(key_, output_tensor_);
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-std::string operator_t<OP_T, OP_CONTEXT_T>::get_forced_kernel() {
-  LOG_DEBUG_INFO("<", name, "> Getting forced kernel for operator_t");
-  if (status == status_t::success) {
-    return forced_kernel;
-  }
-
-  return std::string();
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+std::optional<tensor_t>
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::get_output(const std::string& key_) const {
+  return this->impl->get_output(key_);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-std::size_t operator_t<OP_T, OP_CONTEXT_T>::hash() {
-  LOG_DEBUG_INFO("<", name, "> Getting hash for operator_t");
-  if (status == status_t::success) {
-    if (hash_key) {
-      return hash_key;
-    }
-    hash_key =  context.hash();
-  }
-
-  return hash_key;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::set_forced_kernel(const std::string& forced_kernel_) {
+  this->impl->set_forced_kernel(forced_kernel_);
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-status_t operator_t<OP_T, OP_CONTEXT_T>::load_module(std::string module_) {
-  LOG_DEBUG_INFO("<", name, "> Loading dynamic module operator_t");
-  try {
-    if ((*dynamic_module).set_name(module_).load() != status_t::success) {
-      EXCEPTION_WITH_LOC("dynamic module load failed.");
-    }
-  }
-  catch (const exception_t &ex) {
-    EXCEPTION_WITH_LOC(ex.what());
-  }
-
-  return status_t::success;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+std::string operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::get_forced_kernel() const {
+  return this->impl->get_forced_kernel();
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-status_t operator_t<OP_T, OP_CONTEXT_T>::load_kernel(std::string symbol_) {
-  LOG_DEBUG_INFO("<", name, "> Loading dynamic kernel operator_t");
-  try {
-    create_kernel_handle_type create_kernel_handle =
-      reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(
-            symbol_));
-
-    if (! create_kernel_handle) {
-      EXCEPTION_WITH_LOC("dynamic symbol load returned null.");
-    }
-
-    kernel = create_kernel_handle();
-  }
-  catch (const exception_t &ex) {
-    EXCEPTION_WITH_LOC(ex.what());
-  }
-
-  return status_t::success;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+typename operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::self_type&
+operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::set_validation(bool validation_flag_) {
+  this->impl->set_validation(validation_flag_);
+  return dynamic_cast<self_type&>(*this);
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-status_t operator_t<OP_T, OP_CONTEXT_T>::validate() {
-  LOG_DEBUG_INFO("<", name, "> Validating operator_t");
-  for (const auto& [k, v] : inputs) {
-    std::optional<tensor_t> t = v;
-    if (t && !(t->check())) {
-      return status_t::failure;
-    }
-  }
-
-  for (const auto& [k, v] : outputs) {
-    std::optional<tensor_t> t = v;
-    if (t && !(t->check())) {
-      return status_t::failure;
-    }
-  }
-
-  return status_t::success;
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+bool operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::get_validation() const {
+  return this->impl->get_validation();
 }
 
-template<typename OP_T, typename OP_CONTEXT_T>
-status_t operator_t<OP_T, OP_CONTEXT_T>::validate_forced_kernel() {
-  LOG_DEBUG_INFO("<", name, "> Validating forced kernel operator_t");
-  if (! forced_kernel.empty()) {
-    return status_t::failure;
-  }
-
-  return status_t::success;
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-std::string operator_t<OP_T, OP_CONTEXT_T>::op_create_info() {
-  LOG_DEBUG_INFO("Getting operator create info");
-  return "";
-}
-
-template<typename OP_T, typename OP_CONTEXT_T>
-std::string operator_t<OP_T, OP_CONTEXT_T>::op_execute_info() {
-  LOG_DEBUG_INFO("Getting operator execute info");
-  return "";
+template<typename SELF_T, typename OP_CONTEXT_T, typename OP_IMPL_T>
+status_t operator_t<SELF_T, OP_CONTEXT_T, OP_IMPL_T>::execute() {
+  return this->impl->execute();
 }
 
 } //namespace ops

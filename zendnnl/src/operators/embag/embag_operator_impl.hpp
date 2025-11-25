@@ -13,19 +13,18 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _EMBAG_OPERATOR_HPP_
-#define _EMBAG_OPERATOR_HPP_
+#ifndef _EMBAG_OPERATOR_IMPL_HPP_
+#define _EMBAG_OPERATOR_IMPL_HPP_
 
 #include "common/zendnnl_global.hpp"
-#include "operators/common/operator.hpp"
+#include "operators/common/operator_impl.hpp"
 #include "embag_context.hpp"
-#include "embag_operator_impl.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-/** @class embag_operator_t
- *  @brief Implements embedding bag operator.
+/** @class embag_impl_t
+ *  @brief Implementation class for embedding bag operator.
  *
  * @par Synopsys
  *
@@ -53,27 +52,60 @@ namespace ops {
  * - Output(s)
  *   1. (mandatory) output : A (num_bags x embedding_dim) 2D tensor containing aggregated embeddings per bag.
  */
-class embag_operator_t final : public operator_t<embag_operator_t,
-                                                  embag_context_t,
-                                                  embag_impl_t> {
+class embag_impl_t final : public operator_impl_t<embag_context_t> {
 public:
   /** @brief Self type **/
-  using self_type = embag_operator_t;
+  using self_type = embag_impl_t;
   /** @brief Parent type **/
-  using parent_type = operator_t<embag_operator_t, embag_context_t, embag_impl_t>;
+  using parent_type = operator_impl_t<embag_context_t>;
   /** @brief context type **/
   using context_type = parent_type::context_type;
-  /** @brief impl type **/
-  using impl_type = parent_type::impl_type;
-  /** @brief impl pointer type **/
-  using impl_sptr_type = parent_type::impl_sptr_type;
+  /** @brief kernel type **/
+  using   kernel_type =  parent_type::kernel_type;
+  /** @brief Shared pointer to kernels */
+  using   kernel_sptr_type =  parent_type::kernel_sptr_type;
+  /** @brief A map type from strings to tensors */
+  using   tensor_map_type = parent_type::tensor_map_type;
+  /** @brief Kernel handle type */
+  using   create_kernel_handle_type  = parent_type::create_kernel_handle_type;
+
+protected:
+  /** @brief Validate input/output
+   *
+   * Validates if all mandatory inputs and outputs are given.
+   * @return @c status_t::success if successful.
+   */
+  status_t validate() override;
+
+  /** @brief Validate forced kernel
+   *
+   * Validates if forced kernel is valid.
+   * @return @c status_t::success if successful.
+   */
+  status_t validate_forced_kernel() override;
+
+  /** @brief Select kernel based on input data type.
+   * @return @c status_t::success if successful.
+   */
+  status_t kernel_factory() override;
+
+  /** @brief Preprocess operator
+   * @return @c status_t::success if successful.
+   */
+  status_t preprocess();
+
+  /** @brief Print operator create information
+   * @return @c std::string
+   */
+  std::string op_create_info() override;
+
+  /** @brief Print operator execute information
+   * @return @c std::string
+   */
+  std::string op_execute_info() override;
 };
 
 } //namespace ops
-
-namespace interface {
-using embag_operator_t = zendnnl::ops::embag_operator_t;
-}
-
 } //namespace zendnnl
 #endif
+

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "sample_operator.hpp"
+#include "sample_operator_impl.hpp"
 #include "sample_kernel_list.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-status_t sample_operator_t::validate() {
+status_t sample_impl_t::validate() {
 
   if (parent_type::validate() != status_t::success) {
     return status_t::failure;
@@ -32,7 +32,7 @@ status_t sample_operator_t::validate() {
   return status_t::success;
 }
 
-std::string sample_operator_t::op_create_info() {
+std::string sample_impl_t::op_create_info() {
   std::stringstream ss;
 
   ss << "Sample operator create - ";
@@ -43,7 +43,7 @@ std::string sample_operator_t::op_create_info() {
   return ss.str();
 }
 
-std::string sample_operator_t::op_execute_info() {
+std::string sample_impl_t::op_execute_info() {
   std::stringstream ss;
 
   ss << "Sample operator execute - ";
@@ -60,7 +60,7 @@ std::string sample_operator_t::op_execute_info() {
   return ss.str();
 }
 
-status_t sample_operator_t::kernel_factory() {
+status_t sample_impl_t::kernel_factory() {
 
   auto input_dtype = get_input("sample_input")->get_data_type();
 

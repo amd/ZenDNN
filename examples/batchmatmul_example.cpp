@@ -54,7 +54,7 @@ int batch_matmul_relu_f32_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -125,7 +125,7 @@ int batch_matmul_wei2d_relu_f32_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -196,7 +196,7 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -267,7 +267,7 @@ int batch_matmul_relu_bf16_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -347,7 +347,7 @@ int batch_matmul_mul_silu_mul_f32_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -433,7 +433,7 @@ int batch_matmul_silu_mul_bf16_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error(" operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -511,7 +511,7 @@ int batch_matmul_relu_forced_ref_kernel_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error("operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;
@@ -582,7 +582,7 @@ int batchmatmul_broadcast_example() {
                                  .set_context(batch_matmul_context)
                                  .create();
 
-    if (! batch_matmul_operator.check()) {
+    if (batch_matmul_operator.is_bad_object()) {
       testlog_error("operator ", batch_matmul_operator.get_name(),
                     " creation failed.");
       return NOT_OK;

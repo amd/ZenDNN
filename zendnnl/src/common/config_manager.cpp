@@ -48,6 +48,10 @@ const config_profiler_t &config_manager_t::get_profiler_config() const {
   return config_profiler;
 }
 
+const config_lru_cache_t &config_manager_t::get_lru_cache_config() const {
+  return config_lru_cache;
+}
+
 status_t config_manager_t::parse(std::string file_name_) {
 
   std::ifstream json_file(file_name_);
@@ -66,6 +70,7 @@ status_t config_manager_t::parse(std::string file_name_) {
 void config_manager_t::set_default_config() {
   set_default_logger_config();
   set_default_profiler_config();
+  set_default_lru_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set default configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -75,6 +80,7 @@ void config_manager_t::set_default_config() {
 void config_manager_t::set_user_config() {
   set_user_logger_config();
   set_user_profiler_config();
+  set_user_lru_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set user configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -84,6 +90,7 @@ void config_manager_t::set_user_config() {
 void config_manager_t::set_env_config() {
   set_env_logger_config();
   set_env_profiler_config();
+  set_user_lru_cache_config();
 
   // Retrieve the singleton instance of matmul_config_t and set env configuration.
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -239,6 +246,40 @@ status_t config_manager_t::set_env_profiler_config() {
     char *enable_profiler_str = std::getenv("ZENDNNL_ENABLE_PROFILER");
     if (enable_profiler_str) {
       config_profiler.enable_profiler = (std::string(enable_profiler_str) == "1");
+    }
+  }
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_default_lru_cache_config() {
+  config_lru_cache.capacity = UINT_MAX;
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_user_lru_cache_config() {
+  //check for lru_cache json object
+  auto lru_cache_json = config_json["lru_cache"];
+  if (lru_cache_json.empty()) {
+    return status_t::failure;
+  }
+
+  //get log levels of each log
+  auto capacity_json = lru_cache_json["capacity"];
+  if (!capacity_json.empty()) {
+    config_lru_cache.capacity = capacity_json.get<uint32_t>();
+  }
+
+  return status_t::success;
+}
+
+status_t config_manager_t::set_env_lru_cache_config() {
+  {
+    char *lru_cache_capacity_str = std::getenv("ZENDNNL_LRU_CACHE_CAPACITY");
+    char *endptr;
+    if (lru_cache_capacity_str) {
+      config_lru_cache.capacity = std::strtoul(lru_cache_capacity_str, &endptr, 10);
     }
   }
 

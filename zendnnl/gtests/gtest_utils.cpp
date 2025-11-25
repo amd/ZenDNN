@@ -834,7 +834,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                                           .set_context(matmul_context)
                                           .create();
 
-      if (! matmul_operator.check()) {
+      if (matmul_operator.is_bad_object()) {
         log_error("operator ", matmul_operator.get_name(), " creation failed.");
         return status_t::failure;
       }
@@ -908,7 +908,7 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                         .set_context(matmul_context)
                                         .create();
 
-    if (! matmul_operator.check()) {
+    if (matmul_operator.is_bad_object()) {
       log_error("operator ", matmul_operator.get_name(), " creation failed.");
       return status_t::failure;
     }
@@ -980,7 +980,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
                                             .create()
                                             .set_input("reorder_input", input_tensor);
 
-      if (! reorder_operator.check()) {
+      if (reorder_operator.is_bad_object()) {
         log_error("operator ", reorder_operator.get_name(), " creation failed.");
         return std::make_pair(tensor_t(), status_t::failure);
       }
@@ -1050,7 +1050,7 @@ std::pair<tensor_t, status_t> reorder_kernel_test(tensor_t &input_tensor,
                                             .create()
                                             .set_input("reorder_input", input_tensor);
 
-      if (! reorder_operator.check()) {
+      if (reorder_operator.is_bad_object()) {
         log_error("operator ", reorder_operator.get_name(), " creation failed.");
         return std::make_pair(tensor_t(), status_t::failure);
       }
@@ -1139,7 +1139,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
         .set_context(embedding_bag_context)
         .create();
 
-    if (! embedding_bag_operator.check()) {
+    if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
                     " creation failed.");
       return status_t::failure;
@@ -1203,7 +1203,7 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
         .set_context(embedding_bag_context)
         .create();
 
-    if (! embedding_bag_operator.check()) {
+    if (embedding_bag_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_bag_operator.get_name(),
                     " creation failed.");
       return status_t::failure;
@@ -1264,7 +1264,7 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                           .set_context(embedding_context)
                                           .create();
 
-    if (! embedding_operator.check()) {
+    if (embedding_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_operator.get_name(),
                     " creation failed.");
       return status_t::failure;
@@ -1319,7 +1319,7 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
                                           .set_context(embedding_context)
                                           .create();
 
-    if (! embedding_operator.check()) {
+    if (embedding_operator.is_bad_object()) {
       testlog_error(" operator ", embedding_operator.get_name(),
                     " creation failed.");
       return status_t::failure;

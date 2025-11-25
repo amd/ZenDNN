@@ -13,18 +13,18 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _MATMUL_OPERATOR_HPP_
-#define _MATMUL_OPERATOR_HPP_
+#ifndef _MATMUL_OPERATOR_IMPL_HPP_
+#define _MATMUL_OPERATOR_IMPL_HPP_
 
 #include "common/zendnnl_global.hpp"
-#include "operators/common/operator.hpp"
+#include "operators/common/operator_impl.hpp"
+#include "matmul_config.hpp"
 #include "matmul_context.hpp"
-#include "matmul_operator_impl.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-/** @class matmul_operator_t
+/** @class matmul_impl_t
  *  @brief Implements matmul (matrix multiplication) operator.
  *
  * @par Synopsys
@@ -58,26 +58,72 @@ namespace ops {
  *   1. (mandatory) matmul_output : A MxN 2D tensor.
  *
  */
-class matmul_operator_t final : public operator_t<matmul_operator_t,
-                                                    matmul_context_t,
-                                                    matmul_impl_t> {
+class matmul_impl_t final : public operator_impl_t<matmul_context_t> {
 public:
   /** @brief Self type **/
-  using self_type = matmul_operator_t;
+  using self_type = matmul_impl_t;
   /** @brief Parent type **/
-  using parent_type = operator_t<matmul_operator_t, matmul_context_t, matmul_impl_t>;
+  using parent_type = operator_impl_t<matmul_context_t>;
   /** @brief context type **/
   using context_type = parent_type::context_type;
-  /** @brief impl type **/
-  using impl_type = parent_type::impl_type;
-  /** @brief impl pointer type **/
-  using impl_sptr_type = parent_type::impl_sptr_type;
+  /** @brief kernel type **/
+  using   kernel_type =  parent_type::kernel_type;
+  /** @brief Shared pointer to kernels */
+  using   kernel_sptr_type =  parent_type::kernel_sptr_type;
+  /** @brief A map type from strings to tensors */
+  using   tensor_map_type = parent_type::tensor_map_type;
+  /** @brief Kernel handle type */
+  using   create_kernel_handle_type  = parent_type::create_kernel_handle_type;
+
+protected:
+  /** @brief Validate input/output
+   *
+   * Validates if all mandatory inputs and outputs are given.
+   * @return @c status_t::success if successful.
+   */
+  status_t validate() override;
+
+  /** @brief Validate forced kernel
+   *
+   * Validates if forced kernel is valid.
+   * @return @c status_t::success if successful.
+   */
+  status_t validate_forced_kernel() override;
+
+  /** @brief Select kernel based on input data type.
+   * @return @c status_t::success if successful.
+   */
+  status_t kernel_factory() override;
+
+  /** @brief Print operator create information
+   * @return @c std::string
+   */
+  std::string op_create_info() override;
+
+  /** @brief Print operator execute information
+   * @return @c std::string
+   */
+  std::string op_execute_info() override;
+
+  /** @brief Preprocess operator
+   * @return @c status_t::success if successful.
+   */
+  status_t preprocess();
+
+  /** @brief Update matmul kernel
+   * @return @c status_t::success if successful.
+   */
+  status_t update_matmul_kernel();
+
+  /** @brief Validate buffer post-op
+   * @return @c status_t::success if successful.
+   */
+  status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
+                                   std::vector<post_op_t> &po,
+                                   std::map<std::string,tensor_t> &inputs);
 };
+
 } //namespace ops
-
-namespace interface {
-using matmul_operator_t = zendnnl::ops::matmul_operator_t;
-}
-
 } //namespace zendnnl
 #endif
+

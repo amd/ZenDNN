@@ -13,13 +13,13 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "matmul_operator.hpp"
+#include "matmul_operator_impl.hpp"
 #include "matmul_kernel_list.hpp"
 
 namespace zendnnl {
 namespace ops {
 
-status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
+status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
     &output_size,
     std::vector<post_op_t> &po,
     std::map<std::string,tensor_t> &inputs) {
@@ -125,7 +125,7 @@ status_t matmul_operator_t::validate_buffer_post_op(std::vector<uint64_t>
   return status_t::success;
 }
 
-status_t matmul_operator_t::update_matmul_kernel() {
+status_t matmul_impl_t::update_matmul_kernel() {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo = matmul_config.get_algo();
   if (algo == static_cast<int>(matmul_algo_t::aocl_blis)) {
@@ -151,7 +151,7 @@ status_t matmul_operator_t::update_matmul_kernel() {
   return status_t::success;
 }
 
-status_t matmul_operator_t::validate() {
+status_t matmul_impl_t::validate() {
   LOG_DEBUG_INFO("<", get_name(),
                  "> Validating matmul op parameters matmul_operator_t");
   if (parent_type::validate() != status_t::success) {
@@ -332,7 +332,7 @@ status_t matmul_operator_t::validate() {
   return validate_buffer_post_op(output_size, post_ops, inputs);
 }
 
-status_t matmul_operator_t::validate_forced_kernel() {
+status_t matmul_impl_t::validate_forced_kernel() {
 
 // TODO: Move optional dependency prerpocessor to respective kernel file.
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
@@ -341,7 +341,7 @@ status_t matmul_operator_t::validate_forced_kernel() {
      ) {
     return status_t::success;
   }
-  LOG_DEBUG_INFO("<", get_name(), "> Validating forced kernel matmul_operator_t");
+  LOG_DEBUG_INFO("<", get_name(), "> Validating forced kernel matmul_impl_t");
   if (forced_kernel == "reference") {
     auto input        = get_input("matmul_input");
     auto output       = get_output("matmul_output");
@@ -380,7 +380,7 @@ status_t matmul_operator_t::validate_forced_kernel() {
   return status_t::success;
 }
 
-status_t matmul_operator_t::preprocess() {
+status_t matmul_impl_t::preprocess() {
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
       forced_kernel == "aocl_blis_blocked") {
     LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
@@ -413,7 +413,7 @@ status_t matmul_operator_t::preprocess() {
   return status_t::success;
 }
 
-std::string matmul_operator_t::op_create_info() {
+std::string matmul_impl_t::op_create_info() {
   std::stringstream ss;
 
   ss << "MatMul operator create - ";
@@ -443,7 +443,7 @@ std::string matmul_operator_t::op_create_info() {
   return ss.str();
 }
 
-std::string matmul_operator_t::op_execute_info() {
+std::string matmul_impl_t::op_execute_info() {
   std::stringstream ss;
 
   ss << "MatMul operator execute - ";
@@ -498,8 +498,8 @@ std::string matmul_operator_t::op_execute_info() {
   return ss.str();
 }
 
-status_t matmul_operator_t::kernel_factory() {
-  LOG_DEBUG_INFO("<", get_name(), "> Executing kernel factory matmul_operator_t");
+status_t matmul_impl_t::kernel_factory() {
+  LOG_DEBUG_INFO("<", get_name(), "> Executing kernel factory matmul_impl_t");
   auto weight_tensor  = context.get_param("weights").value();
   auto weight_dtype   = context.get_param("weights")->get_data_type();
   auto input_dtype    = get_input("matmul_input")->get_data_type();
@@ -510,7 +510,7 @@ status_t matmul_operator_t::kernel_factory() {
       forced_kernel == "aocl_blis") {
     /**TODO: check Use of blocked BMM weights with new AOCL BMM API */
     if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_blis_blocked") {
-      apilog_info("<", name, "> kernel unimplemented using aocl_blis_blocked.");
+      apilog_info("<", obj_name, "> kernel unimplemented using aocl_blis_blocked.");
       forced_kernel = "aocl_blis";
     }
 
@@ -542,7 +542,7 @@ status_t matmul_operator_t::kernel_factory() {
       kernel = get_matmul_int8_avx512_kernel();
     }
     else {
-      apilog_error("<", name, "> kernel unimplemented.");
+      apilog_error("<", obj_name, "> kernel unimplemented.");
       return status_t::unimplemented;
     }
   }
@@ -554,7 +554,7 @@ status_t matmul_operator_t::kernel_factory() {
       kernel = std::shared_ptr<matmul_onednn_kernel_t>(get_matmul_onednn_kernel());
     }
     else {
-      apilog_error("<", name, "> kernel unimplemented using forced kernel ",
+      apilog_error("<", obj_name, "> kernel unimplemented using forced kernel ",
                    forced_kernel);
       return status_t::unimplemented;
     }
