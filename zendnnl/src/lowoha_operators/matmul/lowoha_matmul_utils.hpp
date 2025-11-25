@@ -230,6 +230,12 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const);
 
+// Helper function to get tile size from environment variable
+int get_tile_size_from_env(const char *env_var, int default_value);
+
+// Tile selection based on matrix dimensions and cache size
+std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads);
+
 } // namespace lowoha
 } // namespace zendnnl
 

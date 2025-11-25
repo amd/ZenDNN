@@ -21,7 +21,6 @@
 
 namespace zendnnl {
 namespace lowoha {
-
 using namespace zendnnl::ops;
 
 void matmul_kernel_wrapper(char layout, char transA, char transB,
@@ -125,7 +124,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
                             batch_params.batch_stride_dst * out_type_size;
 
   const int batch_count = std::max(Batch_A, Batch_B);
-  const int num_threads = params.num_threads > 0 ? params.num_threads : omp_get_max_threads();
+  const int num_threads = params.num_threads > 0 ? params.num_threads :
+                          omp_get_max_threads();
   // const bool use_blis_partitioning = may_i_use_blis_partition(batch_count, M, N,
   //                                    num_threads, params.dtypes.src);
   matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
@@ -185,7 +185,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, weight_cache_type, is_weights_const);
+                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, weight_cache_type,
+                          is_weights_const);
   }
 #endif
   else if (num_threads > 1 && batch_count > 1) {
@@ -379,8 +380,9 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       }
     }
 #else
-    int M_BLOCK = (M>=8192) ? 128 : 64;
-    int N_BLOCK = 64;
+    auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
+    int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
+    int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
 
     const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
     const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);

@@ -478,5 +478,34 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
   return kernel;
 }
 
+int get_tile_size_from_env(const char *env_var, int default_value) {
+  const char *env_value = std::getenv(env_var);
+  if (env_value != nullptr) {
+    int value = std::stoi(env_value);
+    if (value > 0) {
+      return value;
+    }
+    else {
+      return default_value;
+    }
+  }
+  return default_value;
+}
+
+// This function selects tile sizes for BF16 matmul based on heuristics
+// TODO: Further tune the heuristics based on num_threads
+std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads) {
+
+  if (M <= 2048 && N <= 128) {
+    return {32, 32};
+  }
+
+  if (M <= 4096 && N > 768 && N <= 1024) {
+    return {64, 64};
+  }
+
+  return {128, 64};
+}
+
 } // namespace lowoha
 } // namespace zendnnl
