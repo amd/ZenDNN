@@ -36,9 +36,9 @@ The scope of ZenDNN is to support AMD EPYC™ CPUs on the Linux® platform. ZenD
 
 # Release Highlights
 Following are the highlights of this release:
-* ZenDNN library is integrated with TensorFlow v2.19 (Plugin), and PyTorch v2.8 (Plugin).
-* Python v3.9-v3.12 has been used to generate the TensorFlow v2.19 (Plugin) wheel files (*.whl).
-* Python v3.9-v3.13 has been used to generate the PyTorch v2.8 (Plugin) wheel files (*.whl).
+* ZenDNN library is integrated with TensorFlow v2.20 (Plugin), and PyTorch v2.9 (Plugin).
+* Python v3.9-v3.13 has been used to generate the TensorFlow v2.20 (Plugin) wheel files (*.whl).
+* Python v3.10-v3.13 has been used to generate the PyTorch v2.9 (Plugin) wheel files (*.whl).
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned above and cannot be used independently.
 
@@ -124,8 +124,8 @@ ZenDNN has the following runtime dependencies:
 * POSIX Thread library (libpthread.so)
 * C Math Library (libm.so)
 * OpenMP (libomp.so)
-* Python v3.9-v3.12 for TensorFlow v2.19(Plugin)
-* Python v3.9-v3.13 for PyTorch v2.8 (Plugin)
+* Python v3.9-v3.13 for TensorFlow v2.20(Plugin)
+* Python v3.10-v3.13 for PyTorch v2.9 (Plugin)
 
 Since ZenDNN is configured to use OpenMP, a C++ compiler with OpenMP 2.0 or later is required for runtime execution.
 
