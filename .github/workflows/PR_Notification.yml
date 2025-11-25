@@ -107,7 +107,7 @@ jobs:
         with:
           script: |
             const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
-            const triggerResult = JSON.parse(`\${{ steps.trigger_zentorch.outputs.result || '{}' }}`);
+            const zentorchResult = JSON.parse(`\${{ steps.trigger_zentorch.outputs.result || '{}' }}`);
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const ref = pr.head_sha;
