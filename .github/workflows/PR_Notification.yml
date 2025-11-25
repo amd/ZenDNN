@@ -41,79 +41,60 @@ jobs:
         id: find_zentorch
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.ZIAIE_PAT }}  # ✅ Using organization PAT
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
-            console.log(`🔍 DEBUG: Looking for ZenTorch workflow for PR #${pr.number}`);
-            console.log(`🕐 Current time: ${new Date().toISOString()}`);
+            console.log(`🔍 Looking for ZenTorch workflow for PR #${pr.number}`);
+            console.log(`🔑 Using ZIAIE_PAT for cross-repo access`);
             
             try {
-              console.log('🔑 Testing API access...');
+              // Test access with organization PAT
+              const user = await github.rest.users.getAuthenticated();
+              console.log(`✅ Authenticated as: ${user.data.login}`);
               
-              // Test basic API access
-              const testRepo = await github.rest.repos.get({
+              const repo = await github.rest.repos.get({
                 owner: 'AMD-Zenai',
                 repo: 'ZenDNN_PyTorch_Plugin'
               });
-              console.log(`✅ Repo access OK: ${testRepo.data.full_name}`);
+              console.log(`✅ Repository accessible: ${repo.data.full_name} (${repo.data.visibility})`);
               
-              console.log('📋 Listing ALL workflows...');
+              // Wait for trigger to process
+              console.log('⏳ Waiting 2 minutes for ZenTorch trigger...');
+              await new Promise(resolve => setTimeout(resolve, 120000));
               
-              // Get all workflows first
-              const allWorkflows = await github.rest.actions.listRepoWorkflows({
-                owner: 'AMD-Zenai',
-                repo: 'ZenDNN_PyTorch_Plugin'
-              });
-              
-              console.log(`Found ${allWorkflows.data.workflows.length} workflows:`);
-              allWorkflows.data.workflows.forEach((wf, i) => {
-                console.log(`  ${i+1}. "${wf.name}" (ID: ${wf.id}, File: ${wf.path})`);
-              });
-              
-              console.log('\n🏃‍♂️ Getting recent workflow runs (all workflows)...');
-              
-              // Get ALL recent workflow runs
-              const allRuns = await github.rest.actions.listWorkflowRunsForRepo({
+              // Get recent workflow runs
+              const response = await github.rest.actions.listWorkflowRunsForRepo({
                 owner: 'AMD-Zenai',
                 repo: 'ZenDNN_PyTorch_Plugin',
-                per_page: 20
+                per_page: 15
               });
               
-              console.log(`Found ${allRuns.data.workflow_runs.length} total recent runs:`);
+              console.log(`📊 Found ${response.data.workflow_runs.length} total workflow runs`);
               
-              allRuns.data.workflow_runs.forEach((run, i) => {
-                const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
-                console.log(`  ${i+1}. Run ${run.id}: "${run.name}" - ${run.event} - ${run.status} (${age}m ago)`);
-              });
-              
-              console.log('\n🎯 Filtering for repository_dispatch events...');
-              
-              const dispatchRuns = allRuns.data.workflow_runs.filter(run => 
+              // Filter for repository_dispatch events
+              const dispatchRuns = response.data.workflow_runs.filter(run => 
                 run.event === 'repository_dispatch'
               );
               
-              console.log(`Found ${dispatchRuns.length} repository_dispatch runs:`);
+              console.log(`🎯 Found ${dispatchRuns.length} repository_dispatch runs:`);
               
               dispatchRuns.forEach((run, i) => {
                 const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
-                console.log(`  ${i+1}. Run ${run.id}: "${run.name}" - ${run.status} (${age}m ago) - ${run.html_url}`);
+                console.log(`  ${i+1}. Run ${run.id}: "${run.name}" - ${run.status} (${age}m ago)`);
               });
               
-              console.log('\n⏰ Looking for very recent runs (last 30 minutes)...');
-              
-              const recentDispatch = dispatchRuns.filter(run => {
+              // Look for recent runs (within 20 minutes)
+              const recentRuns = dispatchRuns.filter(run => {
                 const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
-                return age <= 30;
+                return age <= 20;
               });
               
-              if (recentDispatch.length > 0) {
-                console.log(`Found ${recentDispatch.length} recent repository_dispatch runs:`);
-                
-                const mostRecent = recentDispatch[0];
+              if (recentRuns.length > 0) {
+                const mostRecent = recentRuns[0];
                 const age = Math.round((Date.now() - new Date(mostRecent.created_at)) / (1000 * 60));
                 
-                console.log(`✅ Using most recent: Run ${mostRecent.id} (${age}m ago)`);
+                console.log(`✅ Found recent ZenTorch run: ${mostRecent.id} (${age}m ago)`);
                 console.log(`   Name: ${mostRecent.name}`);
                 console.log(`   Status: ${mostRecent.conclusion || mostRecent.status}`);
                 console.log(`   URL: ${mostRecent.html_url}`);
@@ -124,36 +105,34 @@ jobs:
                   external_run_url: mostRecent.html_url,
                   external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
                   external_status: mostRecent.conclusion || mostRecent.status,
-                  debug_info: `Found ${recentDispatch.length} recent runs, used run ${mostRecent.id}`,
-                  minutes_ago: age
+                  minutes_ago: age,
+                  token_used: 'ZIAIE_PAT'
                 };
               } else {
-                console.log(`❌ No repository_dispatch runs in last 30 minutes`);
+                console.log(`⚠️ No recent repository_dispatch runs found (last 20 minutes)`);
                 
                 if (dispatchRuns.length > 0) {
-                  const oldest = dispatchRuns[0];
-                  const age = Math.round((Date.now() - new Date(oldest.created_at)) / (1000 * 60));
-                  console.log(`   Most recent dispatch run was ${age} minutes ago`);
+                  const latest = dispatchRuns[0];
+                  const age = Math.round((Date.now() - new Date(latest.created_at)) / (1000 * 60));
+                  console.log(`   Most recent was ${age} minutes ago`);
                 }
                 
                 return { 
                   found: false, 
                   external_run_url: '', 
-                  reason: 'no_recent_dispatch_runs',
-                  debug_info: `Found ${dispatchRuns.length} total dispatch runs, none recent enough`
+                  reason: 'no_recent_runs',
+                  total_dispatch_runs: dispatchRuns.length,
+                  token_used: 'ZIAIE_PAT'
                 };
               }
               
             } catch (error) {
-              console.log(`❌ ERROR: ${error.message}`);
-              console.log(`   Status: ${error.status}`);
-              console.log(`   Stack: ${error.stack?.split('\n')[0]}`);
-              
+              console.log(`❌ Error accessing ZenTorch repo: ${error.message} (${error.status})`);
               return { 
                 found: false, 
                 external_run_url: '', 
                 error: error.message,
-                error_status: error.status
+                token_used: 'ZIAIE_PAT'
               };
             }
 
@@ -183,10 +162,9 @@ jobs:
             if (zentorchResult.found) {
               console.log(`ZenTorch URL: ${zentorchResult.external_run_url}`);
               console.log(`ZenTorch run ID: ${zentorchResult.external_run_id}`);
-              console.log(`ZenTorch age: ${zentorchResult.minutes_ago || 'N/A'} minutes`);
+              console.log(`ZenTorch age: ${zentorchResult.minutes_ago} minutes`);
             } else {
               console.log(`ZenTorch search reason: ${zentorchResult.reason || 'unknown'}`);
-              console.log(`ZenTorch debug info: ${zentorchResult.debug_info || 'none'}`);
             }
             
             const checkAllWorkflows = async () => {
@@ -295,7 +273,6 @@ jobs:
                     console.log(`ZenTorch workflow status: ${externalResp.data.conclusion || externalResp.data.status}`);
                   } catch (zentorchError) {
                     console.log(`Could not get ZenTorch workflow status: ${zentorchError.message}`);
-                    console.log(`Removing from monitoring to prevent timeout`);
                   }
                 } else {
                   console.log('No ZenTorch workflow to monitor');
@@ -473,7 +450,6 @@ jobs:
 
           # Escape for JSON
           TITLE_SAFE="$ICON PR #$PR_NUMBER — $PR_TITLE"
-
 
           # Create final status notification
           cat > card.json <<EOF
