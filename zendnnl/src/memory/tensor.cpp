@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -454,8 +454,7 @@ float tensor_t::at(const index_vec_type &index_) const {
   LOG_DEBUG_INFO("Getting tensor element");
 
   //check if a tensor is blocked or oblique
-  if ((option.layout & uint16_t(tensor_layout_t::blocked)) ||
-      (option.layout & uint16_t(tensor_layout_t::oblique))) {
+  if (option.is_blocked() || option.is_oblique()) {
     std::string message  = "attempt to get an element of a blocked";
     message += " or oblique tensor.";
     EXCEPTION_WITH_LOC(message);
@@ -510,6 +509,14 @@ uint64_t tensor_t::get_nelem() const {
   return option.nelem;
 }
 
+tensor_t &tensor_t::set_nelem(uint64_t nelem_) {
+  if (status != status_t::success) {
+    allocate = true;
+    option.nelem = option.aligned_nelem = nelem_;
+  }
+  return (*this);
+}
+
 uint64_t tensor_t::get_buffer_sz_bytes() const {
   return storage->size;
 }
@@ -543,6 +550,11 @@ void *tensor_t::get_raw_handle_unsafe(const index_vec_type &index_) const {
     EXCEPTION_WITH_LOC(message);
   }
 
+  if (option.is_blocked() || option.is_oblique()) {
+    std::string message  = "attempt to get indexed raw handle of a blocked or oblique tensor.";
+    EXCEPTION_WITH_LOC(message);
+  }
+
   if (index_sanity_check(index_) != status_t::success) {
     std::string message  = "attempt to get raw handle with invalid index.";
     EXCEPTION_WITH_LOC(message);
@@ -571,6 +583,11 @@ const void *tensor_t::get_raw_handle_const(const index_vec_type &index_) const {
     EXCEPTION_WITH_LOC(message);
   }
 
+  if (option.is_blocked() || option.is_oblique()) {
+    std::string message  = "attempt to get indexed raw handle of a blocked or oblique tensor.";
+    EXCEPTION_WITH_LOC(message);
+  }
+
   if (index_sanity_check(index_) != status_t::success) {
     std::string message  = "attempt to get raw handle with invalid index.";
     EXCEPTION_WITH_LOC(message);
@@ -582,6 +599,7 @@ const void *tensor_t::get_raw_handle_const(const index_vec_type &index_) const {
                         option.base_offset +
                         index_offset);
 }
+
 
 tensor_t &tensor_t::set_storage() {
   if (status != status_t::success) {
@@ -649,12 +667,14 @@ tensor_t &tensor_t::create() {
       }
     }
     else {
+      apilog_error("tensor < ", name, " > attempt to allocate zero storage.");
       status = status_t::memory_bad_storage;
       return *this;
     }
   }
   else {
     if (storage->get_raw_handle() == nullptr) {
+      apilog_error("tensor < ", name, " > unallocated or unassigned memory storage.");
       status = status_t::memory_bad_storage;
       return *this;
     }
@@ -800,52 +820,6 @@ status_t tensor_t::aligned_size_sanity_check() {
   return status_t::success;
 }
 
-void tensor_t::set_default_order(bool is_stride_) {
-
-  LOG_DEBUG_INFO("Set default order");
-
-  option.order.clear();
-  option.order.resize(option.size.size());
-
-  if (is_stride_) {
-    auto stride = option.stride;
-
-    std::vector<uint32_t> ivec;
-    //scan stride for zeros
-    for (uint32_t i = 0; i < stride.size(); ++i) {
-      if (option.stride[i] == 0) {
-        ivec.push_back(i);
-      }
-    }
-
-    //scan stride from max to min
-    while (ivec.size() < stride.size()) {
-      uint32_t max_index = 0;
-      for (uint32_t i = 1; i < stride.size(); ++i) {
-        if (stride[i] > stride[max_index]) {
-          max_index = i;
-        }
-      }
-
-      ivec.push_back(max_index);
-      stride[max_index] = 0;
-    }
-
-    //allocate order
-    char ch = 'a';
-    for (uint8_t i = 0; i < uint8_t(ivec.size()); ++i) {
-      auto idx = ivec[i];
-      option.order[i] = char(ch + idx);
-    }
-
-  }
-  else {
-    for (int8_t i = 0; i < int8_t(option.size.size()); ++i) {
-      option.order[i] = char('a' + i);
-    }
-  }
-}
-
 status_t tensor_t::order_sanity_check() {
 
   LOG_DEBUG_INFO("order sanity check");
@@ -866,35 +840,47 @@ status_t tensor_t::order_sanity_check() {
   return status_t::success;
 }
 
-void tensor_t::set_default_stride() {
+void tensor_t::set_default_stride_with_order() {
   LOG_DEBUG_INFO("Setting default stride");
 
-  //get default order size
-  auto default_order_size =
-    permute_axes_order(option.size, true);
-
-  //get default order aligned size
-  auto default_order_aligned_size =
-    permute_axes_order(option.aligned_size, true);
-
-  //compute default order stride
-  index_vec_type default_order_stride;
-  default_order_stride.resize(option.aligned_size.size());
+  uint32_t dims = option.aligned_size.size();
+  option.stride.resize(dims);
 
   option.aligned_nelem = option.nelem = 1;
-  for (int i = option.aligned_size.size() -1; i >= 0; i--) {
-    default_order_stride[i]  = option.aligned_nelem;
-    option.aligned_nelem    *= default_order_aligned_size[i];
-    option.nelem            *= default_order_size[i];
-  }
+  for (uint32_t i = dims; i > 0; i--) {
+    /* get next fastest moving axis */
+    char ch            = 'a' + i -1;
+    auto loc           = option.order.find(ch);
 
-  //permute stride to given order
-  option.stride = permute_axes_order(default_order_stride, false);
+    /* stride, size and aligned size of fastest moving axis */
+    auto size         = option.size.at(loc);
+    auto aligned_size = option.aligned_size.at(loc);
+
+    option.stride.at(loc) = option.aligned_nelem;
+
+    /* compute next stride */
+    option.nelem         *= size;
+    option.aligned_nelem *= aligned_size;
+  }
 }
 
-status_t tensor_t::stride_sanity_check() {
+void tensor_t::set_default_stride_without_order() {
 
-  LOG_DEBUG_INFO("stride sanity check");
+  uint32_t dims = option.aligned_size.size();
+  option.order  = std::string(dims, 0);
+  option.stride.resize(dims);
+
+  char axis            = 'a' + dims -1;
+  option.aligned_nelem = option.nelem = 1;
+  for (uint32_t i = dims; i > 0; i--) {
+    option.order.at(i-1)     = axis--;
+    option.stride.at(i-1)    = option.aligned_nelem;
+    option.aligned_nelem    *= option.aligned_size.at(i-1);
+    option.nelem            *= option.size.at(i-1);
+  }
+}
+
+status_t tensor_t::stride_sanity_check_with_order() {
 
   //stride size should be at least size of tensor size
   if (option.stride.size() != option.aligned_size.size()) {
@@ -904,56 +890,121 @@ status_t tensor_t::stride_sanity_check() {
     return status_t::memory_bad_stride;
   }
 
-  //permute size and stride if order is set
-  auto default_order_size =
-    permute_axes_order(option.size, true);
-
-  auto default_order_aligned_size =
-    permute_axes_order(option.aligned_size, true);
-
-  auto default_order_stride =
-    permute_axes_order(option.stride, true);
-
-  //ignore trailing zeros in stride
-  int32_t stride_rightmost_nz = int32_t(default_order_stride.size() - 1);
-  while (default_order_stride[stride_rightmost_nz] == 0) {
-    stride_rightmost_nz--;
-
-    //if strides are all zero, flag error
-    if (stride_rightmost_nz < 0) {
-      apilog_error("tensor ", name, " all strides are zero: stride=",
-                   vec_to_string(default_order_stride),
-                   " (must have at least one non-zero stride)");
-      return status_t::memory_bad_stride;
-    }
-  }
-
-  //scan strides for consistency with tensor size
-  int32_t stride_right = stride_rightmost_nz;
-  int32_t stride_left  = 0;
-
   option.nelem         = 1;
   option.aligned_nelem = 1;
 
-  for (int32_t i = stride_right; i >= stride_left; --i) {
-    auto &stride = default_order_stride[i];
 
-    //ignore zero strides
-    if (stride == 0) {
-      continue;
+  int32_t dims         = option.stride.size();
+  for (int32_t i = dims; i > 0; i--) {
+    /* get next fastest moving axis */
+    char ch            = 'a' + i -1;
+    auto loc           = option.order.find(ch);
+
+    /* stride, size and aligned size of fastest moving axis */
+    auto& stride       = option.stride[loc];
+    auto& size         = option.size[loc];
+    auto& aligned_size = option.aligned_size[loc];
+
+    /* ignore zero stride, it belongs to broadcast axis */
+    if (stride != 0) {
+      /* sanity check on stride */
+      if (stride != option.aligned_nelem) {
+        apilog_error("tensor ", name, " invalid stride at dimension ", i,
+                     ": got stride=", stride,
+                     " expected=", option.aligned_nelem);
+        return status_t::memory_bad_stride;
+      }
+
+      /* compute next stride */
+      option.nelem         *= size;
+      option.aligned_nelem *= aligned_size;
+
+      std::cout << option.nelem << ":" << option.aligned_nelem << std::endl;
+    }
+  }
+
+  return status_t::success;
+}
+
+status_t tensor_t::stride_sanity_check_without_order() {
+
+  /* stride size should be at least size of tensor size */
+  if (option.stride.size() != option.aligned_size.size()) {
+    apilog_error("tensor ", name, " bad stride size: got stride.size()=",
+                 option.stride.size(),
+                 " expected=", option.aligned_size.size());
+    return status_t::memory_bad_stride;
+  }
+
+  /* get tensor dims */
+  uint32_t dim = option.size.size();
+
+  /* reserve space for order */
+  option.order = std::string(dim, 0);
+
+  /* fill broadcast axis */
+  char axis = 'a';
+  for (uint32_t i = 0; i < dim; ++i) {
+    if(option.stride[i] == 0) {
+      option.order.at(i) = axis++;
+    }
+  }
+
+  /* if any size is 1, there is a possibility of duplicate strides */
+  std::vector<uint32_t> dloc;
+  for (uint32_t i = 0; i < dim; ++i) {
+    if(option.aligned_size[i] == 1)
+      dloc.push_back(i);
+  }
+
+  /* make a copy of stride and intialize nelem and axis */
+  auto stride  = option.stride;
+  option.nelem = option.aligned_nelem = 1;
+  axis         = 'a' + dim -1;
+
+  for (uint32_t i = 0; i < dim; ++i) {
+    /* search for first nonzero element in stride */
+    uint32_t min_index  = 0;
+    while(min_index < dim) {
+      if (stride[min_index] == 0)
+        min_index++;
+      else
+        break;
     }
 
-    //match stride with alignd_nelem as it is product of aligned_size
-    //so far. stride should match this.
-    if (stride != option.aligned_nelem) {
-      apilog_error("tensor ", name, " invalid stride at dimension ", i,
-                   ": got stride=", stride,
-                   " expected=", option.aligned_nelem);
-      return status_t::memory_bad_stride;
+    /* if stride is all zero terminate */
+    if (min_index >= dim) break;
+
+    /* search for minimum stride */
+    for (uint32_t k = min_index + 1; k < dim; ++k) {
+      if ((stride[k] != 0) && (stride[k] < stride[min_index])) {
+        min_index = k;
+      }
     }
 
-    option.nelem         *= default_order_size[i];
-    option.aligned_nelem *= default_order_aligned_size[i];
+    /* check for a possibility of duplicate stride */
+    for (uint32_t dl : dloc) {
+      if (stride[min_index] == stride[dl]) {
+        min_index = dl;
+        break;
+      }
+    }
+
+    /* sanity check on stride */
+    if (stride[min_index] != option.aligned_nelem) {
+        apilog_error("tensor < ", name, " > invalid stride at dimension ", min_index,
+                     ": got stride=", stride[min_index],
+                     " expected=", option.aligned_nelem);
+        return status_t::memory_bad_stride;
+    }
+
+    /* update order and elements */
+    option.order.at(min_index)   = axis--;
+    option.nelem                *= option.size[min_index];
+    option.aligned_nelem        *= option.aligned_size[min_index];
+
+    /* make min stride zero */
+    stride[min_index]         = 0;
   }
 
   return status_t::success;
@@ -1017,31 +1068,52 @@ status_t tensor_t::validate_meta_info() {
 
   LOG_DEBUG_INFO("Validating meta data");
 
+  /* skip validation for blocked or oblique tensor */
+  // if (option.is_blocked()) {
+  //   apilog_warning("tensor < ", name, " > is blocked, skipping meta information validation.");
+  //   return status_t::success;
+  // }
+
+  if (option.is_oblique()) {
+    apilog_warning("tensor < ", name, " > is oblique, skipping meta information validation.");
+    return status_t::success;
+  }
+
+  /* if tensor size is provided, reset the sizes */
+  if (option.nelem) {
+    apilog_warning("tensor < ", name, " > buffer size will be recomputed for contiguous/blocked tensor.");
+    option.nelem = option.aligned_nelem = 0;
+  }
+
+  /* size sanity check */
   if (size_sanity_check() != status_t::success) {
+    apilog_error("tensor ", name, " zero size or empty size vector.");
     return status_t::memory_bad_size;
   }
 
-  if (option.aligned_size.empty()) {
-    option.aligned_size = option.size;
-  }
-  else {
+  /* aligned size sanity check */
+  if (! option.aligned_size.empty()) {
     if (aligned_size_sanity_check() != status_t::success) {
       apilog_error("tensor ", name, " bad aligned size.");
       return status_t::memory_bad_aligned_size;
     }
-    else {
-      option.layout |= uint16_t(tensor_layout_t::aligned);
+  }
+  else {
+    option.aligned_size = option.size;
+  }
+
+  /* base sanity check */
+  if (! option.base.empty()) {
+    if (index_sanity_check(option.base) != status_t::success) {
+      apilog_error("tensor ", name, " bad base index.");
+      return status_t::memory_bad_base;
     }
   }
-
-  if (option.base.empty()) {
+  else {
     set_default_base();
   }
-  else if (index_sanity_check(option.base) != status_t::success) {
-    apilog_error("tensor ", name, " bad base index.");
-    return status_t::memory_bad_base;
-  }
 
+  /* stride and order sanity check */
   bool is_order  = !option.order.empty();
   bool is_stride = !option.stride.empty();
 
@@ -1051,25 +1123,24 @@ status_t tensor_t::validate_meta_info() {
       return status_t::memory_bad_order;
     }
     if (is_stride) {
-      if (stride_sanity_check() != status_t::success) {
+      if (stride_sanity_check_with_order() != status_t::success) {
         apilog_error("tensor ", name, " order and stride mismatch.");
         return status_t::memory_bad_stride;
       }
     }
     else {
-      set_default_stride();
+      set_default_stride_with_order();
     }
   }
   else {
-    set_default_order(is_stride);
     if (is_stride) {
-      if (stride_sanity_check() != status_t::success) {
-        apilog_error("tensor ", name, " order and stride mismatch.");
+      if (stride_sanity_check_without_order() != status_t::success) {
+        apilog_error("tensor < ", name, " > (aligned) size and stride mismatch.");
         return status_t::memory_bad_stride;
       }
     }
     else {
-      set_default_stride();
+      set_default_stride_without_order();
     }
   }
 

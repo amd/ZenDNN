@@ -34,7 +34,7 @@
                 "0, 1"
                 ],
             "kernel" : "none",
-            "weight_cache" : 0
+            "weight_cache" : "0"
         }
     }
 }

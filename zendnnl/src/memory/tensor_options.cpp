@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -44,6 +44,37 @@ void tensor_option_t::reset() {
   layout         = 0;
   is_const       = false;
   order          = std::string();
+}
+
+bool tensor_option_t::is_contiguous() const {
+  return (layout == uint16_t(tensor_layout_t::contiguous));
+}
+
+bool tensor_option_t::is_aligned() const {
+  return (layout & uint16_t(tensor_layout_t::aligned));
+}
+
+bool tensor_option_t::is_broadcast() const {
+  return (layout & uint16_t(tensor_layout_t::broadcast));
+}
+
+bool tensor_option_t::is_transpose() const {
+  return (layout & uint16_t(tensor_layout_t::transpose));
+}
+
+bool tensor_option_t::is_quantized() const {
+  return (layout & uint16_t(tensor_layout_t::quantized));
+}
+
+bool tensor_option_t::is_blocked() const {
+  return ((layout & uint16_t(tensor_layout_t::blocked)) |
+          (layout & uint16_t(tensor_layout_t::blocked_aocl)) |
+          (layout & uint16_t(tensor_layout_t::blocked_onednn)) |
+          (layout & uint16_t(tensor_layout_t::blocked_libxsmm)));
+}
+
+bool tensor_option_t::is_oblique() const {
+  return (layout & uint16_t(tensor_layout_t::oblique));
 }
 
 std::size_t tensor_option_t::hash() {

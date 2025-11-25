@@ -63,11 +63,11 @@ function parse_args() {
                 ZENDNNL_DEPENDS_ONEDNN=1
                 shift
 		;;
-        --enable-libxsmm )
+            --enable-libxsmm )
                 ZENDNNL_DEPENDS_LIBXSMM=1
                 shift
 		;;
-        --enable-parlooper )
+            --enable-parlooper )
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
 		;;
@@ -95,11 +95,11 @@ function parse_args() {
                 ZENDNNL_LOCAL_ONEDNN=1
                 shift
 		;;
-        --local-libxsmm )
+            --local-libxsmm )
                 ZENDNNL_LOCAL_LIBXSMM=1
                 shift
 		;;
-        --local-parlooper )
+            --local-parlooper )
                 ZENDNNL_LOCAL_PARLOOPER=1
                 shift
 		;;

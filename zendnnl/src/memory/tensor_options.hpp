@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -97,6 +97,28 @@ public:
    */
   std::size_t hash() override;
   /**@}*/
+
+private:
+  /** @brief check if the tensor is contiguous */
+  bool is_contiguous() const;
+
+  /** @brief check if the tensor is aligned */
+  bool is_aligned() const;
+
+  /** @brief check if the tensor is broadcast */
+  bool is_broadcast() const;
+
+  /** @brief check if the tensor is broadcast */
+  bool is_transpose() const;
+
+  /** @brief check if the tensor is broadcast */
+  bool is_quantized() const;
+
+  /** @brief check if the tensor is a blocked tensor */
+  bool is_blocked() const;
+
+  /** @brief check if the tensor is a blocked tensor */
+  bool is_oblique() const;
 
 private:
   index_vec_type     size;           /**< Tensor size. Tensor dimensions are

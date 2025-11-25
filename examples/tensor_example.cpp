@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -29,17 +29,19 @@ using namespace zendnnl::interface;
 int tensor_unaligned_allocation_example() {
   testlog_info("Tensor unaligned memory allocation example");
   auto tensor =  tensor_t()
-                 .set_name("unaligned_tensor")
-                 .set_size({MATMUL_ROWS, MATMUL_COLS})
-                 .set_storage()
-                 .create();
+    .set_name("unaligned_tensor")
+    .set_size({15, 10, 1, 1})
+    .set_stride({1, 15, 1, 150})
+    .set_storage()
+    .create();
 
   if (tensor.check()) {
     testlog_info("Tensor creation of ", tensor.get_name(), " successful.");
-    testlog_verbose(tensor.get_name(),
-                " elements :", tensor.get_nelem(),
-                " buffer size :", tensor.get_buffer_sz_bytes(),
-                " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
+    testlog_info(tensor.get_name(),
+                 " elements :", tensor.get_nelem(),
+                 " buffer size :", tensor.get_buffer_sz_bytes(),
+                 " order :", tensor.get_order(),
+                 " raw ptr :", reinterpret_cast<std::uintptr_t>(tensor.get_raw_handle_unsafe()));
   }
   else {
     testlog_error("Tensor creation of ", tensor.get_name(), " failed!");
@@ -378,6 +380,8 @@ int tensor_broadcast_example() {
 }
 
 int tensor_axes_permutation_example() {
+
+  testlog_info("Tensor axis permutation example");
 
   //create and linearly populate a 4D tensor. stride [120,24,6,1]
   auto orig_tensor = tensor_t()

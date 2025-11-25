@@ -320,6 +320,12 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     btensor.set_quant_zero_point(zp);
   }
 
+  // uint64_t nelem = 1;
+  // for( auto i : size_) {
+  //   nelem *= i;
+  // }
+
+  // btensor.set_nelem(nelem).set_storage().create();
   btensor.set_storage().create();
 
   if (! btensor.check()) {
@@ -380,6 +386,11 @@ tensor_t tensor_factory_t::copy_tensor(const std::vector<index_type> size_,
 
   if (is_blocked) {
     ctensor.set_layout(tensor_layout_t::blocked);
+    // uint64_t nelem = 1;
+    // for( auto i : size_) {
+    //   nelem *= i;
+    // }
+    // ctensor.set_nelem(nelem);
   }
 
   if (std::holds_alternative<std::pair<size_t, void *>>(param)) {

@@ -436,6 +436,7 @@ public:
    * @return Element count.
    */
   uint64_t get_nelem() const;
+  tensor_t &set_nelem(uint64_t nelem_);
 
   /** @brief Get tensor buffer size in bytes.
    *
@@ -526,7 +527,7 @@ public:
    * @return A reference to self.
    */
   tensor_t& set_storage(uint32_t aligned_to_);
-
+  tensor_t& set_storage(uint32_t aligned_to_, uint64_t nelem_);
   /** @brief Borrow memory buffer from another raw pointer.
    *
    * Needed to borrow tensor buffer from a deep learning framework.
@@ -628,10 +629,6 @@ protected:
    */
   status_t aligned_size_sanity_check();
 
-  /** @brief Set default order
-   */
-  void set_default_order(bool is_stride_);
-
   /** @brief Order sanity check
    */
   status_t order_sanity_check();
@@ -645,12 +642,14 @@ protected:
    *
    * @se option.stride, option.nelem and option.strided_nelem are computed.
    */
-  void set_default_stride();
+  void set_default_stride_with_order();
+  void set_default_stride_without_order();
 
   /** @brief sanity check on stride.
    *
    */
-  status_t stride_sanity_check();
+  status_t stride_sanity_check_with_order();
+  status_t stride_sanity_check_without_order();
 
   /** @brief Set default base index.
    *
