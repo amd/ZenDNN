@@ -17,7 +17,6 @@ jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
     timeout-minutes: 60
-    # PREVENT SELF-TRIGGERING
     if: github.actor != 'github-actions[bot]'
     
     steps:
@@ -37,239 +36,113 @@ jobs:
               base_ref: pr.base?.ref || '',
               head_ref: pr.head?.ref || ''
             };
+
       - name: Find Triggered ZenTorch Workflow
         id: find_zentorch
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-           const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+            const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
-           try {
-             console.log(`Searching for ZenTorch workflow triggered by PR #${pr.number}`);
-             console.log(`Looking for specific PR display in workflow logs...`);
-             console.log(`Expected patterns:`);
-             console.log(`  - "PR Number: #${pr.number}"`);
-             console.log(`  - "ZenDNNL SHA: ${pr.head_sha}"`);
-             console.log(`  - "PR Author: ${pr.author}"`);
-             // Wait for trigger to happen and workflow to start
-             await new Promise(resolve => setTimeout(resolve, 90000)); // Wait 1.5 minutes
-             const runsResponse = await github.rest.actions.listWorkflowRuns({
-               owner: 'AMD-Zenai',
-               repo: 'ZenDNN_PyTorch_Plugin',
-               workflow_id: 'zentorch_zendnnl_pr.yml',
+            try {
+              // Wait for trigger
+              await new Promise(resolve => setTimeout(resolve, 90000));
+              
+              // Get recent workflow runs
+              const runsResponse = await github.rest.actions.listWorkflowRuns({
+                owner: 'AMD-Zenai',
+                repo: 'ZenDNN_PyTorch_Plugin',
+                workflow_id: 'ZenDNN PyTorch ZENDNNL CI',
                 per_page: 10
-             });
-             console.log(`Found ${runsResponse.data.workflow_runs.length} total workflow runs`);
+              });
+              
               // Filter to recent repository_dispatch runs
-             const recentDispatchRuns = runsResponse.data.workflow_runs.filter(run => {
-             const isRecentEnough = new Date(run.created_at) > new Date(Date.now() - 25 * 60 * 1000); // Last 25 minutes
-             const isDispatchEvent = run.event === 'repository_dispatch';
-             console.log(`Run ${run.id}: event=${run.event}, created=${run.created_at}, recent=${isRecentEnough}`);
-             return isRecentEnough && isDispatchEvent;
-             });
-             console.log(`Found ${recentDispatchRuns.length} recent repository_dispatch runs to check`);
-             // Check each recent run's logs for our specific PR display
-             for (const run of recentDispatchRuns) {
-               console.log(`\n🔍 Checking logs for workflow run ${run.id} (${run.html_url})...`);
-               try {
-                // Get all jobs for this workflow run
+              const recentRuns = runsResponse.data.workflow_runs.filter(run => {
+                const isRecent = Date.now() - new Date(run.created_at) < (20 * 60 * 1000);
+                return isRecent && run.event === 'repository_dispatch';
+              });
+              
+              if (recentRuns.length === 0) {
+                return { found: false, external_run_url: '', external_status: 'no_recent_runs' };
+              }
+              
+              // Check each run's logs for our PR
+              for (const run of recentRuns) {
                 const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
                   owner: 'AMD-Zenai',
                   repo: 'ZenDNN_PyTorch_Plugin',
                   run_id: run.id
                 });
-            
-             console.log(`Found ${jobsResp.data.jobs.length} jobs in run ${run.id}`);
-            
-             // Look for jobs that likely contain the display step
-             for (const job of jobsResp.data.jobs) {
-              console.log(`  📋 Checking job: "${job.name}" (status: ${job.status})`);
-              
-             // Only check jobs that have started and have logs
-              if (['completed', 'in_progress', 'success', 'failure'].includes(job.status) && job.id) {
-                try {
-                  console.log(`    📥 Downloading logs for job ${job.id}...`);
+                
+                for (const job of jobsResp.data.jobs) {
+                  if (!['completed', 'success', 'failure'].includes(job.status)) continue;
                   
-                  // Get the job logs
-                  const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
-                    owner: 'AMD-Zenai',
-                    repo: 'ZenDNN_PyTorch_Plugin',
-                    job_id: job.id
-                  });
-                  // Fetch the actual log content
-                  if (logsResp.url) {
-                    const logContent = await fetch(logsResp.url);
-                    const logText = await logContent.text();
+                  try {
+                    const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                      owner: 'AMD-Zenai',
+                      repo: 'ZenDNN_PyTorch_Plugin',
+                      job_id: job.id
+                    });
                     
-                    console.log(`    📝 Downloaded ${logText.length} characters of logs`);
-                    
-                    // Look for the specific display patterns from your output
-                    const exactMatches = [
-                      `PR Number: #${pr.number}`,                    // Exact PR number match
-                      `ZenDNNL SHA: ${pr.head_sha}`,                 // Exact SHA match  
-                      `PR Author: ${pr.author}`                      // Exact author match
-                    ];
-                    
-                    const partialMatches = [
-                      `PR Number: #${pr.number}`,
-                      `ZenDNNL SHA: ${pr.head_sha.substring(0, 12)}`, // First 12 chars of SHA
-                      `PR Title: ${pr.title.substring(0, 20)}`        // First 20 chars of title
-                    ];
-                    
-                    let exactMatchCount = 0;
-                    let partialMatchCount = 0;
-                    let matchedPatterns = [];
-                    
-                    // Check for exact matches
-                    for (const pattern of exactMatches) {
-                      if (logText.includes(pattern)) {
-                        exactMatchCount++;
-                        matchedPatterns.push(`EXACT: ${pattern}`);
-                        console.log(`    ✅ EXACT MATCH: "${pattern}"`);
+                    if (logsResp.url) {
+                      const logContent = await fetch(logsResp.url);
+                      const logText = await logContent.text();
+                      
+                      // Check for exact PR match
+                      const prMatch = logText.includes(`PR Number: #${pr.number}`);
+                      const shaMatch = logText.includes(`ZenDNNL SHA: ${pr.head_sha}`);
+                      
+                      if (prMatch && shaMatch) {
+                        return {
+                          found: true,
+                          external_run_id: run.id,
+                          external_run_url: run.html_url,
+                          external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
+                          external_status: run.conclusion || run.status
+                        };
                       }
                     }
-                    // Check for partial matches
-                    for (const pattern of partialMatches) {
-                      if (logText.includes(pattern)) {
-                        partialMatchCount++;
-                        matchedPatterns.push(`PARTIAL: ${pattern}`);
-                        console.log(`    ✅ PARTIAL MATCH: "${pattern}"`);
-                      }
-                    }
-                    
-                    // Require at least 2 exact matches for high confidence
-                    if (exactMatchCount >= 2) {
-                      console.log(`\n🎯 HIGH CONFIDENCE MATCH FOUND!`);
-                      console.log(`Run ID: ${run.id}`);
-                      console.log(`URL: ${run.html_url}`);
-                      console.log(`Exact matches: ${exactMatchCount}`);
-                      console.log(`Matched patterns: ${matchedPatterns.join(', ')}`);
-                      console.log(`Job that contained matches: ${job.name}`);
-                      
-                      return {
-                        found: true,
-                        external_run_id: run.id,
-                        external_run_url: run.html_url,
-                        external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-                        external_status: run.conclusion || run.status,
-                        match_reason: 'high_confidence_log_match',
-                        exact_matches: exactMatchCount,
-                        matched_patterns: matchedPatterns,
-                        matched_job: job.name,
-                        run_created: run.created_at
-                      };
-                    }
-                    // Medium confidence: 1 exact match or 2+ partial matches
-                    else if (exactMatchCount >= 1 || partialMatchCount >= 2) {
-                      console.log(`    🟡 Medium confidence match found (${exactMatchCount} exact, ${partialMatchCount} partial)`);
-                      
-                      // Store as potential match, continue checking other runs
-                      var potentialMatch = {
-                        found: true,
-                        external_run_id: run.id,
-                        external_run_url: run.html_url,
-                        external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-                        external_status: run.conclusion || run.status,
-                        match_reason: 'medium_confidence_log_match',
-                        exact_matches: exactMatchCount,
-                        partial_matches: partialMatchCount,
-                        matched_patterns: matchedPatterns,
-                        matched_job: job.name,
-                        run_created: run.created_at
-                      };
-                    }
-                    
-                  } else {
-                    console.log(`    ⚠️ No log URL returned for job ${job.id}`);
-                  }
-                  
-                } catch (logError) {
-                  console.log(`    ❌ Error getting logs for job ${job.id}: ${logError.message}`);
-                  
-                  if (logError.status === 404) {
-                    console.log(`    📄 Job ${job.id} logs not available yet`);
+                  } catch (logError) {
+                    // Skip log errors, continue checking
                   }
                 }
-              } else {
-                console.log(`    ⏭️ Skipping job ${job.id} (status: ${job.status})`);
               }
+              
+              // No exact match found
+              return { found: false, external_run_url: '', external_status: 'no_match' };
+              
+            } catch (error) {
+              return { found: false, external_run_url: '', external_status: 'error' };
             }
-            
-           } catch (jobError) {
-            console.log(`❌ Error checking jobs for run ${run.id}: ${jobError.message}`);
-           }
-           }
-           // If we found a potential match but no high confidence match, use it
-           if (typeof potentialMatch !== 'undefined') {
-            console.log(`\n🟡 Using medium confidence match: ${potentialMatch.external_run_url}`);
-            return potentialMatch;
-           }
-           // Fallback: Use most recent repository_dispatch run
-           if (recentDispatchRuns.length > 0) {
-             const mostRecent = recentDispatchRuns[0];
-             console.log(`\n⚠️ No log matches found, using most recent dispatch run: ${mostRecent.id}`);
-             return {
-               found: true,
-               external_run_id: mostRecent.id,
-               external_run_url: mostRecent.html_url,
-               external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-               external_status: mostRecent.conclusion || mostRecent.status,
-               match_reason: 'most_recent_fallback',
-               run_created: mostRecent.created_at
-             };
-            }   
-            console.log('❌ No matching triggered workflow found');
-            return {
-              found: false,
-              external_run_id: null,
-              external_run_url: '',
-              external_repo: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-              external_status: 'not_found',
-              match_reason: 'no_match'
-            };
-           } catch (error) {
-             console.log(`❌ Error finding triggered workflow: ${error.message}`);
-             return {
-               found: false,
-               external_run_id: null,
-               external_run_url: '',
-               external_repo: '',
-               external_status: 'error',
-               error: error.message,
-               match_reason: 'error'
-             };
-           }
-                    
-            
+
       - name: Wait for ALL workflows to complete
         id: wait_for_completion
         uses: actions/github-script@v7
         with:
           script: |
-            const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
-            const zentorchResult = JSON.parse(`\${{ steps.trigger_zentorch.outputs.result || '{}' }}`);
+            const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+            
+            // Safe parsing of ZenTorch result
+            let zentorchResult = { found: false };
+            try {
+              const zentorchOutput = `${{ steps.find_zentorch.outputs.result || '{}' }}`;
+              zentorchResult = zentorchOutput ? JSON.parse(zentorchOutput) : { found: false };
+            } catch (error) {
+              console.log(`Could not parse zentorch result: ${error.message}`);
+              zentorchResult = { found: false };
+            }
+            
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const ref = pr.head_sha;
 
-            // External repo details
-            const externalRunId = zentorchResult.external_run_id;
-            const externalRepo = zentorchResult.external_repo || '';
-            const [externalOwner, externalRepoName] = externalRepo.split('/');
-            
             console.log(`Monitoring workflows for PR #${pr.number}, commit: ${ref}`);
-            console.log(`Current workflow run ID: ${context.runId}`);
-
-             if (externalRunId) {
-              console.log(`Also monitoring triggered ZenTorch workflow: ${zentorchResult.external_run_url}`);
-            } else {
-              console.log(`No triggered ZenTorch workflow found: ${zentorchResult.error || 'Not triggered yet'}`);
-            }
+            console.log(`ZenTorch workflow found: ${zentorchResult.found}`);
             
             const checkAllWorkflows = async () => {
               try {
-                // Define EXACTLY which workflows we want to monitor (WHITELIST APPROACH)
+                // Define important workflows to monitor
                 const importantWorkflows = [
                   'commit message enforcement',
                   'zendnnl_build_pr', 
@@ -283,7 +156,7 @@ jobs:
                   'trigger-zentorch-zendnnl'
                 ];
 
-                // Get workflow runs - ONLY include important ones
+                // Get workflow runs
                 const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
                   owner,
                   repo,
@@ -299,20 +172,10 @@ jobs:
                     );
                     const isSelf = run.id === context.runId;
                     
-                    if (isSelf) {
-                      console.log(`Excluding self workflow: ${run.name} (ID: ${run.id})`);
-                      return false;
-                    }
-                    
-                    if (!isImportant) {
-                      console.log(`Excluding non-important workflow: ${run.name}`);
-                      return false;
-                    }
-                    
-                    return true;
+                    return !isSelf && isImportant;
                   });
 
-                // Get check runs - ONLY include important ones
+                // Get check runs
                 const checkResp = await github.rest.checks.listForRef({
                   owner,
                   repo,
@@ -326,93 +189,16 @@ jobs:
                     const isImportant = importantWorkflows.some(important => 
                       name.includes(important.toLowerCase())
                     );
-                    
-                    // Explicitly exclude notification-related checks
                     const isNotification = name.includes('notify') || 
-                                         name.includes('notification') ||
-                                         name === 'notify_teams';
+                                         name.includes('notification');
                     
-                    if (isNotification) {
-                      console.log(`Excluding notification check: ${check.name}`);
-                      return false;
-                    }
-                    
-                    if (!isImportant) {
-                      console.log(`Excluding non-important check: ${check.name}`);
-                      return false;
-                    }
-                    
-                    return true;
+                    return !isNotification && isImportant;
                   });
-                // Get external workflow status
-                let externalWorkflow = null;
-                if (externalRunId && externalOwner && externalRepoName) {
-                  try {
-                    const externalResp = await github.rest.actions.getWorkflowRun({
-                      owner: externalOwner,
-                      repo: externalRepoName,
-                      run_id: externalRunId
-                    });
-                    
-                   externalWorkflow = {
-                      id: externalResp.data.id,
-                      name: `${externalRepoName}: ${externalResp.data.display_title || externalResp.data.name}`,
-                      status: externalResp.data.conclusion || externalResp.data.status,
-                      url: externalResp.data.html_url,
-                      type: 'triggered_workflow_run',
-                      repository: `${externalOwner}/${externalRepoName}`,
-                      started_at: externalResp.data.created_at,
-                      updated_at: externalResp.data.updated_at,
-                      event: externalResp.data.event
-                    };
-                    
-                   console.log(`Triggered ZenTorch workflow: ${externalWorkflow.name} - ${externalWorkflow.status}`);
-                  } catch (error) {
-                    console.log(`Could not get triggered ZenTorch workflow: ${error.message}`);
-                  }
-                } else {
-                  // If we haven't found the triggered workflow yet, try to find it again
-                  if (!zentorchResult.found) {
-                    console.log('Attempting to find triggered workflow again...');
-                    try {
-                      const runsResponse = await github.rest.actions.listWorkflowRuns({
-                        owner: 'AMD-Zenai',
-                        repo: 'ZenDNN_PyTorch_Plugin',
-                        workflow_id: 'zentorch_zendnnl_pr.yml',
-                        per_page: 5
-                      });
-                      const recentRuns = runsResponse.data.workflow_runs.filter(run => {
-                        const isRecent = new Date(run.created_at) > new Date(Date.now() - 15 * 60 * 1000);
-                        const isDispatch = run.event === 'repository_dispatch';
-                        return isRecent && isDispatch;
-                      });
-                      
-                      if (recentRuns.length > 0) {
-                        const latestRun = recentRuns[0];
-                        externalWorkflow = {
-                          id: latestRun.id,
-                          name: `ZenDNN_PyTorch_Plugin: ${latestRun.display_title || latestRun.name}`,
-                          status: latestRun.conclusion || latestRun.status,
-                          url: latestRun.html_url,
-                          type: 'triggered_workflow_run',
-                          repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin',
-                          started_at: latestRun.created_at,
-                          updated_at: latestRun.updated_at,
-                          event: latestRun.event
-                        };
-                        console.log(`Found triggered workflow on retry: ${externalWorkflow.name} - ${externalWorkflow.status}`);
-                      }
-                    } catch (error) {
-                      console.log(`Retry search failed: ${error.message}`);
-                      }
-                  }
-                }
-
-                console.log(`Local workflows: ${workflows.length}, checks: ${checks.length}`);
 
                 // Combine all workflow information
                 const allRuns = [];
-                 // Add local workflow runs
+                
+                // Add local workflows
                 workflows.forEach(run => {
                   allRuns.push({
                     id: run.id,
@@ -420,12 +206,11 @@ jobs:
                     status: run.conclusion || run.status,
                     url: run.html_url,
                     type: 'workflow_run',
-                    repository: `${owner}/${repo}`,
-                    started_at: run.created_at,
-                    updated_at: run.updated_at
+                    repository: `${owner}/${repo}`
                   });
                 });
-                // Add local check runs (avoiding duplicates)
+
+                // Add local checks (avoid duplicates)
                 checks.forEach(check => {
                   if (!allRuns.find(run => run.name === check.name)) {
                     allRuns.push({
@@ -434,16 +219,31 @@ jobs:
                       status: check.conclusion || check.status,
                       url: check.html_url,
                       type: 'check_run',
-                      repository: check.repository?.full_name || `${owner}/${repo}`,
-                      started_at: check.started_at,
-                      updated_at: check.completed_at
+                      repository: `${owner}/${repo}`
                     });
                   }
                 });
 
-                // Add external workflow if exists
-                if (externalWorkflow) {
-                  allRuns.push(externalWorkflow);
+                // Add ZenTorch workflow if found
+                if (zentorchResult.found && zentorchResult.external_run_id) {
+                  try {
+                    const externalResp = await github.rest.actions.getWorkflowRun({
+                      owner: 'AMD-Zenai',
+                      repo: 'ZenDNN_PyTorch_Plugin',
+                      run_id: zentorchResult.external_run_id
+                    });
+                    
+                    allRuns.push({
+                      id: externalResp.data.id,
+                      name: `ZenDNN_PyTorch_Plugin: ${externalResp.data.display_title || externalResp.data.name}`,
+                      status: externalResp.data.conclusion || externalResp.data.status,
+                      url: externalResp.data.html_url,
+                      type: 'triggered_workflow_run',
+                      repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin'
+                    });
+                  } catch (zentorchError) {
+                    console.log(`Could not get ZenTorch workflow status: ${zentorchError.message}`);
+                  }
                 }
 
                 // Check completion status
@@ -455,14 +255,10 @@ jobs:
                   ['success', 'failure', 'cancelled', 'skipped'].includes(r.status)
                 );
 
-                console.log(`Found ${allRuns.length} RELEVANT workflows/checks (after whitelist filtering):`);
+                console.log(`Found ${allRuns.length} workflows/checks:`);
                 allRuns.forEach(run => {
-                  console.log(`  - ${run.name}: ${run.status} (${run.type})`);
+                  console.log(`  - ${run.name}: ${run.status}`);
                 });
-                
-                if (running.length > 0) {
-                  console.log(`Still running: ${running.map(r => r.name).join(', ')}`);
-                }
                 
                 console.log(`Running: ${running.length}, Completed: ${completed.length}`);
 
@@ -472,42 +268,43 @@ jobs:
                   running_count: running.length,
                   completed_count: completed.length,
                   total_count: allRuns.length,
-                  external_workflow_url: externalWorkflow?.url || zentorchResult.external_run_url || ''
+                  zentorch_included: zentorchResult.found,
+                  external_workflow_url: zentorchResult.external_run_url || ''
                 };
               } catch (error) {
                 console.log(`Error checking workflows: ${error.message}`);
-                return { all_complete: false, workflows: [], error: error.message };
+                return { 
+                  all_complete: true,
+                  workflows: [], 
+                  error: error.message,
+                  zentorch_included: false
+                };
               }
             };
 
-            // Give workflows time to start
+            // Wait for workflows to start
             console.log('Waiting 2 minutes for workflows to initialize...');
             await new Promise(resolve => setTimeout(resolve, 120000));
 
-            // Start monitoring
             let result = await checkAllWorkflows();
             let attempts = 0;
-            const maxAttempts = 30; // Reduced from 58 - don't wait forever
+            const maxAttempts = 20;
             
-            console.log(`Initial check: ${result.total_count} workflows found, ${result.running_count} still running`);
+            console.log(`Initial check: ${result.total_count} workflows found, ${result.running_count} running`);
 
-            // Keep checking until all workflows complete
+            // Monitor until completion or timeout
             while (!result.all_complete && attempts < maxAttempts) {
-              if (result.total_count === 0) {
-                console.log('No workflows found yet, waiting for workflows to start...');
-              } else {
-                console.log(`Attempt ${attempts + 1}: ${result.running_count}/${result.total_count} workflows still running`);
-              }
+              console.log(`Attempt ${attempts + 1}/${maxAttempts}: ${result.running_count}/${result.total_count} workflows still running`);
               
               await new Promise(resolve => setTimeout(resolve, 60000));
               result = await checkAllWorkflows();
               attempts++;
             }
 
-            // FORCE COMPLETION if timeout reached
+            // Always complete
             if (!result.all_complete) {
-              console.log(`Forcing completion after ${attempts} attempts. Proceeding with notification.`);
-              result.all_complete = true; // Force completion to send notification
+              console.log(`Timeout after ${attempts} attempts. Forcing completion.`);
+              result.all_complete = true;
             } else {
               console.log(`All workflows completed after ${attempts} attempts!`);
             }
@@ -549,13 +346,16 @@ jobs:
                STATUS=$(echo "$WORKFLOWS" | jq -r ".[$i].status | ascii_upcase")
                URL=$(echo "$WORKFLOWS" | jq -r ".[$i].url")
                REPO=$(echo "$WORKFLOWS" | jq -r ".[$i].repository // \"\"")
+               
                # Escape quotes for JSON
                NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
+               
                if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
                  WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS** (📁 $REPO)"
                else
                  WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS**"
                fi
+               
                # Add TextBlock for this workflow
                TEXTBLOCK='{
                  "type": "TextBlock",
@@ -564,6 +364,7 @@ jobs:
                  "size": "Small",
                  "spacing": "None"
                }'
+               
                if [ -z "$WORKFLOW_TEXTBLOCKS" ]; then
                  WORKFLOW_TEXTBLOCKS="$TEXTBLOCK"
                else
@@ -604,15 +405,13 @@ jobs:
 
           # Completion status
           if [ "$ALL_COMPLETE" = "true" ]; then
-            COMPLETION_TEXT=" All $TOTAL_COUNT workflows completed"
+            COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT=" $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
+            COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
           fi
 
           # Escape for JSON
-          TITLE_SAFE="$ICON  PR #$PR_NUMBER — $PR_TITLE"
-         
-
+          TITLE_SAFE="$ICON PR #$PR_NUMBER — $PR_TITLE"
           # Create final status notification
           cat > card.json <<EOF
           {
