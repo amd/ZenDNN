@@ -330,7 +330,7 @@ jobs:
                   workflows: allRuns,
                   running_count: running.length,
                   completed_count: completed.length,
-                  total_count: allRuns.length
+                  total_count: allRuns.length,
                   external_workflow_url: externalWorkflow?.url || zentorchResult.external_run_url || ''
                 };
               } catch (error) {
