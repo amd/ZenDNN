@@ -447,7 +447,7 @@ jobs:
 
           WORKFLOW_TEXTBLOCKS=""
           if [ "$TOTAL_COUNT" -gt 0 ]; then
-             echo "Building individual TextBlocks for workflows..."
+             echo "Building workflows with colored status text (no icons)..."
              WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
              for i in $(seq 0 $((WORKFLOW_COUNT - 1))); do
                NAME=$(echo "$WORKFLOWS" | jq -r ".[$i].name")
@@ -458,25 +458,72 @@ jobs:
                # Escape quotes for JSON
                NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
                
+               # ✅ COLOR CODING for status text only
+               case "$STATUS" in
+                 "SUCCESS")
+                   STATUS_COLOR="Good"
+                   ;;
+                 "FAILURE")
+                   STATUS_COLOR="Attention"
+                   ;;
+                 "CANCELLED")
+                   STATUS_COLOR="Warning"
+                   ;;
+                 "SKIPPED")
+                   STATUS_COLOR="Accent"
+                   ;;
+                 "IN_PROGRESS"|"QUEUED"|"PENDING")
+                   STATUS_COLOR="Default"
+                   ;;
+                 *)
+                   STATUS_COLOR="Default"
+                   ;;
+               esac
+               
                if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
-                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS** ($REPO)"
+                 REPO_TEXT=" ($REPO)"
                else
-                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS**"
+                 REPO_TEXT=""
                fi
                
-               # Add TextBlock for this workflow
-               TEXTBLOCK='{
-                 "type": "TextBlock",
-                 "text": "'$WORKFLOW_TEXT'",
-                 "wrap": true,
-                 "size": "Small",
+               # ✅ Create RichTextBlock with colored status only (no icons)
+               COMBINED_BLOCK='{
+                 "type": "RichTextBlock",
+                 "inlines": [
+                   {
+                     "type": "TextRun",
+                     "text": "• "
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$NAME_SAFE'",
+                     "selectAction": {
+                       "type": "Action.OpenUrl",
+                       "url": "'$URL'"
+                     }
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": " - "
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$STATUS'",
+                     "color": "'$STATUS_COLOR'",
+                     "weight": "Bolder"
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$REPO_TEXT'"
+                   }
+                 ],
                  "spacing": "None"
                }'
                
                if [ -z "$WORKFLOW_TEXTBLOCKS" ]; then
-                 WORKFLOW_TEXTBLOCKS="$TEXTBLOCK"
+                 WORKFLOW_TEXTBLOCKS="$COMBINED_BLOCK"
                else
-                 WORKFLOW_TEXTBLOCKS="$WORKFLOW_TEXTBLOCKS,$TEXTBLOCK"
+                 WORKFLOW_TEXTBLOCKS="$WORKFLOW_TEXTBLOCKS,$COMBINED_BLOCK"
                fi
              done
            else
@@ -484,7 +531,8 @@ jobs:
               "type": "TextBlock",
               "text": "• No workflows found",
               "wrap": true,
-              "size": "Small"
+              "size": "Small",
+              "color": "Default"
               }'
             fi
 
