@@ -41,7 +41,7 @@ jobs:
         id: find_zentorch
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.ZIAIE_PAT }}  # ✅ Using organization PAT
+          github-token: ${{ secrets.ZIAIE_PAT }}
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
@@ -140,6 +140,7 @@ jobs:
         id: wait_for_completion
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ZIAIE_PAT }}
           script: |
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
@@ -157,23 +158,19 @@ jobs:
             const repo = context.repo.repo;
             const ref = pr.head_sha;
 
-            console.log(`Monitoring workflows for PR #${pr.number}, commit: ${ref}`);
-            console.log(`ZenTorch workflow found: ${zentorchResult.found}`);
+            console.log(`🔍 Monitoring workflows for PR #${pr.number}, commit: ${ref}`);
+            console.log(`ZenTorch external workflow found: ${zentorchResult.found}`);
             if (zentorchResult.found) {
               console.log(`ZenTorch URL: ${zentorchResult.external_run_url}`);
-              console.log(`ZenTorch run ID: ${zentorchResult.external_run_id}`);
-              console.log(`ZenTorch age: ${zentorchResult.minutes_ago} minutes`);
-            } else {
-              console.log(`ZenTorch search reason: ${zentorchResult.reason || 'unknown'}`);
             }
             
             const checkAllWorkflows = async () => {
               try {
-                // Define important workflows to monitor
+                // Define ALL important workflows including ZenTorch status check
                 const importantWorkflows = [
                   'commit message enforcement',
                   'zendnnl_build_pr', 
-                  'check-zentorch-status',
+                  'check-zentorch-status',    // ✅ CRITICAL - This must complete!
                   'asan-build',
                   'zendnnl_build_push',
                   'check jira id',
@@ -182,6 +179,8 @@ jobs:
                   'verify license headers', 
                   'trigger-zentorch-zendnnl'
                 ];
+
+                console.log(`📊 Checking workflows for commit: ${ref.substring(0, 7)}`);
 
                 // Get workflow runs
                 const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
@@ -217,7 +216,8 @@ jobs:
                       name.includes(important.toLowerCase())
                     );
                     const isNotification = name.includes('notify') || 
-                                         name.includes('notification');
+                                         name.includes('notification') ||
+                                         name.includes('pr status');  // Exclude this notification workflow
                     
                     return !isNotification && isImportant;
                   });
@@ -251,9 +251,44 @@ jobs:
                   }
                 });
 
-                // Add ZenTorch workflow if found
+                // ✅ CRITICAL: Check if ZenTorch status check exists and is monitored
+                const zentorchStatusCheck = allRuns.find(run => 
+                  run.name.toLowerCase().includes('zentorch') && 
+                  run.name.toLowerCase().includes('status')
+                );
+                
+                if (!zentorchStatusCheck) {
+                  console.log(`⚠️  WARNING: ZenTorch status check not found in workflow list!`);
+                  console.log(`Looking for any ZenTorch-related checks...`);
+                  
+                  // Search more broadly for ZenTorch checks
+                  const allZentorchChecks = checks.filter(check => 
+                    check.name.toLowerCase().includes('zentorch')
+                  );
+                  
+                  if (allZentorchChecks.length > 0) {
+                    console.log(`Found ${allZentorchChecks.length} ZenTorch-related checks:`);
+                    allZentorchChecks.forEach(check => {
+                      console.log(`  - ${check.name}: ${check.conclusion || check.status}`);
+                      
+                      // Add missing ZenTorch checks
+                      if (!allRuns.find(run => run.id === check.id)) {
+                        allRuns.push({
+                          id: check.id,
+                          name: check.name,
+                          status: check.conclusion || check.status,
+                          url: check.html_url,
+                          type: 'check_run',
+                          repository: `${owner}/${repo}`
+                        });
+                      }
+                    });
+                  }
+                }
+
+                // Add external ZenTorch workflow if found
                 if (zentorchResult.found && zentorchResult.external_run_id) {
-                  console.log('Adding ZenTorch workflow to monitoring list...');
+                  console.log(`📡 Adding external ZenTorch workflow to monitoring...`);
                   try {
                     const externalResp = await github.rest.actions.getWorkflowRun({
                       owner: 'AMD-Zenai',
@@ -270,15 +305,13 @@ jobs:
                       repository: 'AMD-Zenai/ZenDNN_PyTorch_Plugin'
                     });
                     
-                    console.log(`ZenTorch workflow status: ${externalResp.data.conclusion || externalResp.data.status}`);
+                    console.log(`External ZenTorch status: ${externalResp.data.conclusion || externalResp.data.status}`);
                   } catch (zentorchError) {
-                    console.log(`Could not get ZenTorch workflow status: ${zentorchError.message}`);
+                    console.log(`❌ Could not get external ZenTorch status: ${zentorchError.message}`);
                   }
-                } else {
-                  console.log('No ZenTorch workflow to monitor');
                 }
 
-                // Check completion status
+                // ✅ SEPARATE RUNNING vs COMPLETED CHECKS
                 const running = allRuns.filter(r => 
                   ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(r.status)
                 );
@@ -287,30 +320,54 @@ jobs:
                   ['success', 'failure', 'cancelled', 'skipped'].includes(r.status)
                 );
 
-                console.log(`Found ${allRuns.length} workflows/checks:`);
+                // ✅ DETAILED STATUS LOGGING
+                console.log(`\n📋 WORKFLOW STATUS SUMMARY:`);
+                console.log(`Total workflows found: ${allRuns.length}`);
+                console.log(`Completed: ${completed.length}`);
+                console.log(`Still running: ${running.length}`);
+
+                console.log(`\n📊 ALL WORKFLOWS:`);
                 allRuns.forEach(run => {
-                  console.log(`  - ${run.name}: ${run.status} (${run.type})`);
+                  const statusIcon = run.status === 'success' ? '✅' : 
+                                    run.status === 'failure' ? '❌' : 
+                                    ['in_progress', 'pending', 'queued'].includes(run.status) ? '⏳' : 
+                                    run.status === 'cancelled' ? '🟠' :
+                                    run.status === 'skipped' ? '⏭️' : '🔄';
+                  
+                  console.log(`  ${statusIcon} ${run.name}: ${run.status.toUpperCase()}`);
                 });
                 
                 if (running.length > 0) {
-                  console.log(`Still running: ${running.map(r => r.name).join(', ')}`);
+                  console.log(`\n⏳ STILL WAITING FOR:`);
+                  running.forEach(r => {
+                    console.log(`   🔄 ${r.name}: ${r.status}`);
+                  });
                 }
+
+                // ✅ CRITICAL: Only complete when NO workflows are running
+                const allComplete = running.length === 0 && allRuns.length > 0;
                 
-                console.log(`Running: ${running.length}, Completed: ${completed.length}`);
+                if (allComplete) {
+                  console.log(`\n🎉 ALL ${allRuns.length} WORKFLOWS COMPLETED!`);
+                } else {
+                  console.log(`\n⏳ Waiting for ${running.length} workflow(s) to complete...`);
+                }
 
                 return {
-                  all_complete: running.length === 0 && allRuns.length > 0,
+                  all_complete: allComplete,
                   workflows: allRuns,
                   running_count: running.length,
                   completed_count: completed.length,
                   total_count: allRuns.length,
                   zentorch_included: zentorchResult.found,
-                  external_workflow_url: zentorchResult.external_run_url || ''
+                  external_workflow_url: zentorchResult.external_run_url || '',
+                  currently_running: running.map(r => r.name)
                 };
+                
               } catch (error) {
-                console.log(`Error checking workflows: ${error.message}`);
+                console.log(`❌ Error checking workflows: ${error.message}`);
                 return { 
-                  all_complete: true,
+                  all_complete: false,  // ✅ Don't force complete on error
                   workflows: [], 
                   error: error.message,
                   zentorch_included: false
@@ -318,32 +375,46 @@ jobs:
               }
             };
 
-            // Wait for workflows to start
-            console.log('Waiting 2 minutes for workflows to initialize...');
-            await new Promise(resolve => setTimeout(resolve, 120000));
+            // ✅ LONGER INITIAL WAIT for workflows to register
+            console.log('⏳ Waiting 3 minutes for all workflows to initialize...');
+            await new Promise(resolve => setTimeout(resolve, 180000));  // 3 minutes
 
             let result = await checkAllWorkflows();
             let attempts = 0;
-            const maxAttempts = 20;
+            const maxAttempts = 30;  // ✅ Increased to 30 minutes max wait
             
-            console.log(`Initial check: ${result.total_count} workflows found, ${result.running_count} running`);
+            console.log(`\n🔍 INITIAL CHECK RESULTS:`);
+            console.log(`Found ${result.total_count} workflows, ${result.running_count} still running`);
 
-            // Monitor until completion or timeout
+            // ✅ MONITOR UNTIL ALL COMPLETE (no forcing)
             while (!result.all_complete && attempts < maxAttempts) {
-              console.log(`Attempt ${attempts + 1}/${maxAttempts}: ${result.running_count}/${result.total_count} workflows still running`);
-              
-              await new Promise(resolve => setTimeout(resolve, 60000));
-              result = await checkAllWorkflows();
               attempts++;
+              console.log(`\n⏳ ATTEMPT ${attempts}/${maxAttempts}:`);
+              console.log(`   Still waiting for: ${result.currently_running?.join(', ') || 'unknown'}`);
+              
+              await new Promise(resolve => setTimeout(resolve, 60000));  // Wait 1 minute
+              result = await checkAllWorkflows();
+              
+              // ✅ Special check for ZenTorch status
+              const zentorchStillRunning = result.currently_running?.find(name => 
+                name.toLowerCase().includes('zentorch')
+              );
+              if (zentorchStillRunning) {
+                console.log(`🎯 ZenTorch check still running: ${zentorchStillRunning}`);
+              }
             }
 
-            // Always complete
+            // ✅ FINAL COMPLETION CHECK
             if (!result.all_complete) {
-              console.log(`Timeout after ${attempts} attempts. Forcing completion.`);
+              console.log(`\n⏰ TIMEOUT after ${attempts} attempts (${maxAttempts} minutes).`);
+              console.log(`⚠️  Still running: ${result.currently_running?.join(', ') || 'none'}`);
+              console.log(`❌ FORCED COMPLETION - Some workflows may still be running!`);
+              
               result.all_complete = true;
-              result.timeout_reason = `Reached maximum wait time of ${maxAttempts} minutes`;
+              result.timeout_reason = `Timeout after ${maxAttempts} minutes`;
+              result.forced_completion = true;
             } else {
-              console.log(`All workflows completed after ${attempts} attempts!`);
+              console.log(`\n🎉 SUCCESS: All workflows completed after ${attempts} attempts! (${attempts} minutes)`);
             }
 
             return result;
@@ -367,6 +438,7 @@ jobs:
           TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
           RUNNING_COUNT=$(echo "$completion_json" | jq -r '.running_count // 0')
           EXTERNAL_WORKFLOW_URL=$(echo "$completion_json" | jq -r '.external_workflow_url // ""')
+          FORCED_COMPLETION=$(echo "$completion_json" | jq -r '.forced_completion // false')
 
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
           
@@ -427,6 +499,10 @@ jobs:
             ICON="🟠"
             STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
             COLOR="Warning"
+          elif [ "$FORCED_COMPLETION" = "true" ]; then
+            ICON="🟡"
+            STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"
+            COLOR="Warning"
           elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then
             ICON="🟢"
             STATUS_TEXT="✅ ALL CHECKS PASSED"
@@ -442,10 +518,12 @@ jobs:
           fi
 
           # Completion status
-          if [ "$ALL_COMPLETE" = "true" ]; then
+          if [ "$FORCED_COMPLETION" = "true" ]; then
+            COMPLETION_TEXT="⏰ Timeout reached - $RUNNING_COUNT workflows may still be running"
+          elif [ "$ALL_COMPLETE" = "true" ]; then
             COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
           else
-            COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running (timeout reached)"
+            COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
           fi
 
           # Escape for JSON
