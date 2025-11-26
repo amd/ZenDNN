@@ -21,6 +21,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+
 using namespace zendnnl::ops;
 
 void matmul_kernel_wrapper(char layout, char transA, char transB,
@@ -36,34 +37,34 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const lowoha_params &lowoha_param, const void *bias) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
-    if (run_libxsmm(transA,transB,M,N,K,beta,lda,ldb,ldc,A,B,C,dtypes)) {
+    if (run_libxsmm(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
+                    lowoha_param)) {
       log_info("Using libxsmm kernel");
       return;
     }
   }
 #endif
-
   log_info("Using BLIS/AOCL kernel");
-  run_blis(layout,transA,transB,M,N,K,alpha,beta,
-           lda,ldb,ldc,mem_format_a,mem_format_b,
-           A,B,C,dtypes,lowoha_param,bias);
+  run_blis(layout, transA, transB, M, N, K, alpha, beta,
+           lda, ldb, ldc, mem_format_a, mem_format_b,
+           A, B, C, dtypes, lowoha_param, bias);
   return;
 
-//   TODO: To implement native AVX512 BF16 kernel
-//   else if (0) {
-//     if (dtypes.src == data_type_t::bf16 &&
-//         dtypes.dst == data_type_t::bf16) {
-//       matmul_bf16_dispatch(static_cast<const int16_t *>(A),
-//                            static_cast<const int16_t *>(B),
-//                            static_cast<int16_t *>(C), nullptr /*bias.data()*/,
-//                            alpha, beta, M, N, K, lda, ldb, ldc, false);
-//     }
-//   }
+  //   TODO: To implement native AVX512 BF16 kernel
+  //   else if (0) {
+  //     if (dtypes.src == data_type_t::bf16 &&
+  //         dtypes.dst == data_type_t::bf16) {
+  //       matmul_bf16_dispatch(static_cast<const int16_t *>(A),
+  //                            static_cast<const int16_t *>(B),
+  //                            static_cast<int16_t *>(C), nullptr /*bias.data()*/,
+  //                            alpha, beta, M, N, K, lda, ldb, ldc, false);
+  //     }
+  //   }
 }
 
-status_t matmul_direct(const char layout,const bool transA,const bool transB,
-                       const int M, const int N, const int K,const float alpha, const void *src,
-                       const int lda, const void *weight,const int ldb,const void *bias,
+status_t matmul_direct(const char layout, const bool transA, const bool transB,
+                       const int M, const int N, const int K, const float alpha, const void *src,
+                       const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
                        batch_params_t batch_params, lowoha_params params) {
   // Create profiler instance for timing
@@ -75,7 +76,6 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
   int Batch_A = batch_params.Batch_A;
   int Batch_B = batch_params.Batch_B;
-
 
   if (validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A, Batch_B,
                                     params) != status_t::success) {
@@ -97,16 +97,17 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     << ", post_op_dtype=[" << ([&]() {
       std::string dtypes = post_op_data_types_to_string(params);
       return dtypes.empty() ? "none" : dtypes;
-    })() << "]"
-         << ", Batch_A=" << Batch_A << ", Batch_B=" << Batch_B;
+    })()
+        << "]"
+        << ", Batch_A=" << Batch_A << ", Batch_B=" << Batch_B;
 
     apilog_info(ss.str());
   }
 
-  const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
-  const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
+  const bool is_f32_src = (params.dtypes.src == data_type_t::f32);
+  const bool is_f32_out = (params.dtypes.dst == data_type_t::f32);
 
-  const char trans_input  = transA ? 't' : 'n';
+  const char trans_input = transA ? 't' : 'n';
   const char trans_weight = transB ? 't' : 'n';
   char mem_format_b = params.mem_format_b;
 
@@ -114,14 +115,17 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   size_t out_type_size = is_f32_out ? sizeof(float) : sizeof(int16_t);
 
   size_t src_batch_stride = batch_params.batch_stride_src ==
-                            static_cast<size_t>(-1) ? (transA ? K *lda : M * lda) * src_type_size :
-                            batch_params.batch_stride_src * src_type_size;
+                            static_cast<size_t>(-1)
+                            ? (transA ? K *lda : M * lda) * src_type_size
+                            : batch_params.batch_stride_src * src_type_size;
   size_t weight_batch_stride = batch_params.batch_stride_wei ==
-                               static_cast<size_t>(-1) ? (transB ? N *ldb : K * ldb) * src_type_size :
-                               batch_params.batch_stride_wei * src_type_size;
+                               static_cast<size_t>(-1)
+                               ? (transB ? N *ldb : K * ldb) * src_type_size
+                               : batch_params.batch_stride_wei * src_type_size;
   size_t dst_batch_stride = batch_params.batch_stride_dst ==
-                            static_cast<size_t>(-1) ? M * ldc * out_type_size :
-                            batch_params.batch_stride_dst * out_type_size;
+                            static_cast<size_t>(-1)
+                            ? M * ldc * out_type_size
+                            : batch_params.batch_stride_dst * out_type_size;
 
   const int batch_count = std::max(Batch_A, Batch_B);
   const int num_threads = params.num_threads > 0 ? params.num_threads :
@@ -130,21 +134,22 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
   //                                    num_threads, params.dtypes.src);
   matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const);
+
   // TODO: Add memory unreordering logic
   // Unreorder if onednn/ libxsmm is used
   // Implement the necessary logic for memory reordering here
-  //if (params.mem_format_b) {}
+  // if (params.mem_format_b) {}
 
   bool is_weight_blocked = false;
   void *reordered_mem = nullptr;
   matmul_config_t &matmul_config = matmul_config_t::instance();
   [[maybe_unused]] int32_t weight_cache_type = matmul_config.get_weight_cache();
   // AOCL blocked kernel reordering for 2D MatMul
-  if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
+  if (kernel == zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
       batch_count == 1 && is_weights_const) {
     Key_matmul key_(transB, K, N, ldb, weight,
                     static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
-    //call reorder and cache function
+    // call reorder and cache function
     char trans = transB ? 't' : 'n';
     bool blocked_flag = false;
     if (params.dtypes.wei == data_type_t::f32) {
@@ -166,7 +171,6 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       mem_format_b = 'r';
     }
   }
-
   if (kernel == matmul_algo_t::batched_sgemm && batch_count > 1) {
     // Use batch GEMM for multiple batches
     apilog_info("Executing matmul LOWOHA kernel with batch GEMM, algo: ",
@@ -191,14 +195,14 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 #endif
   else if (num_threads > 1 && batch_count > 1) {
     /*
-    * Parallel partitioning strategy:
-    * The total number of available threads is divided across batches to compute `threads_per_batch`,
-    * ensuring that each batch gets a fair share of compute resources. Within each batch, the M dimension
-    * (rows of the output matrix) is further partitioned into blocks of size `M_block`, calculated to
-    * evenly distribute the workload among the threads assigned to that batch. The OpenMP `collapse(2)`
-    * directive enables parallelization over both batch and row-block loops, while `schedule(dynamic)`
-    * ensures better load balancing, especially when M is not divisible evenly or when thread workloads vary.
-    */
+     * Parallel partitioning strategy:
+     * The total number of available threads is divided across batches to compute `threads_per_batch`,
+     * ensuring that each batch gets a fair share of compute resources. Within each batch, the M dimension
+     * (rows of the output matrix) is further partitioned into blocks of size `M_block`, calculated to
+     * evenly distribute the workload among the threads assigned to that batch. The OpenMP `collapse(2)`
+     * directive enables parallelization over both batch and row-block loops, while `schedule(dynamic)`
+     * ensures better load balancing, especially when M is not divisible evenly or when thread workloads vary.
+     */
     int threads_per_batch = std::max(1, num_threads / batch_count);
     int M_block = std::max(1, (M + threads_per_batch - 1) / threads_per_batch);
 
@@ -208,7 +212,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     if ((batch_count >= 1024 && M <= 2048) ||
         (batch_count >= 512 && M <= 256) ||
         (batch_count > 128 && batch_count < 192 && M <= 512)) {
-      if (kernel==matmul_algo_t::libxsmm) {
+      if (kernel == matmul_algo_t::libxsmm) {
         M_block = std::min(128, M);
       }
       else {
@@ -220,12 +224,12 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       M_block = std::min(192, M);
     }
     else {
-      M_block = std::min(M_block, M);  // Ensure M_block <= M
+      M_block = std::min(M_block, M); // Ensure M_block <= M
     }
 
     if (kernel == matmul_algo_t::libxsmm &&
-        !(can_use_libxsmm(trans_input,trans_weight,M_block,N,K,alpha,beta,
-                          params.dtypes))) {
+        !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
+                          params.dtypes, params, kernel))) {
       kernel = matmul_algo_t::aocl_blis;
     }
 
@@ -291,15 +295,15 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
         for (int m_start = 0; m_start < M; m_start += M_block) {
           int m_len = std::min(M_block, M - m_start);
 
-          const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                      get_batch_index(b, Batch_A) * src_batch_stride;
+          const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
+                                   get_batch_index(b, Batch_A) * src_batch_stride;
           const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
                                       get_batch_index(b, Batch_B) * weight_batch_stride;
-          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
+          uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
 
           const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                            src_type_size);
-          void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+          void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
           // Create a modified post_op with offset binary tensor buffers
           lowoha_params thread_lowoha_params = params;
@@ -326,7 +330,7 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       }
     }
   }
-  else if (kernel==matmul_algo_t::libxsmm_blocked && batch_count==1) {
+  else if (kernel == matmul_algo_t::libxsmm_blocked && batch_count == 1) {
 #if ENABLE_K_TILE_OPTIMIZATION
     constexpr int M_BLOCK = 64;
     constexpr int N_BLOCK = 64;
@@ -359,8 +363,8 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
           // Use libxsmm only for perfect tiles
           if (m_tile == M_BLOCK && n_tile == N_BLOCK && k_tile == K_BLOCK &&
-              (can_use_libxsmm(trans_input,trans_weight,m_tile,n_tile,k_tile,tile_alpha,
-                               tile_beta,params.dtypes))) {
+              (can_use_libxsmm(trans_input, trans_weight, m_tile, n_tile, k_tile, tile_alpha,
+                               tile_beta, params.dtypes, params, kernel))) {
             tile_kernel = matmul_algo_t::libxsmm;
           }
           else {
@@ -380,61 +384,91 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
       }
     }
 #else
-    auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
-    int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
-    int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
 
-    const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
-    const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
-    uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
-    matmul_algo_t tile_kernel = matmul_algo_t::libxsmm;
+    if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
+                         beta, params.dtypes, params, kernel))) {
+      auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
+      int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
+      int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
+      const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
+      const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
+      uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
+      matmul_algo_t tile_kernel = matmul_algo_t::libxsmm;
 
-    #pragma omp parallel for collapse(2)
-    for (int i = 0; i < M; i += M_BLOCK) {
-      for (int j = 0; j < N; j += N_BLOCK) {
-        int m_tile = std::min(M_BLOCK, M - i);
-        int n_tile = std::min(N_BLOCK, N - j);
+      #pragma omp parallel for collapse(2)
+      for (int i = 0; i < M; i += M_BLOCK) {
+        for (int j = 0; j < N; j += N_BLOCK) {
+          int m_tile = std::min(M_BLOCK, M - i);
+          int n_tile = std::min(N_BLOCK, N - j);
 
-        const void *A_tile = get_matrix_block(src_ptr, i, 0, lda, transA,
-                                              src_type_size);
-        const void *B_tile = get_matrix_block(weight_ptr, 0, j, ldb, transB,
-                                              src_type_size);
-        void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
+          const void *A_tile = get_matrix_block(src_ptr, i, 0, lda, transA,
+                                                src_type_size);
+          const void *B_tile = get_matrix_block(weight_ptr, 0, j, ldb, transB,
+                                                src_type_size);
+          void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
 
-        float tile_alpha = alpha;
-        float tile_beta = beta;
-        if (!(can_use_libxsmm(trans_input,trans_weight,m_tile,n_tile,K,tile_alpha,
-                              tile_beta,params.dtypes))) {
-          tile_kernel = matmul_algo_t::aocl_blis;
+          float tile_alpha = alpha;
+          float tile_beta = beta;
+
+          lowoha_params tile_params = params;
+          for (auto &po : tile_params.postop_) {
+            if ((po.po_type == post_op_type_t::binary_add ||
+                 po.po_type == post_op_type_t::binary_mul) &&
+                po.buff != nullptr) {
+
+              size_t element_size =
+                (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+              size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
+                                    (ldc) + static_cast<size_t>(j);
+
+              size_t offset_bytes = offset_elems * element_size;
+
+              po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + offset_bytes;
+            }
+          }
+
+          matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                                m_tile, n_tile, K, tile_alpha,
+                                A_tile, lda,
+                                B_tile,
+                                ldb, tile_beta, C_tile, ldc,
+                                tile_params.dtypes, tile_kernel,
+                                tile_params.mem_format_a, mem_format_b,
+                                tile_params, bias);
         }
-        matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                              m_tile, n_tile, K, tile_alpha,
-                              A_tile, lda,
-                              is_weight_blocked ? reordered_mem : B_tile,
-                              ldb, tile_beta, C_tile, ldc,
-                              params.dtypes, tile_kernel,
-                              params.mem_format_a, mem_format_b,
-                              params, bias);
       }
     }
+    else {
+      matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                            M, N, K, alpha,
+                            src, lda,
+                            is_weight_blocked ? reordered_mem : weight,
+                            ldb, beta, dst, ldc,
+                            params.dtypes,  matmul_algo_t::aocl_blis,
+                            params.mem_format_a, mem_format_b,
+                            params, bias);
+    }
+
 #endif
     apilog_info("Executing matmul LOWOHA kernel with libxsmm tiling, algo: ",
                 static_cast<int>(kernel));
   }
   else {
     if (kernel == matmul_algo_t::libxsmm &&
-        !(can_use_libxsmm(trans_input,trans_weight,M,N,K,alpha,beta,params.dtypes))) {
+        !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
+                          params.dtypes,
+                          params, kernel))) {
       kernel = matmul_algo_t::aocl_blis;
     }
 
     apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
                 static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {
-      const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                  get_batch_index(b, Batch_A) * src_batch_stride;
+      const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
+                               get_batch_index(b, Batch_A) * src_batch_stride;
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
                                   get_batch_index(b, Batch_B) * weight_batch_stride;
-      uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
+      uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
@@ -445,9 +479,9 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
     }
     // Free reordered buffer for AOCL blocked non-cached
     bool free_buff = (weight_cache_type == 0 && reordered_mem != nullptr &&
-                      params.mem_format_b != 'r'
-                      && kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked && batch_count == 1);
-    if (free_buff)  {
+                      params.mem_format_b != 'r' &&
+                      kernel == zendnnl::ops::matmul_algo_t::aocl_blis_blocked && batch_count == 1);
+    if (free_buff) {
       free(reordered_mem);
       reordered_mem = nullptr;
     }
@@ -465,4 +499,3 @@ status_t matmul_direct(const char layout,const bool transA,const bool transB,
 
 } // namespace lowoha
 } // namespace zendnnl
-

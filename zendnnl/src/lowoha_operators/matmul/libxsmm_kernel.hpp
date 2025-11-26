@@ -18,65 +18,10 @@
 #define _LIBXSMM_KERNEL_HPP
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
-#if ZENDNNL_DEPENDS_LIBXSMM
-  #include "libxsmm.h"
-#endif
+#include "lowoha_operators/matmul/libxsmm_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
-
-/**
- * @brief Check if LibXSMM can be used for the given matrix multiplication parameters
- *
- * @param transA Transpose flag for matrix A ('t' or 'n')
- * @param transB Transpose flag for matrix B ('t' or 'n')
- * @param M Number of rows in A and C
- * @param N Number of columns in B and C
- * @param K Number of columns in A and rows in B
- * @param alpha Scaling factor for A*B (must be 1.0 for LibXSMM)
- * @param beta Scaling factor for C (must be 0.0 for LibXSMM)
- * @param dtypes Data types for the operands
- * @return true if LibXSMM can handle this operation, false otherwise
- */
-static inline bool can_use_libxsmm(char transA, char transB, int M,
-                                   int N, int K, float alpha, float beta,
-                                   const data_types &dtypes) {
-
-  // Check if the matrix dimensions are within acceptable limits for LIBXSMM kernel selection
-  // This heuristic prevents LIBXSMM from being used for matrices that are either:
-  // 1. Too tall (M > 512) - LIBXSMM throws Segfault on very tall matrices
-  // 2. Too large in terms of element count - when weight matrix B[K×N] > 1.0 Millions elements
-#if ZENDNNL_DEPENDS_LIBXSMM
-  float Max_Matrix_B_Elements = static_cast<float>(K * N) / 1000000.0f;
-  if ((Max_Matrix_B_Elements > 1.0f) || (M > 512 &&
-                                         Max_Matrix_B_Elements > 1.0f)) {
-    return false;  // Fallback to BLIS
-  }
-
-  const bool scalars_ok = ((alpha == 1.0f &&  (beta == 0.0f || beta == 1.0f)));
-  if (!scalars_ok) {
-    return false;
-  }
-
-  //LIBXSMM throws segfault for transA='t' cases
-  if (transA == 't') {
-    return false;
-  }
-
-  if (transA == 't' && transB == 'n' &&
-      dtypes.src == data_type_t::bf16 && (K & 1)) {
-    return false;
-  }
-
-  const bool dtype_ok =
-    (dtypes.src == data_type_t::f32  && dtypes.dst == data_type_t::f32) ||
-    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) ||
-    (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16);
-
-  return dtype_ok;
-#endif
-  return false;
-}
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 /**
@@ -86,7 +31,8 @@ template<typename TA, typename TB, typename TC>
 int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
                  float beta, int lda, int ldb, int ldc,
                  char transA, char transB, libxsmm_datatype a_type, libxsmm_datatype b_type,
-                 libxsmm_datatype c_type, libxsmm_datatype comp_type) {
+                 libxsmm_datatype c_type, libxsmm_datatype comp_type,
+                 const  lowoha_params &lowoha_param) {
   libxsmm_bitfield l_flags = 0;
   if (transA == 'T' || transA == 't') {
     l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
@@ -126,6 +72,11 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
   p.c.primary = C;
 
   ker(&p);
+  if (lowoha_param.postop_.size() > 0) {
+    for (const auto &postop : lowoha_param.postop_) {
+      libxsmm_postop<TC>(M, N, ldc, C, postop);
+    }
+  }
   return 1;
 }
 
@@ -135,7 +86,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
 static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                               float beta, int lda, int ldb, int ldc,
                               const void *A, const void *B, void *C,
-                              const data_types &dtypes) {
+                              const data_types &dtypes, const lowoha_params &lowoha_para) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<float,float,float>(
@@ -144,7 +95,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       static_cast<float *>(C),
                       M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
@@ -153,7 +104,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       static_cast<float *>(C),
                       M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32);
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
     kernel_status =
@@ -163,7 +114,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
         reinterpret_cast<libxsmm_bfloat16 *>(C),
         M,N,K, beta, lda,ldb,ldc, transA,transB,
         LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32);
+        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32, lowoha_para);
   }
   return kernel_status;
 }

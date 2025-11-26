@@ -30,6 +30,7 @@ set(lowoha_matmul_public_headers
   zendnnl_key.hpp)
 
 set(lowoha_matmul_private_headers
+  libxsmm_utils.hpp
   libxsmm_kernel.hpp
   aocl_kernel.hpp
   onednn_kernel.hpp

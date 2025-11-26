@@ -50,9 +50,6 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     }
     algo = params.mat.algo;
     use_LOWOHA = params.mat.use_LOWOHA;
-    if (use_LOWOHA && (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked)) {
-      po_index = 8;
-    }
     if (algo == matmul_algo_t::aocl_blis_blocked) {
       algo = matmul_algo_t::aocl_blis;
     }

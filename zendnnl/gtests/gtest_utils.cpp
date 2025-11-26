@@ -50,9 +50,13 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       //TODO: Add command-line arg support for LOWOHA
       use_LOWOHA = (algo == matmul_algo_t::libxsmm);
       if (algo == matmul_algo_t::libxsmm) {
-        alpha    = 1.0f;
-        beta     = 0.0f;
-        po_index = 8;
+        alpha = 1.0f;
+        beta  = rand() % 2;
+        //ToDo: Need to support silu, gelu_tanh, F32 postops.
+        if (po_index == 4 || po_index == 1 ||
+            source_dtype == data_type_t::f32) {
+          po_index = 8;
+        }
       }
     }
     else {
@@ -80,6 +84,10 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         alpha = 1.0f;
         beta = rand() % 2;
         algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
+        if (po_index == 4 || po_index == 1 ||
+            source_dtype == data_type_t::f32) {
+          po_index = 8;
+        }
       }
     }
   }
@@ -89,7 +97,12 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       alpha    = 1.0f;
       beta     = rand() % 2;
       use_LOWOHA = true;
-    } else {
+      if (po_index == 4 || po_index == 1 ||
+          source_dtype == data_type_t::f32) {
+        po_index = 8;
+      }
+    }
+    else {
       use_LOWOHA = rand() % 2;
     }
   }
