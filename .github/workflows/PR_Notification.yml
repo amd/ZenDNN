@@ -470,7 +470,7 @@ jobs:
                    STATUS_COLOR="Warning"
                    ;;
                  "SKIPPED")
-                   STATUS_COLOR="Accent"
+                   STATUS_COLOR="Default"
                    ;;
                  "IN_PROGRESS"|"QUEUED"|"PENDING")
                    STATUS_COLOR="Default"
