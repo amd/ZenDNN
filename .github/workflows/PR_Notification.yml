@@ -459,7 +459,7 @@ jobs:
                NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
                
                if [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
-                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS** (📁 $REPO)"
+                 WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS** ($REPO)"
                else
                  WORKFLOW_TEXT="• [$NAME_SAFE]($URL) - **$STATUS**"
                fi
@@ -519,7 +519,7 @@ jobs:
           if [ "$FORCED_COMPLETION" = "true" ]; then
             COMPLETION_TEXT="⏰ Timeout reached - $RUNNING_COUNT workflows may still be running"
           elif [ "$ALL_COMPLETE" = "true" ]; then
-            COMPLETION_TEXT="🏁 All $TOTAL_COUNT workflows completed"
+            COMPLETION_TEXT="All $TOTAL_COUNT workflows completed"
           else
             COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
           fi
