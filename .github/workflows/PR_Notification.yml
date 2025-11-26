@@ -360,7 +360,6 @@ jobs:
                   completed_count: completed.length,
                   total_count: allRuns.length,
                   zentorch_included: zentorchResult.found,
-                  external_workflow_url: zentorchResult.external_run_url || '',
                   currently_running: running.map(r => r.name)
                 };
                 
@@ -437,7 +436,6 @@ jobs:
           ALL_COMPLETE=$(echo "$completion_json" | jq -r '.all_complete // false')
           TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
           RUNNING_COUNT=$(echo "$completion_json" | jq -r '.running_count // 0')
-          EXTERNAL_WORKFLOW_URL=$(echo "$completion_json" | jq -r '.external_workflow_url // ""')
           FORCED_COMPLETION=$(echo "$completion_json" | jq -r '.forced_completion // false')
 
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
@@ -599,12 +597,7 @@ jobs:
                               "type": "Action.OpenUrl",
                               "title": "View Commit",
                               "url": "https://github.com/${{ github.repository }}/commit/$HEAD_SHA"
-                          }$(if [ -n "$EXTERNAL_WORKFLOW_URL" ]; then echo ',
-                          {
-                              "type": "Action.OpenUrl",
-                              "title": "View ZenTorch Build",
-                              "url": "'$EXTERNAL_WORKFLOW_URL'"
-                          }'; fi)
+                          }
                        ]
                    }
               }
