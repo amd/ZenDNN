@@ -456,13 +456,6 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
       (kernel >= matmul_algo_t::algo_count)) {
     kernel = matmul_algo_t::aocl_blis;
   }
-  // TODO: Remove condition, when libxsmm supports bias and post_ops.
-  // Other checks for libxsmm is handled by can_use_libxsmm func.
-  if ((kernel == matmul_algo_t::libxsmm ||
-       kernel == matmul_algo_t::libxsmm_blocked) &&  bias != nullptr
-     ) {
-    kernel = matmul_algo_t::aocl_blis;
-  }
 
   // AOCL blocked kernel is not supported for batched matmul
   if ((Batch_A > 1 || Batch_B > 1) &&

@@ -32,7 +32,8 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
                  float beta, int lda, int ldb, int ldc,
                  char transA, char transB, libxsmm_datatype a_type, libxsmm_datatype b_type,
                  libxsmm_datatype c_type, libxsmm_datatype comp_type,
-                 const  lowoha_params &lowoha_param) {
+                 const  lowoha_params &lowoha_param, const void *bias,
+                 const data_type_t &bias_type) {
   libxsmm_bitfield l_flags = 0;
   if (transA == 'T' || transA == 't') {
     l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
@@ -72,6 +73,16 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
   p.c.primary = C;
 
   ker(&p);
+
+  if (bias != nullptr) {
+    if (bias_type == data_type_t::f32) {
+      libxsmm_bias<TC, float>(M, N, ldc, C, bias);
+    }
+    else if (bias_type == data_type_t::bf16) {
+      libxsmm_bias<TC, libxsmm_bfloat16>(M, N, ldc, C, bias);
+    }
+  }
+
   if (lowoha_param.postop_.size() > 0) {
     for (const auto &postop : lowoha_param.postop_) {
       libxsmm_postop<TC>(M, N, ldc, C, postop);
@@ -86,7 +97,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
 static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                               float beta, int lda, int ldb, int ldc,
                               const void *A, const void *B, void *C,
-                              const data_types &dtypes, const lowoha_params &lowoha_para) {
+                              const data_types &dtypes, const lowoha_params &lowoha_para, const void *bias) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<float,float,float>(
@@ -95,7 +106,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       static_cast<float *>(C),
                       M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para);
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para, bias, dtypes.bias);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
@@ -104,7 +115,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       static_cast<float *>(C),
                       M,N,K, beta, lda,ldb,ldc, transA,transB,
                       LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para);
+                      LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para, bias, dtypes.bias);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
     kernel_status =
@@ -114,7 +125,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
         reinterpret_cast<libxsmm_bfloat16 *>(C),
         M,N,K, beta, lda,ldb,ldc, transA,transB,
         LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_BF16,
-        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32, lowoha_para);
+        LIBXSMM_DATATYPE_BF16,LIBXSMM_DATATYPE_F32, lowoha_para, bias, dtypes.bias);
   }
   return kernel_status;
 }

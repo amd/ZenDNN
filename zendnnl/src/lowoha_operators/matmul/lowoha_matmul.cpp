@@ -38,7 +38,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     if (run_libxsmm(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
-                    lowoha_param)) {
+                    lowoha_param, bias)) {
       log_info("Using libxsmm kernel");
       return;
     }
@@ -426,6 +426,14 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
               po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + offset_bytes;
             }
           }
+          const void *tile_bias = nullptr;
+          if (bias != nullptr) {
+            size_t bias_element_size = (params.dtypes.bias == data_type_t::f32)
+                                       ? sizeof(float)
+                                       : sizeof(uint16_t);
+            size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
+            tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
+          }
 
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_tile, n_tile, K, tile_alpha,
@@ -434,7 +442,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                                 ldb, tile_beta, C_tile, ldc,
                                 tile_params.dtypes, tile_kernel,
                                 tile_params.mem_format_a, mem_format_b,
-                                tile_params, bias);
+                                tile_params, tile_bias);
         }
       }
     }

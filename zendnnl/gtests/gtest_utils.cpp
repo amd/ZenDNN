@@ -710,10 +710,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         void *A_data = input_tensor.get_raw_handle_unsafe();
         void *B_data = weight_tensor.get_raw_handle_unsafe();
         void *C_data = output_tensor.get_raw_handle_unsafe();
-        void *bias_data = nullptr;
-        if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::libxsmm_blocked) {
-          bias_data = bias_tensor.get_raw_handle_unsafe();
-        }
+        void *bias_data = bias_tensor.get_raw_handle_unsafe();
 
         // Validate data pointers
         if (!A_data || !B_data || !C_data) {
@@ -904,9 +901,9 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                       .set_param("weights", weight_tensor)
                                       .set_alpha(alpha)
                                       .set_beta(beta);
-    if (algo != matmul_algo_t::libxsmm && algo != matmul_algo_t::libxsmm_blocked) {
-      matmul_context = matmul_context.set_param("bias", bias_tensor);
-    }
+
+    matmul_context = matmul_context.set_param("bias", bias_tensor);
+
 
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();

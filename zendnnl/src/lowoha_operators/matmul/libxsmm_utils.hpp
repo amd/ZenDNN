@@ -205,6 +205,55 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
   }
 }
 
+/**
+ * @brief Apply bias addition on the output matrix using LIBXSMM kernels.
+ *
+ * @param M Number of rows in the output matrix.
+ * @param N Number of columns in the output matrix.
+ * @param ldc Leading dimension of the output matrix.
+ * @param output Pointer to the output matrix where bias will be added.
+ * @param bias Pointer to the bias vector (1D array of length N).
+ * @tparam TA Output datatype (float or bfloat16)
+ * @tparam TB Bias datatype (float or bfloat16)
+ */
+template<typename TA, typename TB = TA>
+inline static void libxsmm_bias(const int M, const int N, const int ldc,
+                                void *output, const void *bias) {
+  constexpr libxsmm_datatype OUT_TYPE =
+    std::is_same<TA, float>::value ? LIBXSMM_DATATYPE_F32 : LIBXSMM_DATATYPE_BF16;
+  constexpr libxsmm_datatype BIAS_TYPE =
+    std::is_same<TB, float>::value ? LIBXSMM_DATATYPE_F32 : LIBXSMM_DATATYPE_BF16;
+  constexpr libxsmm_datatype COMP_TYPE = LIBXSMM_DATATYPE_F32;
+
+  libxsmm_meltw_binary_shape s{};
+  s.m = N;
+  s.n = M;
+  s.ldi = N;
+  s.ldi2 = ldc;
+  s.ldo = ldc;
+  s.in0_type = BIAS_TYPE;
+  s.in1_type = OUT_TYPE;
+  s.comp_type = COMP_TYPE;
+  s.out_type = OUT_TYPE;
+
+
+  libxsmm_meltwfunction_binary kernel = libxsmm_dispatch_meltw_binary(
+                                          LIBXSMM_MELTW_TYPE_BINARY_ADD,
+                                          s,
+                                          LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0
+                                        );
+
+  if (kernel) {
+    libxsmm_meltw_binary_param param{};
+    param.in0.primary = const_cast<void *>(bias);
+    param.in1.primary = output;
+    param.out.primary = output;
+    kernel(&param);
+  }
+  else {
+    log_error("Failed to dispatch LIBXSMM bias add kernel");
+  }
+}
 #endif
 }
 }
