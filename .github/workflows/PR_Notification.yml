@@ -35,7 +35,8 @@ jobs:
               head_sha: pr.head.sha,
               author: pr.user?.login || '',
               base_ref: pr.base?.ref || '',
-              head_ref: pr.head?.ref || ''
+              head_ref: pr.head?.ref || '',
+              created_at: pr.created_at
             };
 
       - name: Find Triggered External Workflows
@@ -51,17 +52,14 @@ jobs:
             console.log(`🔑 Using ZIAIE_PAT for cross-repo access`);
             
             try {
-              // Test access
               const user = await github.rest.users.getAuthenticated();
               console.log(`✅ Authenticated as: ${user.data.login}`);
               
-              // ✅ ENHANCED: Longer wait time (6 minutes instead of 3)
               console.log('⏳ Waiting 6 minutes for workflow triggers and job initialization...');
-              await new Promise(resolve => setTimeout(resolve, 360000));  // 6 minutes
+              await new Promise(resolve => setTimeout(resolve, 360000));
               
               const matchedWorkflows = [];
               
-              // Define external repositories with expected triggers
               const externalRepos = [
                 {
                   owner: 'AMD-Zenai',
@@ -77,47 +75,49 @@ jobs:
                 }
               ];
               
-              // Check each external repository
               for (const repoInfo of externalRepos) {
                 console.log(`\n🔍 Checking ${repoInfo.name} for PR #${pr.number}...`);
-                console.log(`   Expected triggers: ${repoInfo.expectedTriggers.join(', ')}`);
                 
                 try {
-                  // Test repo access
                   const repoResp = await github.rest.repos.get({
                     owner: repoInfo.owner,
                     repo: repoInfo.repo
                   });
                   console.log(`✅ Repository accessible: ${repoResp.data.full_name}`);
                   
-                  // ✅ ENHANCED: Extended time window (60 minutes instead of 45)
                   const response = await github.rest.actions.listWorkflowRunsForRepo({
                     owner: repoInfo.owner,
                     repo: repoInfo.repo,
-                    per_page: 50
+                    per_page: 100
                   });
-                  
-                  console.log(`📊 Found ${response.data.workflow_runs.length} total workflow runs`);
                   
                   const dispatchRuns = response.data.workflow_runs.filter(run => 
                     run.event === 'repository_dispatch'
                   );
                   
-                  console.log(`🎯 Found ${dispatchRuns.length} repository_dispatch runs`);
-                  
+                  // ✅ ENHANCED: Look for runs triggered after this PR was created
+                  const prCreatedTime = new Date(pr.created_at);
                   const recentRuns = dispatchRuns.filter(run => {
-                    const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
-                    return age <= 60; // ✅ ENHANCED: 60 minutes instead of 45
+                    const runTime = new Date(run.created_at);
+                    const timeDiff = (runTime - prCreatedTime) / (1000 * 60); // minutes
+                    return timeDiff >= -5 && timeDiff <= 120; // 5 min before PR to 2 hours after
                   });
                   
-                  console.log(`  Found ${recentRuns.length} recent dispatch runs to check`);
+                  console.log(`  Found ${recentRuns.length} potential runs since PR creation`);
                   
-                  // ✅ ENHANCED: Multiple detection methods
+                  // ✅ CRITICAL: Track found workflows to avoid duplicates
+                  const foundWorkflowTypes = new Set();
+                  
                   for (const run of recentRuns) {
+                    if (foundWorkflowTypes.size >= repoInfo.expectedTriggers.length) {
+                      console.log(`  ✅ Already found all expected workflows for ${repoInfo.name}`);
+                      break;
+                    }
+                    
                     const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
                     const runTitle = run.display_title || run.name || '';
                     
-                    console.log(`    🔍 Checking run: "${runTitle}" (${age}m ago, status: ${run.status})`);
+                    console.log(`    🔍 Checking run: "${runTitle}" (${age}m ago)`);
                     
                     let foundMatch = false;
                     let triggerType = 'Unknown';
@@ -141,9 +141,9 @@ jobs:
                         matchMethod = 'title';
                       }
                       
-                      // METHOD 2: Check job logs (with better error handling)
+                      // METHOD 2: Check job logs for PR reference
                       if (!foundMatch) {
-                        console.log(`      🔍 Checking jobs and logs...`);
+                        console.log(`      🔍 Checking jobs for PR reference...`);
                         
                         const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
                           owner: repoInfo.owner,
@@ -151,20 +151,14 @@ jobs:
                           run_id: run.id
                         });
                         
-                        console.log(`        Found ${jobsResp.data.jobs.length} jobs`);
-                        
                         const activeJobs = jobsResp.data.jobs.filter(job => 
                           job.status !== 'queued' && job.status !== 'waiting'
                         );
                         
-                        console.log(`        ${activeJobs.length} jobs are active/started`);
-                        
-                        for (const job of activeJobs.slice(0, 3)) {
+                        for (const job of activeJobs.slice(0, 2)) {
                           if (foundMatch) break;
                           
                           try {
-                            console.log(`        📄 Checking job: ${job.name} (${job.status})`);
-                            
                             if (['in_progress', 'completed'].includes(job.status)) {
                               const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
                                 owner: repoInfo.owner,
@@ -174,12 +168,12 @@ jobs:
                               
                               const logsText = logsResp.data.toString();
                               
+                              // ✅ ENHANCED: More specific PR patterns
                               const prPatterns = [
                                 `PR Number: #${pr.number}`,
-                                `🔵 TRIGGERED BY ZENDNN PR:.*PR Number: #${pr.number}`,
-                                `Repository: AMD-Zenai/ZenDNN.*PR Number: #${pr.number}`,
+                                `zendnn_pr_number.*${pr.number}`,
                                 `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`,
-                                `zendnn_pr_number.*${pr.number}`
+                                `Repository: AMD-Zenai/ZenDNN.*#${pr.number}`
                               ];
                               
                               const matchedPattern = prPatterns.find(pattern => 
@@ -187,53 +181,68 @@ jobs:
                               );
                               
                               if (matchedPattern) {
-                                console.log(`          ✅ FOUND PR #${pr.number} in logs!`);
-                                console.log(`          📍 Pattern: ${matchedPattern}`);
+                                console.log(`        ✅ FOUND PR #${pr.number} in logs!`);
                                 foundMatch = true;
                                 matchMethod = 'logs';
                                 break;
                               }
-                            } else {
-                              console.log(`          ⏳ Job not ready for log checking (${job.status})`);
                             }
-                            
                           } catch (logError) {
-                            if (logError.status === 404) {
-                              console.log(`          ⏳ Job logs not available yet (${job.status})`);
-                            } else {
-                              console.log(`          ❌ Error getting logs: ${logError.message}`);
-                            }
+                            console.log(`        ⏳ Logs not available for job ${job.id}`);
                           }
                         }
                       }
                       
-                      // METHOD 3: Timing + title pattern matching for very recent runs
-                      if (!foundMatch && age <= 10) {
+                      // METHOD 3: Smart timing + title pattern for very recent runs
+                      if (!foundMatch && age <= 15) {
                         const expectedTitles = repoInfo.expectedTriggers;
                         const matchesExpectedTitle = expectedTitles.some(expected => 
                           runTitle.toLowerCase().includes(expected.toLowerCase())
                         );
                         
                         if (matchesExpectedTitle) {
-                          console.log(`      🎯 ASSUMING MATCH: Recent run with expected title pattern`);
-                          console.log(`        Title: "${runTitle}", Age: ${age}m`);
+                          console.log(`      🎯 SMART MATCH: Recent run with expected trigger pattern`);
                           foundMatch = true;
-                          matchMethod = 'timing+title';
+                          matchMethod = 'smart-timing';
                         }
                       }
                       
-                      // Determine trigger type
                       if (foundMatch) {
+                        // ✅ DETERMINE TRIGGER TYPE and avoid duplicates
                         if (runTitle.toLowerCase().includes('zentorch-zendnnl') || 
                             runTitle.toLowerCase().includes('zendnnl')) {
                           triggerType = 'ZenTorch ZenDNNL';
-                        } else if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
+                          
+                          if (foundWorkflowTypes.has('zentorch-zendnnl')) {
+                            console.log(`      ⚠️ Already found ZenTorch ZenDNNL workflow, skipping duplicate`);
+                            continue;
+                          }
+                          foundWorkflowTypes.add('zentorch-zendnnl');
+                          
+                        } else if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin' && 
+                                 runTitle.toLowerCase().includes('zendnn-pr')) {
                           triggerType = 'ZenDNN PyTorch';
+                          
+                          if (foundWorkflowTypes.has('pytorch')) {
+                            console.log(`      ⚠️ Already found PyTorch workflow, skipping duplicate`);
+                            continue;
+                          }
+                          foundWorkflowTypes.add('pytorch');
+                          
                         } else if (repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
                           triggerType = 'ZenDNN TensorFlow';
+                          
+                          if (foundWorkflowTypes.has('tensorflow')) {
+                            console.log(`      ⚠️ Already found TensorFlow workflow, skipping duplicate`);
+                            continue;
+                          }
+                          foundWorkflowTypes.add('tensorflow');
+                        } else {
+                          console.log(`      ❌ Could not determine trigger type for ${runTitle}`);
+                          continue;
                         }
                         
-                        console.log(`      🎯 MATCH CONFIRMED: ${triggerType} (method: ${matchMethod})`);
+                        console.log(`      🎯 UNIQUE MATCH: ${triggerType} (method: ${matchMethod})`);
                         
                         matchedWorkflows.push({
                           id: run.id,
@@ -246,8 +255,6 @@ jobs:
                           match_method: matchMethod,
                           age_minutes: age
                         });
-                      } else {
-                        console.log(`      ❌ No PR #${pr.number} reference found`);
                       }
                       
                     } catch (runError) {
@@ -255,30 +262,19 @@ jobs:
                     }
                   }
                   
+                  console.log(`  📊 Found ${foundWorkflowTypes.size} unique workflows for ${repoInfo.name}`);
+                  
                 } catch (repoError) {
                   console.log(`❌ Error accessing ${repoInfo.name}: ${repoError.message}`);
                 }
               }
               
-              console.log(`\n🎯 FINAL RESULT: Found ${matchedWorkflows.length}/3 expected workflows for PR #${pr.number}`);
+              console.log(`\n🎯 FINAL RESULT: Found ${matchedWorkflows.length}/3 unique workflows for PR #${pr.number}`);
               if (matchedWorkflows.length > 0) {
-                console.log(`✅ MATCHED WORKFLOWS:`);
+                console.log(`✅ UNIQUE MATCHED WORKFLOWS:`);
                 matchedWorkflows.forEach(wf => {
-                  console.log(`  ✅ ${wf.name}: ${wf.status} (${wf.match_method}, ${wf.age_minutes}m ago)`);
+                  console.log(`  ✅ ${wf.name}: ${wf.status} (${wf.match_method})`);
                 });
-              } else {
-                console.log(`❌ NO MATCHING WORKFLOWS FOUND`);
-                console.log(`   Possible reasons:`);
-                console.log(`   1. Job logs not available yet (workflows just started)`);
-                console.log(`   2. Jobs still in queued/waiting state`);
-                console.log(`   3. Trigger dispatch failed`);
-              }
-              
-              // Log if we're missing any expected workflows
-              if (matchedWorkflows.length < 3) {
-                console.log(`\n⚠️  Expected 3 workflows, found ${matchedWorkflows.length}`);
-                const missing = 3 - matchedWorkflows.length;
-                console.log(`   Missing ${missing} workflow(s) - will wait for them to appear`);
               }
               
               return {
@@ -325,7 +321,6 @@ jobs:
             
             const checkAllWorkflowsAndChecks = async () => {
               try {
-                // Define ALL important workflows for main branch
                 const importantWorkflows = [
                   'jira-id-check',
                   'license-header-check', 
@@ -385,14 +380,45 @@ jobs:
                     return !isNotification && isImportant;
                   });
 
-                // ✅ Get ALL status checks for this commit
+                // ✅ ENHANCED: Get ALL status checks AND commit status for this commit
                 const statusResp = await github.rest.repos.getCombinedStatusForRef({
                   owner,
                   repo,
                   ref
                 });
-                
+
                 const statuses = statusResp.data.statuses || [];
+
+                // ✅ ENHANCED: Also get check suites and their check runs
+                const checkSuitesResp = await github.rest.checks.listSuitesForRef({
+                  owner,
+                  repo,
+                  ref,
+                  per_page: 100
+                });
+
+                const allCheckRuns = [];
+                for (const suite of (checkSuitesResp.data.check_suites || [])) {
+                  try {
+                    const suiteRunsResp = await github.rest.checks.listForSuite({
+                      owner,
+                      repo,
+                      check_suite_id: suite.id,
+                      per_page: 100
+                    });
+                    allCheckRuns.push(...(suiteRunsResp.data.check_runs || []));
+                  } catch (suiteError) {
+                    console.log(`Could not get check runs for suite ${suite.id}: ${suiteError.message}`);
+                  }
+                }
+
+                // Combine checks and check runs (remove duplicates)
+                const allChecks = [...checks];
+                allCheckRuns.forEach(checkRun => {
+                  if (!allChecks.find(check => check.id === checkRun.id)) {
+                    allChecks.push(checkRun);
+                  }
+                });
 
                 // Combine all LOCAL workflow information
                 const allRuns = [];
@@ -410,7 +436,7 @@ jobs:
                 });
 
                 // Add ALL local checks (avoid duplicates)
-                checks.forEach(check => {
+                allChecks.forEach(check => {
                   if (!allRuns.find(run => run.name === check.name)) {
                     allRuns.push({
                       id: check.id,
@@ -471,20 +497,20 @@ jobs:
                   }
                 }
 
-                // ✅ CRITICAL: Only consider FINAL states as completed
+                // ✅ ENHANCED: Include ALL possible status states
                 const running = allRuns.filter(r => 
-                  ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(r.status)
+                  ['in_progress', 'queued', 'pending', 'waiting', 'requested', 'action_required'].includes(r.status)
                 );
                 
                 const completed = allRuns.filter(r => 
-                  ['success', 'failure', 'cancelled', 'skipped', 'error', 'neutral'].includes(r.status)
+                  ['success', 'failure', 'cancelled', 'skipped', 'error', 'neutral', 'timed_out'].includes(r.status)
                 );
 
                 // Detailed status logging
                 console.log(`\n📋 COMPLETE STATUS SUMMARY:`);
                 console.log(`Total workflows/checks: ${allRuns.length}`);
                 console.log(`  - Workflows: ${workflows.length}`);
-                console.log(`  - Check runs: ${checks.length}`);
+                console.log(`  - Check runs: ${allChecks.length}`);
                 console.log(`  - Status checks: ${statuses.length}`);
                 console.log(`  - External workflows: ${externalResult.external_workflows.length}`);
                 console.log(`Completed: ${completed.length}`);
@@ -498,7 +524,8 @@ jobs:
                                     run.status === 'cancelled' ? '🟠' :
                                     run.status === 'skipped' ? '⏭️' : 
                                     run.status === 'neutral' ? '⚪' :
-                                    run.status === 'error' ? '🔴' : '🔄';
+                                    run.status === 'error' ? '🔴' :
+                                    run.status === 'timed_out' ? '⏰' : '🔄';
                   
                   const typeLabel = run.type.includes('external') ? ` [${run.repository}]` : 
                                    run.type.includes('status') ? ' [status]' :
@@ -513,7 +540,6 @@ jobs:
                   });
                 }
 
-                // ✅ CRITICAL: ALL must be completed (no running workflows/checks)
                 const allComplete = running.length === 0 && allRuns.length > 0;
                 
                 if (allComplete) {
@@ -530,7 +556,7 @@ jobs:
                   total_count: allRuns.length,
                   external_count: externalResult.external_workflows.length,
                   workflow_count: workflows.length,
-                  check_count: checks.length,
+                  check_count: allChecks.length,
                   status_count: statuses.length,
                   currently_running: running.map(r => r.name)
                 };
@@ -546,7 +572,6 @@ jobs:
               }
             };
 
-            // ✅ ENHANCED: Longer initial wait for workflows to initialize
             console.log('⏳ Waiting 7 minutes for all workflows and checks to initialize...');
             await new Promise(resolve => setTimeout(resolve, 420000));  // 7 minutes
 
@@ -557,7 +582,6 @@ jobs:
             console.log(`\n🔍 INITIAL CHECK RESULTS:`);
             console.log(`Found ${result.total_count} workflows/checks (${result.external_count} external), ${result.running_count} still running`);
 
-            // ✅ CRITICAL: Keep waiting until ALL are complete
             while (!result.all_complete && attempts < maxAttempts) {
               attempts++;
               console.log(`\n⏳ ATTEMPT ${attempts}/${maxAttempts}:`);
@@ -567,7 +591,6 @@ jobs:
               result = await checkAllWorkflowsAndChecks();
             }
 
-            // ✅ Final completion or timeout
             if (!result.all_complete) {
               console.log(`\n⏰ TIMEOUT after ${attempts} attempts (${maxAttempts} minutes).`);
               console.log(`⚠️  Still running: ${result.currently_running?.join(', ') || 'none'}`);
@@ -609,15 +632,19 @@ jobs:
 
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
           
+          # ✅ ENHANCED: Count ALL possible status types
           SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "success")] | length')
           FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "failure")] | length')
           CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
           NEUTRAL_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "neutral")] | length')
+          ERROR_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "error")] | length')
+          TIMED_OUT_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "timed_out")] | length')
+          PENDING_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "pending" or .status == "in_progress" or .status == "queued" or .status == "waiting")] | length')
 
           echo "✅ Workflow monitoring completed! Building notification..."
           echo "Total: $TOTAL_COUNT (Workflows: $WORKFLOW_COUNT, Checks: $CHECK_COUNT, Status: $STATUS_COUNT, External: $EXTERNAL_COUNT)"
-          echo "Results: Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Cancelled: $CANCELLED_COUNT, Skipped: $SKIPPED_COUNT"
+          echo "Results: Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Cancelled: $CANCELLED_COUNT, Skipped: $SKIPPED_COUNT, Neutral: $NEUTRAL_COUNT"
 
           WORKFLOW_TEXTBLOCKS=""
           if [ "$TOTAL_COUNT" -gt 0 ]; then
@@ -633,7 +660,7 @@ jobs:
                # Escape quotes for JSON
                NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
                
-               # ✅ Color coding for status
+               # ✅ ENHANCED: Color coding for ALL status types
                case "$STATUS" in
                  "SUCCESS")
                    STATUS_COLOR="Good"
@@ -659,9 +686,17 @@ jobs:
                    STATUS_COLOR="Attention"
                    STATUS_WEIGHT="Bolder"
                    ;;
+                 "TIMED_OUT")
+                   STATUS_COLOR="Warning"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 "IN_PROGRESS"|"PENDING"|"QUEUED"|"WAITING")
+                   STATUS_COLOR="Default"
+                   STATUS_WEIGHT="Normal"
+                   ;;
                  *)
                    STATUS_COLOR="Default"
-                   STATUS_WEIGHT="Bolder"
+                   STATUS_WEIGHT="Normal"
                    ;;
                esac
                
@@ -730,7 +765,7 @@ jobs:
             fi
 
           # Determine overall status
-          if [ "$FAILED_COUNT" -gt 0 ]; then
+          if [ "$FAILED_COUNT" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS_TEXT="❌ SOME CHECKS FAILED"
             COLOR="Attention"
@@ -738,11 +773,19 @@ jobs:
             ICON="🟠"
             STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
             COLOR="Warning"
+          elif [ "$TIMED_OUT_COUNT" -gt 0 ]; then
+            ICON="⏰"
+            STATUS_TEXT="⏰ SOME CHECKS TIMED OUT"
+            COLOR="Warning"
           elif [ "$FORCED_COMPLETION" = "true" ]; then
             ICON="🟡"
             STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"
             COLOR="Warning"
-          elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
+          elif [ "$PENDING_COUNT" -gt 0 ]; then
+            ICON="🟡"
+            STATUS_TEXT="⏳ SOME CHECKS STILL RUNNING"
+            COLOR="Default"
+          elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -eq 0 ] && [ "$ERROR_COUNT" -eq 0 ]; then
             ICON="🟢"
             STATUS_TEXT="✅ ALL CHECKS PASSED"
             COLOR="Good"
@@ -816,7 +859,11 @@ jobs:
                                     { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
                                     { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
                                     { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" },
-                                    { "title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT" }
+                                    { "title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT" },
+                                    { "title": "⚪ Neutral:", "value": "$NEUTRAL_COUNT" },
+                                    { "title": "🔴 Error:", "value": "$ERROR_COUNT" },
+                                    { "title": "⏰ Timed Out:", "value": "$TIMED_OUT_COUNT" },
+                                    { "title": "⏳ Running:", "value": "$PENDING_COUNT" }
                                ]
                               },
                               {
