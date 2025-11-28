@@ -68,13 +68,7 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
 
 
   if (lowoha_param.postop_.size() > 0) {
-    // Only BF16->BF16 supports post-ops
-    // TODO: need post-op to support F32
-    if (dtypes.src != data_type_t::bf16 || dtypes.dst != data_type_t::bf16) {
-      return false;
-    }
-
-    // Check post-op support based on kernel
+    //ToDo: Silu is not supported currently, since there is no direct API call available(can use sigm+mul).
     for (const auto &postop : lowoha_param.postop_) {
       switch (postop.po_type) {
       case post_op_type_t::binary_add:
