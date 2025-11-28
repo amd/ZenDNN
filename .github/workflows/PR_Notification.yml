@@ -55,9 +55,9 @@ jobs:
               const user = await github.rest.users.getAuthenticated();
               console.log(`✅ Authenticated as: ${user.data.login}`);
               
-              // Wait for triggers to process
-              console.log('⏳ Waiting 3 minutes for workflow triggers...');
-              await new Promise(resolve => setTimeout(resolve, 180000));
+              // ✅ ENHANCED: Longer wait time (6 minutes instead of 3)
+              console.log('⏳ Waiting 6 minutes for workflow triggers and job initialization...');
+              await new Promise(resolve => setTimeout(resolve, 360000));  // 6 minutes
               
               const matchedWorkflows = [];
               
@@ -90,7 +90,7 @@ jobs:
                   });
                   console.log(`✅ Repository accessible: ${repoResp.data.full_name}`);
                   
-                  // Get recent workflow runs (last 45 minutes)
+                  // ✅ ENHANCED: Extended time window (60 minutes instead of 45)
                   const response = await github.rest.actions.listWorkflowRunsForRepo({
                     owner: repoInfo.owner,
                     repo: repoInfo.repo,
@@ -99,96 +99,141 @@ jobs:
                   
                   console.log(`📊 Found ${response.data.workflow_runs.length} total workflow runs`);
                   
-                  // Filter for repository_dispatch events
                   const dispatchRuns = response.data.workflow_runs.filter(run => 
                     run.event === 'repository_dispatch'
                   );
                   
                   console.log(`🎯 Found ${dispatchRuns.length} repository_dispatch runs`);
                   
-                  // Look for recent runs (within 45 minutes)
                   const recentRuns = dispatchRuns.filter(run => {
                     const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
-                    return age <= 45;
+                    return age <= 60; // ✅ ENHANCED: 60 minutes instead of 45
                   });
                   
                   console.log(`  Found ${recentRuns.length} recent dispatch runs to check`);
                   
-                  // Check each recent run for PR number match in logs
+                  // ✅ ENHANCED: Multiple detection methods
                   for (const run of recentRuns) {
                     const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
                     const runTitle = run.display_title || run.name || '';
                     
-                    console.log(`    🔍 Checking run: "${runTitle}" (${age}m ago)`);
+                    console.log(`    🔍 Checking run: "${runTitle}" (${age}m ago, status: ${run.status})`);
+                    
+                    let foundMatch = false;
+                    let triggerType = 'Unknown';
+                    let matchMethod = '';
                     
                     try {
-                      // Get jobs for this workflow run
-                      const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
-                        owner: repoInfo.owner,
-                        repo: repoInfo.repo,
-                        run_id: run.id
-                      });
+                      // METHOD 1: Check workflow title for PR patterns
+                      const titlePatterns = [
+                        new RegExp(`#${pr.number}\\b`, 'i'),
+                        new RegExp(`PR\\s*${pr.number}`, 'i'),
+                        new RegExp(`pull\\s*${pr.number}`, 'i')
+                      ];
                       
-                      let foundMatch = false;
-                      let triggerType = 'Unknown';
+                      const titleMatch = titlePatterns.some(pattern => 
+                        pattern.test(runTitle) || pattern.test(run.name || '')
+                      );
                       
-                      // Check each job's logs for PR details
-                      for (const job of jobsResp.data.jobs) {
-                        if (foundMatch) break;
+                      if (titleMatch) {
+                        console.log(`      ✅ FOUND PR #${pr.number} in workflow title!`);
+                        foundMatch = true;
+                        matchMethod = 'title';
+                      }
+                      
+                      // METHOD 2: Check job logs (with better error handling)
+                      if (!foundMatch) {
+                        console.log(`      🔍 Checking jobs and logs...`);
                         
-                        try {
-                          console.log(`      📄 Checking job: ${job.name}`);
+                        const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
+                          owner: repoInfo.owner,
+                          repo: repoInfo.repo,
+                          run_id: run.id
+                        });
+                        
+                        console.log(`        Found ${jobsResp.data.jobs.length} jobs`);
+                        
+                        const activeJobs = jobsResp.data.jobs.filter(job => 
+                          job.status !== 'queued' && job.status !== 'waiting'
+                        );
+                        
+                        console.log(`        ${activeJobs.length} jobs are active/started`);
+                        
+                        for (const job of activeJobs.slice(0, 3)) {
+                          if (foundMatch) break;
                           
-                          const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
-                            owner: repoInfo.owner,
-                            repo: repoInfo.repo,
-                            job_id: job.id
-                          });
-                          
-                          const logsText = logsResp.data.toString();
-                          
-                          // ✅ ENHANCED: Search for PR details in "Display Triggering PR Information" step
-                          const prPatterns = [
-                            `PR Number: #${pr.number}`,
-                            `🔵 TRIGGERED BY ZENDNN PR:.*PR Number: #${pr.number}`,
-                            `Repository: AMD-Zenai/ZenDNN.*PR Number: #${pr.number}`,
-                            `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`,
-                            `zendnn_pr_number.*${pr.number}`
-                          ];
-                          
-                          // Check if any pattern matches
-                          const matchedPattern = prPatterns.find(pattern => 
-                            new RegExp(pattern, 'is').test(logsText)
-                          );
-                          
-                          if (matchedPattern) {
-                            console.log(`        ✅ FOUND PR #${pr.number} in logs!`);
-                            console.log(`        📍 Matched pattern: ${matchedPattern}`);
+                          try {
+                            console.log(`        📄 Checking job: ${job.name} (${job.status})`);
                             
-                            // Determine trigger type from logs
-                            if (logsText.includes('Dispatch Type: zendnn-zentorch-zendnnl-pr') || 
-                                logsText.includes('zendnn-zentorch-zendnnl-pr')) {
-                              triggerType = 'ZenTorch ZenDNNL';
-                            } else if (logsText.includes('Dispatch Type: zendnn-pr')) {
-                              if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
-                                triggerType = 'ZenDNN PyTorch';
-                              } else if (repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
-                                triggerType = 'ZenDNN TensorFlow';
+                            if (['in_progress', 'completed'].includes(job.status)) {
+                              const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                                owner: repoInfo.owner,
+                                repo: repoInfo.repo,
+                                job_id: job.id
+                              });
+                              
+                              const logsText = logsResp.data.toString();
+                              
+                              const prPatterns = [
+                                `PR Number: #${pr.number}`,
+                                `🔵 TRIGGERED BY ZENDNN PR:.*PR Number: #${pr.number}`,
+                                `Repository: AMD-Zenai/ZenDNN.*PR Number: #${pr.number}`,
+                                `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`,
+                                `zendnn_pr_number.*${pr.number}`
+                              ];
+                              
+                              const matchedPattern = prPatterns.find(pattern => 
+                                new RegExp(pattern, 'is').test(logsText)
+                              );
+                              
+                              if (matchedPattern) {
+                                console.log(`          ✅ FOUND PR #${pr.number} in logs!`);
+                                console.log(`          📍 Pattern: ${matchedPattern}`);
+                                foundMatch = true;
+                                matchMethod = 'logs';
+                                break;
                               }
+                            } else {
+                              console.log(`          ⏳ Job not ready for log checking (${job.status})`);
                             }
                             
-                            foundMatch = true;
-                            break;
+                          } catch (logError) {
+                            if (logError.status === 404) {
+                              console.log(`          ⏳ Job logs not available yet (${job.status})`);
+                            } else {
+                              console.log(`          ❌ Error getting logs: ${logError.message}`);
+                            }
                           }
-                          
-                        } catch (logError) {
-                          console.log(`        ❌ Could not get logs for job ${job.id}: ${logError.message}`);
                         }
                       }
                       
-                      // If match found, add to results
+                      // METHOD 3: Timing + title pattern matching for very recent runs
+                      if (!foundMatch && age <= 10) {
+                        const expectedTitles = repoInfo.expectedTriggers;
+                        const matchesExpectedTitle = expectedTitles.some(expected => 
+                          runTitle.toLowerCase().includes(expected.toLowerCase())
+                        );
+                        
+                        if (matchesExpectedTitle) {
+                          console.log(`      🎯 ASSUMING MATCH: Recent run with expected title pattern`);
+                          console.log(`        Title: "${runTitle}", Age: ${age}m`);
+                          foundMatch = true;
+                          matchMethod = 'timing+title';
+                        }
+                      }
+                      
+                      // Determine trigger type
                       if (foundMatch) {
-                        console.log(`      🎯 MATCH CONFIRMED: ${triggerType} workflow for PR #${pr.number}`);
+                        if (runTitle.toLowerCase().includes('zentorch-zendnnl') || 
+                            runTitle.toLowerCase().includes('zendnnl')) {
+                          triggerType = 'ZenTorch ZenDNNL';
+                        } else if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
+                          triggerType = 'ZenDNN PyTorch';
+                        } else if (repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
+                          triggerType = 'ZenDNN TensorFlow';
+                        }
+                        
+                        console.log(`      🎯 MATCH CONFIRMED: ${triggerType} (method: ${matchMethod})`);
                         
                         matchedWorkflows.push({
                           id: run.id,
@@ -197,14 +242,16 @@ jobs:
                           url: run.html_url,
                           repository: `${repoInfo.owner}/${repoInfo.repo}`,
                           workflow_name: runTitle,
-                          trigger_type: triggerType
+                          trigger_type: triggerType,
+                          match_method: matchMethod,
+                          age_minutes: age
                         });
                       } else {
-                        console.log(`      ❌ No PR #${pr.number} reference found in this run`);
+                        console.log(`      ❌ No PR #${pr.number} reference found`);
                       }
                       
-                    } catch (jobError) {
-                      console.log(`      ❌ Could not get jobs for run ${run.id}: ${jobError.message}`);
+                    } catch (runError) {
+                      console.log(`      ❌ Error checking run ${run.id}: ${runError.message}`);
                     }
                   }
                   
@@ -217,14 +264,14 @@ jobs:
               if (matchedWorkflows.length > 0) {
                 console.log(`✅ MATCHED WORKFLOWS:`);
                 matchedWorkflows.forEach(wf => {
-                  console.log(`  ✅ ${wf.name}: ${wf.status} - ${wf.url}`);
+                  console.log(`  ✅ ${wf.name}: ${wf.status} (${wf.match_method}, ${wf.age_minutes}m ago)`);
                 });
               } else {
                 console.log(`❌ NO MATCHING WORKFLOWS FOUND`);
-                console.log(`   This could mean:`);
-                console.log(`   1. Workflows are still starting up`);
-                console.log(`   2. Triggers failed to fire`);
-                console.log(`   3. External repositories are not accessible`);
+                console.log(`   Possible reasons:`);
+                console.log(`   1. Job logs not available yet (workflows just started)`);
+                console.log(`   2. Jobs still in queued/waiting state`);
+                console.log(`   3. Trigger dispatch failed`);
               }
               
               // Log if we're missing any expected workflows
@@ -281,9 +328,8 @@ jobs:
                 // Define ALL important workflows for main branch
                 const importantWorkflows = [
                   'jira-id-check',
-                  'license-header-check',
+                  'license-header-check', 
                   'zendnn_build_pr',
-                  'zendnn_build_push',
                   'trigger_pytorch_plugin',
                   'trigger_tensorflow_plugin',
                   'trigger-zentorch-zendnnl',
@@ -500,9 +546,9 @@ jobs:
               }
             };
 
-            // Wait for workflows to initialize
-            console.log('⏳ Waiting 4 minutes for all workflows and checks to initialize...');
-            await new Promise(resolve => setTimeout(resolve, 240000));  // 4 minutes
+            // ✅ ENHANCED: Longer initial wait for workflows to initialize
+            console.log('⏳ Waiting 7 minutes for all workflows and checks to initialize...');
+            await new Promise(resolve => setTimeout(resolve, 420000));  // 7 minutes
 
             let result = await checkAllWorkflowsAndChecks();
             let attempts = 0;
@@ -537,7 +583,6 @@ jobs:
 
             return result;
 
-      # ✅ This step runs when monitoring is complete
       - name: Send Complete Status Notification
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -592,24 +637,31 @@ jobs:
                case "$STATUS" in
                  "SUCCESS")
                    STATUS_COLOR="Good"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                  "FAILURE")
                    STATUS_COLOR="Attention"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                  "CANCELLED")
                    STATUS_COLOR="Warning"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                  "SKIPPED")
-                   STATUS_COLOR="Default"
+                   STATUS_COLOR="Accent"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                  "NEUTRAL")
                    STATUS_COLOR="Default"
+                   STATUS_WEIGHT="Bolder"
                    ;;
-                 "IN_PROGRESS"|"QUEUED"|"PENDING")
-                   STATUS_COLOR="Default"
+                 "ERROR")
+                   STATUS_COLOR="Attention"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                  *)
                    STATUS_COLOR="Default"
+                   STATUS_WEIGHT="Bolder"
                    ;;
                esac
                
@@ -648,7 +700,8 @@ jobs:
                      "type": "TextRun",
                      "text": "'$STATUS'",
                      "color": "'$STATUS_COLOR'",
-                     "weight": "Bolder"
+                     "weight": "'$STATUS_WEIGHT'",
+                     "size": "Medium"
                    },
                    {
                      "type": "TextRun",
