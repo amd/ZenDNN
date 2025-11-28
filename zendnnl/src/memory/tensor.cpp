@@ -918,8 +918,6 @@ status_t tensor_t::stride_sanity_check_with_order() {
       /* compute next stride */
       option.nelem         *= size;
       option.aligned_nelem *= aligned_size;
-
-      std::cout << option.nelem << ":" << option.aligned_nelem << std::endl;
     }
   }
 
