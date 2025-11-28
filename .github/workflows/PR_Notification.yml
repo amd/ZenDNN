@@ -45,7 +45,6 @@ jobs:
             const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             
             console.log(`🎯 Finding external workflows triggered by PR #${pr.number}`);
-            console.log(`Expected: 3 external workflows (2 PyTorch + 1 TensorFlow)`);
             
             // Wait for triggers
             console.log('⏳ Waiting 5 minutes for external workflows...');
@@ -59,23 +58,22 @@ jobs:
                 owner: 'AMD-Zenai', 
                 repo: 'ZenDNN_PyTorch_Plugin', 
                 expectedWorkflows: [
-                  { pattern: 'zendnn-pr', type: 'ZenDNN PyTorch' },
-                  { pattern: 'zendnn-zentorch-zendnnl-pr', type: 'ZenTorch ZenDNNL' }
+                  { pattern: 'zendnn-pr', type: 'ZenDNN PyTorch Plugin' },
+                  { pattern: 'zentorch-zendnnl', type: 'ZenTorch ZenDNNL Plugin' }
                 ]
               },
               { 
                 owner: 'AMD-Zenai', 
                 repo: 'ZenDNN_TensorFlow_Plugin',
                 expectedWorkflows: [
-                  { pattern: 'zendnn-pr', type: 'ZenDNN TensorFlow' }
+                  { pattern: 'zendnn-pr', type: 'ZenDNN TensorFlow Plugin' }
                 ]
               }
             ];
             
             for (const repoInfo of repos) {
               try {
-                console.log(`\n🔍 Checking ${repoInfo.repo} for PR #${pr.number}...`);
-                console.log(`   Expected: ${repoInfo.expectedWorkflows.length} workflows`);
+                console.log(`🔍 Checking ${repoInfo.repo}...`);
                 
                 const response = await github.rest.actions.listWorkflowRunsForRepo({
                   owner: repoInfo.owner,
@@ -83,46 +81,46 @@ jobs:
                   per_page: 50
                 });
                 
-                // Find recent dispatch runs after PR creation
+                // Find recent dispatch runs
                 const recentRuns = response.data.workflow_runs.filter(run => {
                   if (run.event !== 'repository_dispatch') return false;
                   
                   const runTime = new Date(run.created_at);
                   const timeDiff = (runTime - prCreatedTime) / (1000 * 60);
-                  return timeDiff >= 0 && timeDiff <= 60; // Within 1 hour after PR
+                  return timeDiff >= -5 && timeDiff <= 120; // Extended time window
                 });
                 
-                console.log(`   Found ${recentRuns.length} recent dispatch runs`);
+                console.log(`   Found ${recentRuns.length} recent runs`);
                 
-                // Track which workflow types we've found for this repo
+                // Track found workflow types
                 const foundTypes = new Set();
                 
-                // Find workflows matching current PR
                 for (const run of recentRuns) {
-                  if (foundTypes.size >= repoInfo.expectedWorkflows.length) {
-                    break; // Found all expected workflows for this repo
-                  }
-                  
                   const runTitle = run.display_title || run.name || '';
-                  console.log(`   📋 Checking: "${runTitle}"`);
+                  console.log(`   Checking: "${runTitle}"`);
                   
-                  // Check if this run is for our PR
+                  // Check if this run is for our PR (more flexible matching)
                   const isPRMatch = new RegExp(`#${pr.number}\\b`, 'i').test(runTitle) ||
-                                   new RegExp(`PR\\s*${pr.number}`, 'i').test(runTitle);
+                                   new RegExp(`PR\\s*${pr.number}`, 'i').test(runTitle) ||
+                                   new RegExp(`pull\\s*${pr.number}`, 'i').test(runTitle);
                   
                   if (isPRMatch) {
-                    // Determine which specific workflow this is
+                    // Determine workflow type
                     let workflowType = null;
                     
                     for (const expected of repoInfo.expectedWorkflows) {
-                      const matchesPattern = runTitle.toLowerCase().includes(expected.pattern.toLowerCase());
-                      const notFoundYet = !foundTypes.has(expected.type);
-                      
-                      if (matchesPattern && notFoundYet) {
+                      if (runTitle.toLowerCase().includes(expected.pattern.toLowerCase()) && 
+                          !foundTypes.has(expected.type)) {
                         workflowType = expected.type;
                         foundTypes.add(workflowType);
                         break;
                       }
+                    }
+                    
+                    // Fallback: if no specific pattern match, use repo default
+                    if (!workflowType && foundTypes.size < repoInfo.expectedWorkflows.length) {
+                      workflowType = repoInfo.expectedWorkflows.find(w => !foundTypes.has(w.type))?.type;
+                      if (workflowType) foundTypes.add(workflowType);
                     }
                     
                     if (workflowType) {
@@ -138,20 +136,12 @@ jobs:
                   }
                 }
                 
-                console.log(`   📊 Found ${foundTypes.size}/${repoInfo.expectedWorkflows.length} workflows for this repo`);
-                
               } catch (error) {
                 console.log(`❌ Error checking ${repoInfo.repo}: ${error.message}`);
               }
             }
             
-            console.log(`\n🎯 TOTAL FOUND: ${foundWorkflows.length}/3 external workflows for PR #${pr.number}`);
-            if (foundWorkflows.length > 0) {
-              foundWorkflows.forEach(wf => {
-                console.log(`  ✅ ${wf.name}: ${wf.status} [${wf.repository}]`);
-              });
-            }
-            
+            console.log(`🎯 Found ${foundWorkflows.length}/3 external workflows`);
             return { workflows: foundWorkflows };
 
       - name: Monitor All Checks
@@ -167,26 +157,20 @@ jobs:
             const repo = context.repo.repo;
             const ref = pr.head_sha;
             
-            console.log(`🔍 Monitoring all checks for PR #${pr.number} (commit: ${ref.substring(0, 7)})`);
-            console.log(`External workflows found: ${externalResult.workflows.length}`);
+            console.log(`🔍 Monitoring checks for PR #${pr.number}`);
             
             const getAllChecks = async () => {
               const allChecks = [];
               
               try {
-                console.log(`📊 Getting all checks for commit ${ref.substring(0, 7)}...`);
-                
                 // Get workflow runs
                 const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
                   owner, repo, head_sha: ref, per_page: 100
                 });
                 
-                console.log(`   Found ${workflowResp.data.workflow_runs.length} workflow runs`);
-                
                 workflowResp.data.workflow_runs.forEach(run => {
                   const name = run.name.toLowerCase();
                   
-                  // Skip self and unwanted workflows
                   if (run.id === context.runId || 
                       name.includes('notification') || 
                       name.includes('notify') ||
@@ -198,7 +182,7 @@ jobs:
                     name: run.name,
                     status: run.conclusion || run.status,
                     url: run.html_url,
-                    type: 'workflow'
+                    type: 'local'
                   });
                 });
                 
@@ -207,25 +191,21 @@ jobs:
                   owner, repo, ref, per_page: 100
                 });
                 
-                console.log(`   Found ${checkResp.data.check_runs.length} check runs`);
-                
                 checkResp.data.check_runs.forEach(check => {
                   const name = check.name.toLowerCase();
                   
-                  // Skip unwanted checks
                   if (name.includes('notification') || 
                       name.includes('notify') ||
                       name.includes('intelligent analysis')) {
                     return;
                   }
                   
-                  // Avoid duplicates
                   if (!allChecks.find(c => c.name === check.name)) {
                     allChecks.push({
                       name: check.name,
                       status: check.conclusion || check.status,
                       url: check.html_url,
-                      type: 'check'
+                      type: 'local'
                     });
                   }
                 });
@@ -235,20 +215,18 @@ jobs:
                   owner, repo, ref
                 });
                 
-                console.log(`   Found ${statusResp.data.statuses.length} status checks`);
-                
                 statusResp.data.statuses.forEach(status => {
                   if (!allChecks.find(c => c.name === status.context)) {
                     allChecks.push({
                       name: status.context,
                       status: status.state,
                       url: status.target_url,
-                      type: 'status'
+                      type: 'local'
                     });
                   }
                 });
                 
-                // Add external workflows with real-time status
+                // Add external workflows with updated status
                 for (const ext of externalResult.workflows) {
                   try {
                     const [extOwner, extRepo] = ext.repository.split('/');
@@ -259,90 +237,59 @@ jobs:
                     });
                     
                     allChecks.push({
-                      name: `🌐 ${ext.name}`,
+                      name: ext.name,
                       status: extResp.data.conclusion || extResp.data.status,
                       url: extResp.data.html_url,
-                      type: 'external',
-                      repository: ext.repository
+                      type: 'external'
                     });
                   } catch (error) {
-                    // Use cached status if update fails
                     allChecks.push({
-                      name: `🌐 ${ext.name}`,
+                      name: ext.name,
                       status: ext.status,
                       url: ext.url,
-                      type: 'external',
-                      repository: ext.repository
+                      type: 'external'
                     });
                   }
                 }
                 
-                console.log(`📋 Total checks collected: ${allChecks.length}`);
-                console.log(`   Workflows: ${allChecks.filter(c => c.type === 'workflow').length}`);
-                console.log(`   Check runs: ${allChecks.filter(c => c.type === 'check').length}`);
-                console.log(`   Status checks: ${allChecks.filter(c => c.type === 'status').length}`);
-                console.log(`   External: ${allChecks.filter(c => c.type === 'external').length}`);
-                
                 return allChecks;
                 
               } catch (error) {
-                console.log(`❌ Error getting checks: ${error.message}`);
+                console.log(`❌ Error: ${error.message}`);
                 return [];
               }
             };
             
-            // Initial wait
-            console.log('⏳ Waiting 5 minutes for all checks to start...');
+            // Wait and monitor
+            console.log('⏳ Waiting 5 minutes...');
             await new Promise(resolve => setTimeout(resolve, 300000));
             
             let checks = await getAllChecks();
             let attempts = 0;
-            const maxAttempts = 30; // 30 minutes max
+            const maxAttempts = 30;
             
-            console.log(`\n🔄 Starting monitoring loop...`);
-            
-            // Wait for completion
             while (attempts < maxAttempts) {
               const running = checks.filter(c => 
-                ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(c.status)
+                ['in_progress', 'queued', 'pending', 'waiting'].includes(c.status)
               );
-              
-              const completed = checks.filter(c => 
-                ['success', 'failure', 'cancelled', 'skipped', 'neutral', 'error'].includes(c.status)
-              );
-              
-              console.log(`\n📊 Status Summary (attempt ${attempts + 1}):`);
-              console.log(`   ✅ Completed: ${completed.length}`);
-              console.log(`   ⏳ Running: ${running.length}`);
-              console.log(`   📊 Total: ${checks.length}`);
               
               if (running.length === 0) {
-                console.log(`\n🎉 All ${checks.length} checks completed after ${attempts} minutes!`);
+                console.log(`✅ All checks completed after ${attempts}m`);
                 break;
               }
-              
-              console.log(`\n⏳ Still waiting for:`);
-              running.forEach(c => console.log(`   🔄 ${c.name}: ${c.status}`));
               
               attempts++;
-              if (attempts >= maxAttempts) {
-                console.log(`\n⏰ Timeout after ${maxAttempts} minutes - forcing completion`);
-                break;
-              }
+              if (attempts >= maxAttempts) break;
               
-              await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+              await new Promise(resolve => setTimeout(resolve, 60000));
               checks = await getAllChecks();
             }
-            
-            const finalRunning = checks.filter(c => 
-              ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(c.status)
-            ).length;
             
             return { 
               checks, 
               total: checks.length,
-              completed_in_minutes: attempts,
-              still_running: finalRunning
+              external_count: checks.filter(c => c.type === 'external').length,
+              completed_in_minutes: attempts
             };
 
       - name: Send Teams Notification
@@ -351,8 +298,6 @@ jobs:
         run: |
           pr_json='${{ steps.pr_info.outputs.result }}'
           checks_json='${{ steps.monitor_checks.outputs.result }}'
-
-          echo "📤 Building Teams notification..."
 
           # Parse data
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
@@ -363,39 +308,24 @@ jobs:
 
           CHECKS=$(echo "$checks_json" | jq -c '.checks // []')
           TOTAL_COUNT=$(echo "$checks_json" | jq -r '.total // 0')
+          EXTERNAL_COUNT=$(echo "$checks_json" | jq -r '.external_count // 0')
           COMPLETION_TIME=$(echo "$checks_json" | jq -r '.completed_in_minutes // 0')
-          STILL_RUNNING=$(echo "$checks_json" | jq -r '.still_running // 0')
           
           # Count statuses
           SUCCESS_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "success")] | length')
           FAILED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "failure")] | length')
           CANCELLED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "skipped")] | length')
-          NEUTRAL_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "neutral")] | length')
-          ERROR_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "error")] | length')
-          PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued" or .status == "waiting")] | length')
-
-          # External workflow counts
-          EXTERNAL_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.type == "external")] | length')
-          LOCAL_COUNT=$((TOTAL_COUNT - EXTERNAL_COUNT))
-
-          echo "📊 Statistics:"
-          echo "   Total: $TOTAL_COUNT ($LOCAL_COUNT local + $EXTERNAL_COUNT external)"
-          echo "   Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Skipped: $SKIPPED_COUNT"
-          echo "   Completion time: ${COMPLETION_TIME}m, Still running: $STILL_RUNNING"
+          PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued")] | length')
 
           # Overall status
-          if [ "$FAILED_COUNT" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
+          if [ "$FAILED_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS="❌ SOME CHECKS FAILED"
             COLOR="Attention"
           elif [ "$PENDING_COUNT" -gt 0 ]; then
             ICON="🟡"
-            STATUS="⏳ CHECKS STILL RUNNING"
-            COLOR="Warning"
-          elif [ "$CANCELLED_COUNT" -gt 0 ]; then
-            ICON="🟠"
-            STATUS="🟠 SOME CHECKS CANCELLED"
+            STATUS="⏳ CHECKS RUNNING"
             COLOR="Warning"
           else
             ICON="🟢"
@@ -403,8 +333,14 @@ jobs:
             COLOR="Good"
           fi
 
-          # Build check list
-          echo "🔨 Building check list..."
+          # Completion message
+          if [ "$COMPLETION_TIME" -gt 0 ]; then
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m"
+          else
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed"
+          fi
+
+          # Build check list (NO TYPE LABELS)
           CHECKS_LIST=""
           CHECK_COUNT=$(echo "$CHECKS" | jq 'length')
           
@@ -413,7 +349,6 @@ jobs:
             STATUS_VAL=$(echo "$CHECKS" | jq -r ".[$i].status | ascii_upcase")
             URL=$(echo "$CHECKS" | jq -r ".[$i].url // \"\"")
             TYPE=$(echo "$CHECKS" | jq -r ".[$i].type")
-            REPO=$(echo "$CHECKS" | jq -r ".[$i].repository // \"\"")
             
             # Status color
             case "$STATUS_VAL" in
@@ -421,22 +356,10 @@ jobs:
               "FAILURE") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               "CANCELLED") STATUS_COLOR="Warning"; STATUS_WEIGHT="Bolder" ;;
               "SKIPPED") STATUS_COLOR="Accent"; STATUS_WEIGHT="Bolder" ;;
-              "NEUTRAL") STATUS_COLOR="Default"; STATUS_WEIGHT="Bolder" ;;
-              "ERROR") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               *) STATUS_COLOR="Default"; STATUS_WEIGHT="Normal" ;;
             esac
             
-            # Repository label
-            if [ "$TYPE" = "external" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
-              REPO_LABEL=" [$REPO]"
-            elif [ "$TYPE" = "status" ]; then
-              REPO_LABEL=" [status]"
-            elif [ "$TYPE" = "check" ]; then
-              REPO_LABEL=" [check]"
-            else
-              REPO_LABEL=""
-            fi
-            
+            # Create check block (NO LABELS)
             CHECK_BLOCK='{
               "type": "RichTextBlock",
               "inlines": [
@@ -452,12 +375,6 @@ jobs:
                   "text": "'$STATUS_VAL'", 
                   "color": "'$STATUS_COLOR'", 
                   "weight": "'$STATUS_WEIGHT'"
-                },
-                {
-                  "type": "TextRun", 
-                  "text": "'$REPO_LABEL'", 
-                  "size": "Small", 
-                  "color": "Dark"
                 }
               ],
               "spacing": "None"
@@ -470,22 +387,13 @@ jobs:
             fi
           done
 
-          # Completion status message
-          if [ "$STILL_RUNNING" -gt 0 ]; then
-            COMPLETION_MSG="⏰ Completed in ${COMPLETION_TIME}m (${STILL_RUNNING} still running)"
-          else
-            COMPLETION_MSG="✅ All checks completed in ${COMPLETION_TIME}m"
-          fi
-
-          # Create Teams card
-          echo "🔨 Creating Teams card..."
+          # Create Teams card (SIMPLIFIED)
           cat > card.json <<EOF
           {
             "type": "message",
             "attachments": [{
               "contentType": "application/vnd.microsoft.card.adaptive",
               "content": {
-                "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                 "type": "AdaptiveCard",
                 "version": "1.4",
                 "body": [
@@ -501,67 +409,37 @@ jobs:
                     "text": "$STATUS",
                     "weight": "Bolder",
                     "color": "$COLOR",
-                    "size": "Large",
-                    "wrap": true
+                    "size": "Large"
                   },
                   {
                     "type": "FactSet",
                     "facts": [
                       {"title": "Author:", "value": "$PR_AUTHOR"},
-                      {"title": "Branch:", "value": "main"},
                       {"title": "Commit:", "value": "$HEAD_SHA"},
                       {"title": "Status:", "value": "$COMPLETION_MSG"},
-                      {"title": "Total Checks:", "value": "$TOTAL_COUNT"},
-                      {"title": "🏠 Local:", "value": "$LOCAL_COUNT"},
-                      {"title": "🌐 External:", "value": "$EXTERNAL_COUNT"},
+                      {"title": "Total Workflows:", "value": "$TOTAL_COUNT"},
                       {"title": "✅ Passed:", "value": "$SUCCESS_COUNT"},
                       {"title": "❌ Failed:", "value": "$FAILED_COUNT"},
                       {"title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT"},
-                      {"title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT"},
-                      {"title": "⚪ Neutral:", "value": "$NEUTRAL_COUNT"},
-                      {"title": "🔴 Error:", "value": "$ERROR_COUNT"},
-                      {"title": "⏳ Running:", "value": "$PENDING_COUNT"}
+                      {"title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT"}
                     ]
                   },
                   {
                     "type": "TextBlock",
-                    "text": "**All PR Checks ($LOCAL_COUNT local + $EXTERNAL_COUNT external):**",
+                    "text": "**All PR Checks:**",
                     "weight": "Bolder",
-                    "spacing": "Medium",
-                    "wrap": true
+                    "spacing": "Medium"
                   },
                   $CHECKS_LIST
                 ],
                 "actions": [
-                  {
-                    "type": "Action.OpenUrl",
-                    "title": "View PR",
-                    "url": "$PR_URL"
-                  },
-                  {
-                    "type": "Action.OpenUrl", 
-                    "title": "View All Checks",
-                    "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
-                  },
-                  {
-                    "type": "Action.OpenUrl",
-                    "title": "View Commit",
-                    "url": "https://github.com/${{ github.repository }}/commit/${{ steps.pr_info.outputs.result.head_sha }}"
-                  }
+                  {"type": "Action.OpenUrl", "title": "View PR", "url": "$PR_URL"},
+                  {"type": "Action.OpenUrl", "title": "View All Checks", "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"}
                 ]
               }
             }]
           }
           EOF
 
-          echo "📤 Sending Teams notification..."
           curl -s -H "Content-Type: application/json" -d @card.json "$TEAMS_WEBHOOK_URL"
-          
-          if [ $? -eq 0 ]; then
-            echo "✅ Teams notification sent successfully!"
-          else
-            echo "❌ Failed to send Teams notification"
-            exit 1
-          fi
-
-          echo "🎉 Workflow completed successfully!"
+          echo "✅ Teams notification sent!"
