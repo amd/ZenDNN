@@ -2,126 +2,574 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc.
 # All rights reserved.
 # ******************************************************************************
-name: PR Status Notification
+name: PR Status Notification (Main Branch)
 on:
   pull_request:
+    branches: [main]
     types: [opened, reopened, synchronize]
-  check_suite:
-    types: [completed]
-
 
 permissions:
   checks: read
   pull-requests: read
   contents: read
+  actions: read
 
 jobs:
   notify_teams:
     runs-on: amd-zenai-arc-xsmall-dind
+    timeout-minutes: 120
+    if: github.actor != 'github-actions[bot]'
+    
     steps:
-
-
       - name: Get PR info
         id: pr_info
         uses: actions/github-script@v7
         with:
           script: |
-            const ev = context.payload;
-            let pr = null;
-            if (context.eventName === 'check_suite') {
-              pr = ev.check_suite?.pull_requests?.[0];
-              if (!pr) return { number: null };
-            } else {
-              pr = ev.pull_request;
-            }
+            const pr = context.payload.pull_request;
+            
             return {
               number: pr.number,
               title: pr.title || '',
               url: pr.html_url || '',
-              head_sha: pr.head_sha || (pr.head && pr.head.sha) || null,
-              author: pr.user?.login || ''
+              head_sha: pr.head.sha,
+              author: pr.user?.login || '',
+              base_ref: pr.base?.ref || '',
+              head_ref: pr.head?.ref || ''
             };
 
-      - name: Get failed check (if any) and status
-        id: check_info
+      - name: Find Triggered External Workflows
+        id: find_external
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ZIAIE_PAT }}
           script: |
-            const pr = JSON.parse(`\${{ steps.pr_info.outputs.result }}`);
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const ref =
-              pr.head_sha ||
-              context.payload.check_suite?.head_sha ||
-              context.payload.pull_request?.head?.sha;
-            if (!ref) {
-              return { status: 'unknown', failures: ["No commit SHA found"] };
+            const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+            
+            console.log(`🔍 Looking for triggered workflows for PR #${pr.number}`);
+            console.log(`🔑 Using ZIAIE_PAT for cross-repo access`);
+            
+            try {
+              // Test access with organization PAT
+              const user = await github.rest.users.getAuthenticated();
+              console.log(`✅ Authenticated as: ${user.data.login}`);
+              
+              // Wait for triggers to process
+              console.log('⏳ Waiting 3 minutes for workflow triggers...');
+              await new Promise(resolve => setTimeout(resolve, 180000));
+              
+              const externalWorkflows = [];
+              
+              // Define repositories to check
+              const reposToCheck = [
+                {
+                  owner: 'AMD-Zenai',
+                  repo: 'ZenDNN_PyTorch_Plugin',
+                  name: 'ZenDNN PyTorch Plugin',
+                  eventTypes: ['zendnn-pr', 'zendnn-zentorch-zendnnl-pr']
+                },
+                {
+                  owner: 'AMD-Zenai', 
+                  repo: 'ZenDNN_TensorFlow_Plugin',
+                  name: 'ZenDNN TensorFlow Plugin',
+                  eventTypes: ['zendnn-pr']
+                }
+              ];
+              
+              // Check each repository
+              for (const repoInfo of reposToCheck) {
+                console.log(`\n🔍 Checking ${repoInfo.name}...`);
+                
+                try {
+                  // Get recent workflow runs
+                  const response = await github.rest.actions.listWorkflowRunsForRepo({
+                    owner: repoInfo.owner,
+                    repo: repoInfo.repo,
+                    per_page: 20
+                  });
+                  
+                  // Filter for repository_dispatch events from last 30 minutes
+                  const dispatchRuns = response.data.workflow_runs.filter(run => {
+                    const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
+                    return run.event === 'repository_dispatch' && age <= 30;
+                  });
+                  
+                  console.log(`Found ${dispatchRuns.length} recent dispatch runs for ${repoInfo.name}`);
+                  
+                  // Look for runs that match our expected event types
+                  for (const run of dispatchRuns) {
+                    const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
+                    
+                    console.log(`  Run ${run.id}: "${run.name}" - ${run.status} (${age}m ago)`);
+                    
+                    // Add to external workflows
+                    externalWorkflows.push({
+                      id: run.id,
+                      name: `${repoInfo.name}: ${run.name}`,
+                      status: run.conclusion || run.status,
+                      url: run.html_url,
+                      repository: `${repoInfo.owner}/${repoInfo.repo}`,
+                      minutes_ago: age,
+                      type: 'triggered_workflow'
+                    });
+                  }
+                  
+                } catch (repoError) {
+                  console.log(`❌ Error accessing ${repoInfo.name}: ${repoError.message}`);
+                  externalWorkflows.push({
+                    id: `error-${repoInfo.repo}`,
+                    name: `${repoInfo.name}: ACCESS ERROR`,
+                    status: 'error',
+                    url: '',
+                    repository: `${repoInfo.owner}/${repoInfo.repo}`,
+                    error: repoError.message,
+                    type: 'error'
+                  });
+                }
+              }
+              
+              console.log(`\n📊 Found ${externalWorkflows.length} external workflows total`);
+              
+              return {
+                found: externalWorkflows.length > 0,
+                external_workflows: externalWorkflows,
+                total_external: externalWorkflows.length
+              };
+              
+            } catch (error) {
+              console.log(`❌ Error in external workflow search: ${error.message}`);
+              return { 
+                found: false, 
+                external_workflows: [],
+                error: error.message
+              };
             }
 
-            // list check runs for the commit (paginated if necessary)
-            const resp = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref,
-              per_page: 100
-            });
-            const runs = resp.data.check_runs || [];
+      - name: Wait for ALL workflows to complete
+        id: wait_for_completion
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ZIAIE_PAT }}
+          script: |
+            const pr = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+            
+            // Safe parsing of external workflows result
+            let externalResult = { found: false, external_workflows: [] };
+            try {
+              const externalOutput = `${{ steps.find_external.outputs.result || '{}' }}`;
+              externalResult = externalOutput ? JSON.parse(externalOutput) : { found: false, external_workflows: [] };
+            } catch (error) {
+              console.log(`Could not parse external result: ${error.message}`);
+              externalResult = { found: false, external_workflows: [] };
+            }
+            
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = pr.head_sha;
 
-            // Collect all failures
-            const failures = runs
-              .filter(r => r.conclusion === 'failure')
-              .map(r => `❌ ${r.name}: ${(r.output?.summary || r.output?.title || "").substr(0,200)}`);
+            console.log(`🔍 Monitoring workflows for PR #${pr.number}, commit: ${ref}`);
+            console.log(`External workflows found: ${externalResult.external_workflows.length}`);
+            
+            const checkAllWorkflows = async () => {
+              try {
+                // Define important LOCAL workflows for main branch
+                const importantWorkflows = [
+                  'jira-id-check',
+                  'license-header-check', 
+                  'zendnn_build_pr',
+                  'trigger_pytorch_plugin',
+                  'trigger_tensorflow_plugin',
+                  'trigger-zentorch-zendnnl',
+                  'check_status',
+                  'commit message enforcement',
+                  'check jira id',
+                  'verify jira id',
+                  'check license headers',
+                  'verify license headers'
+                ];
 
-            const cancelled = runs.some(r => r.conclusion === 'cancelled');
+                console.log(`📊 Checking workflows for commit: ${ref.substring(0, 7)}`);
 
-            return {
-              status: failures.length > 0 ? 'failure' :
-                      cancelled ? 'cancelled' :
-                      'success',
-              failures: failures
+                // Get LOCAL workflow runs
+                const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner,
+                  repo,
+                  head_sha: ref,
+                  per_page: 100
+                });
+                
+                const workflows = (workflowResp.data.workflow_runs || [])
+                  .filter(run => {
+                    const name = run.name.toLowerCase();
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
+                    const isSelf = run.id === context.runId;
+                    
+                    return !isSelf && isImportant;
+                  });
+
+                // Get LOCAL check runs
+                const checkResp = await github.rest.checks.listForRef({
+                  owner,
+                  repo,
+                  ref,
+                  per_page: 100
+                });
+                
+                const checks = (checkResp.data.check_runs || [])
+                  .filter(check => {
+                    const name = check.name.toLowerCase();
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
+                    const isNotification = name.includes('notify') || 
+                                         name.includes('notification') ||
+                                         name.includes('pr status');
+                    
+                    return !isNotification && isImportant;
+                  });
+
+                // Combine all LOCAL workflow information
+                const allRuns = [];
+                
+                // Add local workflows
+                workflows.forEach(run => {
+                  allRuns.push({
+                    id: run.id,
+                    name: run.name,
+                    status: run.conclusion || run.status,
+                    url: run.html_url,
+                    type: 'local_workflow_run',
+                    repository: `${owner}/${repo}`
+                  });
+                });
+
+                // Add local checks (avoid duplicates)
+                checks.forEach(check => {
+                  if (!allRuns.find(run => run.name === check.name)) {
+                    allRuns.push({
+                      id: check.id,
+                      name: check.name,
+                      status: check.conclusion || check.status,
+                      url: check.html_url,
+                      type: 'local_check_run',
+                      repository: `${owner}/${repo}`
+                    });
+                  }
+                });
+
+                // Add EXTERNAL workflows and update their status
+                for (const extWorkflow of externalResult.external_workflows) {
+                  if (extWorkflow.type === 'triggered_workflow') {
+                    try {
+                      // Get updated status for external workflow
+                      const [extOwner, extRepo] = extWorkflow.repository.split('/');
+                      const externalResp = await github.rest.actions.getWorkflowRun({
+                        owner: extOwner,
+                        repo: extRepo,
+                        run_id: extWorkflow.id
+                      });
+                      
+                      allRuns.push({
+                        id: externalResp.data.id,
+                        name: `🌐 ${extWorkflow.name}`,
+                        status: externalResp.data.conclusion || externalResp.data.status,
+                        url: externalResp.data.html_url,
+                        type: 'external_workflow_run',
+                        repository: extWorkflow.repository
+                      });
+                      
+                    } catch (extError) {
+                      console.log(`❌ Could not update external workflow ${extWorkflow.id}: ${extError.message}`);
+                      // Add with last known status
+                      allRuns.push({
+                        id: extWorkflow.id,
+                        name: `🌐 ${extWorkflow.name}`,
+                        status: extWorkflow.status || 'unknown',
+                        url: extWorkflow.url,
+                        type: 'external_workflow_run',
+                        repository: extWorkflow.repository
+                      });
+                    }
+                  } else {
+                    // Add error/unknown workflows as-is
+                    allRuns.push({
+                      id: extWorkflow.id,
+                      name: `🌐 ${extWorkflow.name}`,
+                      status: extWorkflow.status,
+                      url: extWorkflow.url,
+                      type: 'external_workflow_error',
+                      repository: extWorkflow.repository
+                    });
+                  }
+                }
+
+                // ✅ CRITICAL: Only consider FINAL states as completed
+                const running = allRuns.filter(r => 
+                  ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(r.status)
+                );
+                
+                const completed = allRuns.filter(r => 
+                  ['success', 'failure', 'cancelled', 'skipped', 'error'].includes(r.status)
+                );
+
+                // Detailed status logging
+                console.log(`\n📋 WORKFLOW STATUS SUMMARY:`);
+                console.log(`Total workflows: ${allRuns.length} (${allRuns.length - externalResult.external_workflows.length} local + ${externalResult.external_workflows.length} external)`);
+                console.log(`Completed: ${completed.length}`);
+                console.log(`Still running: ${running.length}`);
+
+                console.log(`\n📊 ALL WORKFLOWS (LOCAL + EXTERNAL):`);
+                allRuns.forEach(run => {
+                  const statusIcon = run.status === 'success' ? '✅' : 
+                                    run.status === 'failure' ? '❌' : 
+                                    ['in_progress', 'pending', 'queued'].includes(run.status) ? '⏳' : 
+                                    run.status === 'cancelled' ? '🟠' :
+                                    run.status === 'skipped' ? '⏭️' : 
+                                    run.status === 'error' ? '🔴' : '🔄';
+                  
+                  const repoLabel = run.type.includes('external') ? ` [${run.repository}]` : '';
+                  console.log(`  ${statusIcon} ${run.name}${repoLabel}: ${run.status.toUpperCase()}`);
+                });
+                
+                if (running.length > 0) {
+                  console.log(`\n⏳ STILL WAITING FOR:`);
+                  running.forEach(r => {
+                    console.log(`   🔄 ${r.name}: ${r.status}`);
+                  });
+                }
+
+                // ✅ CRITICAL: ALL must be completed (no running workflows)
+                const allComplete = running.length === 0 && allRuns.length > 0;
+                
+                if (allComplete) {
+                  console.log(`\n🎉 ALL ${allRuns.length} WORKFLOWS COMPLETED!`);
+                } else {
+                  console.log(`\n⏳ Waiting for ${running.length} workflow(s) to complete...`);
+                }
+
+                return {
+                  all_complete: allComplete,
+                  workflows: allRuns,
+                  running_count: running.length,
+                  completed_count: completed.length,
+                  total_count: allRuns.length,
+                  external_count: externalResult.external_workflows.length,
+                  currently_running: running.map(r => r.name)
+                };
+                
+              } catch (error) {
+                console.log(`❌ Error checking workflows: ${error.message}`);
+                return { 
+                  all_complete: false,
+                  workflows: [], 
+                  error: error.message,
+                  external_count: 0
+                };
+              }
             };
 
-      - name: Send Adaptive Card to Teams
+            // Wait for workflows to initialize
+            console.log('⏳ Waiting 4 minutes for all workflows to initialize...');
+            await new Promise(resolve => setTimeout(resolve, 240000));  // 4 minutes
+
+            let result = await checkAllWorkflows();
+            let attempts = 0;
+            const maxAttempts = 60;  // 60 minutes max wait for main branch
+            
+            console.log(`\n🔍 INITIAL CHECK RESULTS:`);
+            console.log(`Found ${result.total_count} workflows (${result.external_count} external), ${result.running_count} still running`);
+
+            // ✅ CRITICAL: Keep waiting until ALL are complete (no forced completion)
+            while (!result.all_complete && attempts < maxAttempts) {
+              attempts++;
+              console.log(`\n⏳ ATTEMPT ${attempts}/${maxAttempts}:`);
+              console.log(`   Still waiting for: ${result.currently_running?.join(', ') || 'unknown'}`);
+              
+              await new Promise(resolve => setTimeout(resolve, 60000));  // Wait 1 minute
+              result = await checkAllWorkflows();
+            }
+
+            // ✅ CRITICAL: Only proceed if ALL completed OR timeout
+            if (!result.all_complete) {
+              console.log(`\n⏰ TIMEOUT after ${attempts} attempts (${maxAttempts} minutes).`);
+              console.log(`⚠️  Still running: ${result.currently_running?.join(', ') || 'none'}`);
+              console.log(`❌ STOPPING - Will not send notification until all workflows complete!`);
+              
+              // ❌ EXIT WITHOUT SENDING NOTIFICATION
+              process.exit(1);
+            } else {
+              console.log(`\n🎉 SUCCESS: All workflows completed after ${attempts} attempts! (${attempts} minutes)`);
+              console.log(`✅ READY TO SEND NOTIFICATION`);
+            }
+
+            return result;
+
+      # ✅ CRITICAL: This step only runs if ALL workflows completed
+      - name: Send Final Status Notification
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
-          # get JSON outputs from previous steps
           pr_json='${{ steps.pr_info.outputs.result }}'
-          check_json='${{ steps.check_info.outputs.result }}'
+          completion_json='${{ steps.wait_for_completion.outputs.result }}'
 
-          PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
-          PR_TITLE=$(echo "$pr_json" | jq -r '.title' )
-          PR_URL=$(echo "$pr_json" | jq -r '.url')
-          PR_AUTHOR=$(echo "$pr_json" | jq -r '.author')
+          PR_NUMBER=$(echo "$pr_json" | jq -r '.number // "N/A"')
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title // "N/A"' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+          PR_URL=$(echo "$pr_json" | jq -r '.url // "N/A"')
+          PR_AUTHOR=$(echo "$pr_json" | jq -r '.author // "N/A"')
+          HEAD_SHA=$(echo "$pr_json" | jq -r '.head_sha // "N/A"')
+          SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-7)
 
-          STATUS=$(echo "$check_json" | jq -r '.status')
-          FAILURE_LIST=$(echo "$check_json" | jq -r '.failures[]?')
-          if [ "$STATUS" = "failure" ]; then
-            FAIL_TEXT=$(printf "%s\n" $FAILURE_LIST | sed 's/"/\\"/g')
-          else
-            FAIL_TEXT="No failures"
-          fi
+          # Safe parsing with defaults
+          TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
+          EXTERNAL_COUNT=$(echo "$completion_json" | jq -r '.external_count // 0')
 
+          WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
+          
+          SUCCESS_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "success")] | length')
+          FAILED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "failure")] | length')
+          CANCELLED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "cancelled")] | length')
+          SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
 
-          if [ "$STATUS" = "success" ]; then
-            COLOR="#22C55E"
-            ICON="🟢"
-            STATUS_TEXT="Success"
-          elif [ "$STATUS" = "failure" ]; then
-            COLOR="#EF4444"
+          echo "✅ All workflows completed! Building notification..."
+          echo "Total: $TOTAL_COUNT, Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT"
+
+          WORKFLOW_TEXTBLOCKS=""
+          if [ "$TOTAL_COUNT" -gt 0 ]; then
+             echo "Building workflows with colored status text..."
+             WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
+             for i in $(seq 0 $((WORKFLOW_COUNT - 1))); do
+               NAME=$(echo "$WORKFLOWS" | jq -r ".[$i].name")
+               STATUS=$(echo "$WORKFLOWS" | jq -r ".[$i].status | ascii_upcase")
+               URL=$(echo "$WORKFLOWS" | jq -r ".[$i].url")
+               REPO=$(echo "$WORKFLOWS" | jq -r ".[$i].repository // \"\"")
+               TYPE=$(echo "$WORKFLOWS" | jq -r ".[$i].type // \"\"")
+               
+               # Escape quotes for JSON
+               NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
+               
+               # ✅ ENHANCED Color coding for status with specific colors
+               case "$STATUS" in
+                 "SUCCESS")
+                   STATUS_COLOR="Good"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 "FAILURE")
+                   STATUS_COLOR="Attention"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 "CANCELLED")
+                   STATUS_COLOR="Warning"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 "SKIPPED")
+                   STATUS_COLOR="Accent"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 "ERROR")
+                   STATUS_COLOR="Attention"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+                 *)
+                   STATUS_COLOR="Default"
+                   STATUS_WEIGHT="Bolder"
+                   ;;
+               esac
+               
+               # Show repository for external workflows
+               if [[ "$TYPE" == *"external"* ]] && [ "$REPO" != "$GITHUB_REPOSITORY" ] && [ -n "$REPO" ] && [ "$REPO" != "null" ]; then
+                 REPO_TEXT=" [$REPO]"
+               else
+                 REPO_TEXT=""
+               fi
+               
+               # ✅ Enhanced RichTextBlock with better color formatting
+               COMBINED_BLOCK='{
+                 "type": "RichTextBlock",
+                 "inlines": [
+                   {
+                     "type": "TextRun",
+                     "text": "• "
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$NAME_SAFE'",
+                     "selectAction": {
+                       "type": "Action.OpenUrl",
+                       "url": "'$URL'"
+                     }
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": " - "
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$STATUS'",
+                     "color": "'$STATUS_COLOR'",
+                     "weight": "'$STATUS_WEIGHT'",
+                     "size": "Medium"
+                   },
+                   {
+                     "type": "TextRun",
+                     "text": "'$REPO_TEXT'",
+                     "color": "Dark",
+                     "size": "Small"
+                   }
+                 ],
+                 "spacing": "None"
+               }'
+               
+               if [ -z "$WORKFLOW_TEXTBLOCKS" ]; then
+                 WORKFLOW_TEXTBLOCKS="$COMBINED_BLOCK"
+               else
+                 WORKFLOW_TEXTBLOCKS="$WORKFLOW_TEXTBLOCKS,$COMBINED_BLOCK"
+               fi
+             done
+           else
+            WORKFLOW_TEXTBLOCKS='{
+              "type": "TextBlock",
+              "text": "• No workflows found",
+              "wrap": true,
+              "size": "Small",
+              "color": "Default"
+              }'
+            fi
+
+          # ✅ Determine overall status (ALL completed at this point)
+          if [ "$FAILED_COUNT" -gt 0 ]; then
             ICON="🔴"
-            STATUS_TEXT="Failure"
-          elif [ "$STATUS" = "cancelled" ]; then
-            COLOR="#F59E0B"
+            STATUS_TEXT="❌ SOME CHECKS FAILED"
+            COLOR="Attention"
+          elif [ "$CANCELLED_COUNT" -gt 0 ]; then
             ICON="🟠"
-            STATUS_TEXT="Cancelled"
-          else
-            COLOR="#6B7280"
+            STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
+            COLOR="Warning"
+          elif [ "$SUCCESS_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
+            ICON="🟢"
+            STATUS_TEXT="✅ ALL CHECKS PASSED"
+            COLOR="Good"
+          elif [ "$TOTAL_COUNT" -eq 0 ]; then
             ICON="⚪"
-            STATUS_TEXT="Unknown"
+            STATUS_TEXT="⚪ NO WORKFLOWS FOUND"
+            COLOR="Default"
+          else
+            ICON="🟡"
+            STATUS_TEXT="⚠️ MIXED RESULTS"
+            COLOR="Warning"
           fi
 
-          # build adaptive card JSON (simple and compatible)
+          # Completion status (all completed)
+          LOCAL_COUNT=$((TOTAL_COUNT - EXTERNAL_COUNT))
+          COMPLETION_TEXT="✅ All $TOTAL_COUNT workflows completed ($LOCAL_COUNT local + $EXTERNAL_COUNT external)"
+
+          # Escape for JSON
+          TITLE_SAFE="$ICON PR #$PR_NUMBER (Main) — $PR_TITLE"
+
+          echo "📤 Sending Teams notification..."
+
+          # Create final status notification
           cat > card.json <<EOF
           {
             "type": "message",
@@ -138,33 +586,62 @@ jobs:
                          "items": [
                            {
                               "type": "TextBlock",
-                              "text": "$ICON  PR #$PR_NUMBER — $PR_TITLE",
+                              "text": "$TITLE_SAFE",
                               "wrap": true,
                               "weight": "Bolder",
                               "size": "Medium"
                            },
                            {
+                              "type": "TextBlock",
+                              "text": "$STATUS_TEXT",
+                              "wrap": true,
+                              "weight": "Bolder",
+                              "color": "$COLOR",
+                              "size": "Large"
+                           },
+                           {
                               "type": "FactSet",
                               "facts": [
-                                  { "title": "Status:", "value": "$STATUS_TEXT" },
-                                  { "title": "Author:", "value": "$PR_AUTHOR" },
-                                  { "title": "Link:", "value": "$PR_URL" }
+                                    { "title": "Author:", "value": "$PR_AUTHOR" },
+                                    { "title": "Branch:", "value": "main" },
+                                    { "title": "Commit:", "value": "$SHORT_SHA" },
+                                    { "title": "Status:", "value": "$COMPLETION_TEXT" },
+                                    { "title": "Total Workflows:", "value": "$TOTAL_COUNT" },
+                                    { "title": "🏠 Local:", "value": "$LOCAL_COUNT" },
+                                    { "title": "🌐 External:", "value": "$EXTERNAL_COUNT" },
+                                    { "title": "✅ Passed:", "value": "$SUCCESS_COUNT" },
+                                    { "title": "❌ Failed:", "value": "$FAILED_COUNT" },
+                                    { "title": "🟠 Cancelled:", "value": "$CANCELLED_COUNT" },
+                                    { "title": "⏭️ Skipped:", "value": "$SKIPPED_COUNT" }
                                ]
                               },
                               {
-                                "type": "TextBlock",
-                                "text": "**Failure Details:**\n$FAIL_TEXT",
-                                "wrap": true,
-                                "color": "Attention"
-                              }
+                                 "type": "TextBlock",
+                                 "text": "**Final Workflow Results (Local + External):**",
+                                 "wrap": true,
+                                 "weight": "Bolder",
+                                 "size": "Small",
+                                 "spacing": "Medium"
+                              },
+                              $WORKFLOW_TEXTBLOCKS
                             ]
                           }
                         ],
                         "actions": [
                           {
                              "type": "Action.OpenUrl",
-                             "title": "Open Pull Request",
+                             "title": "View PR",
                              "url": "$PR_URL"
+                          },
+                          {
+                             "type": "Action.OpenUrl",
+                             "title": "View All Checks",
+                             "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
+                          },
+                          {
+                              "type": "Action.OpenUrl",
+                              "title": "View Commit",
+                              "url": "https://github.com/${{ github.repository }}/commit/$HEAD_SHA"
                           }
                        ]
                    }
@@ -172,8 +649,9 @@ jobs:
              ]
           }
           EOF
-
-          curl -s -H "Content-Type: application/json" \
+           
+           curl -s -H "Content-Type: application/json" \
             -d @card.json \
-            "$TEAMS_WEBHOOK_URL" || (echo "Failed to send Teams message" && exit 1)
-
+            "$TEAMS_WEBHOOK_URL" || (echo "❌ Failed to send Teams message" && exit 1)
+           
+           echo "✅ Teams notification sent successfully!"
