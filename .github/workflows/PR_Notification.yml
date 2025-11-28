@@ -1,3 +1,7 @@
+# ******************************************************************************
+# Copyright (c) 2025 Advanced Micro Devices, Inc.
+# All rights reserved.
+# ******************************************************************************
 name: PR Status Notification (Main Branch)
 on:
   pull_request:
@@ -44,8 +48,13 @@ jobs:
             
             console.log(`🎯 Looking for workflows triggered by PR #${pr.number}`);
             console.log(`Expected: 3 external workflows (2 in PyTorch + 1 in TensorFlow)`);
+            console.log(`🔑 Using ZIAIE_PAT for cross-repo access`);
             
             try {
+              // Test access
+              const user = await github.rest.users.getAuthenticated();
+              console.log(`✅ Authenticated as: ${user.data.login}`);
+              
               // Wait for triggers to process
               console.log('⏳ Waiting 3 minutes for workflow triggers...');
               await new Promise(resolve => setTimeout(resolve, 180000));
@@ -58,27 +67,29 @@ jobs:
                   owner: 'AMD-Zenai',
                   repo: 'ZenDNN_PyTorch_Plugin',
                   name: 'ZenDNN PyTorch Plugin',
-                  expectedTriggers: [
-                    { event: 'zendnn-pr', workflowName: 'ZenDNN PyTorch CI' },
-                    { event: 'zendnn-zentorch-zendnnl-pr', workflowName: 'ZenTorch ZenDNNL CI' }
-                  ]
+                  expectedTriggers: ['zendnn-pr', 'zendnn-zentorch-zendnnl-pr']
                 },
                 {
                   owner: 'AMD-Zenai', 
                   repo: 'ZenDNN_TensorFlow_Plugin',
                   name: 'ZenDNN TensorFlow Plugin',
-                  expectedTriggers: [
-                    { event: 'zendnn-pr', workflowName: 'ZenDNN TensorFlow CI' }
-                  ]
+                  expectedTriggers: ['zendnn-pr']
                 }
               ];
               
               // Check each external repository
               for (const repoInfo of externalRepos) {
                 console.log(`\n🔍 Checking ${repoInfo.name} for PR #${pr.number}...`);
-                console.log(`   Expected triggers: ${repoInfo.expectedTriggers.map(t => t.event).join(', ')}`);
+                console.log(`   Expected triggers: ${repoInfo.expectedTriggers.join(', ')}`);
                 
                 try {
+                  // Test repo access
+                  const repoResp = await github.rest.repos.get({
+                    owner: repoInfo.owner,
+                    repo: repoInfo.repo
+                  });
+                  console.log(`✅ Repository accessible: ${repoResp.data.full_name}`);
+                  
                   // Get recent workflow runs (last 45 minutes)
                   const response = await github.rest.actions.listWorkflowRunsForRepo({
                     owner: repoInfo.owner,
@@ -86,14 +97,24 @@ jobs:
                     per_page: 50
                   });
                   
-                  const recentRuns = response.data.workflow_runs.filter(run => {
+                  console.log(`📊 Found ${response.data.workflow_runs.length} total workflow runs`);
+                  
+                  // Filter for repository_dispatch events
+                  const dispatchRuns = response.data.workflow_runs.filter(run => 
+                    run.event === 'repository_dispatch'
+                  );
+                  
+                  console.log(`🎯 Found ${dispatchRuns.length} repository_dispatch runs`);
+                  
+                  // Look for recent runs (within 45 minutes)
+                  const recentRuns = dispatchRuns.filter(run => {
                     const age = (Date.now() - new Date(run.created_at)) / (1000 * 60);
-                    return run.event === 'repository_dispatch' && age <= 45;
+                    return age <= 45;
                   });
                   
-                  console.log(`  Found ${recentRuns.length} recent dispatch runs`);
+                  console.log(`  Found ${recentRuns.length} recent dispatch runs to check`);
                   
-                  // Check each run for PR number match in logs
+                  // Check each recent run for PR number match in logs
                   for (const run of recentRuns) {
                     const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
                     const runTitle = run.display_title || run.name || '';
@@ -126,12 +147,13 @@ jobs:
                           
                           const logsText = logsResp.data.toString();
                           
-                          // ✅ ENHANCED: Search for PR details in "display triggering PR information" step
+                          // ✅ ENHANCED: Search for PR details in "Display Triggering PR Information" step
                           const prPatterns = [
                             `PR Number: #${pr.number}`,
                             `🔵 TRIGGERED BY ZENDNN PR:.*PR Number: #${pr.number}`,
                             `Repository: AMD-Zenai/ZenDNN.*PR Number: #${pr.number}`,
-                            `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`
+                            `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`,
+                            `zendnn_pr_number.*${pr.number}`
                           ];
                           
                           // Check if any pattern matches
@@ -256,6 +278,22 @@ jobs:
             
             const checkAllWorkflowsAndChecks = async () => {
               try {
+                // Define ALL important workflows for main branch
+                const importantWorkflows = [
+                  'jira-id-check',
+                  'license-header-check',
+                  'zendnn_build_pr',
+                  'zendnn_build_push',
+                  'trigger_pytorch_plugin',
+                  'trigger_tensorflow_plugin',
+                  'trigger-zentorch-zendnnl',
+                  'check_status',
+                  'check jira id',
+                  'verify jira id',
+                  'check license headers',
+                  'verify license headers'
+                ];
+
                 console.log(`📊 Checking ALL workflows and checks for commit: ${ref.substring(0, 7)}`);
 
                 // ✅ Get ALL LOCAL workflow runs for this commit
@@ -268,12 +306,16 @@ jobs:
                 
                 const workflows = (workflowResp.data.workflow_runs || [])
                   .filter(run => {
+                    const name = run.name.toLowerCase();
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
                     const isSelf = run.id === context.runId;
-                    const isNotification = run.name.toLowerCase().includes('notification') || 
-                                         run.name.toLowerCase().includes('notify') ||
-                                         run.name.toLowerCase().includes('pr status');
+                    const isNotification = name.includes('notification') || 
+                                         name.includes('notify') ||
+                                         name.includes('pr status');
                     
-                    return !isSelf && !isNotification;
+                    return !isSelf && !isNotification && isImportant;
                   });
 
                 // ✅ Get ALL LOCAL check runs for this commit
@@ -286,11 +328,15 @@ jobs:
                 
                 const checks = (checkResp.data.check_runs || [])
                   .filter(check => {
-                    const isNotification = check.name.toLowerCase().includes('notify') || 
-                                         check.name.toLowerCase().includes('notification') ||
-                                         check.name.toLowerCase().includes('pr status');
+                    const name = check.name.toLowerCase();
+                    const isImportant = importantWorkflows.some(important => 
+                      name.includes(important.toLowerCase())
+                    );
+                    const isNotification = name.includes('notify') || 
+                                         name.includes('notification') ||
+                                         name.includes('pr status');
                     
-                    return !isNotification;
+                    return !isNotification && isImportant;
                   });
 
                 // ✅ Get ALL status checks for this commit
@@ -465,7 +511,7 @@ jobs:
             console.log(`\n🔍 INITIAL CHECK RESULTS:`);
             console.log(`Found ${result.total_count} workflows/checks (${result.external_count} external), ${result.running_count} still running`);
 
-            // ✅ CRITICAL: Keep waiting until ALL are complete (no forced completion)
+            // ✅ CRITICAL: Keep waiting until ALL are complete
             while (!result.all_complete && attempts < maxAttempts) {
               attempts++;
               console.log(`\n⏳ ATTEMPT ${attempts}/${maxAttempts}:`);
@@ -475,22 +521,23 @@ jobs:
               result = await checkAllWorkflowsAndChecks();
             }
 
-            // ✅ CRITICAL: Only proceed if ALL completed OR timeout
+            // ✅ Final completion or timeout
             if (!result.all_complete) {
               console.log(`\n⏰ TIMEOUT after ${attempts} attempts (${maxAttempts} minutes).`);
               console.log(`⚠️  Still running: ${result.currently_running?.join(', ') || 'none'}`);
-              console.log(`❌ STOPPING - Will not send notification until all workflows and checks complete!`);
+              console.log(`❌ FORCED COMPLETION - Some workflows may still be running!`);
               
-              // ❌ EXIT WITHOUT SENDING NOTIFICATION
-              process.exit(1);
+              result.all_complete = true;
+              result.timeout_reason = `Timeout after ${maxAttempts} minutes`;
+              result.forced_completion = true;
             } else {
               console.log(`\n🎉 SUCCESS: All workflows and checks completed after ${attempts} attempts! (${attempts} minutes)`);
-              console.log(`✅ READY TO SEND NOTIFICATION`);
+              result.forced_completion = false;
             }
 
             return result;
 
-      # ✅ CRITICAL: This step only runs if ALL workflows and checks completed
+      # ✅ This step runs when monitoring is complete
       - name: Send Complete Status Notification
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -506,11 +553,14 @@ jobs:
           SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-7)
 
           # Safe parsing with defaults
+          ALL_COMPLETE=$(echo "$completion_json" | jq -r '.all_complete // false')
           TOTAL_COUNT=$(echo "$completion_json" | jq -r '.total_count // 0')
           EXTERNAL_COUNT=$(echo "$completion_json" | jq -r '.external_count // 0')
           WORKFLOW_COUNT=$(echo "$completion_json" | jq -r '.workflow_count // 0')
           CHECK_COUNT=$(echo "$completion_json" | jq -r '.check_count // 0')
           STATUS_COUNT=$(echo "$completion_json" | jq -r '.status_count // 0')
+          RUNNING_COUNT=$(echo "$completion_json" | jq -r '.running_count // 0')
+          FORCED_COMPLETION=$(echo "$completion_json" | jq -r '.forced_completion // false')
 
           WORKFLOWS=$(echo "$completion_json" | jq -c '.workflows // []')
           
@@ -520,7 +570,7 @@ jobs:
           SKIPPED_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "skipped")] | length')
           NEUTRAL_COUNT=$(echo "$WORKFLOWS" | jq '[.[] | select(.status == "neutral")] | length')
 
-          echo "✅ All workflows and checks completed! Building notification..."
+          echo "✅ Workflow monitoring completed! Building notification..."
           echo "Total: $TOTAL_COUNT (Workflows: $WORKFLOW_COUNT, Checks: $CHECK_COUNT, Status: $STATUS_COUNT, External: $EXTERNAL_COUNT)"
           echo "Results: Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Cancelled: $CANCELLED_COUNT, Skipped: $SKIPPED_COUNT"
 
@@ -538,35 +588,28 @@ jobs:
                # Escape quotes for JSON
                NAME_SAFE=$(echo "$NAME" | sed 's/"/\\"/g')
                
-               # ✅ ENHANCED Color coding for status with specific colors
+               # ✅ Color coding for status
                case "$STATUS" in
                  "SUCCESS")
                    STATUS_COLOR="Good"
-                   STATUS_WEIGHT="Bolder"
                    ;;
                  "FAILURE")
                    STATUS_COLOR="Attention"
-                   STATUS_WEIGHT="Bolder"
                    ;;
                  "CANCELLED")
                    STATUS_COLOR="Warning"
-                   STATUS_WEIGHT="Bolder"
                    ;;
                  "SKIPPED")
-                   STATUS_COLOR="Accent"
-                   STATUS_WEIGHT="Bolder"
+                   STATUS_COLOR="Default"
                    ;;
                  "NEUTRAL")
                    STATUS_COLOR="Default"
-                   STATUS_WEIGHT="Bolder"
                    ;;
-                 "ERROR")
-                   STATUS_COLOR="Attention"
-                   STATUS_WEIGHT="Bolder"
+                 "IN_PROGRESS"|"QUEUED"|"PENDING")
+                   STATUS_COLOR="Default"
                    ;;
                  *)
                    STATUS_COLOR="Default"
-                   STATUS_WEIGHT="Bolder"
                    ;;
                esac
                
@@ -581,7 +624,7 @@ jobs:
                  REPO_TEXT=""
                fi
                
-               # ✅ Enhanced RichTextBlock with better color formatting
+               # Create RichTextBlock with colored status
                COMBINED_BLOCK='{
                  "type": "RichTextBlock",
                  "inlines": [
@@ -605,8 +648,7 @@ jobs:
                      "type": "TextRun",
                      "text": "'$STATUS'",
                      "color": "'$STATUS_COLOR'",
-                     "weight": "'$STATUS_WEIGHT'",
-                     "size": "Medium"
+                     "weight": "Bolder"
                    },
                    {
                      "type": "TextRun",
@@ -634,7 +676,7 @@ jobs:
               }'
             fi
 
-          # ✅ Determine overall status (ALL completed at this point)
+          # Determine overall status
           if [ "$FAILED_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS_TEXT="❌ SOME CHECKS FAILED"
@@ -643,11 +685,15 @@ jobs:
             ICON="🟠"
             STATUS_TEXT="🟠 SOME CHECKS CANCELLED"
             COLOR="Warning"
-          elif [ "$SUCCESS_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
+          elif [ "$FORCED_COMPLETION" = "true" ]; then
+            ICON="🟡"
+            STATUS_TEXT="⏰ TIMEOUT - SOME CHECKS MAY STILL BE RUNNING"
+            COLOR="Warning"
+          elif [ "$ALL_COMPLETE" = "true" ] && [ "$SUCCESS_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
             ICON="🟢"
             STATUS_TEXT="✅ ALL CHECKS PASSED"
             COLOR="Good"
-          elif [ "$TOTAL_COUNT" -eq 0 ]; then
+          elif [ "$ALL_COMPLETE" = "true" ] && [ "$TOTAL_COUNT" -eq 0 ]; then
             ICON="⚪"
             STATUS_TEXT="⚪ NO WORKFLOWS OR CHECKS FOUND"
             COLOR="Default"
@@ -657,9 +703,15 @@ jobs:
             COLOR="Warning"
           fi
 
-          # Completion status (all completed)
+          # Completion status
           LOCAL_COUNT=$((TOTAL_COUNT - EXTERNAL_COUNT))
-          COMPLETION_TEXT="✅ All $TOTAL_COUNT workflows and checks completed ($LOCAL_COUNT local + $EXTERNAL_COUNT external)"
+          if [ "$FORCED_COMPLETION" = "true" ]; then
+            COMPLETION_TEXT="⏰ Timeout reached - $RUNNING_COUNT workflows may still be running"
+          elif [ "$ALL_COMPLETE" = "true" ]; then
+            COMPLETION_TEXT="✅ All $TOTAL_COUNT workflows and checks completed ($LOCAL_COUNT local + $EXTERNAL_COUNT external)"
+          else
+            COMPLETION_TEXT="⏰ $RUNNING_COUNT of $TOTAL_COUNT workflows still running"
+          fi
 
           # Escape for JSON
           TITLE_SAFE="$ICON PR #$PR_NUMBER (Main) — $PR_TITLE"
