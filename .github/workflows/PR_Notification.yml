@@ -1,7 +1,3 @@
-# ******************************************************************************
-# Copyright (c) 2025 Advanced Micro Devices, Inc.
-# All rights reserved.
-# ******************************************************************************
 name: PR Status Notification (Main Branch)
 on:
   pull_request:
@@ -97,50 +93,31 @@ jobs:
                   
                   console.log(`  Found ${recentRuns.length} recent dispatch runs`);
                   
-                  // Check each run for PR number match
+                  // Check each run for PR number match in logs
                   for (const run of recentRuns) {
                     const age = Math.round((Date.now() - new Date(run.created_at)) / (1000 * 60));
                     const runTitle = run.display_title || run.name || '';
                     
-                    console.log(`    Checking: "${runTitle}" (${age}m ago)`);
+                    console.log(`    🔍 Checking run: "${runTitle}" (${age}m ago)`);
                     
-                    // ✅ MATCH METHOD 1: Check title for PR number
-                    const prInTitle = runTitle.match(/(?:PR[:\s#]*|#)(\d+)/i);
-                    if (prInTitle && prInTitle[1] === pr.number.toString()) {
-                      console.log(`      ✅ MATCHED by title!`);
-                      
-                      // Determine which trigger this represents
-                      let triggerType = 'Unknown';
-                      if (runTitle.toLowerCase().includes('zentorch') || runTitle.toLowerCase().includes('zendnnl')) {
-                        triggerType = 'ZenTorch ZenDNNL';
-                      } else if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
-                        triggerType = 'ZenDNN PyTorch';
-                      } else if (repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
-                        triggerType = 'ZenDNN TensorFlow';
-                      }
-                      
-                      matchedWorkflows.push({
-                        id: run.id,
-                        name: `${repoInfo.name} (${triggerType})`,
-                        status: run.conclusion || run.status,
-                        url: run.html_url,
-                        repository: `${repoInfo.owner}/${repoInfo.repo}`,
-                        workflow_name: runTitle,
-                        trigger_type: triggerType
-                      });
-                      continue; // Found match, skip log checking
-                    }
-                    
-                    // ✅ MATCH METHOD 2: Check logs for PR payload and trigger type
                     try {
+                      // Get jobs for this workflow run
                       const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
                         owner: repoInfo.owner,
                         repo: repoInfo.repo,
                         run_id: run.id
                       });
                       
+                      let foundMatch = false;
+                      let triggerType = 'Unknown';
+                      
+                      // Check each job's logs for PR details
                       for (const job of jobsResp.data.jobs) {
+                        if (foundMatch) break;
+                        
                         try {
+                          console.log(`      📄 Checking job: ${job.name}`);
+                          
                           const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
                             owner: repoInfo.owner,
                             repo: repoInfo.repo,
@@ -149,44 +126,63 @@ jobs:
                           
                           const logsText = logsResp.data.toString();
                           
-                          // Look for specific PR number patterns in logs
+                          // ✅ ENHANCED: Search for PR details in "display triggering PR information" step
                           const prPatterns = [
-                            `"zendnn_pr_number": "${pr.number}"`,
-                            `zendnn_pr_number.*${pr.number}`,
-                            `PR #${pr.number} -`
+                            `PR Number: #${pr.number}`,
+                            `🔵 TRIGGERED BY ZENDNN PR:.*PR Number: #${pr.number}`,
+                            `Repository: AMD-Zenai/ZenDNN.*PR Number: #${pr.number}`,
+                            `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`
                           ];
                           
-                          if (prPatterns.some(pattern => new RegExp(pattern, 'i').test(logsText))) {
-                            console.log(`      ✅ MATCHED by logs!`);
+                          // Check if any pattern matches
+                          const matchedPattern = prPatterns.find(pattern => 
+                            new RegExp(pattern, 'is').test(logsText)
+                          );
+                          
+                          if (matchedPattern) {
+                            console.log(`        ✅ FOUND PR #${pr.number} in logs!`);
+                            console.log(`        📍 Matched pattern: ${matchedPattern}`);
                             
                             // Determine trigger type from logs
-                            let triggerType = 'Unknown';
-                            if (logsText.includes('zendnn-zentorch-zendnnl-pr') || logsText.includes('zentorch')) {
+                            if (logsText.includes('Dispatch Type: zendnn-zentorch-zendnnl-pr') || 
+                                logsText.includes('zendnn-zentorch-zendnnl-pr')) {
                               triggerType = 'ZenTorch ZenDNNL';
-                            } else if (logsText.includes('zendnn-pr') && repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
-                              triggerType = 'ZenDNN PyTorch';
-                            } else if (logsText.includes('zendnn-pr') && repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
-                              triggerType = 'ZenDNN TensorFlow';
+                            } else if (logsText.includes('Dispatch Type: zendnn-pr')) {
+                              if (repoInfo.repo === 'ZenDNN_PyTorch_Plugin') {
+                                triggerType = 'ZenDNN PyTorch';
+                              } else if (repoInfo.repo === 'ZenDNN_TensorFlow_Plugin') {
+                                triggerType = 'ZenDNN TensorFlow';
+                              }
                             }
                             
-                            matchedWorkflows.push({
-                              id: run.id,
-                              name: `${repoInfo.name} (${triggerType})`,
-                              status: run.conclusion || run.status,
-                              url: run.html_url,
-                              repository: `${repoInfo.owner}/${repoInfo.repo}`,
-                              workflow_name: runTitle,
-                              trigger_type: triggerType
-                            });
-                            break; // Found match, stop checking other jobs
+                            foundMatch = true;
+                            break;
                           }
                           
                         } catch (logError) {
-                          // Skip if can't get logs
+                          console.log(`        ❌ Could not get logs for job ${job.id}: ${logError.message}`);
                         }
                       }
+                      
+                      // If match found, add to results
+                      if (foundMatch) {
+                        console.log(`      🎯 MATCH CONFIRMED: ${triggerType} workflow for PR #${pr.number}`);
+                        
+                        matchedWorkflows.push({
+                          id: run.id,
+                          name: `${repoInfo.name} (${triggerType})`,
+                          status: run.conclusion || run.status,
+                          url: run.html_url,
+                          repository: `${repoInfo.owner}/${repoInfo.repo}`,
+                          workflow_name: runTitle,
+                          trigger_type: triggerType
+                        });
+                      } else {
+                        console.log(`      ❌ No PR #${pr.number} reference found in this run`);
+                      }
+                      
                     } catch (jobError) {
-                      // Skip if can't get jobs
+                      console.log(`      ❌ Could not get jobs for run ${run.id}: ${jobError.message}`);
                     }
                   }
                   
@@ -196,14 +192,24 @@ jobs:
               }
               
               console.log(`\n🎯 FINAL RESULT: Found ${matchedWorkflows.length}/3 expected workflows for PR #${pr.number}`);
-              matchedWorkflows.forEach(wf => {
-                console.log(`  ✅ ${wf.name}: ${wf.status} - ${wf.url}`);
-              });
+              if (matchedWorkflows.length > 0) {
+                console.log(`✅ MATCHED WORKFLOWS:`);
+                matchedWorkflows.forEach(wf => {
+                  console.log(`  ✅ ${wf.name}: ${wf.status} - ${wf.url}`);
+                });
+              } else {
+                console.log(`❌ NO MATCHING WORKFLOWS FOUND`);
+                console.log(`   This could mean:`);
+                console.log(`   1. Workflows are still starting up`);
+                console.log(`   2. Triggers failed to fire`);
+                console.log(`   3. External repositories are not accessible`);
+              }
               
               // Log if we're missing any expected workflows
               if (matchedWorkflows.length < 3) {
                 console.log(`\n⚠️  Expected 3 workflows, found ${matchedWorkflows.length}`);
-                console.log(`   Missing workflows may still be starting up or may have failed to trigger`);
+                const missing = 3 - matchedWorkflows.length;
+                console.log(`   Missing ${missing} workflow(s) - will wait for them to appear`);
               }
               
               return {
