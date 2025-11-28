@@ -249,6 +249,22 @@ jobs:
             console.log(`🔍 Monitoring checks for PR #${pr.number} (commit: ${ref.substring(0, 7)})`);
             console.log(`External workflows found: ${externalResult.workflows.length}`);
             
+            // ✅ EXCLUSION LIST - Remove specific checks
+            const excludedChecks = [
+              'amd-zenai/zendnn_tensorflow_plugin ci',
+              'amd-zenai/zendnn_pytorch_plugin ci', 
+              'amd-zenai/zendnn_pytorch_plugin zendnnl ci',
+              'check-commit-messages',
+              'notification',
+              'notify',
+              'intelligent analysis'
+            ];
+            
+            const isExcluded = (name) => {
+              const lowerName = name.toLowerCase();
+              return excludedChecks.some(excluded => lowerName.includes(excluded));
+            };
+            
             const getAllChecks = async () => {
               const allChecks = [];
               
@@ -263,12 +279,8 @@ jobs:
                 console.log(`   Found ${workflowResp.data.workflow_runs.length} workflow runs`);
                 
                 workflowResp.data.workflow_runs.forEach(run => {
-                  const name = run.name.toLowerCase();
-                  
-                  if (run.id === context.runId || 
-                      name.includes('notification') || 
-                      name.includes('notify') ||
-                      name.includes('intelligent analysis')) {
+                  // Skip self, excluded workflows
+                  if (run.id === context.runId || isExcluded(run.name)) {
                     return;
                   }
                   
@@ -288,14 +300,12 @@ jobs:
                 console.log(`   Found ${checkResp.data.check_runs.length} check runs`);
                 
                 checkResp.data.check_runs.forEach(check => {
-                  const name = check.name.toLowerCase();
-                  
-                  if (name.includes('notification') || 
-                      name.includes('notify') ||
-                      name.includes('intelligent analysis')) {
+                  // Skip excluded checks
+                  if (isExcluded(check.name)) {
                     return;
                   }
                   
+                  // Avoid duplicates
                   if (!allChecks.find(c => c.name === check.name)) {
                     allChecks.push({
                       name: check.name,
@@ -314,6 +324,12 @@ jobs:
                 console.log(`   Found ${statusResp.data.statuses.length} status checks`);
                 
                 statusResp.data.statuses.forEach(status => {
+                  // Skip excluded status checks
+                  if (isExcluded(status.context)) {
+                    return;
+                  }
+                  
+                  // Avoid duplicates
                   if (!allChecks.find(c => c.name === status.context)) {
                     allChecks.push({
                       name: status.context,
@@ -354,6 +370,12 @@ jobs:
                 console.log(`📋 Total checks collected: ${allChecks.length}`);
                 console.log(`   Local: ${allChecks.filter(c => c.type === 'local').length}`);
                 console.log(`   External: ${allChecks.filter(c => c.type === 'external').length}`);
+                
+                // ✅ LOG EXCLUDED CHECKS
+                const excludedCount = (workflowResp.data.workflow_runs.length + 
+                                    checkResp.data.check_runs.length + 
+                                    statusResp.data.statuses.length) - allChecks.length + externalResult.workflows.length;
+                console.log(`   Excluded: ${excludedCount} checks (CI status checks, commit-messages, notifications)`);
                 
                 return allChecks;
                 
@@ -449,7 +471,7 @@ jobs:
           ERROR_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "error")] | length')
           PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued" or .status == "waiting")] | length')
 
-          echo "📊 Statistics:"
+          echo "📊 Statistics (FILTERED - Excluded CI status checks and check-commit-messages):"
           echo "   Total: $TOTAL_COUNT ($((TOTAL_COUNT - EXTERNAL_COUNT)) local + $EXTERNAL_COUNT external)"
           echo "   Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Skipped: $SKIPPED_COUNT"
           echo "   Completion time: ${COMPLETION_TIME}m, Still running: $STILL_RUNNING"
@@ -481,7 +503,7 @@ jobs:
           fi
 
           # Build check list - ENSURE URLs ARE PRESERVED
-          echo "🔨 Building check list..."
+          echo "🔨 Building filtered check list..."
           CHECKS_LIST=""
           CHECK_COUNT=$(echo "$CHECKS" | jq 'length')
           
@@ -503,7 +525,7 @@ jobs:
               "SUCCESS") STATUS_COLOR="Good"; STATUS_WEIGHT="Bolder" ;;
               "FAILURE") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               "CANCELLED") STATUS_COLOR="Warning"; STATUS_WEIGHT="Bolder" ;;
-              "SKIPPED") STATUS_COLOR="Accent"; STATUS_WEIGHT="Bolder" ;;
+              "SKIPPED") STATUS_COLOR="Default"; STATUS_WEIGHT="Bolder" ;;
               "NEUTRAL") STATUS_COLOR="Default"; STATUS_WEIGHT="Bolder" ;;
               "ERROR") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               *) STATUS_COLOR="Default"; STATUS_WEIGHT="Normal" ;;
