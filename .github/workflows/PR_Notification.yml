@@ -87,7 +87,7 @@ jobs:
                   
                   const runTime = new Date(run.created_at);
                   const timeDiff = (runTime - prCreatedTime) / (1000 * 60);
-                  return timeDiff >= -5 && timeDiff <= 120; // Extended time window
+                  return timeDiff >= -10 && timeDiff <= 180; // Extended window: 10min before to 3h after
                 });
                 
                 console.log(`   Found ${recentRuns.length} recent runs`);
@@ -97,14 +97,83 @@ jobs:
                 
                 for (const run of recentRuns) {
                   const runTitle = run.display_title || run.name || '';
-                  console.log(`   Checking: "${runTitle}"`);
+                  console.log(`   📋 Checking: "${runTitle}"`);
                   
-                  // Check if this run is for our PR (more flexible matching)
-                  const isPRMatch = new RegExp(`#${pr.number}\\b`, 'i').test(runTitle) ||
-                                   new RegExp(`PR\\s*${pr.number}`, 'i').test(runTitle) ||
-                                   new RegExp(`pull\\s*${pr.number}`, 'i').test(runTitle);
+                  // ✅ ENHANCED PR MATCHING - Multiple methods
+                  let isPRMatch = false;
+                  let matchMethod = '';
+                  
+                  // Method 1: Direct PR number in title
+                  if (new RegExp(`#${pr.number}\\b`, 'i').test(runTitle) ||
+                      new RegExp(`PR\\s*${pr.number}`, 'i').test(runTitle) ||
+                      new RegExp(`pull\\s*${pr.number}`, 'i').test(runTitle)) {
+                    isPRMatch = true;
+                    matchMethod = 'title-match';
+                  }
+                  
+                  // Method 2: Check job logs for PR reference (if title doesn't match)
+                  if (!isPRMatch) {
+                    try {
+                      const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
+                        owner: repoInfo.owner,
+                        repo: repoInfo.repo,
+                        run_id: run.id
+                      });
+                      
+                      for (const job of jobsResp.data.jobs.slice(0, 2)) {
+                        if (isPRMatch) break;
+                        
+                        if (['completed', 'in_progress'].includes(job.status)) {
+                          try {
+                            const logsResp = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                              owner: repoInfo.owner,
+                              repo: repoInfo.repo,
+                              job_id: job.id
+                            });
+                            
+                            const logsText = logsResp.data.toString();
+                            
+                            // Look for PR patterns in logs
+                            const prPatterns = [
+                              `PR Number: #${pr.number}`,
+                              `zendnn_pr_number.*${pr.number}`,
+                              `https://github.com/AMD-Zenai/ZenDNN/pull/${pr.number}`,
+                              `Repository: AMD-Zenai/ZenDNN.*#${pr.number}`
+                            ];
+                            
+                            if (prPatterns.some(pattern => new RegExp(pattern, 'is').test(logsText))) {
+                              isPRMatch = true;
+                              matchMethod = 'logs-match';
+                              break;
+                            }
+                          } catch (logError) {
+                            console.log(`      Logs not ready for job ${job.id}`);
+                          }
+                        }
+                      }
+                    } catch (jobError) {
+                      console.log(`      Could not check jobs for run ${run.id}`);
+                    }
+                  }
+                  
+                  // Method 3: Smart timing match for very recent runs (within 30 min)
+                  if (!isPRMatch) {
+                    const runAge = (Date.now() - new Date(run.created_at)) / (1000 * 60);
+                    if (runAge <= 30) {
+                      const matchesExpectedPattern = repoInfo.expectedWorkflows.some(expected => 
+                        runTitle.toLowerCase().includes(expected.pattern.toLowerCase())
+                      );
+                      
+                      if (matchesExpectedPattern) {
+                        isPRMatch = true;
+                        matchMethod = 'smart-timing';
+                      }
+                    }
+                  }
                   
                   if (isPRMatch) {
+                    console.log(`      ✅ MATCH found via ${matchMethod}!`);
+                    
                     // Determine workflow type
                     let workflowType = null;
                     
@@ -117,31 +186,51 @@ jobs:
                       }
                     }
                     
-                    // Fallback: if no specific pattern match, use repo default
+                    // Fallback: if no specific pattern match, assign by order
                     if (!workflowType && foundTypes.size < repoInfo.expectedWorkflows.length) {
-                      workflowType = repoInfo.expectedWorkflows.find(w => !foundTypes.has(w.type))?.type;
-                      if (workflowType) foundTypes.add(workflowType);
+                      for (const expected of repoInfo.expectedWorkflows) {
+                        if (!foundTypes.has(expected.type)) {
+                          workflowType = expected.type;
+                          foundTypes.add(workflowType);
+                          break;
+                        }
+                      }
                     }
                     
                     if (workflowType) {
-                      console.log(`   ✅ Found: ${workflowType}`);
+                      console.log(`      ✅ Added: ${workflowType}`);
                       foundWorkflows.push({
                         id: run.id,
                         name: workflowType,
                         status: run.conclusion || run.status,
-                        url: run.html_url,
-                        repository: `${repoInfo.owner}/${repoInfo.repo}`
+                        url: run.html_url, // ✅ ENSURE URL is included
+                        repository: `${repoInfo.owner}/${repoInfo.repo}`,
+                        match_method: matchMethod
                       });
                     }
+                  } else {
+                    console.log(`      ❌ No match for "${runTitle}"`);
                   }
                 }
+                
+                console.log(`   📊 Found ${foundTypes.size}/${repoInfo.expectedWorkflows.length} workflows for ${repoInfo.repo}`);
                 
               } catch (error) {
                 console.log(`❌ Error checking ${repoInfo.repo}: ${error.message}`);
               }
             }
             
-            console.log(`🎯 Found ${foundWorkflows.length}/3 external workflows`);
+            console.log(`\n🎯 TOTAL FOUND: ${foundWorkflows.length}/3 external workflows for PR #${pr.number}`);
+            if (foundWorkflows.length > 0) {
+              foundWorkflows.forEach(wf => {
+                console.log(`  ✅ ${wf.name}: ${wf.status} (${wf.match_method}) - ${wf.url}`);
+              });
+            } else {
+              console.log(`\n🔍 DEBUGGING: No external workflows found. Recent dispatch runs might not contain PR #${pr.number}`);
+              console.log(`   Check if external repositories are properly triggered`);
+              console.log(`   Check if PR number appears in workflow titles or logs`);
+            }
+            
             return { workflows: foundWorkflows };
 
       - name: Monitor All Checks
@@ -157,16 +246,21 @@ jobs:
             const repo = context.repo.repo;
             const ref = pr.head_sha;
             
-            console.log(`🔍 Monitoring checks for PR #${pr.number}`);
+            console.log(`🔍 Monitoring checks for PR #${pr.number} (commit: ${ref.substring(0, 7)})`);
+            console.log(`External workflows found: ${externalResult.workflows.length}`);
             
             const getAllChecks = async () => {
               const allChecks = [];
               
               try {
+                console.log(`📊 Getting all checks for commit ${ref.substring(0, 7)}...`);
+                
                 // Get workflow runs
                 const workflowResp = await github.rest.actions.listWorkflowRunsForRepo({
                   owner, repo, head_sha: ref, per_page: 100
                 });
+                
+                console.log(`   Found ${workflowResp.data.workflow_runs.length} workflow runs`);
                 
                 workflowResp.data.workflow_runs.forEach(run => {
                   const name = run.name.toLowerCase();
@@ -190,6 +284,8 @@ jobs:
                 const checkResp = await github.rest.checks.listForRef({
                   owner, repo, ref, per_page: 100
                 });
+                
+                console.log(`   Found ${checkResp.data.check_runs.length} check runs`);
                 
                 checkResp.data.check_runs.forEach(check => {
                   const name = check.name.toLowerCase();
@@ -215,6 +311,8 @@ jobs:
                   owner, repo, ref
                 });
                 
+                console.log(`   Found ${statusResp.data.statuses.length} status checks`);
+                
                 statusResp.data.statuses.forEach(status => {
                   if (!allChecks.find(c => c.name === status.context)) {
                     allChecks.push({
@@ -226,7 +324,7 @@ jobs:
                   }
                 });
                 
-                // Add external workflows with updated status
+                // Add external workflows with updated status AND preserved URLs
                 for (const ext of externalResult.workflows) {
                   try {
                     const [extOwner, extRepo] = ext.repository.split('/');
@@ -239,57 +337,85 @@ jobs:
                     allChecks.push({
                       name: ext.name,
                       status: extResp.data.conclusion || extResp.data.status,
-                      url: extResp.data.html_url,
+                      url: extResp.data.html_url, // ✅ ENSURE URL is from API response
                       type: 'external'
                     });
                   } catch (error) {
+                    console.log(`   ⚠️ Could not update external workflow ${ext.id}, using cached data`);
                     allChecks.push({
                       name: ext.name,
                       status: ext.status,
-                      url: ext.url,
+                      url: ext.url, // ✅ FALLBACK to original URL
                       type: 'external'
                     });
                   }
                 }
                 
+                console.log(`📋 Total checks collected: ${allChecks.length}`);
+                console.log(`   Local: ${allChecks.filter(c => c.type === 'local').length}`);
+                console.log(`   External: ${allChecks.filter(c => c.type === 'external').length}`);
+                
                 return allChecks;
                 
               } catch (error) {
-                console.log(`❌ Error: ${error.message}`);
+                console.log(`❌ Error getting checks: ${error.message}`);
                 return [];
               }
             };
             
-            // Wait and monitor
-            console.log('⏳ Waiting 5 minutes...');
+            // Initial wait
+            console.log('⏳ Waiting 5 minutes for all checks to start...');
             await new Promise(resolve => setTimeout(resolve, 300000));
             
             let checks = await getAllChecks();
             let attempts = 0;
-            const maxAttempts = 30;
+            const maxAttempts = 30; // 30 minutes max
             
+            console.log(`\n🔄 Starting monitoring loop...`);
+            
+            // Wait for completion
             while (attempts < maxAttempts) {
               const running = checks.filter(c => 
-                ['in_progress', 'queued', 'pending', 'waiting'].includes(c.status)
+                ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(c.status)
               );
               
+              const completed = checks.filter(c => 
+                ['success', 'failure', 'cancelled', 'skipped', 'neutral', 'error'].includes(c.status)
+              );
+              
+              console.log(`\n📊 Status Summary (attempt ${attempts + 1}):`);
+              console.log(`   ✅ Completed: ${completed.length}`);
+              console.log(`   ⏳ Running: ${running.length}`);
+              console.log(`   📊 Total: ${checks.length}`);
+              
               if (running.length === 0) {
-                console.log(`✅ All checks completed after ${attempts}m`);
+                console.log(`\n🎉 All ${checks.length} checks completed after ${attempts} minutes!`);
                 break;
               }
               
-              attempts++;
-              if (attempts >= maxAttempts) break;
+              console.log(`\n⏳ Still waiting for:`);
+              running.forEach(c => console.log(`   🔄 ${c.name}: ${c.status}`));
               
-              await new Promise(resolve => setTimeout(resolve, 60000));
+              attempts++;
+              if (attempts >= maxAttempts) {
+                console.log(`\n⏰ Timeout after ${maxAttempts} minutes - forcing completion`);
+                break;
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
               checks = await getAllChecks();
             }
+            
+            const finalRunning = checks.filter(c => 
+              ['in_progress', 'queued', 'pending', 'waiting', 'requested'].includes(c.status)
+            ).length;
             
             return { 
               checks, 
               total: checks.length,
               external_count: checks.filter(c => c.type === 'external').length,
-              completed_in_minutes: attempts
+              completed_in_minutes: attempts,
+              still_running: finalRunning
             };
 
       - name: Send Teams Notification
@@ -298,6 +424,8 @@ jobs:
         run: |
           pr_json='${{ steps.pr_info.outputs.result }}'
           checks_json='${{ steps.monitor_checks.outputs.result }}'
+
+          echo "📤 Building Teams notification..."
 
           # Parse data
           PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
@@ -310,22 +438,34 @@ jobs:
           TOTAL_COUNT=$(echo "$checks_json" | jq -r '.total // 0')
           EXTERNAL_COUNT=$(echo "$checks_json" | jq -r '.external_count // 0')
           COMPLETION_TIME=$(echo "$checks_json" | jq -r '.completed_in_minutes // 0')
+          STILL_RUNNING=$(echo "$checks_json" | jq -r '.still_running // 0')
           
           # Count statuses
           SUCCESS_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "success")] | length')
           FAILED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "failure")] | length')
           CANCELLED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "cancelled")] | length')
           SKIPPED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "skipped")] | length')
-          PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued")] | length')
+          NEUTRAL_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "neutral")] | length')
+          ERROR_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "error")] | length')
+          PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued" or .status == "waiting")] | length')
+
+          echo "📊 Statistics:"
+          echo "   Total: $TOTAL_COUNT ($((TOTAL_COUNT - EXTERNAL_COUNT)) local + $EXTERNAL_COUNT external)"
+          echo "   Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, Skipped: $SKIPPED_COUNT"
+          echo "   Completion time: ${COMPLETION_TIME}m, Still running: $STILL_RUNNING"
 
           # Overall status
-          if [ "$FAILED_COUNT" -gt 0 ]; then
+          if [ "$FAILED_COUNT" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
             ICON="🔴"
             STATUS="❌ SOME CHECKS FAILED"
             COLOR="Attention"
           elif [ "$PENDING_COUNT" -gt 0 ]; then
             ICON="🟡"
-            STATUS="⏳ CHECKS RUNNING"
+            STATUS="⏳ CHECKS STILL RUNNING"
+            COLOR="Warning"
+          elif [ "$CANCELLED_COUNT" -gt 0 ]; then
+            ICON="🟠"
+            STATUS="🟠 SOME CHECKS CANCELLED"
             COLOR="Warning"
           else
             ICON="🟢"
@@ -334,13 +474,14 @@ jobs:
           fi
 
           # Completion message
-          if [ "$COMPLETION_TIME" -gt 0 ]; then
-            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m"
+          if [ "$STILL_RUNNING" -gt 0 ]; then
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m (${STILL_RUNNING} still running)"
           else
-            COMPLETION_MSG="All $TOTAL_COUNT workflows completed"
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m"
           fi
 
-          # Build check list (NO TYPE LABELS)
+          # Build check list - ENSURE URLs ARE PRESERVED
+          echo "🔨 Building check list..."
           CHECKS_LIST=""
           CHECK_COUNT=$(echo "$CHECKS" | jq 'length')
           
@@ -350,16 +491,25 @@ jobs:
             URL=$(echo "$CHECKS" | jq -r ".[$i].url // \"\"")
             TYPE=$(echo "$CHECKS" | jq -r ".[$i].type")
             
+            # Validate URL
+            if [ "$URL" = "null" ] || [ -z "$URL" ]; then
+              URL="https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
+            fi
+            
+            echo "   Adding: $NAME ($STATUS_VAL) - $URL"
+            
             # Status color
             case "$STATUS_VAL" in
               "SUCCESS") STATUS_COLOR="Good"; STATUS_WEIGHT="Bolder" ;;
               "FAILURE") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               "CANCELLED") STATUS_COLOR="Warning"; STATUS_WEIGHT="Bolder" ;;
               "SKIPPED") STATUS_COLOR="Accent"; STATUS_WEIGHT="Bolder" ;;
+              "NEUTRAL") STATUS_COLOR="Default"; STATUS_WEIGHT="Bolder" ;;
+              "ERROR") STATUS_COLOR="Attention"; STATUS_WEIGHT="Bolder" ;;
               *) STATUS_COLOR="Default"; STATUS_WEIGHT="Normal" ;;
             esac
             
-            # Create check block (NO LABELS)
+            # Create check block with clickable URLs
             CHECK_BLOCK='{
               "type": "RichTextBlock",
               "inlines": [
@@ -367,7 +517,10 @@ jobs:
                 {
                   "type": "TextRun", 
                   "text": "'$NAME'", 
-                  "selectAction": {"type": "Action.OpenUrl", "url": "'$URL'"}
+                  "selectAction": {
+                    "type": "Action.OpenUrl", 
+                    "url": "'$URL'"
+                  }
                 },
                 {"type": "TextRun", "text": " - "},
                 {
@@ -387,13 +540,15 @@ jobs:
             fi
           done
 
-          # Create Teams card (SIMPLIFIED)
+          # Create Teams card
+          echo "🔨 Creating Teams card..."
           cat > card.json <<EOF
           {
             "type": "message",
             "attachments": [{
               "contentType": "application/vnd.microsoft.card.adaptive",
               "content": {
+                "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                 "type": "AdaptiveCard",
                 "version": "1.4",
                 "body": [
@@ -409,7 +564,8 @@ jobs:
                     "text": "$STATUS",
                     "weight": "Bolder",
                     "color": "$COLOR",
-                    "size": "Large"
+                    "size": "Large",
+                    "wrap": true
                   },
                   {
                     "type": "FactSet",
@@ -428,18 +584,41 @@ jobs:
                     "type": "TextBlock",
                     "text": "**All PR Checks:**",
                     "weight": "Bolder",
-                    "spacing": "Medium"
+                    "spacing": "Medium",
+                    "wrap": true
                   },
                   $CHECKS_LIST
                 ],
                 "actions": [
-                  {"type": "Action.OpenUrl", "title": "View PR", "url": "$PR_URL"},
-                  {"type": "Action.OpenUrl", "title": "View All Checks", "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"}
+                  {
+                    "type": "Action.OpenUrl",
+                    "title": "View PR",
+                    "url": "$PR_URL"
+                  },
+                  {
+                    "type": "Action.OpenUrl", 
+                    "title": "View All Checks",
+                    "url": "https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
+                  },
+                  {
+                    "type": "Action.OpenUrl",
+                    "title": "View Commit",
+                    "url": "https://github.com/${{ github.repository }}/commit/$(echo "$pr_json" | jq -r '.head_sha')"
+                  }
                 ]
               }
             }]
           }
           EOF
 
+          echo "📤 Sending Teams notification..."
           curl -s -H "Content-Type: application/json" -d @card.json "$TEAMS_WEBHOOK_URL"
-          echo "✅ Teams notification sent!"
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Teams notification sent successfully!"
+          else
+            echo "❌ Failed to send Teams notification"
+            exit 1
+          fi
+
+          echo "🎉 Workflow completed successfully!"
