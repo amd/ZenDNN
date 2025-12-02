@@ -99,6 +99,7 @@ int main() {
     embedding_bag_f32_kernel_example();
     embedding_bag_f32_forced_ref_kernel_example();
     embedding_f32_kernel_example();
+    embedding_bag_int4_ref_kernel_example();
 
     /** Sample functionality examples.
      *
@@ -108,11 +109,11 @@ int main() {
 
     return OK;
   }
-  catch (const zendnnl::error_handling::exception_t& e) {
+  catch (const zendnnl::error_handling::exception_t &e) {
     std::cerr << "ZenDNN exception caught in main: " << e.what() << std::endl;
     return NOT_OK;
   }
-  catch (const std::exception& e) {
+  catch (const std::exception &e) {
     std::cerr << "Standard exception caught in main: " << e.what() << std::endl;
     return NOT_OK;
   }

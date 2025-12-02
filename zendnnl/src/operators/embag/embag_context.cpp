@@ -27,7 +27,8 @@ embag_context_t::embag_context_t()
     scatter_stride{-1},
     scatter_offset{0},
     include_last_offset{false},
-    is_weights{false} {
+    is_weights{false},
+    fp16_scale_bias{true} {
 }
 
 embag_context_t &embag_context_t::set_algo(embag_algo_t algo_) {
@@ -95,6 +96,17 @@ embag_context_t &embag_context_t::set_is_weights(bool is_weights_) {
 bool embag_context_t::get_is_weights() const {
   LOG_DEBUG_INFO("Getting is_weights parameter for embag_context_t");
   return is_weights;
+}
+
+embag_context_t &embag_context_t::set_fp16_scale_bias(bool fp16_scale_bias_) {
+  LOG_DEBUG_INFO("Setting fp16_scale_bias parameter for embag_context_t");
+  fp16_scale_bias = fp16_scale_bias_;
+  return *this;
+}
+
+bool embag_context_t::get_fp16_scale_bias() const {
+  LOG_DEBUG_INFO("Getting fp16_scale_bias parameter for embag_context_t");
+  return fp16_scale_bias;
 }
 
 status_t embag_context_t::validate() {

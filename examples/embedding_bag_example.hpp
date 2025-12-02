@@ -64,6 +64,16 @@ int embedding_bag_f32_forced_ref_kernel_example();
  */
 int embedding_f32_kernel_example();
 
+/** @fn embedding_bag_int4_ref_kernel_example
+ *  @brief Demonstrates embedding bag operator reference kernel enforced by user.
+ *
+ * embedding bag operator performs efficient lookups and aggregations
+ * such as sum or mean) over a set of embedding vectors selected by indices.
+ *
+ *  This example demonstrates how an operator kernel can be forced by the user.
+ */
+int embedding_bag_int4_ref_kernel_example();
+
 } // namespace examples
 } // namespace zendnnl
 

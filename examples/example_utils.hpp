@@ -95,6 +95,12 @@ class tensor_factory_t {
   /** @brief Generate random offsets tensor for bag boundaries */
   tensor_t random_offsets_tensor(const std::vector<index_type> size_,
                                  uint64_t num_indices, bool include_last_offset = true);
+
+  /** @brief quantized embedding tensor random */
+  tensor_t quantized_embedding_tensor_random(const std::vector<index_type> size_,
+      data_type dtype_, std::string tensor_name_="quant random",
+      bool fp16_scale_bias = true, float scale_min = 0.10,
+      float scale_max = 0.19, int8_t zp_min = 0, int8_t zp_max = 7);
 };
 
 /** @class tensor_functions

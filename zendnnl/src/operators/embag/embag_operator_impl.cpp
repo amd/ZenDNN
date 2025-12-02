@@ -41,23 +41,60 @@ status_t embag_impl_t::validate() {
   auto indices_sizes       = get_input("indices")->get_size();
   auto output_sizes        = get_output("output")->get_size();
 
+  auto fp16_scale_bias   = context.get_fp16_scale_bias();
+
   //Get input-output data type
   auto table_data_type   = context.get_param("table")->get_data_type();
   auto indices_data_type = get_input("indices")->get_data_type();
   auto output_data_type  = get_output("output")->get_data_type();
 
-  if (output_sizes[1] != table_sizes[1]) {
-    log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-              " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
-    return status_t::failure;
+  if (table_data_type == data_type_t::f32 ||
+      table_data_type == data_type_t::bf16) {
+    if (output_sizes[1] != table_sizes[1]) {
+      log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
+      return status_t::failure;
+    }
+  }
+  else if (table_data_type == data_type_t::s8) {
+    if (output_sizes[1] != table_sizes[1] - (fp16_scale_bias ? 4 : 8)) {
+      log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                " output_size=", output_sizes[1], " table_size=",
+                table_sizes[1] - (fp16_scale_bias ? 4 : 8));
+      return status_t::failure;
+    }
+  }
+  else if (table_data_type == data_type_t::s4) {
+    if (output_sizes[1] % 2 == 0) {
+      if (output_sizes[1] != (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) {
+        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                  " output_size=", output_sizes[1], " table_size=",
+                  (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2);
+        return status_t::failure;
+      }
+    }
+    else {
+      if (output_sizes[1] != ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) -
+          1)  {
+        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                  " output_size=", output_sizes[1], " table_size=",
+                  ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) - 1);
+        return status_t::failure;
+      }
+    }
+  }
+  else {
+    log_error(obj_name, " unsupported table datatype");
   }
 
   if ((table_data_type != data_type_t::f32 &&
-       table_data_type != data_type_t::bf16) ||
+       table_data_type != data_type_t::bf16 &&
+       table_data_type != data_type_t::s8 &&
+       table_data_type != data_type_t::s4) ||
       (output_data_type != data_type_t::f32 &&
        output_data_type != data_type_t::bf16)) {
-    apilog_error(obj_name, ": table and output datatype must be float32 or bfloat16");
-    return status_t::failure;
+    apilog_error(obj_name,
+                 ": table datatype must be float32 or bfloat16 or int8 or uint8 and output datatype must be float32 or bfloat16");
   }
 
   if (indices_data_type != data_type_t::s64 &&
@@ -103,7 +140,8 @@ status_t embag_impl_t::validate() {
 
   if ((is_weights && !get_input("weights")) ||
       (!is_weights && get_input("weights"))) {
-    apilog_error(obj_name, ": weights input is missing or is_weights is not enabled.");
+    apilog_error(obj_name,
+                 ": weights input is missing or is_weights is not enabled.");
     return status_t::failure;
   }
 
@@ -135,18 +173,55 @@ status_t embag_impl_t::validate_forced_kernel() {
     auto indices_data_type = get_input("indices")->get_data_type();
     auto output_data_type  = get_output("output")->get_data_type();
 
-    if (output_sizes[1] != table_sizes[1]) {
-      log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
-      return status_t::failure;
+    auto fp16_scale_bias   = context.get_fp16_scale_bias();
+
+    if (table_data_type == data_type_t::f32 ||
+        table_data_type == data_type_t::bf16) {
+      if (output_sizes[1] != table_sizes[1]) {
+        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                  " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
+        return status_t::failure;
+      }
+    }
+    else if (table_data_type == data_type_t::s8) {
+      if (output_sizes[1] != table_sizes[1] - (fp16_scale_bias ? 4 : 8)) {
+        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                  " output_size=", output_sizes[1], " table_size=",
+                  table_sizes[1] - (fp16_scale_bias ? 4 : 8));
+        return status_t::failure;
+      }
+    }
+    else if (table_data_type == data_type_t::s4) {
+      if (output_sizes[1] % 2 == 0) {
+        if (output_sizes[1] != (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) {
+          log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                    " output_size=", output_sizes[1], " table_size=",
+                    (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2);
+          return status_t::failure;
+        }
+      }
+      else {
+        if (output_sizes[1] != ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) -
+            1)  {
+          log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
+                    " output_size=", output_sizes[1], " table_size=",
+                    ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) - 1);
+          return status_t::failure;
+        }
+      }
+    }
+    else {
+      log_error(obj_name, "unsupported table datatype");
     }
 
     if ((table_data_type != data_type_t::f32 &&
-         table_data_type != data_type_t::bf16) ||
+         table_data_type != data_type_t::bf16 &&
+         table_data_type != data_type_t::s8 &&
+         table_data_type != data_type_t::s4) ||
         (output_data_type != data_type_t::f32 &&
          output_data_type != data_type_t::bf16)) {
-      apilog_error(obj_name, ": table and output datatype must be float32 or bfloat16");
-      return status_t::failure;
+      apilog_error(obj_name,
+                   ": table datatype must be float32 or bfloat16 or int8 or uint8 and output datatype must be float32 or bfloat16");
     }
 
     if (indices_data_type != data_type_t::s64 &&
@@ -192,7 +267,8 @@ status_t embag_impl_t::validate_forced_kernel() {
 
     if ((is_weights && !get_input("weights")) ||
         (!is_weights && get_input("weights"))) {
-      apilog_error(obj_name, ": weights input is missing or is_weights is not enabled.");
+      apilog_error(obj_name,
+                   ": weights input is missing or is_weights is not enabled.");
       return status_t::failure;
     }
 
@@ -318,14 +394,27 @@ status_t embag_impl_t::kernel_factory() {
                    (get_embag_bf16_avx2_kernel());
         }
       }
+      else if (table_dtype == data_type_t::s8 ||
+               table_dtype == data_type_t::s4) {
+        kernel = std::shared_ptr<embag_int8_int4_ref_kernel_t>
+                 (get_embag_int8_int4_ref_kernel());
+      }
       else {
         apilog_error("<", obj_name, "> kernel unimplemented.");
         return status_t::unimplemented;
       }
     }
     else {
-      if (forced_kernel == "reference") {
+      if (forced_kernel == "reference" &&
+          (table_dtype == data_type_t::f32 ||
+           table_dtype == data_type_t::bf16)) {
         kernel = std::shared_ptr<embag_ref_kernel_t>(get_embag_ref_kernel());
+      }
+      else if (forced_kernel == "reference" &&
+               (table_dtype == data_type_t::s8 ||
+                table_dtype == data_type_t::s4)) {
+        kernel = std::shared_ptr<embag_int8_int4_ref_kernel_t>
+                 (get_embag_int8_int4_ref_kernel());
       }
       else {
         apilog_error("<", obj_name, "> kernel unimplemented using forced kernel ",

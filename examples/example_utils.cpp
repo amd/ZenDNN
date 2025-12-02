@@ -462,6 +462,105 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
   return tensor;
 }
 
+// Convert float32 to float16 (stored as uint16_t)
+uint16_t float_to_half(float f) {
+  uint32_t x;
+  std::memcpy(&x, &f, sizeof(x));
+
+  uint32_t sign = (x >> 31) & 0x1;
+  int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mantissa = (x >> 13) & 0x3FF;
+
+  if (exponent <= 0) {
+    if (exponent < -10) {
+      return static_cast<uint16_t>(sign << 15);
+    }
+    mantissa = (x & 0x7FFFFF) | 0x800000;
+    mantissa >>= (1 - exponent + 13);
+    return static_cast<uint16_t>((sign << 15) | mantissa);
+  }
+  else if (exponent >= 31) {
+    return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+  }
+
+  return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
+}
+
+tensor_t tensor_factory_t::quantized_embedding_tensor_random(
+  const std::vector<index_type> size_,
+  data_type dtype_,
+  std::string tensor_name_,
+  bool fp16_scale_bias,
+  float scale_min,
+  float scale_max,
+  int8_t zp_min,
+  int8_t zp_max) {
+
+  int num_embeddings = size_[0];
+  int embedding_dim = size_[1];
+  // Compute row size: embedding + metadata
+  int quantized_size = (dtype_ == data_type_t::s4) ? (embedding_dim + 1) / 2 :
+                       embedding_dim;
+  const int row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
+
+  auto qtensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size({static_cast<size_t>(num_embeddings), static_cast<size_t>(row_size)})
+                 .set_data_type(dtype_)
+                 .set_storage()
+                 .create();
+  if (! qtensor.check()) {
+    log_warning("tensor creation of ", qtensor.get_name(), " failed.");
+  }
+  else {
+    int8_t *input = static_cast<int8_t *>(qtensor.get_raw_handle_unsafe());
+
+    // Random generators
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<int8_t> qval_dist(-8, 7); // quantized range
+    std::uniform_real_distribution<float> scale_dist(scale_min, scale_max);
+    std::uniform_int_distribution<int8_t> zp_dist(zp_min, zp_max);
+
+    for (int i = 0; i < num_embeddings; ++i) {
+      float scale = scale_dist(gen);
+      float zp = static_cast<float>(zp_dist(gen));
+
+      // Fill quantized values randomly
+      for (int j = 0; j < embedding_dim; ++j) {
+        int8_t qval = qval_dist(gen);
+        if (dtype_ == data_type_t::s4) {
+          int byte_idx = j / 2;
+          if (j % 2 == 0) {
+            input[i * row_size + byte_idx] = (qval & 0x0F);
+          }
+          else {
+            input[i * row_size + byte_idx] &= 0x0F;
+            input[i * row_size + byte_idx] |= (qval & 0x0F) << 4;
+          }
+        }
+        else {
+          input[i * row_size + j] = qval;
+        }
+      }
+
+      // Append scale and zp
+      if (fp16_scale_bias) {
+        uint16_t scale_fp16 = float_to_half(scale);
+        uint16_t zp_fp16 = float_to_half(zp);
+        std::memcpy(&input[i * row_size + quantized_size], &scale_fp16,
+                    sizeof(uint16_t));
+        std::memcpy(&input[i * row_size + quantized_size + 2], &zp_fp16,
+                    sizeof(uint16_t));
+      }
+      else {
+        std::memcpy(&input[i * row_size + quantized_size], &scale, sizeof(float));
+        std::memcpy(&input[i * row_size + quantized_size + 4], &zp, sizeof(float));
+      }
+    }
+  }
+  return qtensor;
+}
+
 void tensor_functions_t::tensor_pretty_print(const tensor_t &tensor_) {
   //works only for 3D as of now
   auto tensor_size = tensor_.get_size();

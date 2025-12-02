@@ -65,6 +65,9 @@ class embag_context_t final : public op_context_t<embag_context_t> {
   embag_context_t &set_is_weights(bool is_weights_);
   bool             get_is_weights() const;
 
+  embag_context_t &set_fp16_scale_bias(bool fp16_scale_bias_);
+  bool             get_fp16_scale_bias() const;
+
  protected:
   /** @brief validate parameters */
   status_t validate() override;
@@ -79,6 +82,7 @@ class embag_context_t final : public op_context_t<embag_context_t> {
   int64_t       scatter_offset;
   bool          include_last_offset;
   bool          is_weights;
+  bool          fp16_scale_bias;
 
 };
 
