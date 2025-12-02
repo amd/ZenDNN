@@ -424,8 +424,8 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                  matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
-                         (batch_count == 1 ? matmul_algo_t::aocl_blis : matmul_algo_t::dynamic_dispatch)
-                         : static_cast<matmul_algo_t>(algo);
+                         ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_blis
+                         : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
 
   // TODO: Fallback to reference/supported kernel
   if ((kernel == matmul_algo_t::onednn ||
