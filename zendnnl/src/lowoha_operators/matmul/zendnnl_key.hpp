@@ -23,31 +23,49 @@
 using matmul_algo_t = zendnnl::ops::matmul_algo_t;
 //structure to make key
 struct Key_matmul {
+  bool transpose_inp;
   bool transpose_weights;
+  unsigned int m;
   unsigned int k;
   unsigned int n;
+  unsigned int lda;
   unsigned int ldb;
   const void *weights;
   uint32_t algo;
 
   // Default constructor
-  Key_matmul() : transpose_weights(false), k(1), n(1),
-    ldb(1), weights(nullptr), algo(static_cast<uint32_t>(matmul_algo_t::none)) {}
+  Key_matmul() : transpose_inp(false), transpose_weights(false), m(1), k(1), n(1),
+    lda(1), ldb(1), weights(nullptr), algo(static_cast<uint32_t>(matmul_algo_t::none)) {}
 
-  // Constructor to initialize all member variables
+  // Constructor to initialize few variables
   Key_matmul(bool TransB, unsigned int K,
              unsigned int N,
              unsigned int ldb, const void *B_Array,
              uint32_t algo)
     : transpose_weights(TransB), k(K), n(N),
       ldb(ldb), weights(B_Array), algo(algo) {
+    m = 1;
+    lda = 1;
+    transpose_inp = false;
+  }
+
+  // Constructor to initialize all member variables
+  Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,
+             unsigned int N,
+             unsigned int lda, unsigned int ldb, const void *B_Array,
+             uint32_t algo)
+    : transpose_inp(TransA), transpose_weights(TransB), m(M), k(K), n(N),
+      lda(lda), ldb(ldb), weights(B_Array), algo(algo) {
   }
 
   bool operator==(const Key_matmul &other) const {
-    return (k == other.k
+    return (m == other.m
+            && k == other.k
             && n == other.n
+            && lda == other.lda
             && ldb == other.ldb
             && weights == other.weights
+            && transpose_inp == other.transpose_inp
             && transpose_weights == other.transpose_weights
             && algo == other.algo
            );
@@ -60,9 +78,12 @@ template <>
 struct hash<Key_matmul> {
   std::size_t operator()(const Key_matmul &k) const {
     std::size_t seed = 0;
+    seed = zendnnl::common::hash_combine(seed, (k.transpose_inp));
     seed = zendnnl::common::hash_combine(seed, (k.transpose_weights));
+    seed = zendnnl::common::hash_combine(seed, (k.m));
     seed = zendnnl::common::hash_combine(seed, (k.k));
     seed = zendnnl::common::hash_combine(seed, (k.n));
+    seed = zendnnl::common::hash_combine(seed, (k.lda));
     seed = zendnnl::common::hash_combine(seed, (k.ldb));
     seed = zendnnl::common::hash_combine(seed, (k.weights));
     seed = zendnnl::common::hash_combine(seed, (k.algo));

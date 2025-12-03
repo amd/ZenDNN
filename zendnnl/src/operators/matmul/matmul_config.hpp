@@ -41,6 +41,7 @@ enum class matmul_algo_t : int32_t {
   libxsmm_blocked = 6,   /*!< Blocked LIBXSMM */
   reference = 7,         /*!< Reference */
   batched_sgemm = 8,     /*!< Batched SGEMM */
+  auto_tuner = 9,        /*!< Auto Tuner */
   algo_count             /*!< Algo count */
 };
 

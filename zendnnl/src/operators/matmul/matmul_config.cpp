@@ -34,6 +34,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   }
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
+  int32_t matmul_weight_cache = 0;
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
     auto matmul_algo_json = matmul_json["kernel"];
@@ -48,7 +49,8 @@ status_t matmul_config_t::set_user_config(json config_json) {
     if ((static_cast<matmul_algo_t>(matmul_algo) ==
          matmul_algo_t::aocl_blis_blocked) ||
         (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
-        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)) {
+        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch) ||
+        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
       matmul_weight_cache = 1;
     }
     if (! matmul_weight_cache_json.empty()) {
@@ -84,7 +86,8 @@ void matmul_config_t::set_env_config() {
   if ((static_cast<matmul_algo_t>(matmul_algo) ==
        matmul_algo_t::aocl_blis_blocked) ||
       (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
-      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)) {
+      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)||
+      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
     matmul_weight_cache = 1;
   }
   if (weight_cache_env) {

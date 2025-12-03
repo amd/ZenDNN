@@ -112,50 +112,6 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const int Batch_A, const int Batch_B,
                                        const lowoha_params &params);
 
-using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
-                                       const char, const char, const md_t, const md_t
-#if ZENDNNL_DEPENDS_AOCLDLP
-  ,dlp_metadata_t *
-#endif
-                                                            );
-
-template <typename T>
-using reorder_func_ptr = void (*)(const char, const char, const char, const T *,
-                                  T *, const md_t, const md_t, const md_t
-#if ZENDNNL_DEPENDS_AOCLDLP
-  ,dlp_metadata_t *
-#endif
-                                 );
-
-/**
-* @brief Reorders and caches weight matrices for optimized access patterns.
-*
-* This template function performs weight reordering to optimize memory access patterns
-* for specific GEMM kernels and implements a caching mechanism to avoid redundant
-* reordering operations for the same weight tensors.
-*
-* @tparam T Data type of the weights (float, int16_t, etc.)
-* @param key Unique key identifying the weight tensor and reordering parameters
-* @param weights Pointer to the original weight data
-* @param reorder_weights Reference to pointer that will hold the reordered weights
-* @param k Matrix dimension K (inner dimension)
-* @param n Matrix dimension N (output dimension)
-* @param ldb Leading dimension of matrix B
-* @param order Memory layout order ('r' for row-major, 'c' for column-major)
-* @param trans Transpose flag ('t' for transposed, 'n' for not transposed)
-* @param mem_format_b Memory format for matrix B
-* @param get_reorder_buf_size Function pointer to calculate required buffer size
-* @param reorder_func Function pointer to perform the actual reordering
-* @param weight_cache_type Type of caching strategy to use
-* @return true if reordering was performed (cache miss), false if cached version was used
-*/
-template <typename T>
-bool reorderAndCacheWeights(Key_matmul key, const void *weights,
-                            void *&reorder_weights, const int k, const int n, const int ldb,
-                            const char order, const char trans, char mem_format_b,
-                            get_reorder_buff_size_func_ptr get_reorder_buf_size,
-                            reorder_func_ptr<T> reorder_func, int weight_cache_type);
-
 /**
  * @brief Convert post-op names to a comma-separated string.
  *
@@ -201,8 +157,8 @@ std::string post_op_data_types_to_string(const lowoha_params &params);
 inline bool may_i_use_blis_partition(int batch_count, int M, int N,
                                      int num_threads, data_type_t dtype);
 
-inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N, int K,
-    int num_threads);
+inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
+    int K, int num_threads);
 
 inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 
@@ -235,6 +191,16 @@ int get_tile_size_from_env(const char *env_var, int default_value);
 
 // Tile selection based on matrix dimensions and cache size
 std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads);
+
+/**
+ * @brief Get the auto-tuner version number
+ *
+ * This function returns the version of the auto-tuner implementation currently in use.
+ * The version number can be used to select between different auto-tuning strategies.
+ *
+ * @return unsigned int The auto-tuner version number
+ */
+unsigned int get_auto_tuner_ver();
 
 } // namespace lowoha
 } // namespace zendnnl

@@ -95,80 +95,6 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   return status_t::success;
 }
 
-template <typename T>
-bool reorderAndCacheWeights(Key_matmul key, const void *weights,
-                            void *&reorder_weights, const int k, const int n, const int ldb,
-                            const char order, const char trans, char mem_format_b,
-                            get_reorder_buff_size_func_ptr get_reorder_buf_size,
-                            reorder_func_ptr<T> reorder_func, int weight_cache_type) {
-  // Weight caching
-  static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
-
-  // Weights are already reordered and algo is aocl_blis_blocked
-  // Add the key into map and value as nullptr
-  // Modify the reorder_weight as weight.
-  if (mem_format_b == 'r') {
-    matmul_weight_cache.add(key, nullptr);
-    reorder_weights = const_cast<void *>(weights);
-    return true;
-  }
-
-  if (weight_cache_type == 0) {
-    apilog_info("AOCL reorder weights (WEIGHT_CACHE_DISABLE)");
-    size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
-                                   k, n
-#if ZENDNNL_DEPENDS_AOCLDLP
-                                   ,nullptr
-#endif
-                                                       );
-    size_t alignment      = 64;
-    size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
-                            (alignment - 1);
-    reorder_weights       = (T *)aligned_alloc(alignment, reorder_size);
-    reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
-#if ZENDNNL_DEPENDS_AOCLDLP
-                 ,nullptr
-#endif
-                );
-  }
-  // Out-of-place reordering
-  else if (weight_cache_type == 1) {
-    auto found_obj = matmul_weight_cache.find_key(key);
-    if (!found_obj) {
-      apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
-      size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
-                                     k, n
-#if ZENDNNL_DEPENDS_AOCLDLP
-                                     ,nullptr
-#endif
-                                                         );
-      size_t alignment      = 64;
-      size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
-                              (alignment - 1);
-      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
-      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
-#if ZENDNNL_DEPENDS_AOCLDLP
-                   ,nullptr
-#endif
-                  );
-      // Create new entry
-      matmul_weight_cache.add(key, reorder_weights);
-    }
-    else {
-      apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE");
-      reorder_weights = matmul_weight_cache.get(key);
-    }
-  }
-  return true;
-}
-
-template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
-    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-    reorder_func_ptr<short>, int);
-template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
-    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
-    reorder_func_ptr<float>, int);
-
 // Helper function to convert post_op_type_t to string
 inline const char *post_op_type_to_string(post_op_type_t type) {
   switch (type) {
@@ -232,12 +158,16 @@ const char *kernel_to_string(matmul_algo_t kernel) {
     return "onednn_blocked";
   case matmul_algo_t::libxsmm:
     return "libxsmm";
+  case matmul_algo_t::libxsmm_blocked:
+    return "libxsmm_blocked";
   case matmul_algo_t::batched_sgemm:
     return "batched_sgemm";
   case matmul_algo_t::dynamic_dispatch:
     return "dynamic_dispatch";
   case matmul_algo_t::reference:
     return "reference";
+  case matmul_algo_t::auto_tuner:
+    return "auto_tuner";
   default:
     return "none";
   }
@@ -416,6 +346,20 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
   }
 }
 
+unsigned int get_auto_tuner_ver() {
+  char *skip_env_var = std::getenv("ZENDNNL_AUTO_TUNER_TYPE");
+  if (skip_env_var) {
+    unsigned int version = std::stoi(skip_env_var);
+    // Current support is 2 versions.
+    if (version == 0 || version > 2) {
+      return 2;
+    }
+    return version;
+  }
+  // return version 2 as default
+  return 2;
+}
+
 matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const) {
@@ -428,6 +372,10 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                          : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
 
   // TODO: Fallback to reference/supported kernel
+  if (kernel == matmul_algo_t::auto_tuner && (Batch_A != 1 || Batch_B != 1 ||
+      !is_weights_const)) {
+    kernel = matmul_algo_t::dynamic_dispatch;
+  }
   if ((kernel == matmul_algo_t::onednn ||
        kernel == matmul_algo_t::onednn_blocked) && (Batch_A != 1 && Batch_B != 1 &&
            Batch_A != Batch_B)) {

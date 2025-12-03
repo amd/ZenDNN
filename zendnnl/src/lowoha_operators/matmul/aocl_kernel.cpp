@@ -751,14 +751,119 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po,
   }
 }
 #endif
+template <typename T>
+bool reorderAndCacheWeights(Key_matmul key, const void *weights,
+                            void *&reorder_weights, const int k, const int n, const int ldb,
+                            const char order, const char trans, char mem_format_b,
+                            get_reorder_buff_size_func_ptr get_reorder_buf_size,
+                            reorder_func_ptr<T> reorder_func, int weight_cache_type) {
+  // Weight caching
+  static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
+
+  // Weights are already reordered and algo is aocl_blis_blocked
+  // Add the key into map and value as nullptr
+  // Modify the reorder_weight as weight.
+  if (mem_format_b == 'r') {
+    matmul_weight_cache.add(key, nullptr);
+    reorder_weights = const_cast<void *>(weights);
+    return true;
+  }
+
+  if (weight_cache_type == 0) {
+    apilog_info("AOCL reorder weights (WEIGHT_CACHE_DISABLE)");
+    size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                   k, n
+#if ZENDNNL_DEPENDS_AOCLDLP
+                                   ,nullptr
+#endif
+                                                       );
+    size_t alignment      = 64;
+    size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
+                            (alignment - 1);
+    reorder_weights       = (T *)aligned_alloc(alignment, reorder_size);
+    reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
+#if ZENDNNL_DEPENDS_AOCLDLP
+                 ,nullptr
+#endif
+                );
+  }
+  // Out-of-place reordering
+  else if (weight_cache_type == 1) {
+    auto found_obj = matmul_weight_cache.find_key(key);
+    if (!found_obj) {
+      apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                     k, n
+#if ZENDNNL_DEPENDS_AOCLDLP
+                                     ,nullptr
+#endif
+                                                         );
+      size_t alignment      = 64;
+      size_t reorder_size   = (b_reorder_buf_siz_req + alignment - 1) & ~
+                              (alignment - 1);
+      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights, k, n, ldb
+#if ZENDNNL_DEPENDS_AOCLDLP
+                   ,nullptr
+#endif
+                  );
+      // Create new entry
+      matmul_weight_cache.add(key, reorder_weights);
+    }
+    else {
+      apilog_info("Read AOCL cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      reorder_weights = matmul_weight_cache.get(key);
+    }
+  }
+  return true;
+}
+
+template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
+    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
+    reorder_func_ptr<short>, int);
+template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
+    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
+    reorder_func_ptr<float>, int);
 
 void run_blis(char layout, char transA, char transB, int M, int N,
               int K,
               float alpha, float beta, int lda, int ldb, int ldc,
               char mem_format_a, char mem_format_b, const void *A,
               const void *B, void *C, const data_types &dtypes,
-              const lowoha_params &lowoha_param, const void *bias) {
+              const lowoha_params &lowoha_param, const void *bias,
+              zendnnl::ops::matmul_algo_t kernel,
+              bool is_weights_const, bool can_reorder) {
 
+  bool is_weight_blocked = false;
+  void *reordered_mem = nullptr;
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t weight_cache_type = matmul_config.get_weight_cache();
+  // AOCL blocked kernel reordering for 2D MatMul
+  if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
+      can_reorder && is_weights_const) {
+    Key_matmul key_(transB == 't' ? true : false, K, N, ldb, B,
+                    static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
+    //call reorder and cache function
+    bool blocked_flag = false;
+    if (lowoha_param.dtypes.wei == data_type_t::f32) {
+      blocked_flag = reorderAndCacheWeights<float>(key_, B, reordered_mem, K, N,
+                     ldb,
+                     'r', transB, mem_format_b,
+                     aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
+                     weight_cache_type);
+    }
+    else if (lowoha_param.dtypes.wei == data_type_t::bf16) {
+      blocked_flag = reorderAndCacheWeights<int16_t>(key_, B, reordered_mem, K,
+                     N, ldb,
+                     'r', transB, mem_format_b,
+                     aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
+                     weight_cache_type);
+    }
+    if (blocked_flag) {
+      is_weight_blocked = true;
+      mem_format_b = 'r';
+    }
+  }
   // Create aocl_post_op structure for bias and post-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N);
@@ -769,23 +874,31 @@ void run_blis(char layout, char transA, char transB, int M, int N,
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     aocl_gemm_f32f32f32of32(layout,transA,transB,M,N,K,alpha,
                             static_cast<const float *>(A),lda,mem_format_a,
-                            static_cast<const float *>(B),ldb,mem_format_b,
-                            beta,static_cast<float *>(C),ldc,aocl_po);
+                            is_weight_blocked ? (float *)reordered_mem : static_cast<const float *>(B),
+                            ldb, mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
     aocl_gemm_bf16bf16f32obf16(layout,transA,transB,M,N,K,alpha,
                                static_cast<const int16_t *>(A),lda,mem_format_a,
-                               static_cast<const int16_t *>(B),ldb,mem_format_b,
-                               beta,static_cast<int16_t *>(C),ldc,aocl_po);
+                               is_weight_blocked ? (int16_t *)reordered_mem : static_cast<const int16_t *>(B),
+                               ldb, mem_format_b, beta,static_cast<int16_t *>(C),ldc,aocl_po);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
     aocl_gemm_bf16bf16f32of32(layout,transA,transB,M,N,K,alpha,
                               static_cast<const int16_t *>(A),lda,mem_format_a,
-                              static_cast<const int16_t *>(B),ldb,mem_format_b,
-                              beta,static_cast<float *>(C),ldc,aocl_po);
+                              is_weight_blocked ? (int16_t *)reordered_mem : static_cast<const int16_t *>(B),
+                              ldb,mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
   }
   else {
     log_info("Data type not supported");
+  }
+  // Free reordered buffer for AOCL blocked non-cached
+  bool free_buff = (weight_cache_type == 0 && reordered_mem != nullptr &&
+                    lowoha_param.mem_format_b != 'r'
+                    && kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked && can_reorder);
+  if (free_buff)  {
+    free(reordered_mem);
+    reordered_mem = nullptr;
   }
   // Clean up aocl_post_op structure
 #if ZENDNNL_DEPENDS_AOCLDLP

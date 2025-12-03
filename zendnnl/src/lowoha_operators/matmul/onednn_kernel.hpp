@@ -41,12 +41,13 @@ namespace lowoha {
  * @param lowoha_params Parameters including data types and post-ops
  * @param batchA,batchB Batch sizes for matrices A and B
  * @param bias Optional bias vector pointer
+ * @param kernel Algorithm selection for the matmul operation
  * @param weight_cache_type Caching strategy for weight reordering
  */
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-                           const void *bias, int weight_cache_type, bool is_weights_const);
+                           const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const);
 /**
  * @brief Reorder weights to OneDNN's optimal format with caching
  *

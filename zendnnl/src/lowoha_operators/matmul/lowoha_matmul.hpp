@@ -29,7 +29,21 @@
 
 namespace zendnnl {
 namespace lowoha {
-
+/**
+ * @brief Entry function for different backends supported by ZenDNNL
+ */
+void matmul_kernel_wrapper(char layout, char transA, char transB,
+                           int M, int N, int K,
+                           float alpha,
+                           const void *A, int lda,
+                           const void *B, int ldb,
+                           float beta,
+                           void *C, int ldc,
+                           data_types &dtypes,
+                           zendnnl::ops::matmul_algo_t kernel,
+                           char mem_format_a, char mem_format_b,
+                           lowoha_params &lowoha_param, const void *bias,
+                           bool is_weights_const, bool can_reorder = false);
 /**
  * @brief Execute matrix multiplication with automatic kernel selection and optimization
  *

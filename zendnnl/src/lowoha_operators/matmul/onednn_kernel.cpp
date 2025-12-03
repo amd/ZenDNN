@@ -23,8 +23,9 @@ namespace lowoha {
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-                           const void *bias, int weight_cache_type, bool is_weights_const) {
-
+                           const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const) {
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  int32_t weight_cache_type = matmul_config.get_weight_cache();
   onednn_utils_t::onednn_matmul_params dnnl_params;
 
   dnnl_params.src.buffer = const_cast<void *>(A);
@@ -56,7 +57,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   dnnl_params.src.is_transposed = (transA == 'n') ? false : true;
   dnnl_params.weights.is_transposed = (transB == 'n') ? false : true;
-  dnnl_params.algo = lowoha_params.lowoha_algo;
+  dnnl_params.algo = kernel;
 
   if (batch_count == 1) {
     dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
