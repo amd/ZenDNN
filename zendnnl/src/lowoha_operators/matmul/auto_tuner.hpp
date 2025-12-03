@@ -33,8 +33,8 @@ namespace lowoha {
 /**
  * @brief Number of initial warmup iterations before algorithm evaluation begins.
  *
- * During these skip iterations, the autotuner uses a default algorithm
- * (AOCL BLIS blocked) to warm up caches and stabilize the system before
+ * During these skip iterations, the autotuner uses a different algorithm
+ * to warm up caches and stabilize the system before
  * performance measurements are taken.
  *
  * Can be overridden via environment variable: ZENDNNL_MATMUL_SKIP_ITER
@@ -71,7 +71,7 @@ namespace lowoha {
  * matrix multiplication algorithm for the given operation parameters. It uses a
  * multi-phase approach:
  *
- * 1. Skip Phase: Runs initial iterations with a default algorithm (AOCL BLIS blocked)
+ * 1. Skip Phase: Runs initial iterations with different algorithm
  * 2. Evaluation Phase: Tests multiple algorithms and measures their execution times
  * 3. Execution Phase: Uses the cached best-performing algorithm for subsequent calls
  *
