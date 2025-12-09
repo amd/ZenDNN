@@ -19,6 +19,7 @@
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/auto_tuner.hpp"
+#include "lowoha_operators/matmul/brgemm_matmul.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -336,15 +337,16 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     }
   }
   else if (kernel == matmul_algo_t::libxsmm_blocked && batch_count == 1) {
-#if ENABLE_K_TILE_OPTIMIZATION
-    constexpr int M_BLOCK = 64;
-    constexpr int N_BLOCK = 64;
-    constexpr int K_BLOCK = 64;
+#if ENABLE_BRGEMM_KERNEL
+
+    auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
+    int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
+    int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
+    int KC_BLOCK = 64;
 
     const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
     const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
     uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
-    matmul_algo_t tile_kernel = matmul_algo_t::aocl_blis; // default fallback
 
     #pragma omp parallel for collapse(2)
     for (int i = 0; i < M; i += M_BLOCK) {
@@ -352,45 +354,43 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         int m_tile = std::min(M_BLOCK, M - i);
         int n_tile = std::min(N_BLOCK, N - j);
 
-        void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
+        // Prepare batch arrays
+        std::vector<const void *> A_batch;
+        std::vector<const void *> B_batch;
+        std::vector<int> K_sizes;
 
-        for (int k = 0; k < K; k += K_BLOCK) {
-          int k_tile = std::min(K_BLOCK, K - k);
-          bool is_first_k = (k == 0);
-
+        for (int k = 0; k < K; k += KC_BLOCK) {
+          int k_tile = std::min(KC_BLOCK, K - k);
           const void *A_tile = get_matrix_block(src_ptr, i, k, lda, transA,
                                                 src_type_size);
           const void *B_tile = get_matrix_block(weight_ptr, k, j, ldb, transB,
                                                 src_type_size);
-
-          float tile_alpha = alpha;
-          float tile_beta = is_first_k ? beta : 1.0f;
-
-          // Use libxsmm only for perfect tiles
-          if (m_tile == M_BLOCK && n_tile == N_BLOCK && k_tile == K_BLOCK &&
-              (can_use_libxsmm(trans_input, trans_weight, m_tile, n_tile, k_tile, tile_alpha,
-                               tile_beta, params.dtypes, params, kernel))) {
-            tile_kernel = matmul_algo_t::libxsmm;
-          }
-          else {
-            // For irregular tiles (including K tail), always use BLIS
-            tile_kernel = matmul_algo_t::aocl_blis;
-          }
-
-          matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                                m_tile, n_tile, k_tile, tile_alpha,
-                                A_tile, lda,
-                                B_tile,
-                                ldb, tile_beta, C_tile, ldc,
-                                params.dtypes, tile_kernel,
-                                params.mem_format_a, params.mem_format_b,
-                                params, (k == 0) ? bias : nullptr,
-                                is_weights_const);
+          A_batch.push_back(A_tile);
+          B_batch.push_back(B_tile);
+          K_sizes.push_back(k_tile);
         }
+
+        void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
+
+        // Offset bias pointer for the current N tile
+        const void *tile_bias = nullptr;
+        if (bias != nullptr) {
+          size_t bias_element_size = (params.dtypes.bias == data_type_t::f32)
+                                     ? sizeof(float)
+                                     : sizeof(uint16_t);
+          size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
+          tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
+        }
+
+        brgemm_ref_kernel(transA, transB,
+                          m_tile, n_tile, K_sizes.data(),
+                          A_batch.data(), B_batch.data(),
+                          A_batch.size(),
+                          alpha, beta, C_tile, ldc,
+                          lda, ldb, params.dtypes, tile_bias);
       }
     }
 #else
-
     if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
                          beta, params.dtypes, params, kernel))) {
       auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);

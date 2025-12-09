@@ -25,7 +25,7 @@
 #include "operators/matmul/matmul_context.hpp"
 
 #define M_FLOPS 6.0
-#define ENABLE_K_TILE_OPTIMIZATION 0
+#define ENABLE_BRGEMM_KERNEL 0
 
 namespace zendnnl {
 namespace lowoha {

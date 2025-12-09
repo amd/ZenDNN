@@ -36,6 +36,7 @@ set(lowoha_matmul_private_headers
   aocl_kernel.hpp
   onednn_kernel.hpp
   auto_tuner.hpp
+  brgemm_matmul.hpp
   matmul_kernel_bf16_avx512.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
