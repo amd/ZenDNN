@@ -653,7 +653,8 @@ tensor_t &tensor_t::create() {
     return (*this);
   }
 
-  uint64_t buffer_size = option.aligned_nelem * size_of(option.data_type);
+  float multiplier = option.data_type == data_type_t::s4 || option.data_type == data_type_t::u4 ? 2.0f : 1.0f;
+  uint64_t buffer_size = std::ceil(1.0 * option.aligned_nelem * size_of(option.data_type) / multiplier);
   if (allocate) {
     // allocate new storage
     if (buffer_size) {
@@ -1152,7 +1153,7 @@ tensor_t::compute_quant_block_size(const tensor_t::index_vec_type
   index_vec_type block_size{};
   //validate dim and compute block size
   if (quant_size_.size() != option.size.size()) {
-    apilog_error(name, "quant dimension mismatch with tensor dimension");
+    apilog_error(name, " quant dimension mismatch with tensor dimension");
     return {};
   }
 

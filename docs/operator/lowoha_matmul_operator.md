@@ -116,6 +116,7 @@ struct data_types {
 |----------|-------------|-----------|-------------|-------|
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
+| BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ) |
 
 
 ### `postop`
@@ -147,26 +148,44 @@ struct postop {
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
 
-### `lowoha_quantization_params_t(Not supported yet)`
+### `lowoha_quantization_params_t`
 
-Quantization scale and zero-point parameters:
+Quantization scale and zero-point parameters for Weight-Only Quantization (WOQ):
 
 ```cpp
 struct lowoha_quantization_params_t {
+  /**
+   * Individual quantization parameter (scale or zero-point)
+   * 
+   * Dimensions determine quantization granularity for weight matrix [K, N]:
+   *   - Per-tensor:  dims = {1} or {1,1}  → single scale for all weights
+   *   - Per-channel: dims = {1, N}        → one scale per output channel
+   *   - Per-group:   dims = {G, N}        → G groups along K, where G = K/group_size
+   */
   struct quant_t {
-    const void *buff;    // Pointer to scale/zero-point data
-    data_type_t dt;      // Data type (f32 for scale, s8/u8/s32 for zero-point)
-    size_t size;         // Size of buffer
+    const void *buff;              // Pointer to scale/zero-point data
+    data_type_t dt;                // Data type (f32/bf16 for scale, s8/u8/s32 for zero-point)
+    std::vector<int64_t> dims;     // Dimensions of the quantization tensor
   };
   
-  quant_t src_scale;     // Source tensor scale
-  quant_t wei_scale;     // Weight tensor scale
-  quant_t dst_scale;     // Destination tensor scale
-  quant_t src_zp;        // Source tensor zero-point
-  quant_t wei_zp;        // Weight tensor zero-point
-  quant_t dst_zp;        // Destination tensor zero-point
+  quant_t src_scale;     // Source tensor scale (not used for WOQ)
+  quant_t wei_scale;     // Weight tensor scale (required for WOQ)
+  quant_t dst_scale;     // Destination tensor scale (not used for WOQ)
+  quant_t src_zp;        // Source tensor zero-point (not used for WOQ)
+  quant_t wei_zp;        // Weight tensor zero-point (optional for asymmetric WOQ)
+  quant_t dst_zp;        // Destination tensor zero-point (not used for WOQ)
 };
 ```
+
+**WOQ Quantization Granularity:**
+
+| Granularity | Scale Dims | Zero-Point Dims | Description |
+|-------------|------------|-----------------|-------------|
+| Per-tensor | `{1}` or `{1, 1}` | `{1}` or `{1, 1}` | Single scale/zp for entire weight matrix |
+| Per-channel | `{1, N}` | `{1, N}` | One scale/zp per output channel |
+| Per-group | `{G, N}` | `{G, N}` | G groups along K dimension (G = K/group_size) |
+
+**Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
 
 
 ## Usage Examples
@@ -291,6 +310,99 @@ int lowoha_batched_matmul_example() {
   return (status == status_t::success) ? 0 : -1;
 }
 ```
+
+### Example 3: WOQ MatMul with BF16 Input and S4 Weights
+
+This example demonstrates Weight-Only Quantization (WOQ) with per-group quantization, commonly used in LLM inference:
+
+```cpp
+int lowoha_woq_bf16s4_matmul_example() {
+  using namespace zendnnl::lowoha;
+  
+  // Matrix dimensions
+  constexpr int M = 16, K = 128, N = 64;
+  constexpr int GROUP_SIZE = 32;              // Typical group size for LLM quantization
+  constexpr int NUM_GROUPS = K / GROUP_SIZE;  // = 4 groups
+  
+  // Create weight scale tensor (per-group: {NUM_GROUPS, N})
+  std::vector<float> wei_scale(NUM_GROUPS * N);
+  for (int g = 0; g < NUM_GROUPS; ++g) {
+    for (int n = 0; n < N; ++n) {
+      wei_scale[g * N + n] = 1.0f + 0.1f * g;  // Varying scales per group
+    }
+  }
+  
+  // Create zero point tensor (per-group: {NUM_GROUPS, N})
+  std::vector<int8_t> wei_zp(NUM_GROUPS * N);
+  for (int g = 0; g < NUM_GROUPS; ++g) {
+    for (int n = 0; n < N; ++n) {
+      wei_zp[g * N + n] = static_cast<int8_t>(g % 4);  // zp = 0, 1, 2, 3
+    }
+  }
+  
+  // Create S4 packed weights (2 values per byte)
+  size_t packed_weight_size = (K * N + 1) / 2;
+  std::vector<int8_t> weights(packed_weight_size);
+  int8_t s4_val = 1 & 0x0F;
+  int8_t packed_val = s4_val | (s4_val << 4);  // Same value in both nibbles
+  std::fill(weights.begin(), weights.end(), packed_val);
+  
+  // Create BF16 input (stored as int16_t)
+  std::vector<int16_t> input(M * K);
+  std::fill(input.begin(), input.end(), 0x3F80);  // BF16 representation of 1.0f
+  
+  // Output tensor
+  std::vector<float> output(M * N, 0.0f);
+  
+  // Configure data types for WOQ
+  data_types dtypes;
+  dtypes.src = data_type_t::bf16;
+  dtypes.wei = data_type_t::s4;
+  dtypes.dst = data_type_t::f32;
+  dtypes.bias = data_type_t::none;
+  dtypes.compute = data_type_t::none;
+  
+  lowoha_params params;
+  params.dtypes = dtypes;
+  
+  // Setup per-group quantization parameters
+  params.quant_params.wei_scale.buff = wei_scale.data();
+  params.quant_params.wei_scale.dt = data_type_t::f32;
+  params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
+  
+  params.quant_params.wei_zp.buff = wei_zp.data();
+  params.quant_params.wei_zp.dt = data_type_t::s8;
+  params.quant_params.wei_zp.dims = {NUM_GROUPS, N};
+  
+  // Batch parameters
+  batch_params_t batch_params;
+  batch_params.Batch_A = 1;
+  batch_params.Batch_B = 1;
+  
+  // Execute WOQ MatMul
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f,
+    input.data(), K,
+    weights.data(), N,
+    nullptr,  // no bias
+    0.0f,
+    output.data(), N,
+    true,  // is_weights_const (required for WOQ)
+    batch_params,
+    params
+  );
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+**Key Points for WOQ:**
+- **S4 Weight Packing**: Weights are stored as 4-bit signed integers, with 2 values packed per byte (low nibble and high nibble).
+- **Quantization Granularity**: Per-group quantization divides K dimension into groups, each with its own scale/zero-point.
+- **Constant Weights**: `is_weights_const = true` is required for WOQ to enable weight reordering and caching.
+- **Dequantization Formula**: `dequant_value = (s4_weight - zero_point) * scale`
 
 
 ## Weight Caching and Reordering

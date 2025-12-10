@@ -38,6 +38,20 @@ using namespace zendnnl::lowoha;
  */
 int run_lowoha_matmul_fp32_test();
 
+/** @fn run_lowoha_matmul_woq_bf16s4_test
+ *  @brief Demonstrates LOWOHA WOQ matmul with BF16 input and S4 weights.
+ *
+ *  This example demonstrates weight-only quantization (WOQ) with per-group
+ *  quantization using the low-overhead LOWOHA API.
+ *
+ *  Configuration:
+ *    - Input: BF16 [M, K]
+ *    - Weights: S4 packed [K, N]
+ *    - Output: F32 [M, N]
+ *    - Per-group quantization with scale and zero point
+ */
+int run_lowoha_matmul_woq_bf16s4_test();
+
 } // examples
 } // zendnnl
 

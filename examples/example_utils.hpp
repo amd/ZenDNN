@@ -24,6 +24,10 @@
 
 #include "zendnnl.hpp"
 
+#define  MATMUL_M 10
+#define  MATMUL_K 6
+#define  MATMUL_N 4
+
 namespace zendnnl {
 /** @namespace zendnnl::examples
  *  @brief A namespace that contains examples of how to use ZenDNNL.

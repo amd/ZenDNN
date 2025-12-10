@@ -151,9 +151,11 @@ class tensor_factory_t {
                                        data_type dtype_, float range_, bool trans = false,
                                        tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
-  /** @brief uniform tensor */
+  /** @brief uniform tensor with optional transpose and quantization support */
   tensor_t uniform_tensor(const std::vector<index_type> size_, data_type dtype_,
-                          float val_, std::string tensor_name_="uniform");
+                          float val_, std::string tensor_name_="uniform",
+                          bool trans = false,
+                          tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
 
   /** @brief blocked tensor */
   tensor_t blocked_tensor(const std::vector<index_type> size_, data_type dtype_,

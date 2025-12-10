@@ -24,10 +24,6 @@
 
 #define  ROWS 50
 #define  COLS 50
-#define  MATMUL_M 10
-#define  MATMUL_K 5
-#define  MATMUL_N 4
-
 
 namespace zendnnl {
 namespace examples {

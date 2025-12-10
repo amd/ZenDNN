@@ -87,7 +87,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
  * @return Pointer to the created dlp_metadata_t object
  */
 dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N);
+                                   const void *bias, const data_types &dtypes, int N, int K);
 
 /**
 * @brief Cleans up DLP (Deep Learning Post-op) metadata.
@@ -200,6 +200,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                void *C, int ldc, data_types &dtypes, int batch_count, char mem_format_a,
                                char mem_format_b, size_t src_stride, size_t weight_stride,
                                size_t dst_stride, const lowoha_params &lowoha_param, const void *bias);
+
 }
 }
 

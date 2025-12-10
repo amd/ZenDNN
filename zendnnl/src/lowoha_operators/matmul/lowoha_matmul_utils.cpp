@@ -32,7 +32,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       const lowoha_params &params) {
+                                       const lowoha_params &params,
+                                       const bool is_weights_const) {
   // Check for null pointers
   if (!src || !weight || !dst) {
     log_error("Null pointer input to matmul_direct: src=",
@@ -53,12 +54,28 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
-  // Check quantization parameters (not supported yet)
-  if (params.quant_params.src_scale.buff || params.quant_params.wei_scale.buff ||
-      params.quant_params.dst_scale.buff ||
-      params.quant_params.src_zp.buff || params.quant_params.wei_zp.buff ||
-      params.quant_params.dst_zp.buff) {
-    log_error("Quantization params are not supported in LOWOHA matmul_direct yet");
+  // Check quantization parameters
+  // WOQ (Weight-Only Quantization) is supported for BF16 src with S4 weights
+  // Only weight scale and weight zero point are allowed for WOQ
+  const bool is_woq = (params.dtypes.src == data_type_t::bf16) && 
+                      (params.dtypes.wei == data_type_t::s4);
+  
+  // WOQ requires constant weights for weight reordering/caching
+  if (is_woq && !is_weights_const) {
+    log_error("WOQ (Weight-Only Quantization) requires constant weights (is_weights_const=true)");
+    return status_t::failure;
+  }
+  
+  // Source and destination quantization params are not supported
+  if (params.quant_params.src_scale.buff || params.quant_params.dst_scale.buff ||
+      params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) {
+    log_error("Source/destination quantization params are not supported in LOWOHA matmul_direct");
+    return status_t::failure;
+  }
+  
+  // Weight quantization params only allowed for WOQ
+  if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) && !is_woq) {
+    log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights)");
     return status_t::failure;
   }
 
@@ -181,6 +198,8 @@ const char *data_type_to_string(data_type_t dtype) {
     return "f32";
   case data_type_t::bf16:
     return "bf16";
+  case data_type_t::s4:
+    return "s4";
   default:
     return "unknown";
   }
@@ -403,6 +422,15 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                                     kernel == matmul_algo_t::libxsmm_blocked)) ||
       (kernel >= matmul_algo_t::algo_count)) {
     kernel = matmul_algo_t::aocl_blis;
+  }
+
+  // Force aocl_blis for WOQ (Weight-Only Quantization) cases
+  // WOQ uses specialized AOCL kernels that don't support blocked format
+  const bool is_woq = (params.dtypes.src == data_type_t::bf16) && 
+                      (params.dtypes.wei == data_type_t::s4);
+  if (is_woq) {
+    log_info("WOQ detected, switching to aocl_blis_blocked kernel");
+    kernel = matmul_algo_t::aocl_blis_blocked;
   }
 
   // AOCL blocked kernel is not supported for batched matmul

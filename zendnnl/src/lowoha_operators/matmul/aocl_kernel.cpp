@@ -22,11 +22,14 @@ namespace lowoha {
 // Helper function to create post_op structure for bias and post-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
 dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N) {
+                                   const void *bias, const data_types &dtypes, int N, int K) {
   // Count total operations (bias + post-ops)
   int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
 
-  if (total_ops == 0) {
+  // Check if this is a WOQ case (need metadata even if no post-ops)
+  bool is_woq = dtypes.wei == data_type_t::s4 && dtypes.src == data_type_t::bf16;
+
+  if (total_ops == 0 && !is_woq) {
     return nullptr;
   }
 
@@ -75,12 +78,16 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
     }
   }
 
-  // Allocate seq_vector first
-  dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
-                             sizeof(DLP_POST_OP_TYPE)));
-  if (!dlp_metadata->seq_vector) {
-    free(dlp_metadata);
-    return nullptr;
+  // Allocate seq_vector first (only if we have post-ops)
+  if (total_ops > 0) {
+    dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
+                               sizeof(DLP_POST_OP_TYPE)));
+    if (!dlp_metadata->seq_vector) {
+      free(dlp_metadata);
+      return nullptr;
+    }
+  } else {
+    dlp_metadata->seq_vector = nullptr;
   }
 
   // Allocate memory for different post-op types
@@ -351,15 +358,87 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
   dlp_metadata->seq_length = op_index;
   dlp_metadata->num_eltwise = eltwise_count;
 
+  // Setup pre-ops for WOQ (Weight-Only Quantization)
+  if (is_woq) {
+    dlp_metadata->pre_ops = static_cast<dlp_pre_op *>(malloc(sizeof(dlp_pre_op)));
+    if (dlp_metadata->pre_ops) {
+      const auto& wei_scale = lowoha_param.quant_params.wei_scale;
+      const auto& wei_zp = lowoha_param.quant_params.wei_zp;
+      
+      // Helper to compute num_elements from dims
+      auto get_num_elements = [](const std::vector<int64_t>& dims) -> size_t {
+        if (dims.empty()) return 0;
+        size_t count = 1;
+        for (auto d : dims) count *= static_cast<size_t>(d);
+        return count;
+      };
+      
+      // Setup weight scale factor
+      dlp_metadata->pre_ops->b_scl = static_cast<dlp_sf_t *>(malloc(sizeof(dlp_sf_t)));
+      if (dlp_metadata->pre_ops->b_scl) {
+        size_t scale_len = get_num_elements(wei_scale.dims);
+        dlp_metadata->pre_ops->b_scl->scale_factor = const_cast<void*>(wei_scale.buff);
+        dlp_metadata->pre_ops->b_scl->scale_factor_len = scale_len;
+        dlp_metadata->pre_ops->b_scl->scale_factor_type = 
+            (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
+      }
+      
+      // Setup weight zero-point
+      dlp_metadata->pre_ops->b_zp = static_cast<dlp_zp_t *>(malloc(sizeof(dlp_zp_t)));
+      if (dlp_metadata->pre_ops->b_zp) {
+        if (wei_zp.buff) {
+          dlp_metadata->pre_ops->b_zp->zero_point = const_cast<void*>(wei_zp.buff);
+          dlp_metadata->pre_ops->b_zp->zero_point_len = get_num_elements(wei_zp.dims);
+        } else {
+          dlp_metadata->pre_ops->b_zp->zero_point = nullptr;
+          dlp_metadata->pre_ops->b_zp->zero_point_len = 0;
+        }
+        dlp_metadata->pre_ops->b_zp->zero_point_type = DLP_S8;
+      }
+      
+      dlp_metadata->pre_ops->seq_length = 1;
+      
+      // Determine group_size from scale dimensions
+      // wei_scale.dims determines granularity:
+      //   - Per-tensor:  dims = {} or {1}     → group_size = K
+      //   - Per-channel: dims = {1, N}        → group_size = K  
+      //   - Per-group:   dims = {G, N}        → group_size = K / G
+      int64_t group_size = K;  // Default per-tensor
+      const auto& dims = wei_scale.dims;
+      if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
+        // Not per-tensor, check for per-group
+        if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
+          group_size = K / dims[0];  // Per-group: dims = {G, N}
+        }
+        // Per-channel (dims={N} or {1,N}) keeps group_size = K
+      }
+      
+      // Validation: group_size must divide K evenly
+      if (K % group_size != 0) {
+        log_error("WOQ: group_size (", group_size, ") must divide K (", K, ") evenly");
+        group_size = K;  // Fallback to per-tensor
+      }
+      
+      dlp_metadata->pre_ops->group_size = static_cast<int>(group_size);
+      
+      log_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=", group_size);
+    }
+  }
+
   return dlp_metadata;
 }
 #else
 aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
-                                  const void *bias, const data_types &dtypes, int N) {
+                                  const void *bias, const data_types &dtypes, int N, int K) {
+  // Check if this is a WOQ case (S4/S8 weights with BF16 source)
+  bool is_woq = dtypes.wei == data_type_t::s4 &&
+                dtypes.src == data_type_t::bf16;
+
   // Count total operations (bias + post-ops)
   int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
 
-  if (total_ops == 0) {
+  // For WOQ, we need aocl_post_op even if total_ops == 0 (for pre_ops)
+  if (total_ops == 0 && !is_woq) {
     return nullptr;
   }
 
@@ -608,6 +687,72 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
   aocl_po->seq_length = op_index;
   aocl_po->num_eltwise = eltwise_count;
 
+  // Setup pre-ops for WOQ (Weight-Only Quantization)
+  if (is_woq) {
+    aocl_po->pre_ops = static_cast<aocl_pre_op *>(malloc(sizeof(aocl_pre_op)));
+    if (aocl_po->pre_ops) {
+      const auto& wei_scale = lowoha_param.quant_params.wei_scale;
+      const auto& wei_zp = lowoha_param.quant_params.wei_zp;
+      
+      // Helper to compute num_elements from dims
+      auto get_num_elements = [](const std::vector<int64_t>& dims) -> size_t {
+        if (dims.empty()) return 0;
+        size_t count = 1;
+        for (auto d : dims) count *= static_cast<size_t>(d);
+        return count;
+      };
+      
+      // Setup weight scale factor
+      aocl_po->pre_ops->b_scl = static_cast<aocl_pre_op_sf *>(malloc(sizeof(aocl_pre_op_sf)));
+      if (aocl_po->pre_ops->b_scl) {
+        size_t scale_len = get_num_elements(wei_scale.dims);
+        aocl_po->pre_ops->b_scl->scale_factor = const_cast<void*>(wei_scale.buff);
+        aocl_po->pre_ops->b_scl->scale_factor_len = scale_len;
+        aocl_po->pre_ops->b_scl->scale_factor_type = 
+            (wei_scale.dt == data_type_t::bf16) ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
+      }
+      
+      // Setup weight zero-point
+      aocl_po->pre_ops->b_zp = static_cast<aocl_pre_op_zp *>(malloc(sizeof(aocl_pre_op_zp)));
+      if (aocl_po->pre_ops->b_zp) {
+        if (wei_zp.buff) {
+          aocl_po->pre_ops->b_zp->zero_point = const_cast<void*>(wei_zp.buff);
+          aocl_po->pre_ops->b_zp->zero_point_len = get_num_elements(wei_zp.dims);
+        } else {
+          aocl_po->pre_ops->b_zp->zero_point = nullptr;
+          aocl_po->pre_ops->b_zp->zero_point_len = 0;
+        }
+        aocl_po->pre_ops->b_zp->zero_point_type = AOCL_GEMM_INT8;
+      }
+      
+      aocl_po->pre_ops->seq_length = 1;
+      
+      // Determine group_size from scale dimensions
+      // wei_scale.dims determines granularity:
+      //   - Per-tensor:  dims = {} or {1}     → group_size = K
+      //   - Per-channel: dims = {1, N}        → group_size = K  
+      //   - Per-group:   dims = {G, N}        → group_size = K / G
+      int64_t group_size = K;  // Default per-tensor
+      const auto& dims = wei_scale.dims;
+      if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
+        // Not per-tensor, check for per-group
+        if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
+          group_size = K / dims[0];  // Per-group: dims = {G, N}
+        }
+        // Per-channel (dims={N} or {1,N}) keeps group_size = K
+      }
+      
+      // Validation: group_size must divide K evenly
+      if (K % group_size != 0) {
+        log_error("WOQ: group_size (", group_size, ") must divide K (", K, ") evenly");
+        group_size = K;  // Fallback to per-tensor
+      }
+      aocl_po->pre_ops->group_size = static_cast<dim_t>(group_size);
+      
+      log_info("WOQ BLIS: scale_len=", get_num_elements(wei_scale.dims), ", group_size=", group_size);
+    }
+  }
+
   return aocl_po;
 }
 #endif
@@ -692,6 +837,12 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
     }
 
     if (aocl_po->pre_ops) {
+      if (aocl_po->pre_ops->b_scl) {
+        free(aocl_po->pre_ops->b_scl);
+      }
+      if (aocl_po->pre_ops->b_zp) {
+        free(aocl_po->pre_ops->b_zp);
+      }
       free(aocl_po->pre_ops);
     }
 
@@ -744,6 +895,21 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po,
     if (aocl_po->bias) {
       free(aocl_po->bias);
     }
+    
+    // Clean up pre-ops for WOQ
+    if (aocl_po->pre_ops) {
+      // Note: Don't free scale_factor and zero_point buffers - they're user-provided
+      if (aocl_po->pre_ops->b_scl) {
+        aocl_po->pre_ops->b_scl->scale_factor = nullptr;
+        free(aocl_po->pre_ops->b_scl);
+      }
+      if (aocl_po->pre_ops->b_zp) {
+        aocl_po->pre_ops->b_zp->zero_point = nullptr;
+        free(aocl_po->pre_ops->b_zp);
+      }
+      free(aocl_po->pre_ops);
+    }
+    
     if (aocl_po->seq_vector) {
       free(aocl_po->seq_vector);
     }
@@ -751,6 +917,7 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po,
   }
 }
 #endif
+
 template <typename T>
 bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             void *&reorder_weights, const int k, const int n, const int ldb,
@@ -824,6 +991,9 @@ template bool reorderAndCacheWeights<short>(Key_matmul, const void *, void *&,
 template bool reorderAndCacheWeights<float>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<float>, int);
+template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
+    int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
+    reorder_func_ptr<int8_t>, int);
 
 void run_blis(char layout, char transA, char transB, int M, int N,
               int K,
@@ -859,16 +1029,23 @@ void run_blis(char layout, char transA, char transB, int M, int N,
                      aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                      weight_cache_type);
     }
+    else if (lowoha_param.dtypes.wei == data_type_t::s4) {
+      blocked_flag = reorderAndCacheWeights<int8_t>(key_, B, reordered_mem, K,
+                     N, ldb,
+                     'r', transB, mem_format_b,
+                     aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32,
+                     weight_cache_type);
+    }
     if (blocked_flag) {
       is_weight_blocked = true;
       mem_format_b = 'r';
     }
   }
-  // Create aocl_post_op structure for bias and post-ops
+  // Create aocl_post_op structure for bias, post-ops, and WOQ pre-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N);
+  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N, K);
 #else
-  aocl_post_op *aocl_po = create_blis_post_op(lowoha_param, bias, dtypes, N);
+  aocl_post_op *aocl_po = create_blis_post_op(lowoha_param, bias, dtypes, N, K);
 #endif
 
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
@@ -876,6 +1053,23 @@ void run_blis(char layout, char transA, char transB, int M, int N,
                             static_cast<const float *>(A),lda,mem_format_a,
                             is_weight_blocked ? (float *)reordered_mem : static_cast<const float *>(B),
                             ldb, mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
+  }
+  else if (dtypes.wei == data_type_t::s4) {
+    if (dtypes.dst == data_type_t::bf16) {
+      aocl_gemm_bf16s4f32obf16(layout,transA,transB,M,N,K,alpha,
+                               static_cast<const int16_t *>(A),lda,mem_format_a,
+                               is_weight_blocked ? (int8_t *)reordered_mem : static_cast<const int8_t *>(B),
+                               ldb, mem_format_b, beta,static_cast<int16_t *>(C),ldc,aocl_po);
+    }
+    else if (dtypes.dst == data_type_t::f32) {
+      aocl_gemm_bf16s4f32of32(layout,transA,transB,M,N,K,alpha,
+                              static_cast<const int16_t *>(A),lda,mem_format_a,
+                              is_weight_blocked ? (int8_t *)reordered_mem : static_cast<const int8_t *>(B),
+                              ldb,mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
+    }
+    else {
+      log_error("Unsupported data type for matmul");
+    }
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
     aocl_gemm_bf16bf16f32obf16(layout,transA,transB,M,N,K,alpha,
@@ -900,6 +1094,7 @@ void run_blis(char layout, char transA, char transB, int M, int N,
     free(reordered_mem);
     reordered_mem = nullptr;
   }
+  
   // Clean up aocl_post_op structure
 #if ZENDNNL_DEPENDS_AOCLDLP
   cleanup_dlp_post_op(aocl_po, lowoha_param);
@@ -916,7 +1111,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
-                                   N);
+                                   N, K);
   md_t m_ = M;
   md_t n_ = N;
   md_t k_ = K;
@@ -926,7 +1121,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   md_t group_size = batch_count;
 #else
   aocl_post_op *metadata_array = create_blis_post_op(lowoha_param, bias, dtypes,
-                                 N);
+                                 N, K);
   dim_t m_ = M;
   dim_t n_ = N;
   dim_t k_ = K;

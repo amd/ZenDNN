@@ -361,9 +361,11 @@ status_t operator_impl_t<OP_CONTEXT_T>::execute() {
       return status_t::failure;
     }
 
-    if (apilog_verbose_enabled()) {
+    if (apilog_verbose_enabled() || profilelog_verbose_enabled()) {
       execution_info = op_execute_info();
-      apilog_verbose(execution_info);
+      if (apilog_verbose_enabled()) {
+        apilog_verbose(execution_info);
+      }
     }
 
     /* cleanup after execution */

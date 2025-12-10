@@ -558,6 +558,11 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
   if (aocl_dlp_po_ptr != nullptr) {
     return status_t::success;
   }
+  bool is_woq = false;
+  auto weight_dtype = weight_tensor.get_data_type();
+  if (weight_dtype == data_type_t::s4) {
+    is_woq = true;
+  }
   // Iterate through each postop, check and add it if needed.
   int post_op_count = 0;
   // Find total number of post-ops with bias and scales
@@ -654,17 +659,20 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
   if (optional_bias_tensor_) {
     total_po++;
   }
-  if (total_po > 0) {
+
+  if (total_po > 0 || is_woq) {
     //Index for each post-op
     size_t eltwise_index = 0;
     size_t add_index_2d  = 0;
     size_t mul_index_2d  = 0;
     size_t mul_index_1d  = 0;
     size_t bias_index    = 0;
+
     aocl_dlp_po_ptr = (dlp_metadata_t *) calloc(1, sizeof(dlp_metadata_t));
     if (aocl_dlp_po_ptr == NULL) {
       return status_t::failure;
     }
+
     aocl_dlp_po_ptr->seq_vector = (DLP_POST_OP_TYPE *) calloc(total_po,
                                   sizeof(DLP_POST_OP_TYPE));
     if (aocl_dlp_po_ptr->seq_vector == NULL) {
@@ -678,94 +686,149 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
     aocl_dlp_po_ptr->matrix_add = NULL;
     aocl_dlp_po_ptr->matrix_mul = NULL;
     aocl_dlp_po_ptr->pre_ops = NULL;
+  
 
-    // Allocate memory for post-ops
-    if (aocl_post_op_memory_alloc(post_op_vec_, optional_bias_tensor_? true : false,
-                                  inputs_)
-        != status_t::success) {
-      return status_t::failure;
+    if (is_woq) {
+      auto weight_size      = weight_tensor.get_size();
+      auto scale_dt         = weight_tensor.get_quant_scale_data_type();
+      const void *scale_ptr = weight_tensor.get_quant_scale_raw_handle_const();
+      auto scale_size       = weight_tensor.get_quant_scale_size();
+      bool is_zero_point    = weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric;
+      auto scale_nelems     = compute_product(scale_size);
+      // Calculate group_size: number of consecutive weights in K dimension sharing the same scale
+      // AOCL DLP interprets group_size as: how many consecutive elements along K dimension share the same scale
+      // For per-channel quantization (scale_nelems == N): group_size = K (all K weights in each column share the same scale)
+      // For per-tensor quantization (scale_nelems == 1): group_size = K (all weights share the same scale)
+      // For group-wise quantization: group_size = K / (scale_nelems / N)
+      int group_size;
+      if (static_cast<size_t>(scale_nelems) == weight_size[1]) {
+        // Per-channel quantization: each output channel (column) has its own scale
+        // All K weights in each column share the same scale
+        group_size = static_cast<int>(weight_size[0]);  // K
+      } else if (scale_nelems == 1) {
+        // Per-tensor quantization: all weights share the same scale
+        group_size = static_cast<int>(weight_size[0]);  // K
+      } else {
+        // Group-wise quantization
+        group_size = static_cast<int>(weight_size[0]) / (scale_nelems / static_cast<int>(weight_size[1]));
+      }
+      aocl_dlp_po_ptr->pre_ops = (dlp_pre_op *)malloc(sizeof(dlp_pre_op));
+      (aocl_dlp_po_ptr->pre_ops)->b_zp = (dlp_zp_t *)malloc(sizeof(dlp_zp_t));
+      (aocl_dlp_po_ptr->pre_ops)->b_scl = (dlp_sf_t *)malloc(sizeof(dlp_sf_t));
+      // Setup zero point for WOQ (asymmetric quantization)
+      if (is_zero_point) {
+        const void *zp_ptr = weight_tensor.get_quant_zero_raw_handle_const();
+        auto zp_size = weight_tensor.get_quant_zero_size();
+        auto zp_nelems = compute_product(zp_size);
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point = const_cast<void *>(zp_ptr);
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_len = zp_nelems;
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_type = DLP_TYPE::DLP_S8;
+      } else {
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point = NULL;
+        ((aocl_dlp_po_ptr->pre_ops)->b_zp)->zero_point_len = 0;
+      }
+      ((aocl_dlp_po_ptr->pre_ops)->b_scl)->scale_factor = (float *)scale_ptr;
+      ((aocl_dlp_po_ptr->pre_ops)->b_scl)->scale_factor_len = scale_nelems;
+      ((aocl_dlp_po_ptr->pre_ops)->b_scl)->scale_factor_type = get_aocl_store_type(scale_dt);
+      (aocl_dlp_po_ptr->pre_ops)->seq_length = 1;
+      (aocl_dlp_po_ptr->pre_ops)->group_size = group_size;
     }
-    if (is_quant) {
-      // Add zero-point compensation
-      if (zp_comp_ndim == 1) {
+
+    if (total_po > 0) {
+      
+      aocl_dlp_po_ptr->seq_vector = (DLP_POST_OP_TYPE *) calloc(total_po,
+                                    sizeof(DLP_POST_OP_TYPE));
+      if (aocl_dlp_po_ptr->seq_vector == NULL) {
+        free(aocl_dlp_po_ptr);
+        return status_t::failure;
+      }
+      // Allocate memory for post-ops
+      if (aocl_post_op_memory_alloc(post_op_vec_, optional_bias_tensor_? true : false,
+                                    inputs_)
+          != status_t::success) {
+        return status_t::failure;
+      }
+      if (is_quant) {
+        // Add zero-point compensation
+        if (zp_comp_ndim == 1) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
+          if (aocl_dlp_po_ptr->bias == NULL) {
+            return status_t::failure;
+          }
+          (aocl_dlp_po_ptr->bias + bias_index)->stor_type = DLP_TYPE::DLP_S32;
+          (aocl_dlp_po_ptr->bias + bias_index)->bias      = zp_comp_acc;
+          bias_index++;
+        }
+        else if (zp_comp_ndim == 2) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_ADD;
+          if (aocl_dlp_po_ptr->matrix_add == NULL) {
+            return status_t::failure;
+          }
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->stor_type = DLP_TYPE::DLP_S32;
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->ldm = dim_N;
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->matrix = zp_comp_acc;
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor = malloc(sizeof(
+                float));
+          *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).sf->scale_factor) = 1.0f;
+          (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor_len = 1;
+          add_index_2d++;
+        }
+
+        // Src Scale
+        if (src_scale_) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor  = const_cast<void *>
+              (src_scale_);
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
+            get_aocl_store_type(src_scale_dt);
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = src_scale_size;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
+            DLP_TYPE::DLP_S32;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
+          mul_index_1d++;
+        }
+        // Wei Scale
+        if (wei_scale_) {
+          aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor  = const_cast<void *>
+              (wei_scale_);
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
+            get_aocl_store_type(wei_scale_dt);
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = wei_scale_size;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
+            DLP_TYPE::DLP_S32;
+          (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
+          mul_index_1d++;
+        }
+      }
+      // Add bias postop
+      if (optional_bias_tensor_) {
+        auto bias_type = optional_bias_tensor_->get_data_type();
         aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
         if (aocl_dlp_po_ptr->bias == NULL) {
           return status_t::failure;
         }
-        (aocl_dlp_po_ptr->bias + bias_index)->stor_type = DLP_TYPE::DLP_S32;
-        (aocl_dlp_po_ptr->bias + bias_index)->bias      = zp_comp_acc;
+        (aocl_dlp_po_ptr->bias + bias_index)->bias = (void *)
+            optional_bias_tensor_->get_raw_handle_unsafe();
+        (aocl_dlp_po_ptr->bias + bias_index)->stor_type = get_aocl_store_type(
+              bias_type);
         bias_index++;
       }
-      else if (zp_comp_ndim == 2) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::MATRIX_ADD;
-        if (aocl_dlp_po_ptr->matrix_add == NULL) {
-          return status_t::failure;
-        }
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->stor_type = DLP_TYPE::DLP_S32;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->ldm = dim_N;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->matrix = zp_comp_acc;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor = malloc(sizeof(
-              float));
-        *((float *)(aocl_dlp_po_ptr->matrix_add[add_index_2d]).sf->scale_factor) = 1.0f;
-        (aocl_dlp_po_ptr->matrix_add + add_index_2d)->sf->scale_factor_len = 1;
-        add_index_2d++;
-      }
 
-      // Src Scale
-      if (src_scale_) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor  = const_cast<void *>
-            (src_scale_);
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
-          get_aocl_store_type(src_scale_dt);
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = src_scale_size;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
-          DLP_TYPE::DLP_S32;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
-        mul_index_1d++;
-      }
-      // Wei Scale
-      if (wei_scale_) {
-        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor  = const_cast<void *>
-            (wei_scale_);
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_type  =
-          get_aocl_store_type(wei_scale_dt);
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->sf->scale_factor_len = wei_scale_size;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point = &dummy_zp;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_type =
-          DLP_TYPE::DLP_S32;
-        (aocl_dlp_po_ptr->scale + mul_index_1d)->zp->zero_point_len = 1;
-        mul_index_1d++;
-      }
-    }
-    // Add bias postop
-    if (optional_bias_tensor_) {
-      auto bias_type = optional_bias_tensor_->get_data_type();
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::BIAS;
-      if (aocl_dlp_po_ptr->bias == NULL) {
+      //Initialize other post-ops.
+      if (aocl_post_op_initialize(post_op_vec_, post_op_count,
+                                  optional_bias_tensor_? true : false, inputs_, output_tensor,
+                                  eltwise_index, add_index_2d, mul_index_1d, mul_index_2d) != status_t::success) {
         return status_t::failure;
       }
-      (aocl_dlp_po_ptr->bias + bias_index)->bias = (void *)
-          optional_bias_tensor_->get_raw_handle_unsafe();
-      (aocl_dlp_po_ptr->bias + bias_index)->stor_type = get_aocl_store_type(
-            bias_type);
-      bias_index++;
+      if (is_dst_scale_ || dst_zp_ != nullptr) {
+        aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
+      }
+      aocl_dlp_po_ptr->seq_length = post_op_count;
     }
-
-    //Initialize other post-ops.
-    if (aocl_post_op_initialize(post_op_vec_, post_op_count,
-                                optional_bias_tensor_? true : false, inputs_, output_tensor,
-                                eltwise_index, add_index_2d, mul_index_1d, mul_index_2d) != status_t::success) {
-      return status_t::failure;
-    }
-    if (is_dst_scale_ || dst_zp_ != nullptr) {
-      aocl_dlp_po_ptr->seq_vector[post_op_count++] = DLP_POST_OP_TYPE::SCALE;
-    }
-    aocl_dlp_po_ptr->seq_length = post_op_count;
   }
-
   return status_t::success;
 }
 
@@ -773,6 +836,16 @@ void aocl_dlp_utils_t::free_post_op() {
   LOG_DEBUG_INFO("Freeing aocl post-ops from aocl_dlp_utils_t");
   if (aocl_dlp_po_ptr == nullptr) {
     return;
+  }
+
+  if (aocl_dlp_po_ptr->pre_ops) {
+    if (aocl_dlp_po_ptr->pre_ops->b_scl) {
+      free(aocl_dlp_po_ptr->pre_ops->b_scl);
+    }
+    if (aocl_dlp_po_ptr->pre_ops->b_zp) {
+      free(aocl_dlp_po_ptr->pre_ops->b_zp);
+    }
+    free(aocl_dlp_po_ptr->pre_ops);
   }
 
   if (aocl_dlp_po_ptr->bias) {
@@ -837,9 +910,6 @@ void aocl_dlp_utils_t::free_post_op() {
   }
   if (aocl_dlp_po_ptr->seq_vector) {
     free(aocl_dlp_po_ptr->seq_vector);
-  }
-  if (aocl_dlp_po_ptr->pre_ops) {
-    free(aocl_dlp_po_ptr->pre_ops);
   }
   free(aocl_dlp_po_ptr);
 }
@@ -920,6 +990,19 @@ status_t aocl_dlp_utils_t::reorder_weights(std::optional<tensor_t> weights, data
         aocl_reorder_u8s8s32os32 // reorder_func
       );
     }
+  }
+  else if (weight_data_type == data_type_t::s4) {
+    log_info("Reordering S4 weights");
+    reorder_weights_execute<int8_t>(
+      weights_ptr, // weights
+      k, // k
+      n, // n
+      ldb, // ldb
+      'r', // order
+      trans_weights ? 't':'n', // trans
+      aocl_get_reorder_buf_size_bf16s4f32of32, // size function
+      aocl_reorder_bf16s4f32of32 // reorder_func
+    );
   }
   else {
     log_error("Unsupported data type for aocl reorder.");

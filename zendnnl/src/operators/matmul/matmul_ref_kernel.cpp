@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "matmul_ref_kernel.hpp"
+#include <cstring>
+#include <vector>
 
 namespace zendnnl {
 namespace ops {
@@ -40,6 +42,16 @@ inline void read_quant_params(const tensor_t &tensor,
     zp.size = 0;
     zp.dt = data_type_t::none;
   }
+}
+
+// Extract nibble from packed S4 byte (low nibble if is_low_nibble=true, else high nibble)
+inline int8_t extract_s4_nibble(int8_t packed_byte, bool is_low_nibble) {
+  int8_t s4_value = is_low_nibble ? (packed_byte & 0x0F) : ((packed_byte >> 4) & 0x0F);
+  // Sign extend from bit 3
+  if (s4_value & 0x08) {
+    s4_value |= 0xF0;
+  }
+  return s4_value;
 }
 
 void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
@@ -231,6 +243,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   bool is_int8                 = (input_dtype == data_type_t::s8 ||
                                   input_dtype == data_type_t::u8) &&
                                  weight_dtype == data_type_t::s8;
+  bool is_woq                  = input_dtype == data_type_t::bf16 &&
+                                 weight_dtype == data_type_t::s4;
   // Interim buffer  size
   size_t output_size = batch_size*M*N;
   // Interim accumulation buffer with float type
@@ -267,6 +281,126 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                              offset_wei, offset_out, alpha, beta, is_transpose_src, is_transpose_weights,
                              input, weights, bias, output, accum_buff_f32, input_dtype, weight_dtype,
                              bias_dtype, output_dtype, quant_param);
+  }
+  else if (is_woq) {
+    // WOQ: Weight-Only Quantization (BF16/F32 input, S4 weights)
+    // Convert S4 weights to BF16 and use compute_matmul
+    scale_and_zero_point_t quant_param;
+    if (weight_tensor.is_quantized()) {
+      read_quant_params(weight_tensor, quant_param.wei_scale, quant_param.wei_zp);
+    }
+    else {
+      log_error("WOQ requires quantized weights with scale factors");
+      return status_t::failure;
+    }
+
+    // Allocate tensor for dequantized BF16 weights
+    size_t weight_nelem = batch_size * K * N;
+    tensor_t bf16_weight_tensor = tensor_t()
+                                  .set_size({weight_nelem})
+                                  .set_data_type(data_type_t::bf16)
+                                  .set_storage()
+                                  .create();
+    bfloat16_t *bf16_weights = static_cast<bfloat16_t *>(bf16_weight_tensor.get_raw_handle_unsafe());
+    if (bf16_weights == nullptr) {
+      log_error("Failed to allocate BF16 weight buffer for WOQ dequantization");
+      return status_t::unimplemented;
+    }
+
+    // Dequantize S4 weights to BF16
+    // S4 weights are packed: 2 values per byte
+    // The tensor's physical layout depends on its order (ab vs ba)
+    const int8_t *packed_weights = (const int8_t *)weights;
+    auto wei_scale_size = quant_param.wei_scale.size;
+    bool has_zp = (quant_param.wei_zp.buff != nullptr);
+    
+    // Determine quantization granularity:
+    // - Per-tensor:  wei_scale_size == 1
+    // - Per-channel: wei_scale_size == N
+    // - Per-group:   wei_scale_size == G * N, where G = K / group_size
+    int num_groups = 1;
+    int group_size = K;
+    if (wei_scale_size > 1 && wei_scale_size != static_cast<size_t>(N)) {
+      // Per-group quantization
+      num_groups = wei_scale_size / N;
+      group_size = K / num_groups;
+    }
+
+    // Use tensor strides for correct S4 data access
+    // For S4, ldb represents stride in elements (not bytes)
+    #pragma omp parallel for collapse(3)
+    for (int bs = 0; bs < batch_size; ++bs) {
+      for (int k = 0; k < K; ++k) {
+        for (int n = 0; n < N; ++n) {
+          // Calculate S4 element index using tensor strides
+          // For non-transposed (ab): element[k,n] at k*ldb + n
+          // For transposed (ba): element[k,n] at n*ldb + k
+          size_t unpacked_idx = is_transpose_weights ?
+                                (bs * offset_wei + n * ldb + k) :
+                                (bs * offset_wei + k * ldb + n);
+          size_t packed_byte_idx = unpacked_idx / 2;
+          bool is_low_nibble = (unpacked_idx % 2) == 0;
+
+          // Extract S4 value
+          int8_t packed_byte = packed_weights[packed_byte_idx];
+          int8_t s4_value = extract_s4_nibble(packed_byte, is_low_nibble);
+
+          // Get scale based on quantization granularity
+          // - Per-tensor:  index = 0
+          // - Per-channel: index = n
+          // - Per-group:   index = group_idx * N + n, where group_idx = k / group_size
+          size_t scale_idx;
+          if (wei_scale_size == 1) {
+            scale_idx = 0;  // Per-tensor
+          } else if (wei_scale_size == static_cast<size_t>(N)) {
+            scale_idx = n;  // Per-channel
+          } else {
+            // Per-group: scale[group_idx, n]
+            int group_idx = k / group_size;
+            scale_idx = group_idx * N + n;
+          }
+          float scale = read_and_cast<float>(quant_param.wei_scale.buff,
+                                             quant_param.wei_scale.dt,
+                                             scale_idx);
+
+          // Get zero point if available (same indexing logic)
+          float zp = 0.0f;
+          if (has_zp) {
+            size_t zp_idx;
+            auto zp_size = quant_param.wei_zp.size;
+            if (zp_size == 1) {
+              zp_idx = 0;  // Per-tensor
+            } else if (zp_size == static_cast<size_t>(N)) {
+              zp_idx = n;  // Per-channel
+            } else {
+              // Per-group: zp[group_idx, n]
+              int group_idx = k / group_size;
+              zp_idx = group_idx * N + n;
+            }
+            zp = read_and_cast<float>(quant_param.wei_zp.buff,
+                                      quant_param.wei_zp.dt,
+                                      zp_idx);
+          }
+
+          // Dequantize: (s4_value - zero_point) * scale
+          float dequant_value = (static_cast<float>(s4_value) - zp) * scale;
+
+          // Store in standard K x N layout (untranspose if needed)
+          size_t bf16_idx = bs * K * N + k * N + n;
+          bf16_weights[bf16_idx] = bfloat16_t(dequant_value);
+        }
+      }
+    }
+
+    // Dequantized weights are now in standard K x N layout
+    int ldb_bf16 = N;
+    unsigned int offset_wei_bf16 = K * N;
+
+    // Call compute_matmul with dequantized BF16 weights (no longer transposed)
+    compute_matmul(batch_size, M, N, K, lda, ldb_bf16, ldc,
+                   offset_src, offset_wei_bf16, offset_out, alpha, beta, is_transpose_src,
+                   false, input, bf16_weights, bias, output, accum_buff_f32,
+                   input_dtype, data_type_t::bf16, bias_dtype, output_dtype);
   }
   else {
     compute_matmul(batch_size, M, N, K, lda, ldb, ldc,

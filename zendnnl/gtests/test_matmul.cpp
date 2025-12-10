@@ -110,6 +110,140 @@ TEST_P(TestMatmul,F32_F32) {
 
 /** @fn TEST_P
  *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param WOQ_BF16_S4 user-defined name of test according to test
+ *  @brief Test to validate matmul WOQ (Weight-Only Quantization) with BF16 input
+ *         and S4 weights wrt Reference kernel
+ */
+ TEST_P(TestMatmul, WOQ_BF16_S4) {
+  // Test WOQ with different scale/zp granularity combinations:
+  // Combination 0: scale=per-tensor,  zp=per-tensor  -> {1,1}, {1,1}
+  // Combination 1: scale=per-channel, zp=per-tensor  -> {1,n}, {1,1}
+  // Combination 2: scale=per-group,   zp=per-tensor  -> {G,n}, {1,1}
+  // Combination 3: scale=per-group,   zp=per-group   -> {G,n}, {G,n}
+
+  int quant_combo = rand() % 4;
+
+  std::vector<uint64_t> scale_size;
+  std::vector<uint64_t> zp_size;
+  uint64_t group_size = 0;
+  uint64_t num_groups = 1;
+  std::string scale_granularity, zp_granularity;
+
+  // Calculate group size for per-group cases
+  // DLP only supports even group sizes
+  // Find all even divisors of K as valid group sizes
+  std::vector<uint64_t> valid_group_sizes;
+  for (uint64_t gs = 2; gs <= k; gs += 2) {  // Only even numbers
+    if (k % gs == 0) {
+      valid_group_sizes.push_back(gs);
+    }
+  }
+  // If no even divisors found, fall back to K only if K is even
+  // Otherwise, fall back to per-channel (combo 1) for per-group cases
+  bool has_valid_group_size = !valid_group_sizes.empty() || (k % 2 == 0);
+  if (valid_group_sizes.empty() && k % 2 == 0) {
+    valid_group_sizes.push_back(k);
+  }
+  // If K is odd and no even divisors, downgrade per-group to per-channel
+  if (!has_valid_group_size && (quant_combo == 2 || quant_combo == 3)) {
+    quant_combo = 1;  // Fall back to per-channel
+  }
+
+  switch (quant_combo) {
+    case 0:
+      // scale=per-tensor, zp=per-tensor
+      scale_size = {1, 1};
+      zp_size = {1, 1};
+      scale_granularity = "per-tensor";
+      zp_granularity = "per-tensor";
+      break;
+
+    case 1:
+      // scale=per-channel, zp=per-tensor
+      scale_size = {1, n};
+      zp_size = {1, 1};
+      scale_granularity = "per-channel";
+      zp_granularity = "per-tensor";
+      break;
+
+    case 2:
+      // scale=per-tensor, zp=per-channel
+      scale_size = {1, 1};
+      zp_size = {1, n};
+      scale_granularity = "per-tensor";
+      zp_granularity = "per-channel";
+      break;
+
+    case 3: {
+      // scale=per-group, zp=per-group
+      // Randomly select one of the valid group sizes (safe here since we checked has_valid_group_size)
+      uint64_t valid_group_size = valid_group_sizes[rand() % valid_group_sizes.size()];
+      group_size = valid_group_size;
+      num_groups = k / group_size;
+      scale_size = {num_groups, n};
+      zp_size = {num_groups, n};
+      scale_granularity = "per-group";
+      zp_granularity = "per-group";
+      break;
+    }
+  }
+
+  auto scale_dtype = (rand() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto wei_scale = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
+  auto wei_zp = tensor_factory.uniform_tensor(zp_size, data_type_t::s8, 0);
+
+  // Log test configuration
+  std::string group_info = quant_combo > 2
+      ? " group_size=" + std::to_string(group_size) + " num_groups=" + std::to_string(num_groups)
+      : "";
+  log_info("WOQ test: scale=", scale_granularity, "[", scale_size[0], ",", scale_size[1], "]",
+           " zp=", zp_granularity, "[", zp_size[0], ",", zp_size[1], "]",
+           " scale_dtype=", (scale_dtype == data_type_t::f32 ? "f32" : "bf16"), group_info);
+
+  // Create S4 quantized weight tensor with scale and zero point
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+                            data_type_t::s4, 7.0, transB, wei_scale, wei_zp);
+
+  // BF16 input tensor
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+                            data_type_t::bf16, 2.0, transA);
+
+  // Bias tensor (optional, can be BF16 or F32)
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
+                            == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+
+  // Binary tensor for post-ops if needed
+  auto binary_tensor      = (po_index < po_arr.size() &&
+                             is_binary_postop(po_arr[po_index].first)) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+
+  auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32;
+  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+                            output_dtype, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+                            output_dtype, 2.0);
+
+  // Run kernel test and reference test
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+                            output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_index,
+                            binary_tensor, use_LOWOHA, algo, alpha, beta);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_bf16,
+                             epsilon_bf16, is_test_successful);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
  *  @param BF16_F32 user-defined name of test according to test
  *  @brief Test to validate matmul BF16outputF32 aocl kernel support wrt Reference kernel
  */

@@ -61,6 +61,8 @@ int main() {
     matmul_relu_forced_ref_kernel_example();
     matmul_broadcast_example(); //2d mm broadcast example
     run_lowoha_matmul_fp32_test();
+    matmul_woq_bf16_kernel_example();
+    run_lowoha_matmul_woq_bf16s4_test();
 
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,
@@ -99,7 +101,7 @@ int main() {
     embedding_bag_f32_kernel_example();
     embedding_bag_f32_forced_ref_kernel_example();
     embedding_f32_kernel_example();
-    embedding_bag_int4_ref_kernel_example();
+    //embedding_bag_int4_ref_kernel_example();
 
     /** Sample functionality examples.
      *

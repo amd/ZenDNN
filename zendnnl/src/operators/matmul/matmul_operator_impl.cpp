@@ -362,6 +362,22 @@ status_t matmul_impl_t::validate_forced_kernel() {
         return status_t::failure;
       }
     }
+    else if (wt_dtype == data_type_t::s4) {
+      // WOQ: Weight-Only Quantization - s4 weights with bf16/f32 input
+      if (!((in_dtype == data_type_t::f32) || (in_dtype == data_type_t::bf16)) ||
+          !((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16)) ||
+          (out_order == "ba")) {
+        log_error("<", get_name(),
+                  "> forced reference kernel for WOQ needs bf16/f32 input/output and non-transposed dst.");
+        return status_t::failure;
+      }
+      // Check that weights are quantized (required for WOQ)
+      if (!weights->is_quantized()) {
+        log_error("<", get_name(),
+                  "> forced reference kernel for WOQ requires quantized weights with scales.");
+        return status_t::failure;
+      }
+    }
     else if ((!((in_dtype == data_type_t::f32) ||
                 (in_dtype  == data_type_t::bf16))) ||
              (!((out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16))) ||
@@ -381,14 +397,18 @@ status_t matmul_impl_t::validate_forced_kernel() {
 }
 
 status_t matmul_impl_t::preprocess() {
+  // For WOQ (S4 weights), always use blocked kernel for better performance
+  auto weight_tensor = context.get_param("weights");
+  if (weight_tensor && weight_tensor->get_data_type() == data_type_t::s4) {
+    forced_kernel = "aocl_blis_blocked";
+  }
+
   if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
       forced_kernel == "aocl_blis_blocked") {
     LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
     //get bias tensor
     auto optional_bias_tensor = context.get_param("bias");
 
-    //get weight tensor for reorder
-    auto weight_tensor = context.get_param("weights");
     // output tensor
     auto output_tensor = outputs["matmul_output"];
 
@@ -540,6 +560,12 @@ status_t matmul_impl_t::kernel_factory() {
               output_dtype == data_type_t::u8 ||
               output_dtype == data_type_t::s32)) {
       kernel = get_matmul_int8_avx512_kernel();
+    }
+    else if ((weight_dtype == data_type_t::s4) &&
+             (input_dtype  == data_type_t::bf16) &&
+             (output_dtype == data_type_t::f32 ||
+              output_dtype == data_type_t::bf16)) {
+      kernel = get_matmul_bf16s4_avx512_kernel();
     }
     else {
       apilog_error("<", obj_name, "> kernel unimplemented.");

@@ -65,15 +65,33 @@ status_t matmul_context_t::validate() {
   }
   if (weights->is_quantized()) {
     unsigned long scale_nelems = compute_product(weights->get_quant_scale_size());
-    if (!(scale_nelems == weights_size.at(weights_size.size()-1) ||
-          scale_nelems == 1)) {
-      apilog_error("Weights quant scale supports per tensor or per channel quantization");
+    unsigned long N = weights_size.at(weights_size.size()-1);
+    unsigned long K = weights_size.at(weights_size.size()-2);
+    
+    // Supported quantization granularities:
+    // - Per-tensor:  scale_nelems == 1
+    // - Per-channel: scale_nelems == N
+    // - Per-group:   scale_nelems == G * N, where G divides K evenly
+    bool is_per_tensor = (scale_nelems == 1);
+    bool is_per_channel = (scale_nelems == N);
+    bool is_per_group = (scale_nelems > N) && (scale_nelems % N == 0) && 
+                        (K % (scale_nelems / N) == 0);
+    
+    if (!(is_per_tensor || is_per_channel || is_per_group)) {
+      apilog_error("Weights quant scale supports per tensor, per channel, or per group quantization");
       return status_t::failure;
     }
+    
     if (weights->get_quant_subtype() == quant_subtype_t::asymmetric) {
-      auto zero_nelems = compute_product(weights->get_quant_zero_size());
-      if (zero_nelems != 1) {
-        apilog_error("Weights quant zero supports per tensor quantization");
+      unsigned long zero_nelems = compute_product(weights->get_quant_zero_size());
+      // Zero point supports same granularities as scale
+      bool zp_is_per_tensor = (zero_nelems == 1);
+      bool zp_is_per_channel = (zero_nelems == N);
+      bool zp_is_per_group = (zero_nelems > N) && (zero_nelems % N == 0) && 
+                              (K % (zero_nelems / N) == 0);
+      
+      if (!(zp_is_per_tensor || zp_is_per_channel || zp_is_per_group)) {
+        apilog_error("Weights quant zero supports per tensor, per channel, or per group quantization");
         return status_t::failure;
       }
     }

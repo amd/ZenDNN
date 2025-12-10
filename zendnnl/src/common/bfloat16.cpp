@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -72,9 +72,13 @@ float bfloat16_t::bf16_to_f32_val(int16_t bf16_val) {
 }
 
 int16_t bfloat16_t::f32_to_bf16_val(float val) {
-  uint32_t temp;
-  std::memcpy(&temp, &val, sizeof(temp));
-  return static_cast<int16_t>(temp >> 16);
+  // Use round-to-nearest-even to match hardware behavior
+  uint32_t bits;
+  std::memcpy(&bits, &val, sizeof(float));
+  uint32_t lsb = (bits >> 16) & 1;
+  uint32_t rounding_bias = 0x7FFF + lsb;
+  bits += rounding_bias;
+  return static_cast<int16_t>(bits >> 16);
 }
 
 __attribute__((target("avx512f")))

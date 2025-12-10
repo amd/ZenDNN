@@ -22,10 +22,6 @@
 #define  OK          (0)
 #define  NOT_OK      (1)
 
-#define  MATMUL_M 10
-#define  MATMUL_K 5
-#define  MATMUL_N 4
-
 namespace zendnnl {
 namespace examples {
 

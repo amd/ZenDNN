@@ -245,6 +245,18 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       int32_t *buf_ptr = static_cast<int32_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int32_t>(dist_s32(gen)); });
     }
+    else if (dtype_ == data_type::s4) {
+      // S4 is packed: 2 x 4-bit values per byte, range [-8, 7]
+      // buf_nelem is the number of S4 elements, stored in buf_nelem/2 bytes
+      std::uniform_int_distribution<int> dist_s4(-8, 7);  // S4 range: -8 to 7
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;  // Round up for odd number of elements
+      for (size_t i = 0; i < num_bytes; ++i) {
+        int8_t low_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        int8_t high_nibble = static_cast<int8_t>(dist_s4(gen)) & 0x0F;
+        buf_ptr[i] = low_nibble | (high_nibble << 4);
+      }
+    }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");
     }
@@ -254,21 +266,40 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
 
 tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
     data_type dtype_, float val_,
-    std::string tensor_name_) {
+    std::string tensor_name_, bool trans,
+    tensor_t scale, tensor_t zp) {
 
   auto utensor = tensor_t()
                  .set_name(tensor_name_)
                  .set_size(size_)
-                 .set_data_type(dtype_)
-                 .set_storage()
-                 .create();
+                 .set_data_type(dtype_);
 
-  if (! utensor.check()) {
+  auto tensor_dim = utensor.get_dim();
+  if (trans && tensor_dim >= 2) {
+    std::string tag;
+    for (size_t i = 0; i < tensor_dim; ++i) {
+      tag += 'a' + i;
+    }
+    std::swap(tag[size_.size() - 2], tag[size_.size() - 1]);
+    utensor.set_order(tag);
+  }
+
+  utensor.set_storage();
+
+  if (scale.get_nelem() != 0) {
+    utensor.set_quant_scale(scale);
+  }
+  if (zp.get_nelem() != 0) {
+    utensor.set_quant_zero_point(zp);
+  }
+  utensor.create();
+
+  if (!utensor.check()) {
     log_warning("tensor creation of ", utensor.get_name(), " failed.");
   }
   else {
-    auto  buf_nelem  = utensor.get_nelem();
-    void *buf_vptr   = utensor.get_raw_handle_unsafe();
+    auto  buf_nelem = utensor.get_nelem();
+    void *buf_vptr  = utensor.get_raw_handle_unsafe();
 
     if (dtype_ == data_type::f32) {
       float *buf_ptr = static_cast<float *>(buf_vptr);
@@ -292,6 +323,22 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
       uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
         buf_ptr[i] = static_cast<uint8_t>(val_);
+      }
+    }
+    else if (dtype_ == data_type::s32) {
+      int32_t *buf_ptr = static_cast<int32_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = static_cast<int32_t>(val_);
+      }
+    }
+    else if (dtype_ == data_type::s4) {
+      // S4 is packed: 2 x 4-bit values per byte, range [-8, 7]
+      int8_t s4_val = static_cast<int8_t>(val_) & 0x0F;
+      int8_t packed_val = s4_val | (s4_val << 4);  // Same value in both nibbles
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      size_t num_bytes = (buf_nelem + 1) / 2;
+      for (size_t i = 0; i < num_bytes; ++i) {
+        buf_ptr[i] = packed_val;
       }
     }
     else {
@@ -698,6 +745,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                                         input_dim-3) : 1;
         const int batchB            = (weight_dim==3) ? weight_tensor.get_size(
                                         weight_dim-3) : 1;
+        const int batchC            = (output_dim==3) ? output_tensor.get_size(
+                                        output_dim-3) : 1;
 
         const int M                 = output_tensor.get_size(output_dim-2);
         const int K                 = input_tensor.get_size(input_dim-1);
@@ -705,6 +754,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         // Validate dimensions
         if (M == 0 || K == 0 || N == 0) {
           log_error("LOWOHA: Invalid tensor dimensions - M:", M, " K:", K, " N:", N);
+          return status_t::failure;
+        }
+        if (std::max(batchA, batchB) != batchC) {
+          log_error("Invalid output batch size");
           return status_t::failure;
         }
 
@@ -742,9 +795,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           return status_t::failure;
         }
 
+        // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
+        bool is_woq = (src_data_type == data_type_t::bf16 && wei_data_type == data_type_t::s4);
+
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
                  batchB, " M:", M, " N:", N, " K:", K,
-                 " alpha:", alpha, " beta:", beta);
+                 " alpha:", alpha, " beta:", beta, " is_woq:", is_woq);
 
         // Extract batch strides from tensors if they have batch dimension (3D)
         // Batch strides are in elements, not bytes
@@ -769,6 +825,32 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         lowoha_params params;
         params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
+
+        // For WOQ: Extract quantization parameters from weight tensor
+        if (is_woq) {
+          // Extract weight scale
+          const void *scale_buff = weight_tensor.get_quant_scale_raw_handle_const();
+          params.quant_params.wei_scale.buff = scale_buff;
+          params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
+          auto scale_size = weight_tensor.get_quant_scale_size();
+          params.quant_params.wei_scale.dims.assign(scale_size.begin(), scale_size.end());
+          log_info("LOWOHA WOQ: Weight scale extracted, dims: [",
+                    params.quant_params.wei_scale.dims.size() > 0 ? params.quant_params.wei_scale.dims[0] : 0,
+                    params.quant_params.wei_scale.dims.size() > 1 ? params.quant_params.wei_scale.dims[1] : 0, "]");
+          
+
+          // Extract weight zero point (if asymmetric quantization)
+          if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+            const void *zp_buff = weight_tensor.get_quant_zero_raw_handle_const();
+            if (zp_buff) {
+              params.quant_params.wei_zp.buff = zp_buff;
+              params.quant_params.wei_zp.dt = weight_tensor.get_quant_zero_data_type();
+              auto zp_size = weight_tensor.get_quant_zero_size();
+              params.quant_params.wei_zp.dims.assign(zp_size.begin(), zp_size.end());
+              log_info("LOWOHA WOQ: Weight zero point extracted");
+            }
+          }
+        }
 
         // Create batch_params structure
         batch_params_t batch_params;
@@ -803,7 +885,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
-                            beta, C_data, ldc, rand() % 2 == 0 ? true : false,
+                            beta, C_data, ldc, is_woq ? true : rand() % 2 == 0 ? true : false,
                             batch_params, params);
         if (status != status_t::success) {
           log_error("LOWOHA matmul_direct execution failed.");

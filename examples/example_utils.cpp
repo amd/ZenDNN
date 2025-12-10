@@ -147,6 +147,26 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = static_cast<int8_t>(val_);
       }
     }
+    else if (dtype_ == data_type::s4) {
+      int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
+      // Clamp val_ to S4 range [-8, 7] and quantize to nearest integer
+      float clamped_val = val_;
+      if (clamped_val < -8.0f) clamped_val = -8.0f;
+      if (clamped_val > 7.0f) clamped_val = 7.0f;
+      // Round to nearest integer: add 0.5 and truncate
+      int8_t quantized_val = static_cast<int8_t>(clamped_val >= 0.0f ? 
+                                                  clamped_val + 0.5f : 
+                                                  clamped_val - 0.5f);
+      
+      // Pack the same value into both lower and upper halves of each byte
+      // Lower 4 bits: quantized_val & 0x0F
+      // Upper 4 bits: (quantized_val & 0x0F) << 4
+      uint8_t packed_byte = (quantized_val & 0x0F) | ((quantized_val & 0x0F) << 4);
+      
+      for (index_type i=0; i<ceil(buf_nelem/2.0); ++i) {
+        buf_ptr[i] = static_cast<int8_t>(packed_byte);
+      }
+    }
     else if (dtype_ == data_type::u8) {
       uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {

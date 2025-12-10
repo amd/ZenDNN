@@ -104,13 +104,15 @@ inline int get_batch_index(int b, int batch_size) {
 * @param Batch_A Number of batches for matrix A
 * @param Batch_B Number of batches for matrix B
 * @param params Const reference to lowoha_params containing operation configuration
+* @param is_weights_const Boolean indicating if weights are constant
 * @return status_t::success if all validations pass, status_t::failure otherwise
 */
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       const lowoha_params &params);
+                                       const lowoha_params &params,
+                                       const bool is_weights_const);
 
 /**
  * @brief Convert post-op names to a comma-separated string.

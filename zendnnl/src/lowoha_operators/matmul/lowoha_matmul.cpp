@@ -90,7 +90,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   int Batch_B = batch_params.Batch_B;
 
   if (validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A, Batch_B,
-                                    params) != status_t::success) {
+                                    params, is_weights_const) != status_t::success) {
     return status_t::failure;
   }
 

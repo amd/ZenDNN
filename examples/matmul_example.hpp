@@ -22,10 +22,6 @@
 #define  OK          (0)
 #define  NOT_OK      (1)
 
-#define  MATMUL_M 10
-#define  MATMUL_K 5
-#define  MATMUL_N 4
-
 namespace zendnnl {
 namespace examples {
 /** @fn matmul_relu_f32_kernel_example
@@ -115,6 +111,17 @@ int matmul_relu_forced_ref_kernel_example();
  *  weight tensor and its execution.
  */
 int matmul_broadcast_example();
+
+/** @fn matmul_woq_bf16_kernel_example
+ *  @brief Demonstrates WOQ matmul fused operator on bf16 inputs s4 weights.
+ *
+ *  matmul operator implements matrix multiplication on 2D tensors. This operator
+ *  can be fused with various post_ops.
+ *
+ *  This example demonstrates WOQ matmul operator creation and
+ *  execution of one of its bf16s4 computation based kernel.
+ */
+ int matmul_woq_bf16_kernel_example();
 
 } //examples
 } //zendnnl

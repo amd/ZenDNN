@@ -64,16 +64,21 @@ struct postop {
 struct lowoha_quantization_params_t {
   /**
    * @brief Individual quantization parameter (scale or zero-point)
+   * 
+   * Dimensions determine quantization granularity for weight matrix [K, N]:
+   *   - Per-tensor:  dims = {} or {1}     → single scale for all weights
+   *   - Per-channel: dims = {1, N}        → one scale per output channel
+   *   - Per-group:   dims = {G, N}        → G groups along K, where G = K/group_size
    */
   struct quant_t {
-    const void *buff;    ///< Pointer to quantization data buffer
-    data_type_t dt;      ///< Data type of the buffer
-    size_t size;         ///< Size of the buffer in bytes
+    const void *buff;              ///< Pointer to quantization data buffer
+    data_type_t dt;                ///< Data type of the buffer
+    std::vector<int64_t> dims;     ///< Dimensions of the quantization tensor
 
     /**
      * @brief Default constructor for quant_t
      */
-    quant_t() : buff(nullptr), dt(data_type_t::none), size(0) {}
+    quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
   };
 
   quant_t src_scale;  ///< Source tensor scale

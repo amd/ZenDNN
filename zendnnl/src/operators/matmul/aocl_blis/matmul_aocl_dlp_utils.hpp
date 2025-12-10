@@ -25,7 +25,7 @@
 #include "memory/tensor.hpp"
 #include "memory/memory_utils.hpp"
 #include "operators/common/post_op.hpp"
-
+#include "memory/memory_utils.hpp"
 #include "aocl_dlp.h" // aocl-dlp header
 namespace zendnnl {
 namespace ops {
