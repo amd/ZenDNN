@@ -893,19 +893,40 @@ jobs:
 
           EOF
           cat email.html >> email_message.txt
-
-          # Send via AMD SMTP
-          curl --url 'smtps://smtp.amd.com:465' \
-               --ssl-reqd \
-               --mail-from "${{ secrets.SMTP_USERNAME }}" \
-               --mail-rcpt "${PR_AUTHOR_RAW}@amd.com" \
-               --user "${{ secrets.SMTP_USERNAME }}:${{ secrets.SMTP_PASSWORD }}" \
-               --upload-file email_message.txt
-
-          if [ $? -eq 0 ]; then
-            echo "✅ Email notification sent successfully to ${PR_AUTHOR_RAW}@amd.com!"
-          else
-            echo "❌ Failed to send email notification (continuing workflow)"
+          
+          echo "📧 Trying to send email to ${PR_AUTHOR_RAW}@amd.com..."
+          # Try multiple SMTP servers
+          SMTP_SERVERS=(
+               "outlook.office365.com:587"
+               "smtp.office365.com:587" 
+               "mail.amd.com:465"
+               "exchange.amd.com:587"
+               "smtp.amd.com:587"
+          )
+          EMAIL_SENT=false
+          for server in "${SMTP_SERVERS[@]}"; do
+           echo "📧 Trying SMTP server: $server"
+           if curl --url "smtps://$server" \
+              --ssl-reqd \
+              --mail-from "z1zenaibuild@amd.com" \
+              --mail-rcpt "${PR_AUTHOR_RAW}@amd.com" \
+              --user "z1zenaibuild@amd.com:uG54@c-2AuB=RYIkl]" \
+              --upload-file email_message.txt \
+              --connect-timeout 10 \
+              --max-time 30 \
+              2>/dev/null; then
+            echo "✅ Email sent successfully via $server!"
+            EMAIL_SENT=true
+            break
+           else
+            echo "❌ Failed with $server, trying next..."
+           fi
+          done
+          if [ "$EMAIL_SENT" = false ]; then
+           echo "❌ All SMTP servers failed. Email could not be sent."
+           echo "📧 PR author: ${PR_AUTHOR_RAW}@amd.com"
+           echo "📧 Subject: $ICON ZenDNN PR #$PR_NUMBER - $PR_TITLE"
+           # Don't fail the workflow
           fi
 
           echo "📧 Email notification completed for PR #$PR_NUMBER"
