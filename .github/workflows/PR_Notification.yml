@@ -10,9 +10,10 @@ on:
 
 permissions:
   checks: read
-  pull-requests: read
+  pull-requests: write
   contents: read
   actions: read
+  issues: write 
 
 jobs:
   notify_teams:
@@ -649,6 +650,7 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ZIAIE_PAT }}
           script: |
             const pr_json = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
             const checks_json = JSON.parse(`${{ steps.monitor_checks.outputs.result }}`);
