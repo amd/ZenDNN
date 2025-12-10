@@ -327,15 +327,18 @@ params.lowoha_algo = matmul_algo_t::aocl_blis;
 ```
 
 **Available Algorithms:**
+- `matmul_algo_t::auto_tuner` (auto) - Auto Tuner (selects performant backend at runtime)
 - `matmul_algo_t::dynamic_dispatch` (0) - Automatic backend selection based on heuristics
-- `matmul_algo_t::aocl_blis` (1) - AOCL BLIS backend
-- `matmul_algo_t::aocl_blis_blocked` (2) - Blocked AOCL BLIS
-- `matmul_algo_t::onednn` (3) - OneDNN backend
-- `matmul_algo_t::onednn_blocked` (4) - Blocked OneDNN
-- `matmul_algo_t::libxsmm` (5) - LibXSMM backend
+- `matmul_algo_t::aocl_blis_blocked` (1) - Blocked AOCL BLIS/DLP backend
+- `matmul_algo_t::onednn_blocked` (2) - Blocked OneDNN backend
+- `matmul_algo_t::libxsmm_blocked` (3) - Blocked LibXSMM backend
+- `matmul_algo_t::aocl_blis` (4) - AOCL BLIS/DLP backend
+- `matmul_algo_t::onednn` (5) - OneDNN backend
+- `matmul_algo_t::libxsmm` (6) - LibXSMM backend
+
 
 ### 2. Via Environment Variable
 
 ```bash
-export ZENDNNL_MATMUL_ALGO=1  # 0=Dynamic, 1=AOCL BLIS, 2=AOCL Blocked, 3=OneDNN, 4=OneDNN Blocked, 5=LibXSMM
+export ZENDNNL_MATMUL_ALGO=1  # auto=Auto_tuner, 0=Dynamic, 1=AOCL BLIS/DLP Blocked, 2=OneDNN Blocked, 3=LibXSMM blocked, 4=AOCL BLIS/DLP, 5=OneDNN, 6=LibXSMM
 ```

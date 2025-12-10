@@ -197,11 +197,11 @@ auto quantized_input = tensor_t()
 
 ### Supported Quantization Configurations
 
-| Tensor         | Scale (mandatory) | Zero-Point             | Granularity               |
-|----------------|-------------------|------------------------|---------------------------|
-| Input          | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor                |
-| Weights        | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor or per-channel |
-| Output         | Yes (FP32/BF16)   | Yes (INT8/UINT8/INT32) | Per-tensor                |
+| Tensor         | Scale (mandatory)                          | Zero-Point (per-tensor)|
+|----------------|--------------------------------------------|------------------------|
+| Input          | Yes (FP32/BF16)  Per-tensor                | Yes (INT8/UINT8/INT32) |
+| Weights        | Yes (FP32/BF16)  Per-tensor or per-channel | Yes (INT8/UINT8/INT32) |
+| Output         | Yes (FP32/BF16)  Per-tensor                | Yes (INT8/UINT8/INT32) |
 
 Quantization in the MatMul operator enables efficient computation while maintaining acceptable accuracy for many deep learning workloads.
 
@@ -212,7 +212,7 @@ This table provides a detailed overview of supported configurations for matrix m
 |------------------|---------------------|--------------------|--------------------------------|-------|-----------|
 | FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       |
 | BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       |
-| INT8             | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       |
+| UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       |
 ---
 | Activation     | Description                     |
 |----------------|---------------------------------|
@@ -791,7 +791,7 @@ Set the environment variable before running your application:
 ```
 export ZENDNNL_MATMUL_ALGO = <algo>
 ```
-Example: `export ZENDNNL_MATMUL_ALGO = 2` (for aocl_blis_blocked)
+Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_blis_blocked)
 
 - Note: Runtime variable can be set via either method, precedence is given to JSON configuration if both are provided.
 

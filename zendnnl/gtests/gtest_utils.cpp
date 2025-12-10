@@ -39,7 +39,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
     if (!cmd_backend.empty()) {
       // Handle oneDNN dependency check for command-line backends
 #if ZENDNNL_DEPENDS_ONEDNN
-      algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn : strToAlgo(
+      algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn_blocked : strToAlgo(
                cmd_backend);
 #else
       // Fallback to AOCL BLIS if oneDNN backends requested but not available
@@ -53,21 +53,22 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         alpha = 1.0f;
         beta  = rand() % 2;
         //ToDo: Need to support silu, gelu_tanh, F32 postops.
-        if (po_index == 4 || po_index == 1) {
+        if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
           po_index = 8;
         }
       }
     }
     else {
       // Random algorithm selection
-#if ZENDNNL_DEPENDS_ONEDNN
-      int algo_range_max = 3;
-#else
-      int algo_range_max = 2;
-#endif
+      int algo_range_max = 6; // 6 algorithms in total
       std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
       algo = static_cast<matmul_algo_t>(algo_dist(gen));
-
+      if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked)) {
+        algo = matmul_algo_t::aocl_blis;
+      }
+      if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
+        algo = matmul_algo_t::aocl_blis;
+      }
       // Control LOWOHA and LIBXSMM based on test index
       // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
       uint32_t third = total_tests / TEST_PARTITIONS;
@@ -83,7 +84,11 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         alpha = 1.0f;
         beta = rand() % 2;
         algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
-        if (po_index == 4 || po_index == 1 ) {
+        if (!ZENDNNL_DEPENDS_LIBXSMM) {
+          algo = matmul_algo_t::aocl_blis;
+        }
+        // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
+        if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
           po_index = 8;
         }
       }
@@ -95,7 +100,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       alpha    = 1.0f;
       beta     = rand() % 2;
       use_LOWOHA = true;
-      if (po_index == 4 || po_index == 1 ) {
+      if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
         po_index = 8;
       }
     }

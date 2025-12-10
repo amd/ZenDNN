@@ -297,7 +297,7 @@ The AutoTuner behavior can be controlled through various environment variables, 
 
 ```
 # Enable the AutoTuner
-export ZENDNNL_MATMUL_ALGO=9
+export ZENDNNL_MATMUL_ALGO=auto
 
 # Select AutoTuner version (optional, default: 2)
 export ZENDNNL_AUTO_TUNER_TYPE=1/2

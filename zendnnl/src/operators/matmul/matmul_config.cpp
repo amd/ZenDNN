@@ -45,7 +45,6 @@ status_t matmul_config_t::set_user_config(json config_json) {
       }
     }
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
-    [[maybe_unused]] int32_t matmul_weight_cache = 0;
     if ((static_cast<matmul_algo_t>(matmul_algo) ==
          matmul_algo_t::aocl_blis_blocked) ||
         (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
@@ -71,13 +70,29 @@ void matmul_config_t::set_env_config() {
   char *algo_env = std::getenv("ZENDNNL_MATMUL_ALGO");
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   if (algo_env) {
-    int32_t algo = std::stoi(algo_env);
-    if (algo > static_cast<int32_t>(matmul_algo_t::none) &&
-        algo < static_cast<int32_t>(matmul_algo_t::algo_count)) {
-      matmul_algo = static_cast<int32_t>(matmul_algo_t(algo));
+    std::string algoStr(algo_env);
+    std::transform(algoStr.begin(), algoStr.end(), algoStr.begin(),
+               [](unsigned char c) { return std::tolower(c); });
+    if (algoStr == "auto") {
+      matmul_algo = static_cast<int32_t>(matmul_algo_t::auto_tuner);
     }
     else {
-      matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+      try {
+        int32_t algo = std::stoi(algoStr);
+        if (algo > static_cast<int32_t>(matmul_algo_t::none) &&
+            algo < static_cast<int32_t>(matmul_algo_t::algo_count)) {
+          matmul_algo = static_cast<int32_t>(matmul_algo_t(algo));
+        }
+        else {
+          matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+        }
+      }
+      catch (const std::invalid_argument& e) {
+        matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+      }
+      catch (const std::out_of_range& e) {
+        matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+      }
     }
   }
   set_algo(matmul_algo);
@@ -141,8 +156,11 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   else if (algo == "aocl_blis_blocked") {
     return matmul_algo_t::aocl_blis_blocked;
   }
-  else if ((algo == "onednn") || (algo == "onednn_blocked")) {
+  else if (algo == "onednn") {
     return matmul_algo_t::onednn;
+  }
+  else if (algo == "onednn_blocked") {
+    return matmul_algo_t::onednn_blocked;
   }
   else if (algo == "libxsmm") {
     return matmul_algo_t::libxsmm;
@@ -155,6 +173,9 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   }
   else if (algo == "batched_sgemm") {
     return matmul_algo_t::batched_sgemm;
+  }
+  else if (algo == "auto_tuner") {
+    return matmul_algo_t::auto_tuner;
   }
 
   return matmul_algo_t::algo_count;
