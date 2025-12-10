@@ -34,10 +34,13 @@ struct MatmulConfig;
  * @param cfg MatmulConfig structure specifying tensor dimensions and data types.
  * @param weights Vector to store created weight tensors.
  * @param options Global options for command-line configuration.
+ * @param isLOWOHA Flag to indicate LOWOHA mode (true) or regular API mode (false).
+ *                 When false, reorder is applied for aocl_blis_blocked kernels.
  * @return int OK (0) on success, NOT_OK (1) on failure.
  */
 int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
-                          std::vector<tensor_t> &weights, const global_options &options);
+                          std::vector<tensor_t> &weights, const global_options &options,
+                          bool isLOWOHA = false);
 
 /**
  * @brief Creates bias tensors for each layer if bias is enabled.

@@ -147,6 +147,12 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = static_cast<int8_t>(val_);
       }
     }
+    else if (dtype_ == data_type::u8) {
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = static_cast<uint8_t>(val_);
+      }
+    }
     else {
       log_warning("tensor ", utensor.get_name(), " unsupported data type.");
     }
@@ -293,8 +299,19 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
     }
     else if (dtype_ == data_type::s8) {
+      std::uniform_int_distribution<int> dist_s8(-1 * range_, range_);
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
-      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return int8_t(dist(gen));});
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist_s8(gen)); });
+    }
+    else if (dtype_ == data_type::u8) {
+      std::uniform_int_distribution<int> dist_u8(0, range_);
+      uint8_t *buf_ptr = static_cast<uint8_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<uint8_t>(dist_u8(gen)); });
+    }
+    else if (dtype_ == data_type::s32) {
+      std::uniform_int_distribution<int> dist_s32(-1 * range_, range_);
+      int32_t *buf_ptr = static_cast<int32_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int32_t>(dist_s32(gen)); });
     }
     else {
       log_warning("tensor ", udtensor.get_name(), " unsupported data type.");

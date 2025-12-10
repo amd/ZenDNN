@@ -37,7 +37,9 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       std::vector<tensor_t> weight_tensor, bias, output_tensor;
       std::vector<std::vector<tensor_t>> binary_post_ops_tensors;
 
-      int ret = create_weights_tensor(tensor_factory, cfg, weight_tensor, options);
+      // true indicates LOWOHA mode for weight tensor creation
+      int ret = create_weights_tensor(tensor_factory, cfg, weight_tensor, options,
+                                      true);
       if (ret != OK) {
         testlog_error("create_bias_tensor failed");
         log_benchmark_failure(cfg);

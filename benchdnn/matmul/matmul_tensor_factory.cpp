@@ -21,7 +21,7 @@ namespace benchdnn {
 namespace matmul {
 
 int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
-                          std::vector<tensor_t> &weights, const global_options &options) {
+                          std::vector<tensor_t> &weights, const global_options &options, bool isLOWOHA) {
 
   zendnnl::common::data_type_t dt = cfg.dt[1];
 
@@ -31,15 +31,19 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
     size_t n = cfg.n_values[i];
     tensor_t weights_tensor;
 
-    if (cfg.kernel_name == "aocl_blis_blocked") {
+    // Apply reorder for regular API, not for LOWOHA
+    if (cfg.kernel_name == "aocl_blis_blocked" && !isLOWOHA) {
+      auto wei_scale = (dt == data_type_t::s8) ? tensor_factory.uniform_dist_tensor({1, n},
+                       data_type_t::f32, 0.2) : tensor_t();
+
       // Create input tensor with contigious layout.
       auto input_tensor = tensor_factory.uniform_dist_tensor({k, n},
                           dt,
-                          1.0, "reorder_input", cfg.isTransB);
-
+                          1.0, "reorder_input", cfg.isTransB, wei_scale);
       // Reorder context creation with backend aocl.
       auto reorder_context = reorder_context_t()
                              .set_algo_format("aocl")
+                             .set_source_dtype(dt)
                              .create();
 
       if (! reorder_context.check()) {
@@ -73,8 +77,8 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         // Blocked Tensor creation with seperate view for input tensor.
         weights_tensor = tensor_factory.copy_tensor({k, n},
                          dt,
-                         buffer_params, false, true,
-                         "weights_" + std::to_string(i));
+                         buffer_params, cfg.isTransB, true,
+                         "weights_" + std::to_string(i), std::move(wei_scale));
       }
       else {
         // Compute the reorder size and create a buffer with reorderd size
@@ -87,8 +91,8 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
         // Blocked Tensor creation with seperate view for input tensor.
         weights_tensor = tensor_factory.copy_tensor({k, n},
                          dt,
-                         buffer_params, false, true,
-                         "weights_" + std::to_string(i));
+                         buffer_params, cfg.isTransB, true,
+                         "weights_" + std::to_string(i), std::move(wei_scale));
       }
     }
     else {
@@ -98,9 +102,11 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                          1.0, "weights_" + std::to_string(i), cfg.isTransB);
       }
       else {
+        auto wei_scale = (dt == data_type_t::s8) ? tensor_factory.uniform_dist_tensor({1, n},
+                         data_type_t::f32, 0.2) : tensor_t();
         weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
                          dt,
-                         1.0, "weights_" + std::to_string(i), cfg.isTransB);
+                         1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale);
       }
     }
     weights.push_back(weights_tensor);
@@ -139,9 +145,14 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
             1.0, "matmul_input", cfg.isTransA);
   }
   else {
+    auto src_scale = (cfg.dt[0] == data_type_t::s8 ||
+                      cfg.dt[0] == data_type_t::u8) ? tensor_factory.uniform_dist_tensor({1, 1},
+                          data_type_t::f32, 0.3) : tensor_t();
+    auto src_zp = cfg.dt[0] == data_type_t::u8 ? tensor_factory.uniform_tensor({1, 1},
+                  data_type_t::s8, 16) : tensor_t();
     input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
             cfg.dt[0],
-            1.0, "matmul_input", cfg.isTransA);
+            1.0, "matmul_input", cfg.isTransA, src_scale, src_zp);
   }
   input.set_name("matmul_input");
   return OK;
@@ -153,6 +164,11 @@ int create_output_tensor(tensor_factory_t &tensor_factory,
   // Create output tensor with zero initialization.
   size_t m = cfg.m;
   zendnnl::common::data_type_t dt = cfg.dt[2];
+  auto dst_scale = !(dt == data_type_t::f32 ||
+                     dt == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
+                         data_type_t::f32, 1.2) : tensor_t();
+  auto dst_zp  = dt == data_type_t::u8 ? tensor_factory.uniform_tensor({1, 1},
+                 data_type_t::u8, 53) : tensor_t();
   for (auto i = 0; i < cfg.n_values.size(); i++) {
     size_t n = cfg.n_values[i];
     tensor_t output_tensor;
@@ -162,7 +178,7 @@ int create_output_tensor(tensor_factory_t &tensor_factory,
     }
     else {
       output_tensor = tensor_factory.zero_tensor({m, n},
-                      dt, "matmul_output_" + std::to_string(i));
+                      dt, "matmul_output_" + std::to_string(i), dst_scale, dst_zp);
     }
     output_tensor.set_name("matmul_output_" + std::to_string(i));
     output.push_back(output_tensor);

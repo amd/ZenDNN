@@ -179,6 +179,12 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
   for (const auto &cfg:configs) {
     try {
       skip = false;
+      // Check if weight data type is u8, which is not supported
+      if (cfg.dt[1] == data_type_t::u8) {
+        testlog_error("Weight data type u8 is not supported");
+        log_benchmark_failure(cfg);
+        continue;
+      }
 
       tensor_factory_t tensor_factory;
       tensor_t input_tensor;
