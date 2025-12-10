@@ -351,6 +351,20 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
     }
     options.isTransB = (arg.substr(11) == "true");
   }
+  else if (arg.find("--alpha=") == 0) {
+    if (arg.substr(8).empty()) {
+      commonlog_error("Alpha value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.alpha = std::stof(arg.substr(8));
+  }
+  else if (arg.find("--beta=") == 0) {
+    if (arg.substr(7).empty()) {
+      commonlog_error("Beta value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.beta = std::stof(arg.substr(7));
+  }
   else if (arg.find("--warmup_iters=") == 0) {
     if (arg.substr(15).empty()) {
       commonlog_error("Warmup iterations value cannot be empty. Please provide a valid number.");

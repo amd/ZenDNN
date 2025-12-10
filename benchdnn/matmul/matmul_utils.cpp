@@ -43,7 +43,7 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         "Invalid line (expected ", expected_fields_cnt, " fields): [",
         (options.ndims > 2) ? "bs, " : "",
         "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, ",
-        "kernel name, isTransA, isTransB, warmup iterations (optional)]");
+        "kernel name, isTransA, isTransB, alpha, beta, warmup iterations (optional)]");
       continue;
     }
     MatmulConfig cfg;
@@ -195,6 +195,11 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         continue;
       }
       id++;
+      // Parse alpha and beta scaling factors (default: alpha=1.0, beta=0.0)
+      cfg.alpha = fields[id].empty() ? 1.0f : std::stof(fields[id]);
+      id++;
+      cfg.beta = fields[id].empty() ? 0.0f : std::stof(fields[id]);
+      id++;
       // Parse warmup iterations if provided, otherwise use 20% of main iterations
       if (id < fields.size() && !(fields[id].empty())) {
         cfg.warmup_iters = std::stoi(fields[id]);
@@ -286,7 +291,8 @@ void inputModelFileParser(std::ifstream &infile,
       }
       else if (fields_size == 4) {
         if (options.ndims != 2) {
-          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ", line);
+          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ",
+                          line);
           continue;
         }
         if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
@@ -299,7 +305,8 @@ void inputModelFileParser(std::ifstream &infile,
       }
       else if (fields_size == 5) {
         if (options.ndims <= 2) {
-          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ", line);
+          commonlog_error("Ensure to provide the correct number of dims and specify BS (batch size) for BMM cases. Input: ",
+                          line);
           continue;
         }
         if (fields[id].empty()) {
@@ -383,7 +390,10 @@ void inputModelFileParser(std::ifstream &infile,
       cfg.bias_dt = options.bias_dt;
       cfg.isTransA = options.isTransA;
       cfg.isTransB = options.isTransB;
-      cfg.warmup_iters = options.warmup_iters;
+      cfg.alpha = options.alpha;
+      cfg.beta = options.beta;
+      cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
+                         options.warmup_iters;
 
       configs.push_back(cfg);
     }
@@ -422,7 +432,10 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     cfg.bias_dt = options.bias_dt;
     cfg.isTransA = options.isTransA;
     cfg.isTransB = options.isTransB;
-    cfg.warmup_iters = options.warmup_iters;
+    cfg.alpha = options.alpha;
+    cfg.beta = options.beta;
+    cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
+                       options.warmup_iters;
 
     configs.push_back(cfg);
   }
@@ -446,7 +459,8 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
                   n_values, ", ", datatypeToStr(cfg.dt[0]), ":",
                   datatypeToStr(cfg.dt[1]), ":", datatypeToStr(cfg.dt[2]), ", ",
                   cfg.isBiasEnabled, ", ", (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) :""),
-                  ", ", post_op, ", ", cfg.kernel_name, ", ", cfg.warmup_iters);
+                  ", ", post_op, ", ", cfg.kernel_name, ", ", cfg.isTransA, ", ", cfg.isTransB,
+                  ", ", cfg.alpha, ", ", cfg.beta, ", ", cfg.warmup_iters);
 }
 
 void print_matmul_execution_summary(const MatmulConfig &cfg,
@@ -476,6 +490,8 @@ void print_matmul_execution_summary(const MatmulConfig &cfg,
             << ", " << post_op << ", " << cfg.kernel_name << ", "
             << cfg.isTransA << ", "
             << cfg.isTransB << ", "
+            << cfg.alpha << ", "
+            << cfg.beta << ", "
             << cfg.warmup_iters << ", "
             << total_time << std::endl;
 }
@@ -510,6 +526,8 @@ void write_each_config_result(const MatmulConfig &config,
   outfile << config.kernel_name << ", "
           << config.isTransA << ", "
           << config.isTransB << ", "
+          << config.alpha << ", "
+          << config.beta << ", "
           << config.warmup_iters << ", " << stat[layer_num].total_time_ms
           << ", " << gflops_val;
   if (isPipeline) {
@@ -574,6 +592,10 @@ void cal_column_width(const MatmulConfig &config,
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.isTransB).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.alpha).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.beta).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.warmup_iters).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string((int)stat[0].total_time_ms).size() + 2);
@@ -637,6 +659,8 @@ void fill_row(const MatmulConfig &config,
   row.push_back(config.kernel_name);
   row.push_back(std::to_string(config.isTransA));
   row.push_back(std::to_string(config.isTransB));
+  row.push_back(std::to_string(config.alpha));
+  row.push_back(std::to_string(config.beta));
   row.push_back(std::to_string(config.warmup_iters));
   std::ostringstream total_time_ss;
   total_time_ss << std::fixed << std::setprecision(2) <<
@@ -689,7 +713,7 @@ void log_pipeline_results(
     outfile << "BS, ";
   }
   outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
@@ -736,6 +760,8 @@ void log_pipeline_results(
     outfile << config.kernel_name << ", "
             << config.isTransA << ", "
             << config. isTransB << ", "
+            << config.alpha << ", "
+            << config.beta << ", "
             << config.warmup_iters << ", " << total_time;
     outfile << std::endl;
 
@@ -768,7 +794,7 @@ void print_pipeline_results(
   }
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB",
+    "isTransA", "isTransB", "Alpha", "Beta",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS", "%_of_Total"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -837,6 +863,10 @@ void print_pipeline_results(
                                  std::to_string(config.isTransA).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.isTransB).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.alpha).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.beta).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.warmup_iters).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
@@ -933,6 +963,8 @@ void print_pipeline_results(
     summary_row.push_back(config.kernel_name);
     summary_row.push_back(std::to_string(config.isTransA));
     summary_row.push_back(std::to_string(config.isTransB));
+    summary_row.push_back(std::to_string(config.alpha));
+    summary_row.push_back(std::to_string(config.beta));
     summary_row.push_back(std::to_string(config.warmup_iters));
     std::ostringstream total_time_oss;
     total_time_oss << std::fixed << std::setprecision(2) << total_time;
@@ -976,7 +1008,7 @@ void log_results(
     outfile << "BS, ";
   }
   outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Warmup iterations, Total time (ms) (all iters), GFLOPS";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, Warmup iterations, Total time (ms) (all iters), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {
     outfile <<
@@ -1014,7 +1046,7 @@ void print_results(
   }
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB",
+    "isTransA", "isTransB", "Alpha", "Beta",
     "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS

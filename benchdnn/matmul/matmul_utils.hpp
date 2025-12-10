@@ -19,7 +19,7 @@
 #include "benchdnn.hpp"
 
 // Number of extra fields in each matmul input line (beyond ndims)
-#define MATMUL_EXTRA_INPUT_FIELD_COUNT 8
+#define MATMUL_EXTRA_INPUT_FIELD_COUNT 10
 
 namespace zendnnl {
 namespace benchdnn {
@@ -49,7 +49,8 @@ namespace matmul {
  * @var warmup_iters Number of warmup iterations to run before actual benchmarking.
  */
 struct MatmulConfig {
-  std::string modelName; /**< Name of the model (used for model-based benchmarking). */
+  std::string
+  modelName; /**< Name of the model (used for model-based benchmarking). */
   size_t bs; /**< Batch size (for batched matmul; default 1 for non-batched). */
   size_t m; /**< Number of rows in matrix A (output rows). */
   size_t k; /**< Number of columns in matrix A / rows in matrix B (inner dimension). */
@@ -69,6 +70,7 @@ struct MatmulConfig {
                             to invoke (e.g., aocl_blis, aocl_blis_blocked). */
   bool isTransA; /** Transpose flag for input matrix */
   bool isTransB; /** Transpose flag for weight matrix */
+  float alpha, beta; /**< Scaling factors for the matrix multiplication. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 };
 

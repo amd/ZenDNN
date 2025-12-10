@@ -72,12 +72,13 @@ struct global_options {
   data_type_t bias_dt; /**< Datatype of bias. */
   bool isTransA; /**< Transpose flag for input matrix */
   bool isTransB; /**< Transpose flag for weight matrix */
+  float alpha, beta; /**< Scaling factors for matmul operation. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
     ddt(data_type_t::f32), kernel_name("aocl_blis"), bias_dt(data_type_t::f32),
-    isTransA(false), isTransB(false), warmup_iters(20) {}
+    isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f) {}
 };
 
 /**

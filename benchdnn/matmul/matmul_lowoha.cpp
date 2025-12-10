@@ -73,7 +73,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      float alpha = 1.0f, beta = 0.0f;
+      float alpha = cfg.alpha, beta = cfg.beta;
       auto input_dim              = input_tensor.get_dim();
       auto weight_dim             = weight_tensor[0].get_dim();
       auto output_dim             = output_tensor[0].get_dim();

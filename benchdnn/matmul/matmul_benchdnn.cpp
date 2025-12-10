@@ -31,7 +31,9 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
 #endif
     //define matmul context
     auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights);
+                          .set_param("weights", weights)
+                          .set_alpha(cfg.alpha)
+                          .set_beta(cfg.beta);
     if (cfg.isBiasEnabled) {
       matmul_context.set_param("bias", bias);
     }
@@ -93,7 +95,9 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
     auto start_context_creation = std::chrono::high_resolution_clock::now();
     //define matmul context
     auto matmul_context = matmul_context_t()
-                          .set_param("weights", weights);
+                          .set_param("weights", weights)
+                          .set_alpha(cfg.alpha)
+                          .set_beta(cfg.beta);
     if (cfg.isBiasEnabled) {
       matmul_context.set_param("bias", bias);
     }
