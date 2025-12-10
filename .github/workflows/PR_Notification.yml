@@ -644,3 +644,268 @@ jobs:
           fi
 
           echo "🎉 Workflow completed successfully!"
+
+      - name: Send Email Notification to PR Author
+        if: always()
+        run: |
+          pr_json='${{ steps.pr_info.outputs.result }}'
+          checks_json='${{ steps.monitor_checks.outputs.result }}'
+
+          echo "📧 Building email notification for PR author..."
+
+          # Parse data (same as Teams notification)
+          PR_NUMBER=$(echo "$pr_json" | jq -r '.number')
+          PR_TITLE=$(echo "$pr_json" | jq -r '.title' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+          PR_URL=$(echo "$pr_json" | jq -r '.url')
+          PR_AUTHOR_RAW=$(echo "$pr_json" | jq -r '.author')
+          HEAD_SHA=$(echo "$pr_json" | jq -r '.head_sha' | cut -c1-7)
+
+          # Clean author name - remove _amdeng suffix for display
+          PR_AUTHOR=$(echo "$PR_AUTHOR_RAW" | sed 's/_amdeng$//')
+
+          CHECKS=$(echo "$checks_json" | jq -c '.checks // []')
+          TOTAL_COUNT=$(echo "$checks_json" | jq -r '.total // 0')
+          EXTERNAL_COUNT=$(echo "$checks_json" | jq -r '.external_count // 0')
+          COMPLETION_TIME=$(echo "$checks_json" | jq -r '.completed_in_minutes // 0')
+          STILL_RUNNING=$(echo "$checks_json" | jq -r '.still_running // 0')
+          
+          # Count statuses (exact same logic as Teams)
+          SUCCESS_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "success")] | length')
+          FAILED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "failure")] | length')
+          CANCELLED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "cancelled")] | length')
+          SKIPPED_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "skipped")] | length')
+          NEUTRAL_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "neutral")] | length')
+          ERROR_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "error")] | length')
+          PENDING_COUNT=$(echo "$CHECKS" | jq '[.[] | select(.status == "in_progress" or .status == "pending" or .status == "queued" or .status == "waiting")] | length')
+
+          # Overall status (exact same logic as Teams)
+          if [ "$FAILED_COUNT" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
+            ICON="🔴"
+            STATUS="❌ SOME CHECKS FAILED"
+            STATUS_COLOR="#d13438"
+          elif [ "$PENDING_COUNT" -gt 0 ]; then
+            ICON="🟡"
+            STATUS="⏳ CHECKS STILL RUNNING"
+            STATUS_COLOR="#ff8c00"
+          elif [ "$CANCELLED_COUNT" -gt 0 ]; then
+            ICON="🟠"
+            STATUS="🟠 SOME CHECKS CANCELLED"
+            STATUS_COLOR="#ff8c00"
+          else
+            ICON="🟢"
+            STATUS="✅ ALL CHECKS PASSED"
+            STATUS_COLOR="#107c10"
+          fi
+
+          # Completion message
+          if [ "$STILL_RUNNING" -gt 0 ]; then
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m (${STILL_RUNNING} still running)"
+          else
+            COMPLETION_MSG="All $TOTAL_COUNT workflows completed in ${COMPLETION_TIME}m"
+          fi
+
+          # Build detailed checks list (matching Teams format exactly)
+          CHECKS_HTML=""
+          CHECK_COUNT=$(echo "$CHECKS" | jq 'length')
+          
+          for i in $(seq 0 $((CHECK_COUNT - 1))); do
+            NAME=$(echo "$CHECKS" | jq -r ".[$i].name")
+            STATUS_VAL=$(echo "$CHECKS" | jq -r ".[$i].status | ascii_upcase")
+            URL=$(echo "$CHECKS" | jq -r ".[$i].url // \"\"")
+            TYPE=$(echo "$CHECKS" | jq -r ".[$i].type")
+            
+            if [ "$URL" = "null" ] || [ -z "$URL" ]; then
+              URL="https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks"
+            fi
+            
+            # Status styling (matching Teams colors)
+            case "$STATUS_VAL" in
+              "SUCCESS") 
+                STATUS_COLOR="#107c10"
+                STATUS_ICON="✅"
+                ;;
+              "FAILURE") 
+                STATUS_COLOR="#d13438"
+                STATUS_ICON="❌"
+                ;;
+              "CANCELLED") 
+                STATUS_COLOR="#ff8c00"
+                STATUS_ICON="🟠"
+                ;;
+              "SKIPPED") 
+                STATUS_COLOR="#6264a7"
+                STATUS_ICON="⏭️"
+                ;;
+              "NEUTRAL") 
+                STATUS_COLOR="#8a8886"
+                STATUS_ICON="⚪"
+                ;;
+              "ERROR") 
+                STATUS_COLOR="#d13438"
+                STATUS_ICON="❌"
+                ;;
+              *) 
+                STATUS_COLOR="#8a8886"
+                STATUS_ICON="🔄"
+                ;;
+            esac
+            
+            CHECKS_HTML="$CHECKS_HTML<div style=\"margin: 6px 0; padding: 8px; background: #f8f9fa; border-radius: 4px;\">$STATUS_ICON <a href=\"$URL\" style=\"color: #0078d4; text-decoration: none; font-weight: 500;\">$NAME</a> - <span style=\"color: $STATUS_COLOR; font-weight: bold;\">$STATUS_VAL</span></div>"
+          done
+
+          # Create email HTML (matching Teams card structure)
+          cat > email.html <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <style>
+              body { 
+                font-family: 'Segoe UI', Tahoma, Arial, sans-serif; 
+                margin: 0; 
+                padding: 20px; 
+                background-color: #f3f2f1; 
+                line-height: 1.4; 
+              }
+              .card { 
+                max-width: 600px; 
+                margin: 0 auto; 
+                background: #ffffff; 
+                border-radius: 8px; 
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+                overflow: hidden; 
+              }
+              .header { 
+                background: #464775; 
+                color: white; 
+                padding: 20px; 
+                text-align: left; 
+              }
+              .header h1 { 
+                margin: 0 0 8px 0; 
+                font-size: 18px; 
+                font-weight: 600; 
+              }
+              .status { 
+                padding: 16px 20px; 
+                font-size: 16px; 
+                font-weight: 600; 
+                color: $STATUS_COLOR; 
+                border-bottom: 1px solid #edebe9; 
+              }
+              .content { 
+                padding: 20px; 
+              }
+              .facts-table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin: 16px 0; 
+              }
+              .facts-table td { 
+                padding: 6px 0; 
+                border: none; 
+                vertical-align: top; 
+              }
+              .facts-table .label { 
+                font-weight: 600; 
+                color: #323130; 
+                width: 140px; 
+              }
+              .facts-table .value { 
+                color: #605e5c; 
+              }
+              .checks-section { 
+                margin-top: 20px; 
+              }
+              .checks-title { 
+                font-weight: 600; 
+                font-size: 14px; 
+                color: #323130; 
+                margin-bottom: 12px; 
+              }
+              .actions { 
+                padding: 16px 20px; 
+                background: #f8f9fa; 
+                text-align: center; 
+                border-top: 1px solid #edebe9; 
+              }
+              .btn { 
+                display: inline-block; 
+                padding: 8px 16px; 
+                margin: 4px 8px; 
+                background: #0078d4; 
+                color: white; 
+                text-decoration: none; 
+                border-radius: 4px; 
+                font-size: 14px; 
+                font-weight: 500; 
+              }
+              .btn:hover { 
+                background: #106ebe; 
+              }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="header">
+                <h1>$ICON PR #$PR_NUMBER (Main) — $PR_TITLE</h1>
+              </div>
+              
+              <div class="status">$STATUS</div>
+              
+              <div class="content">
+                <table class="facts-table">
+                  <tr><td class="label">Author:</td><td class="value">$PR_AUTHOR</td></tr>
+                  <tr><td class="label">Commit:</td><td class="value">$HEAD_SHA</td></tr>
+                  <tr><td class="label">Status:</td><td class="value">$COMPLETION_MSG</td></tr>
+                  <tr><td class="label">Total Workflows:</td><td class="value">$TOTAL_COUNT</td></tr>
+                  <tr><td class="label">✅ Passed:</td><td class="value">$SUCCESS_COUNT</td></tr>
+                  <tr><td class="label">❌ Failed:</td><td class="value">$FAILED_COUNT</td></tr>
+                  <tr><td class="label">🟠 Cancelled:</td><td class="value">$CANCELLED_COUNT</td></tr>
+                  <tr><td class="label">⏭️ Skipped:</td><td class="value">$SKIPPED_COUNT</td></tr>
+                </table>
+                
+                <div class="checks-section">
+                  <div class="checks-title">All PR Checks:</div>
+                  $CHECKS_HTML
+                </div>
+              </div>
+              
+              <div class="actions">
+                <a href="$PR_URL" class="btn">View PR</a>
+                <a href="https://github.com/${{ github.repository }}/pull/$PR_NUMBER/checks" class="btn">View All Checks</a>
+                <a href="https://github.com/${{ github.repository }}/commit/$(echo "$pr_json" | jq -r '.head_sha')" class="btn">View Commit</a>
+              </div>
+            </div>
+          </body>
+          </html>
+          EOF
+
+          # Send email using curl (matching your provided credentials)
+          echo "📧 Sending email to ${PR_AUTHOR_RAW}@amd.com..."
+          
+          # Create email message
+          cat > email_message.txt <<EOF
+          To: ${PR_AUTHOR_RAW}@amd.com
+          From: ZenDNN Build Bot <z1zenaibuild@amd.com>
+          Subject: $ICON ZenDNN PR #$PR_NUMBER - $PR_TITLE
+          Content-Type: text/html; charset=UTF-8
+          MIME-Version: 1.0
+
+          EOF
+          cat email.html >> email_message.txt
+
+          # Send via AMD SMTP
+          curl --url 'smtps://smtp.amd.com:465' \
+               --ssl-reqd \
+               --mail-from "${{ secrets.SMTP_USERNAME }}" \
+               --mail-rcpt "${PR_AUTHOR_RAW}@amd.com" \
+               --user "${{ secrets.SMTP_USERNAME }}:${{ secrets.SMTP_PASSWORD }}" \
+               --upload-file email_message.txt
+
+          if [ $? -eq 0 ]; then
+            echo "✅ Email notification sent successfully to ${PR_AUTHOR_RAW}@amd.com!"
+          else
+            echo "❌ Failed to send email notification (continuing workflow)"
+          fi
+
+          echo "📧 Email notification completed for PR #$PR_NUMBER"
