@@ -739,126 +739,126 @@ jobs:
               const commentBody = `## ${mainIcon} ZenDNN PR #${PR_NUMBER} - Workflow Results
                > **Hey @${PR_AUTHOR_RAW}!** Your PR "${PR_TITLE}" workflow has completed. Here's a comprehensive summary:
 
----
-
-### 📊 **Workflow Summary**
-
-| **Field** | **Value** |
-|-----------|-----------|
-| **👤 Author** | ${PR_AUTHOR} |
-| **📝 Title** | ${PR_TITLE} |
-| **🔗 Commit** | [\`${HEAD_SHA}\`](https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}) |
-| **⏱️ Duration** | ${COMPLETION_TIME} minutes |
-| **📦 Total Workflows** | **${TOTAL_COUNT}** (${TOTAL_COUNT - EXTERNAL_COUNT} local + ${EXTERNAL_COUNT} external) |
-
----
-
-### ${statusColor} **Results Overview**
-
-| Status | Count |
-|--------|-------|
-| ✅ **Passed** | **${SUCCESS_COUNT}** |
-| ❌ **Failed** | **${FAILED_COUNT}** |
-| 🟠 **Cancelled** | **${CANCELLED_COUNT}** |
-| ⏭️ **Skipped** | **${SKIPPED_COUNT}** |
-${PENDING_COUNT > 0 ? `| ⏳ **Running** | **${PENDING_COUNT}** |` : ''}
-
----
-
-### 📋 **Detailed Check Results**
-
-${failedList}${cancelledList}${pendingList}${successList}${skippedList}
-
----
-
-### 🚀 **Quick Actions**
-
-<table>
-<tr>
-<td align="center">
-<a href="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}/checks">
-🔍<br/>
-<strong>View All Checks</strong>
-</a><br/>
-<sub>See detailed workflow results and logs</sub>
-</td>
-<td align="center">
-<a href="https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}">
-📝<br/>
-<strong>View Commit</strong>
-</a><br/>
-<sub>Review your changes</sub>
-</td>
-<td align="center">
-<a href="${PR_URL}">
-🔄<br/>
-<strong>View PR</strong>
-</a><br/>
-<sub>Go to PR overview</sub>
-</td>
-<td align="center">
-<a href="${PR_URL}/files">
-📊<br/>
-<strong>Files Changed</strong>
-</a><br/>
-<sub>Review modified files</sub>
-</td>
-</tr>
-</table>
-
----
-
-<div align="center">
-
-**🤖 Automated notification from ZenDNN Build System**  
-*📧 This replaces email notification (SMTP blocked by AMD enterprise)*
-
-</div>
-
-<!-- PR-${PR_NUMBER}-${HEAD_SHA} -->`;
-
-              // Create comment on PR
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: PR_NUMBER,
-                body: commentBody
-              });
-
-              console.log(`✅ Enhanced PR comment sent successfully to @${PR_AUTHOR_RAW}`);
-              console.log(`📊 Summary: ${SUCCESS_COUNT} passed, ${FAILED_COUNT} failed, ${CANCELLED_COUNT} cancelled, ${SKIPPED_COUNT} skipped`);
-              console.log(`📧 This replaces the email that would have been sent to ${PR_AUTHOR_RAW}@amd.com`);
+              ---
               
-            } catch (error) {
-              console.log(`❌ Failed to create enhanced PR comment: ${error.message}`);
+              ### 📊 **Workflow Summary**
               
-              // Simple fallback comment
-              try {
-                const pr_json = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
-                const checks_json = JSON.parse(`${{ steps.monitor_checks.outputs.result }}`);
-                
-                const simpleFallback = `## 🔔 ZenDNN PR #${pr_json.number} - Workflow Completed
+              | **Field** | **Value** |
+              |-----------|-----------|
+              | **👤 Author** | ${PR_AUTHOR} |
+              | **📝 Title** | ${PR_TITLE} |
+              | **🔗 Commit** | [\`${HEAD_SHA}\`](https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}) |
+              | **⏱️ Duration** | ${COMPLETION_TIME} minutes |
+              | **📦 Total Workflows** | **${TOTAL_COUNT}** (${TOTAL_COUNT - EXTERNAL_COUNT} local + ${EXTERNAL_COUNT} external) |
+              
+              ---
 
-**Hey @${pr_json.author}!** Your PR workflow has finished.
-
-**Results:** ${(checks_json.checks || []).filter(c => c.status === 'success').length} passed, ${(checks_json.checks || []).filter(c => c.status === 'failure').length} failed
-
-[📊 View All Results →](https://github.com/${{ github.repository }}/pull/${pr_json.number}/checks)
-
-🤖 *ZenDNN Build System*`;
-
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr_json.number,
-                  body: simpleFallback
-                });
-                
-                console.log(`✅ Simple fallback comment sent to @${pr_json.author}`);
-              } catch (fallbackError) {
-                console.log(`❌ Both enhanced and fallback comments failed: ${fallbackError.message}`);
-              }
-            }
-
-            console.log(`🎉 Notification process completed for PR #${PR_NUMBER}`);
-
+              ### ${statusColor} **Results Overview**
+              
+              | Status | Count |
+              |--------|-------|
+              | ✅ **Passed** | **${SUCCESS_COUNT}** |
+              | ❌ **Failed** | **${FAILED_COUNT}** |
+              | 🟠 **Cancelled** | **${CANCELLED_COUNT}** |
+              | ⏭️ **Skipped** | **${SKIPPED_COUNT}** |
+              ${PENDING_COUNT > 0 ? `| ⏳ **Running** | **${PENDING_COUNT}** |` : ''}
+              
+              ---
+              
+              ### 📋 **Detailed Check Results**
+              
+              ${failedList}${cancelledList}${pendingList}${successList}${skippedList}
+              
+              ---
+              
+              ### 🚀 **Quick Actions**
+              
+              <table>
+              <tr>
+              <td align="center">
+              <a href="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}/checks">
+              🔍<br/>
+              <strong>View All Checks</strong>
+              </a><br/>
+              <sub>See detailed workflow results and logs</sub>
+              </td>
+              <td align="center">
+              <a href="https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}">
+              📝<br/>
+              <strong>View Commit</strong>
+              </a><br/>
+              <sub>Review your changes</sub>
+              </td>
+              <td align="center">
+              <a href="${PR_URL}">
+              🔄<br/>
+              <strong>View PR</strong>
+              </a><br/>
+              <sub>Go to PR overview</sub>
+              </td>
+              <td align="center">
+              <a href="${PR_URL}/files">
+              📊<br/>
+              <strong>Files Changed</strong>
+              </a><br/>
+              <sub>Review modified files</sub>
+              </td>
+              </tr>
+              </table>
+              
+              ---
+              
+              <div align="center">
+              
+              **🤖 Automated notification from ZenDNN Build System**  
+              *📧 This replaces email notification (SMTP blocked by AMD enterprise)*
+              
+              </div>
+              
+              <!-- PR-${PR_NUMBER}-${HEAD_SHA} -->`;
+              
+                            // Create comment on PR
+                            await github.rest.issues.createComment({
+                              owner: context.repo.owner,
+                              repo: context.repo.repo,
+                              issue_number: PR_NUMBER,
+                              body: commentBody
+                            });
+              
+                            console.log(`✅ Enhanced PR comment sent successfully to @${PR_AUTHOR_RAW}`);
+                            console.log(`📊 Summary: ${SUCCESS_COUNT} passed, ${FAILED_COUNT} failed, ${CANCELLED_COUNT} cancelled, ${SKIPPED_COUNT} skipped`);
+                            console.log(`📧 This replaces the email that would have been sent to ${PR_AUTHOR_RAW}@amd.com`);
+                            
+                          } catch (error) {
+                            console.log(`❌ Failed to create enhanced PR comment: ${error.message}`);
+                            
+                            // Simple fallback comment
+                            try {
+                              const pr_json = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
+                              const checks_json = JSON.parse(`${{ steps.monitor_checks.outputs.result }}`);
+                              
+                              const simpleFallback = `## 🔔 ZenDNN PR #${pr_json.number} - Workflow Completed
+              
+              **Hey @${pr_json.author}!** Your PR workflow has finished.
+              
+              **Results:** ${(checks_json.checks || []).filter(c => c.status === 'success').length} passed, ${(checks_json.checks || []).filter(c => c.status === 'failure').length} failed
+              
+              [📊 View All Results →](https://github.com/${{ github.repository }}/pull/${pr_json.number}/checks)
+              
+              🤖 *ZenDNN Build System*`;
+              
+                              await github.rest.issues.createComment({
+                                owner: context.repo.owner,
+                                repo: context.repo.repo,
+                                issue_number: pr_json.number,
+                                body: simpleFallback
+                              });
+                              
+                              console.log(`✅ Simple fallback comment sent to @${pr_json.author}`);
+                            } catch (fallbackError) {
+                              console.log(`❌ Both enhanced and fallback comments failed: ${fallbackError.message}`);
+                            }
+                          }
+              
+                          console.log(`🎉 Notification process completed for PR #${PR_NUMBER}`);
+              
