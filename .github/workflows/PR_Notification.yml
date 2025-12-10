@@ -2,10 +2,6 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc.
 # All rights reserved.
 # ******************************************************************************
-# ******************************************************************************
-# Copyright (c) 2025 Advanced Micro Devices, Inc.
-# All rights reserved.
-# ******************************************************************************
 name: PR Status Notification (Main Branch)
 on:
   pull_request:
@@ -716,11 +712,11 @@ jobs:
               const skippedChecks = CHECKS.filter(c => c.status === 'skipped');
               const pendingChecks = CHECKS.filter(c => ['in_progress', 'pending', 'queued', 'waiting'].includes(c.status));
 
-              // Build organized check lists
-              const buildCheckList = (checks, icon, label) => {
+              // Build organized check lists with colored headings
+              const buildCheckList = (checks, icon, label, color) => {
                 if (checks.length === 0) return '';
                 
-                let list = `\n#### ${icon} ${label} (${checks.length})\n`;
+                let list = `\n<h4 style="color: ${color};">${icon} ${label} (${checks.length})</h4>\n\n`;
                 checks.forEach(check => {
                   const checkUrl = check.url || `https://github.com/${{ github.repository }}/pull/${PR_NUMBER}/checks`;
                   const externalLabel = check.type === 'external' ? ' *(External)*' : '';
@@ -729,39 +725,41 @@ jobs:
                 return list;
               };
 
-              const failedList = buildCheckList(failedChecks, '❌', 'Failed Checks');
-              const cancelledList = buildCheckList(cancelledChecks, '🟠', 'Cancelled Checks');
-              const pendingList = buildCheckList(pendingChecks, '⏳', 'Running Checks');
-              const successList = buildCheckList(successChecks, '✅', 'Passed Checks');
-              const skippedList = buildCheckList(skippedChecks, '⏭️', 'Skipped Checks');
+              const failedList = buildCheckList(failedChecks, '❌', 'Failed Checks', '#d73a49');
+              const cancelledList = buildCheckList(cancelledChecks, '🟠', 'Cancelled Checks', '#f66a0a');
+              const pendingList = buildCheckList(pendingChecks, '⏳', 'Running Checks', '#dbab09');
+              const successList = buildCheckList(successChecks, '✅', 'Passed Checks', '#28a745');
+              const skippedList = buildCheckList(skippedChecks, '⏭️', 'Skipped Checks', '#6a737d');
 
-              // Create beautifully formatted comment
+              // Create beautifully formatted comment with proper alignment
               const commentBody = `## ${mainIcon} ZenDNN PR #${PR_NUMBER} - Workflow Results
-               > **Hey @${PR_AUTHOR_RAW}!** Your PR "${PR_TITLE}" workflow has completed. Here's a comprehensive summary:
 
+              ### ${statusTitle}
+              
+              > **Hey @${PR_AUTHOR_RAW}!** Your PR "${PR_TITLE}" workflow has completed. Here's a comprehensive summary:
+              
               ---
               
               ### 📊 **Workflow Summary**
               
-              | **Field** | **Value** |
-              |-----------|-----------|
-              | **👤 Author** | ${PR_AUTHOR} |
-              | **📝 Title** | ${PR_TITLE} |
-              | **🔗 Commit** | [\`${HEAD_SHA}\`](https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}) |
-              | **⏱️ Duration** | ${COMPLETION_TIME} minutes |
+              | **Field**             | **Value** |
+              |-----------------------|-----------|
+              | **👤 Author**         | ${PR_AUTHOR} |
+              | **📝 Title**          | ${PR_TITLE} |
+              | **🔗 Commit**         | [\`${HEAD_SHA}\`](https://github.com/${{ github.repository }}/commit/${pr_json.head_sha}) |
+              | **⏱️ Duration**       | ${COMPLETION_TIME} minutes |
               | **📦 Total Workflows** | **${TOTAL_COUNT}** (${TOTAL_COUNT - EXTERNAL_COUNT} local + ${EXTERNAL_COUNT} external) |
               
               ---
-
+              
               ### ${statusColor} **Results Overview**
               
-              | Status | Count |
-              |--------|-------|
-              | ✅ **Passed** | **${SUCCESS_COUNT}** |
-              | ❌ **Failed** | **${FAILED_COUNT}** |
-              | 🟠 **Cancelled** | **${CANCELLED_COUNT}** |
-              | ⏭️ **Skipped** | **${SKIPPED_COUNT}** |
-              ${PENDING_COUNT > 0 ? `| ⏳ **Running** | **${PENDING_COUNT}** |` : ''}
+              | **Status**            | **Count** |
+              |-----------------------|-----------|
+              | **✅ Passed**         | **${SUCCESS_COUNT}** |
+              | **❌ Failed**         | **${FAILED_COUNT}** |
+              | **🟠 Cancelled**      | **${CANCELLED_COUNT}** |
+              | **⏭️ Skipped**        | **${SKIPPED_COUNT}** |${PENDING_COUNT > 0 ? `\n| **⏳ Running**        | **${PENDING_COUNT}** |` : ''}
               
               ---
               
@@ -808,12 +806,6 @@ jobs:
               
               ---
               
-              <div align="center">
-              
-              **🤖 Automated notification from ZenDNN Build System**  
-              *📧 This replaces email notification (SMTP blocked by AMD enterprise)*
-              
-              </div>
               
               <!-- PR-${PR_NUMBER}-${HEAD_SHA} -->`;
               
@@ -830,35 +822,10 @@ jobs:
                             console.log(`📧 This replaces the email that would have been sent to ${PR_AUTHOR_RAW}@amd.com`);
                             
                           } catch (error) {
-                            console.log(`❌ Failed to create enhanced PR comment: ${error.message}`);
-                            
-                            // Simple fallback comment
-                            try {
-                              const pr_json = JSON.parse(`${{ steps.pr_info.outputs.result }}`);
-                              const checks_json = JSON.parse(`${{ steps.monitor_checks.outputs.result }}`);
-                              
-                              const simpleFallback = `## 🔔 ZenDNN PR #${pr_json.number} - Workflow Completed
-              
-              **Hey @${pr_json.author}!** Your PR workflow has finished.
-              
-              **Results:** ${(checks_json.checks || []).filter(c => c.status === 'success').length} passed, ${(checks_json.checks || []).filter(c => c.status === 'failure').length} failed
-              
-              [📊 View All Results →](https://github.com/${{ github.repository }}/pull/${pr_json.number}/checks)
-              
-              🤖 *ZenDNN Build System*`;
-              
-                              await github.rest.issues.createComment({
-                                owner: context.repo.owner,
-                                repo: context.repo.repo,
-                                issue_number: pr_json.number,
-                                body: simpleFallback
-                              });
-                              
-                              console.log(`✅ Simple fallback comment sent to @${pr_json.author}`);
-                            } catch (fallbackError) {
-                              console.log(`❌ Both enhanced and fallback comments failed: ${fallbackError.message}`);
-                            }
+                            console.log(`❌ Failed to create PR comment: ${error.message}`);
+                            console.log(`📧 Teams notification was sent successfully as primary notification`);
                           }
               
-                          console.log(`🎉 Notification process completed for PR #${PR_NUMBER}`);
+                          console.log(`🎉 PR notification process completed`);
+
               
