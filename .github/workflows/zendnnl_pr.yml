@@ -316,35 +316,35 @@ jobs:
    needs: [trigger-zenTorch-ZenDNNL]
    runs-on: amd-zenai-arc-xsmall-dind
    steps:
-    - name: Check PyTorch & TensorFlow plugin CI statuses
+    - name: Check PyTorch  status
       env:
         GH_TOKEN: ${{ secrets.ZIAIE_PAT }}
         REPO_ZENDNN: AMD-Zenai/ZenDNN
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       run: |
-        echo "Checking ZenTorch_Zendnnl CI status for commit $COMMIT_SHA..."
+        echo "Checking ZenTorch CI status for commit $COMMIT_SHA..."
 
         for i in {1..360}; do
           status=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO_ZENDNN/commits/$COMMIT_SHA/status" \
-            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin ZENDNNL CI") | .state' | tail -n 1)
+            | jq -r '.statuses[] | select(.context=="AMD-Zenai/ZenDNN_PyTorch_Plugin CI") | .state' | tail -n 1)
 
-          echo "Attempt $i: ZenTorch-ZenDNNL CI status = $status"
+          echo "Attempt $i: ZenTorch CI status = $status"
 
           if [[ "$status" == "success" ]]; then
-            echo "ZenTorch-ZenDNNL workflow succeeded."
+            echo "ZenTorch workflow succeeded."
             exit 0
           fi
 
           if [[ "$status" == "failure" ]]; then
-            echo "ZenTorch-ZenDNNL workflow failed."
+            echo "ZenTorch workflow failed."
             exit 1
           fi
 
           sleep 30
         done
 
-        echo "Timeout: ZenTorch-ZenDNNL CI did not finish within 3 hours."
+        echo "Timeout: ZenTorch CI did not finish within 3 hours."
         exit 1
 
         
