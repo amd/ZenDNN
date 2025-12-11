@@ -1,0 +1,84 @@
+# ******************************************************************************
+# Copyright (c) 2025 Advanced Micro Devices, Inc.
+# All rights reserved.
+# ******************************************************************************
+name: License Header Verification
+
+on:
+  workflow_call:
+    outputs:
+      result:
+        description: "Result of the license header check"
+        value: ${{ jobs.check-license-headers.outputs.result }}
+
+jobs:
+  check-license-headers:
+    name: Verify License Headers in Changed Files
+    runs-on: header_check_runner
+    outputs:
+      result: ${{ steps.header-check.outputs.result }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for checking changes
+      
+    - name: Verify license headers
+      id: header-check
+      run: |
+        echo "Verifying license headers in changed files..."
+        
+        # For pull request
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          # Get all changed files in the PR
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+        else
+          # For push event, get changed files in the latest commit
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+        fi
+        
+        # Filter only source files
+        SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp|cc|h|hpp|hxx|cu)$' || true)
+        
+        if [ -z "$SOURCE_FILES" ]; then
+          echo "No source files changed. License header check skipped."
+          echo "result=success" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        CURRENT_YEAR=$(date +"%Y")
+        HEADER_CHECK_PASSED=true
+        
+        echo "Checking license headers for the following files:"
+        echo "$SOURCE_FILES"
+        
+        while IFS= read -r file; do
+          if [ ! -f "$file" ]; then
+            echo "File not found: $file. Skipping."
+            continue
+          fi
+          
+          # Check for all required keywords in the license header
+          if ! grep -q "Copyright" "$file" || \
+             ! grep -q "Advanced Micro Devices" "$file" || \
+             ! grep -q "All rights" "$file" || \
+             ! grep -q "reserved" "$file" || \
+             ! grep -q "$CURRENT_YEAR" "$file"; then
+            echo "❌ ERROR: File missing proper license header: $file"
+            echo "License header must contain: 'Copyright', 'Advanced Micro Devices', 'All rights', 'reserved', and current year ($CURRENT_YEAR)"
+            HEADER_CHECK_PASSED=false
+          else
+            echo "✅ License header OK: $file"
+          fi
+        done <<< "$SOURCE_FILES"
+        
+        if [ "$HEADER_CHECK_PASSED" = true ]; then
+          echo "✅ All license headers are valid!"
+          echo "result=success" >> $GITHUB_OUTPUT
+        else
+          echo "❌ License header check failed!"
+          echo "result=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      shell: bash
