@@ -110,6 +110,10 @@ int main(int argc, char **argv) {
     }
   }
 
+  size_t cache_size = 0;
+#if COLD_CACHE
+  cache_size = benchdnn::get_cache_size();
+#endif
   // Generate output filename based on current timestamp for CSV results
   auto now = std::chrono::system_clock::now();
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -126,13 +130,15 @@ int main(int argc, char **argv) {
   // Dispatch to the appropriate benchmark based on operator type
   if (op == "matmul") {
     benchdnn::matmul::bench(in_filename, out_filename, inputMode,
-                            options, isLOWOHA); ///< Run matmul benchmark
+                            options, isLOWOHA, cache_size); ///< Run matmul benchmark
   }
   else if (op == "reorder") {
-    benchdnn::reorder::bench(in_filename, out_filename); ///< Run reorder benchmark
+    benchdnn::reorder::bench(in_filename, out_filename,
+                             cache_size); ///< Run reorder benchmark
   }
   else if (op == "embag") {
-    benchdnn::embag::bench(in_filename, out_filename); ///< Run embag benchmark
+    benchdnn::embag::bench(in_filename, out_filename,
+                           cache_size); ///< Run embag benchmark
   }
   else {
     commonlog_error("Unsupported operator: ", op);

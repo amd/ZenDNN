@@ -61,7 +61,8 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int matmul_benchdnn(std::vector<MatmulConfig> configs,
-                    std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results);
+                    std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
+                    size_t cache_size);
 
 /**
  * @brief Runs the full matmul benchmark suite from an input file and writes results to a CSV file.
@@ -77,7 +78,8 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const InputMode inputMode, const global_options &options, const bool isLOWOHA);
+          const InputMode inputMode, const global_options &options, const bool isLOWOHA,
+          size_t cache_size);
 
 } // namespace matmul
 } // namespace benchdnn

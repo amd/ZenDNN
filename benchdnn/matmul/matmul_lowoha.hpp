@@ -41,7 +41,8 @@ namespace matmul {
  */
 int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                            std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> &matmul_results,
-                           const global_options &options);
+                           const global_options &options,
+                           size_t cache_size);
 
 } // namespace matmul
 } // namespace benchdnn

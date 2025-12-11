@@ -25,7 +25,8 @@ namespace matmul {
 // - Add pipeline (multi-layer) support.
 int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                            std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>>
-                           &matmul_results, const global_options &options) {
+                           &matmul_results, const global_options &options,
+                           size_t cache_size) {
 
   bool skip;
   for (const auto &cfg:configs) {
@@ -190,8 +191,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
 
       for (auto j = 0; j < cfg.iters && !skip; j++) {
 #if COLD_CACHE
-        std::vector<char> buffer(CACHE_SIZE, 1);
-        flush_cache(buffer);
+        flush_cache(cache_size);
 #endif
         for (auto i = 0; i < cfg.n_values.size(); i++) {
           auto start_layer = std::chrono::high_resolution_clock::now();

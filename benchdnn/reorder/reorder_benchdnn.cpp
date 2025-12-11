@@ -275,7 +275,8 @@ void log_benchmark_failure(const ReorderConfig &cfg) {
 }
 
 int reorder_benchdnn(std::vector<ReorderConfig> configs,
-                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results) {
+                     std::vector<std::pair<ReorderConfig, TimingStats>> &reorder_results,
+                     size_t cache_size) {
   bool skip;
   for (const auto &cfg:configs) {
     try {
@@ -306,8 +307,7 @@ int reorder_benchdnn(std::vector<ReorderConfig> configs,
       double elapsed_ms = 0.0;
       for (auto i = 0; i < cfg.iters; i++) {
 #if COLD_CACHE
-        std::vector<char> buffer(CACHE_SIZE, 1);
-        flush_cache(buffer);
+        flush_cache(cache_size);
 #endif
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto start = std::chrono::high_resolution_clock::now();
@@ -505,7 +505,8 @@ void log_results(std::vector<std::pair<ReorderConfig, TimingStats>>
   }
 }
 
-int bench(const std::string &in_filename, const std::string &out_filename) {
+int bench(const std::string &in_filename, const std::string &out_filename,
+          size_t cache_size) {
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
   if (!infile.is_open()) {
@@ -516,7 +517,7 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   inputParser(infile, reorderConfig);
 
   std::vector<std::pair<ReorderConfig, TimingStats>> reorder_results;
-  int status = reorder_benchdnn(reorderConfig, reorder_results);
+  int status = reorder_benchdnn(reorderConfig, reorder_results, cache_size);
   if (status != OK) {
     testlog_error("Reorder benchmark failed.");
     return NOT_OK;

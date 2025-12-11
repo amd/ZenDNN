@@ -26,20 +26,9 @@ using namespace zendnnl::interface;
 
 #if COLD_CACHE
   #include <emmintrin.h>
-  // TODO: Extract cache sizes dynamically at runtime instead of hardcoding.
-  // Size of the buffer (in bytes) used to flush the cache.
-  // Sum of cache levels: 512 MB (L3), 96 MB (L2), 3 MB (L1d), 3 MB (L1i).
-  // Ensures the buffer covers the entire last-level cache (LLC) and lower caches.
-  #define CACHE_SIZE ((512 + 96 + 3 + 3) * 1024 * 1024)
+  #include <numa.h>
   // Size (in bytes) of a cache line; typically 64 bytes on x86 systems.
   #define CACHE_LINE_SIZE 64
-  /**
-  * @brief Global accumulator to prevent compiler optimization of cache flush operations.
-  *
-  * This variable is incremented during cache flushes to ensure the memory operations
-  * are not optimized away by the compiler. Only used if COLD_CACHE is enabled.
-  */
-  extern volatile unsigned long global_sum;
 #endif
 
 namespace zendnnl {
@@ -163,13 +152,39 @@ std::string postOpsToStr(post_op_type_t post_op);
   /**
   * @brief Simulates cold cache conditions by flushing the entire cache.
   *
-  * Iterates over the provided buffer, incrementing each cache line and using _mm_clflush
-  * to evict it from the cache. The global_sum variable is updated to prevent compiler
-  * optimization. The buffer should be large enough to cover the LLC and lower cache levels.
+  * This function allocates a buffer of the specified size and iterates over it,
+  * accessing each cache line and using _mm_clflush to evict it from all cache levels
+  * (L1, L2, and LLC). This ensures a cold cache state before benchmarking operations,
+  * providing more accurate performance measurements under realistic conditions.
   *
-  * @param buffer Reference to a buffer (std::vector<char>) covering the full cache size.
+  * @param cache_size The total size (in bytes) of the cache to flush, typically covering
+  *                   the sum of all cache levels (L1d + L1i + L2 + LLC).
   */
-  void flush_cache(std::vector<char> &buffer);
+  void flush_cache(size_t cache_size);
+
+  /**
+  * @brief Reads and returns the cache size from a specified sysfs path.
+  *
+  * This function reads the cache size information from the Linux sysfs filesystem,
+  * typically from paths like /sys/devices/system/cpu/cpu0/cache/indexN/size.
+  * The value is parsed and converted from KB/MB to bytes.
+  *
+  * @param path The filesystem path to the cache size file (e.g., "/sys/devices/system/cpu/cpu0/cache/index3/size").
+  * @return size_t The cache size in bytes, or 0 if the file cannot be read or parsed.
+  */
+  size_t read_cache_size(const std::string &path);
+
+  /**
+  * @brief Retrieves the total cache size by aggregating all cache levels from the system.
+  *
+  * This function queries the Linux sysfs filesystem to determine the total size of all
+  * CPU cache levels (L1 data, L1 instruction, L2, and LLC/L3). It reads cache information
+  * from /sys/devices/system/cpu/cpu0/cache/ for each cache index and sums them up.
+  * The returned value is used to allocate an appropriate buffer for cache flushing operations.
+  *
+  * @return size_t The total cache size in bytes across all cache levels, or 0 if unable to determine.
+  */
+  size_t get_cache_size();
 #endif
 /**
  * @brief Parses a single command-line argument and updates global benchmarking options.

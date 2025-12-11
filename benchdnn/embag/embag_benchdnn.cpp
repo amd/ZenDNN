@@ -159,7 +159,8 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
 }
 
 int embag_benchdnn(std::vector<EmbagConfig> configs,
-                   std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results) {
+                   std::vector<std::pair<EmbagConfig, TimingStats>> &embag_results,
+                   size_t cache_size) {
   bool skip;
 
   for (const auto &cfg : configs) {
@@ -229,8 +230,7 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
       // Benchmark iterations
       for (int i = 0; i < cfg.iters; ++i) {
 #if COLD_CACHE
-        std::vector<char> buffer(CACHE_SIZE, 1);
-        flush_cache(buffer);
+        flush_cache(cache_size);
 #endif
 #if !MEASURE_INDIVIDUAL_TIMINGS
         auto start = std::chrono::high_resolution_clock::now();
@@ -277,7 +277,8 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
   return OK;
 }
 
-int bench(const std::string &in_filename, const std::string &out_filename) {
+int bench(const std::string &in_filename, const std::string &out_filename,
+          size_t cache_size) {
 
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
@@ -289,7 +290,7 @@ int bench(const std::string &in_filename, const std::string &out_filename) {
   inputParser(infile, embagConfig);
 
   std::vector<std::pair<EmbagConfig, TimingStats>> embag_results;
-  int status = embag_benchdnn(embagConfig, embag_results);
+  int status = embag_benchdnn(embagConfig, embag_results, cache_size);
   if (status != OK) {
     testlog_error("Embag benchmark failed.");
     return NOT_OK;

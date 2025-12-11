@@ -173,7 +173,8 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
 
 int matmul_benchdnn(std::vector<MatmulConfig> configs,
                     std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>>
-                    &matmul_results, const global_options &options) {
+                    &matmul_results, const global_options &options,
+                    size_t cache_size) {
 
   bool skip;
   for (const auto &cfg:configs) {
@@ -255,8 +256,7 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
 
       for (auto j = 0; j < cfg.iters && !skip; j++) {
 #if COLD_CACHE
-        std::vector<char> buffer(CACHE_SIZE, 1);
-        flush_cache(buffer);
+        flush_cache(cache_size);
 #endif
         for (auto i = 0; i < cfg.n_values.size(); i++) {
 #if !MEASURE_INDIVIDUAL_TIMINGS
@@ -314,7 +314,9 @@ int matmul_benchdnn(std::vector<MatmulConfig> configs,
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          const InputMode inputMode, const global_options &options, const bool isLOWOHA) {
+          const InputMode inputMode, const global_options &options, const bool isLOWOHA,
+          size_t cache_size
+         ) {
 
   std::vector<MatmulConfig> matmulConfig;
   bool isPipeline = false;
@@ -348,7 +350,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> matmul_results;
   if (!isLOWOHA) {
     // Run the matmul benchmark with the provided configurations
-    int status = matmul_benchdnn(matmulConfig, matmul_results, options);
+    int status = matmul_benchdnn(matmulConfig, matmul_results, options, cache_size);
     if (status != OK) {
       testlog_error("Matmul benchmark failed.");
       return NOT_OK;
@@ -356,7 +358,8 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   }
   else {
     // Run the LOWOHA benchmark with the provided configurations
-    int status = matmul_lowoha_benchdnn(matmulConfig, matmul_results, options);
+    int status = matmul_lowoha_benchdnn(matmulConfig, matmul_results, options,
+                                        cache_size);
     if (status != OK) {
       testlog_error("LOWOHA Matmul benchmark failed.");
       return NOT_OK;

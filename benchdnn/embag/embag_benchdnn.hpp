@@ -73,7 +73,8 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
  * @param out_filename Path to the output CSV file for writing results.
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
-int bench(const std::string &in_filename, const std::string &out_filename);
+int bench(const std::string &in_filename, const std::string &out_filename,
+          size_t cache_size);
 
 } // namespace embag
 } // namespace benchdnn

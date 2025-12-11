@@ -212,13 +212,66 @@ std::string postOpsToStr(post_op_type_t post_op) {
 }
 
 #if COLD_CACHE
-void flush_cache(std::vector<char> &buffer) {
-  unsigned long sum = 0;
-  for (size_t i = 0; i < CACHE_SIZE; i += CACHE_LINE_SIZE) {
-    buffer[i]++;
-    global_sum += buffer[i];
-    _mm_clflush(&buffer[i]);
+void flush_cache(size_t cache_size) {
+  // Pre-calculate to avoid runtime variability
+  size_t buffer_size = cache_size * 2;
+
+  #pragma omp parallel
+  {
+    static thread_local std::vector<char> tls_buffer(buffer_size);
+
+    char *buffer = tls_buffer.data();
+
+    // Pollute cache lines - simple sequential write
+    for (size_t i = 0; i < buffer_size; i += CACHE_LINE_SIZE) {
+      buffer[i] = (char)(i & 0xFF);
+    }
+
+    // Prevent optimization
+    asm volatile("" : : "r"(buffer), "r"(buffer_size) : "memory");
+
+    // Flush cache
+    for (size_t i = 0; i < buffer_size; i += CACHE_LINE_SIZE) {
+      _mm_clflush(&buffer[i]);
+    }
+    _mm_mfence();
   }
+}
+
+size_t read_cache_size(const std::string &path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return 0;
+  }
+  std::string size_str;
+  file >> size_str;
+  file.close();
+
+  size_t multiplier = 1;
+  if (size_str.back() == 'K') {
+    multiplier = 1024;
+  }
+  else if (size_str.back() == 'M') {
+    multiplier = 1024 * 1024;
+  }
+  size_str.pop_back();
+  return std::stoul(size_str) * multiplier;
+}
+
+size_t get_cache_size() {
+  size_t cache_size = 0;
+
+  std::filesystem::path cache_path = "/sys/devices/system/cpu/cpu0/cache";
+
+  for (const auto &index : std::filesystem::directory_iterator(cache_path)) {
+    if (index.path().filename().string().find("index") == 0) {
+      std::string size_path = index.path().string() + "/size";
+
+      size_t size_in_bytes = read_cache_size(size_path);
+      cache_size += size_in_bytes;
+    }
+  }
+  return cache_size;
 }
 #endif
 

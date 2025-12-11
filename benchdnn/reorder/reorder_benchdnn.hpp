@@ -98,7 +98,8 @@ void log_results(std::vector<std::pair<ReorderConfig, TimingStats>>
  * @param out_filename Path to the output CSV file for results.
  * @return Status code (0 for success, non-zero for error).
  */
-int bench(const std::string &in_filename, const std::string &out_filename);
+int bench(const std::string &in_filename, const std::string &out_filename,
+          size_t cache_size);
 
 } // namespace reorder
 } // namespace benchdnn
