@@ -32,7 +32,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       const lowoha_params &params,
+                                       lowoha_params &params,
                                        const bool is_weights_const) {
   // Check for null pointers
   if (!src || !weight || !dst) {
@@ -107,6 +107,16 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     log_error("Broadcasting is not compatible with given batch sizes: Batch_A=",
               Batch_A, ", Batch_B=", Batch_B);
     return status_t::failure;
+  }
+
+  // Set leading dimension for binary buffers if not set
+  for (auto &po : params.postop_) {
+    if (po.po_type == post_op_type_t::binary_add ||
+        po.po_type == post_op_type_t::binary_mul) {
+      if (po.leading_dim == -1) {
+        po.leading_dim = N;
+      }
+    }
   }
 
   return status_t::success;

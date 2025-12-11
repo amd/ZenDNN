@@ -146,34 +146,83 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
   }
 }
 
-void matmul_ref_kernel_t::store_output(uint64_t nelem, float *accum_buff_f32,
+void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *accum_buff_f32,
                                        void *output, data_type_t output_dtype) {
   LOG_DEBUG_INFO("Storing matmul_ref_kernel_t output");
 
+  // Calculate batch strides
+  const size_t accum_batch_stride = static_cast<size_t>(M) * N;
+  const size_t output_batch_stride = static_cast<size_t>(M) * ldc;
+
   if (output_dtype == data_type_t::u8) {
-    for (uint64_t i = 0; i < nelem; ++i) {
-      ((uint8_t *)output)[i] = (uint8_t)std::nearbyint(
-                                 clip_fwd(accum_buff_f32[i], 0.0, (float)UINT8_MAX));
+    uint8_t *out_u8 = static_cast<uint8_t *>(output);
+    #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+    for (int bs = 0; bs < BS; ++bs) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
+          val = (val < 0.0f) ? 0.0f : ((val > (float)UINT8_MAX) ? (float)UINT8_MAX : val);
+          out_u8[bs * output_batch_stride + i * ldc + j] = static_cast<uint8_t>(std::nearbyint(val));
+        }
+      }
     }
   }
   else if (output_dtype == data_type_t::s8) {
-    for (uint64_t i = 0; i < nelem; ++i) {
-      ((int8_t *)output)[i] = (int8_t)std::nearbyint(
-                                clip_fwd(accum_buff_f32[i], (float)INT8_MIN, (float)INT8_MAX));
+    int8_t *out_s8 = static_cast<int8_t *>(output);
+    #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+    for (int bs = 0; bs < BS; ++bs) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
+          val = (val < (float)INT8_MIN) ? (float)INT8_MIN : ((val > (float)INT8_MAX) ? (float)INT8_MAX : val);
+          out_s8[bs * output_batch_stride + i * ldc + j] = static_cast<int8_t>(std::nearbyint(val));
+        }
+      }
     }
   }
   else if (output_dtype == data_type_t::s32) {
-    for (uint64_t i = 0; i < nelem; ++i) {
-      ((int32_t *)output)[i] = (int32_t)std::nearbyint(
-                                 clip_fwd(accum_buff_f32[i], (float)INT32_MIN, (float)INT32_MAX));
+    int32_t *out_s32 = static_cast<int32_t *>(output);
+    #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+    for (int bs = 0; bs < BS; ++bs) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
+          val = (val < (float)INT32_MIN) ? (float)INT32_MIN : ((val > (float)INT32_MAX) ? (float)INT32_MAX : val);
+          out_s32[bs * output_batch_stride + i * ldc + j] = static_cast<int32_t>(std::nearbyint(val));
+        }
+      }
     }
   }
   else if (output_dtype == data_type_t::bf16) {
-    bfloat16_t::f32_to_bf16(accum_buff_f32, (int16_t *)output, nelem);
+    bfloat16_t *out_bf16 = static_cast<bfloat16_t *>(output);
+    #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+    for (int bs = 0; bs < BS; ++bs) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          out_bf16[bs * output_batch_stride + i * ldc + j] = bfloat16_t(accum_buff_f32[bs * accum_batch_stride + i * N + j]);
+        }
+      }
+    }
   }
   else {
-    for (uint64_t i = 0; i < nelem; ++i) {
-      ((float *)output)[i] = accum_buff_f32[i];
+    float *out_f32 = static_cast<float *>(output);
+    // Optimized path for contiguous memory (BS == 1 and ldc == N)
+    if (BS == 1 && ldc == N) {
+      const size_t total_elements = static_cast<size_t>(M) * N;
+      #pragma omp parallel for if(total_elements > 10000)
+      for (size_t idx = 0; idx < total_elements; ++idx) {
+        out_f32[idx] = accum_buff_f32[idx];
+      }
+    }
+    else {
+      #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+      for (int bs = 0; bs < BS; ++bs) {
+        for (int i = 0; i < M; ++i) {
+          for (int j = 0; j < N; ++j) {
+            out_f32[bs * output_batch_stride + i * ldc + j] = accum_buff_f32[bs * accum_batch_stride + i * N + j];
+          }
+        }
+      }
     }
   }
 }
@@ -417,8 +466,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   if (is_int8) {
     quantize_dst(const_cast<tensor_t &>(output_tensor), accum_buff_f32);
   }
-  uint64_t nelem = output_tensor.get_nelem();
-  store_output(nelem, accum_buff_f32, output, output_dtype);
+  store_output(batch_size, M, N, ldc, accum_buff_f32, output, output_dtype);
 
   return status_t::success;
 }
@@ -713,6 +761,7 @@ void matmul_ref_kernel_t::compute_matmul(int batch_size, int M, int N, int K,
       for (auto j = 0; j < N; ++j) {
         float sum = 0.0;
         size_t op_idx = bs * offset_out + i * ldc + j;
+        size_t ac_idx = bs * offset_out + i * N + j;
         for (auto k = 0; k < K; ++k) {
           size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
                           (bs * offset_wei + k * ldb + j);
@@ -731,7 +780,7 @@ void matmul_ref_kernel_t::compute_matmul(int batch_size, int M, int N, int K,
         if (bias) {
           sum += read_and_cast<float>(bias, bias_dtype, j);
         }
-        accum_buff_f32[op_idx] = sum;
+        accum_buff_f32[ac_idx] = sum;
       }
     }
   }
@@ -777,6 +826,7 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
       for (auto j = 0; j < N; ++j) {
         int32_t sum_s32 = 0;
         size_t op_idx = bs * offset_out + i * ldc + j;
+        size_t ac_idx = bs * offset_out + i * N + j;
         for (auto k = 0; k < K; ++k) {
           size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
                           (bs * offset_wei + k * ldb + j);
@@ -806,7 +856,7 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
         if (bias) {
           sum += read_and_cast<float>(bias, bias_dtype, j);
         }
-        accum_buff_f32[op_idx] = sum;
+        accum_buff_f32[ac_idx] = sum;
       }
     }
   }

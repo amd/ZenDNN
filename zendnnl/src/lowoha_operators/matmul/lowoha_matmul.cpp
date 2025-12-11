@@ -425,7 +425,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
               size_t element_size =
                 (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
               size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
-                                    (ldc) + static_cast<size_t>(j);
+                                    (po.leading_dim) + static_cast<size_t>(j);
 
               size_t offset_bytes = offset_elems * element_size;
 

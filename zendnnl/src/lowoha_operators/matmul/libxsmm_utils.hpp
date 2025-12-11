@@ -169,7 +169,7 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
     s.m = N;
     s.n = M;
     s.ldi = ldc;
-    s.ldi2 = ldc;
+    s.ldi2 = po.leading_dim;
     s.ldo = ldc;
     s.in0_type = IN_TYPE;
     s.in1_type = COMP_TYPE;

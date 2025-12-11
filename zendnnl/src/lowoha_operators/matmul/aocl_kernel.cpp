@@ -317,7 +317,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
       }
       dlp_metadata->seq_vector[op_index++] = MATRIX_ADD;
       dlp_metadata->matrix_add[matrix_add_index].matrix = po.buff;
-      dlp_metadata->matrix_add[matrix_add_index].ldm = N;
+      dlp_metadata->matrix_add[matrix_add_index].ldm = po.leading_dim;
       dlp_metadata->matrix_add[matrix_add_index].stor_type = po.dtype ==
           data_type_t::bf16 ? DLP_BF16 : DLP_F32;
       // sf structure is already allocated, initialize with default values
@@ -336,7 +336,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
       }
       dlp_metadata->seq_vector[op_index++] = MATRIX_MUL;
       dlp_metadata->matrix_mul[matrix_mul_index].matrix = po.buff;
-      dlp_metadata->matrix_mul[matrix_mul_index].ldm = N;
+      dlp_metadata->matrix_mul[matrix_mul_index].ldm = po.leading_dim;
       dlp_metadata->matrix_mul[matrix_mul_index].stor_type = po.dtype ==
           data_type_t::bf16 ? DLP_BF16 : DLP_F32;
       // sf structure is already allocated, initialize with default values
@@ -661,7 +661,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
       *static_cast<float *>(aocl_po->matrix_add[matrix_add_index].scale_factor) =
         1.0f; // Default scale
       aocl_po->matrix_add[matrix_add_index].scale_factor_len = 1;
-      aocl_po->matrix_add[matrix_add_index].ldm = N; // Set leading dimension to N
+      aocl_po->matrix_add[matrix_add_index].ldm = po.leading_dim;
       aocl_po->matrix_add[matrix_add_index].stor_type = po.dtype == data_type_t::bf16
           ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
       matrix_add_index++;

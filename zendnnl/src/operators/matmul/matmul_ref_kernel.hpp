@@ -396,12 +396,15 @@ class matmul_ref_kernel_t final : public op_kernel_t<matmul_context_t> {
 
   /**
    * @brief Store the computed output tensor to the destination buffer.
-   * @param nelem Number of elements in the output tensor.
+   * @param BS Batch size for the operation.
+   * @param M Number of rows in the output matrix.
+   * @param N Number of columns in the output matrix.
+   * @param ldc Leading dimension of the output matrix.
    * @param accum_buff_f32 Pointer to the accumulation buffer containing the computed results.
    * @param output Pointer to the destination buffer where the output tensor will be stored.
    * @param output_dtype Data type of the output tensor.
    */
-  void store_output(uint64_t nelem, float *accum_buff_f32, void *output,
+  void store_output(int BS, int M, int N, int ldc, float *accum_buff_f32, void *output,
                     data_type_t output_dtype);
 };
 

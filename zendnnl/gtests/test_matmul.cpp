@@ -325,10 +325,12 @@ TEST_P(TestMatmul, BF16_BF16) {
  *
  */
 TEST_P(TestMatmul,F32_F32_Stride) {
-  size_t stride_in_inc          = rand() % 50;
-  size_t stride_wt_inc          = rand() % 50;
-  std::vector<size_t> stride_in = {m,k};
-  std::vector<size_t> stride_wt = {k,n};
+  size_t stride_in_inc           = rand() % 50;
+  size_t stride_wt_inc           = rand() % 50;
+  size_t stride_dst_inc          = rand() % 50;
+  std::vector<size_t> stride_in  = {m,k};
+  std::vector<size_t> stride_wt  = {k,n};
+  std::vector<size_t> stride_dst = {m,n + stride_dst_inc};
   if (transB) {
     stride_wt[0] += stride_wt_inc;
   }
@@ -351,10 +353,10 @@ TEST_P(TestMatmul,F32_F32_Stride) {
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
-  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 2.0);
-  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 2.0);
+  auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f32, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f32, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
@@ -388,10 +390,12 @@ TEST_P(TestMatmul,F32_F32_Stride) {
  *
  */
 TEST_P(TestMatmul,BF16_F32_Stride) {
-  size_t stride_in_inc          = rand() % 50;
-  size_t stride_wt_inc          = rand() % 50;
-  std::vector<size_t> stride_in = {m,k};
-  std::vector<size_t> stride_wt = {k,n};
+  size_t stride_in_inc           = rand() % 50;
+  size_t stride_wt_inc           = rand() % 50;
+  size_t stride_dst_inc          = rand() % 50;
+  std::vector<size_t> stride_in  = {m,k};
+  std::vector<size_t> stride_wt  = {k,n};
+  std::vector<size_t> stride_dst = {m,n + stride_dst_inc};
   if (transB) {
     stride_wt[0] += stride_wt_inc;
   }
@@ -414,10 +418,10 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
-  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 2.0);
-  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::f32, 2.0);
+  auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f32, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f32, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
@@ -451,10 +455,12 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
  *
  */
 TEST_P(TestMatmul,BF16_BF16_Stride) {
-  size_t stride_in_inc          = rand() % 50;
-  size_t stride_wt_inc          = rand() % 50;
-  std::vector<size_t> stride_in = {m,k};
-  std::vector<size_t> stride_wt = {k,n};
+  size_t stride_in_inc           = rand() % 50;
+  size_t stride_wt_inc           = rand() % 50;
+  size_t stride_dst_inc          = rand() % 50;
+  std::vector<size_t> stride_in  = {m,k};
+  std::vector<size_t> stride_wt  = {k,n};
+  std::vector<size_t> stride_dst = {m,n + stride_dst_inc};
   if (transB) {
     stride_wt[0] += stride_wt_inc;
   }
@@ -477,10 +483,10 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
                              is_binary_postop(po_arr[po_index].first)) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
-  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 2.0);
-  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
-                            data_type_t::bf16, 2.0);
+  auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::bf16, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::bf16, 2.0);
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");

@@ -111,7 +111,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       const lowoha_params &params,
+                                       lowoha_params &params,
                                        const bool is_weights_const);
 
 /**

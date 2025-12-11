@@ -50,12 +50,13 @@ struct postop {
   std::vector<int64_t> dims;               ///< Dimensions of the buffer
   float alpha;                             ///< Alpha parameter for operations
   float beta;                              ///< Beta parameter for operations
+  int leading_dim;                         ///< Leading dimension for the buffer
 
   /**
    * @brief Default constructor for postop
    */
   postop() : po_type(zendnnl::ops::post_op_type_t::none), buff(nullptr),
-    dtype(data_type_t::none), dims(), alpha(0.0f), beta(0.0f) {}
+    dtype(data_type_t::none), dims(), alpha(0.0f), beta(0.0f), leading_dim(-1) {}
 };
 
 /**
