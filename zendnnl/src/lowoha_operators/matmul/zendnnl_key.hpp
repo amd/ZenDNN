@@ -23,30 +23,26 @@
 using matmul_algo_t = zendnnl::ops::matmul_algo_t;
 //structure to make key
 struct Key_matmul {
-  bool transpose_inp;
-  bool transpose_weights;
-  unsigned int m;
-  unsigned int k;
-  unsigned int n;
-  unsigned int lda;
-  unsigned int ldb;
-  const void *weights;
-  uint32_t algo;
+  bool transpose_inp = false;
+  bool transpose_weights = false;
+  unsigned int m = 1;
+  unsigned int k = 1;
+  unsigned int n = 1;
+  unsigned int lda = 1;
+  unsigned int ldb = 1;
+  const void *weights = nullptr;
+  uint32_t algo = static_cast<uint32_t>(matmul_algo_t::none);
 
-  // Default constructor
-  Key_matmul() : transpose_inp(false), transpose_weights(false), m(1), k(1), n(1),
-    lda(1), ldb(1), weights(nullptr), algo(static_cast<uint32_t>(matmul_algo_t::none)) {}
+  // Default constructor, uses the default member initializers
+  Key_matmul() = default;
 
-  // Constructor to initialize few variables
+  // Constructor for the most common case, relies on defaults for m, lda, and transpose_inp
   Key_matmul(bool TransB, unsigned int K,
              unsigned int N,
              unsigned int ldb, const void *B_Array,
              uint32_t algo)
     : transpose_weights(TransB), k(K), n(N),
       ldb(ldb), weights(B_Array), algo(algo) {
-    m = 1;
-    lda = 1;
-    transpose_inp = false;
   }
 
   // Constructor to initialize all member variables

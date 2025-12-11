@@ -57,12 +57,13 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
  * @param key Unique cache key for the weight tensor
  * @param dnnl_params OneDNN parameters containing weight memory info
  * @param weight_cache_type Type of caching mechanism to use
+ * @param matmul_attr OneDNN primitive attributes for the matmul operation
  * @param eng OneDNN engine for memory operations
  * @return true if reordering was performed
  */
 bool reorderAndCacheWeights(Key_matmul key,
                             onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::engine &eng);
+                            dnnl::primitive_attr matmul_attr, dnnl::engine &eng);
 /**
  * @brief Reorder weights to OneDNN's optimal format without caching
  *
@@ -70,10 +71,11 @@ bool reorderAndCacheWeights(Key_matmul key,
  * OneDNN's internal optimized memory layout for better performance.
  *
  * @param dnnl_params OneDNN parameters containing source and destination memory
+ * @param matmul_attr OneDNN primitive attributes for the matmul operation
  * @param eng OneDNN engine for executing the reorder operation
  */
 void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
-                    dnnl::engine &eng);
+                    dnnl::primitive_attr matmul_attr, dnnl::engine &eng);
 #endif
 
 } // lowoha namespace

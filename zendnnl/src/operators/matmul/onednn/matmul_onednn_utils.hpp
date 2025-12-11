@@ -48,6 +48,9 @@ class onednn_utils_t {
     data_type_t             dtype = data_type_t::none;
     std::string             format_tag = "any"; // e.g., "ab", "abc"
     bool                    is_transposed = false;
+#if ZENDNNL_DEPENDS_ONEDNN
+    dnnl::memory            mem;
+#endif
   };
 
   // Holds all parameters for the complete matmul operation.

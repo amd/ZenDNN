@@ -213,7 +213,7 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
         auto dim = buff_dims.size();
-        while(dst_dim > dim) {
+        while (dst_dim > dim) {
           buff_dims.insert(buff_dims.begin(), 1);
           dim++;
         }
@@ -241,7 +241,7 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
         onednn_utils_t::onednn_tensor_params binary_tensor;
         auto buff_dims           = buff_tensor.get_size();
         auto dim = buff_dims.size();
-        while(dst_dim > dim) {
+        while (dst_dim > dim) {
           buff_dims.insert(buff_dims.begin(), 1);
           dim++;
         }
@@ -279,8 +279,9 @@ void matmul_onednn_kernel_t::execute_matmul(const
   dnnl::stream eng_stream(eng);
   dnnl::memory::desc  dnnl_input_desc    = onednn_utils_t::to_dnnl_tensor(
         params.src, eng);
-  dnnl::memory::desc  dnnl_weight_desc   = onednn_utils_t::to_dnnl_tensor(
-        params.weights, eng);
+  dnnl::memory::desc  dnnl_weight_desc    = params.is_blocked ?
+      params.weights.mem.get_desc() : onednn_utils_t::to_dnnl_tensor(params.weights,
+          eng);
   dnnl::memory::desc  dnnl_output_desc   = onednn_utils_t::to_dnnl_tensor(
         params.dst, eng);
 
@@ -289,8 +290,8 @@ void matmul_onednn_kernel_t::execute_matmul(const
 
   dnnl::memory        dnnl_input_tensor  = dnnl::memory(dnnl_input_desc, eng,
       params.src.buffer);
-  dnnl::memory        dnnl_weight_tensor = dnnl::memory(dnnl_weight_desc, eng,
-      params.weights.buffer);
+  dnnl::memory        dnnl_weight_tensor = params.is_blocked ?
+      params.weights.mem : dnnl::memory(dnnl_weight_desc, eng, params.weights.buffer);
   dnnl::memory        dnnl_output_tensor = dnnl::memory(dnnl_output_desc, eng,
       params.dst.buffer);
   dnnl::memory        dnnl_bias_tensor   = dnnl::memory(dnnl_bias_desc, eng,
@@ -301,7 +302,6 @@ void matmul_onednn_kernel_t::execute_matmul(const
 
   bool is_reorder = !params.is_blocked && params.weights.dims.size() == 2 &&
                     params.algo == matmul_algo_t::onednn_blocked;
-
   if (is_reorder) {
     // Create a mutable copy of the weights params to change the format tag
     onednn_utils_t::onednn_tensor_params blocked_weights_params = params.weights;

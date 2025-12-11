@@ -260,66 +260,86 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                     dnnl_params.algo == matmul_algo_t::onednn_blocked &&
                     is_weights_const;
   if (is_blocked) {
-    Key_matmul key_(transB, K, N, ldb, dnnl_params.weights.buffer,
+    // TODO: Update Key with thread information and use hash for input matrix.
+    Key_matmul key_(transA, transB,
+                    M, K, N, lda, ldb, dnnl_params.weights.buffer,
                     static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
     dnnl_params.is_blocked = reorderAndCacheWeights(key_, dnnl_params,
-                             weight_cache_type, eng);
+                             weight_cache_type, matmul_attr, eng);
   }
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
                                          eng);
-  if (weight_cache_type == 0 && is_blocked) {
-    free(dnnl_params.weights.buffer);
-  }
 }
 
 void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
-                    dnnl::engine &eng) {
+                    dnnl::primitive_attr matmul_attr, dnnl::engine &eng) {
   dnnl::stream eng_stream(eng);
-  void *reordered_mem = nullptr;
+
+  dnnl::memory::desc  dnnl_input_desc    = onednn_utils_t::to_dnnl_tensor(
+        dnnl_params.src, eng);
+  dnnl::memory        dnnl_input_tensor  = dnnl::memory(dnnl_input_desc, eng,
+      dnnl_params.src.buffer);
+
   dnnl::memory::desc  dnnl_weight_desc   = onednn_utils_t::to_dnnl_tensor(
         dnnl_params.weights, eng);
   dnnl::memory        dnnl_weight_mem    = dnnl::memory(dnnl_weight_desc, eng,
       dnnl_params.weights.buffer);
 
-  dnnl_params.weights.format_tag = (dnnl_params.weights.dtype == data_type_t::f32)
-                                   ? "BA16a64b" : "BA16a64b2a";
+  dnnl_params.weights.format_tag = "any";
   dnnl::memory::desc  dnnl_blocked_weight_desc   = onednn_utils_t::to_dnnl_tensor(
         dnnl_params.weights, eng);
-  size_t reordered_size = dnnl_blocked_weight_desc.get_size();
-  size_t alignment      = 64;
-  size_t reorder_size   = (reordered_size + alignment - 1) & ~(alignment - 1);
-  reordered_mem         = (void *)aligned_alloc(alignment, reorder_size);
-  dnnl::memory        dnnl_blocked_weight_mem    = dnnl::memory(
-        dnnl_blocked_weight_desc, eng, reordered_mem);
+  [[maybe_unused]] dnnl::memory        dnnl_blocked_weight_mem;
+
+  dnnl::memory::desc  dnnl_output_desc   = onednn_utils_t::to_dnnl_tensor(
+        dnnl_params.dst, eng);
+  dnnl::memory        dnnl_output_tensor = dnnl::memory(dnnl_output_desc, eng,
+      dnnl_params.dst.buffer);
+
+  [[maybe_unused]] dnnl::memory::desc  dnnl_bias_desc  =
+    onednn_utils_t::to_dnnl_tensor(dnnl_params.bias, eng);
+  dnnl::memory        dnnl_bias_tensor   = dnnl::memory(dnnl_bias_desc, eng,
+      dnnl_params.bias.buffer);
+
+  dnnl::matmul::primitive_desc matmul_pd;
+  if (dnnl_params.bias.buffer != nullptr) {
+    matmul_pd = dnnl::matmul::primitive_desc(eng, dnnl_input_desc,
+                dnnl_blocked_weight_desc, dnnl_bias_desc,
+                dnnl_output_desc, matmul_attr);
+  }
+  else {
+    matmul_pd = dnnl::matmul::primitive_desc(eng, dnnl_input_desc,
+                dnnl_blocked_weight_desc,
+                dnnl_output_desc, matmul_attr);
+  }
+
+  dnnl_blocked_weight_mem   = dnnl::memory(matmul_pd.weights_desc(), eng);
 
   reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
       dnnl_weight_mem, dnnl_blocked_weight_mem);
-  dnnl_params.weights.buffer = dnnl_blocked_weight_mem.get_data_handle();
+  dnnl_params.weights.mem  = dnnl_blocked_weight_mem;
 }
 
 bool reorderAndCacheWeights(Key_matmul key,
                             onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::engine &eng) {
+                            dnnl::primitive_attr matmul_attr, dnnl::engine &eng) {
   // Weight caching
-  static lru_cache_t<Key_matmul, std::pair<void *, std::string>>
-      matmul_weight_cache;
+  static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
 
   if (weight_cache_type == 0) {
     apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
-    reorderWeights(dnnl_params, eng);
+    reorderWeights(dnnl_params, matmul_attr, eng);
   }
   else {
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
       apilog_info("onednn reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
-      reorderWeights(dnnl_params, eng);
-      matmul_weight_cache.add(key, {dnnl_params.weights.buffer, dnnl_params.weights.format_tag});
+      reorderWeights(dnnl_params, matmul_attr, eng);
+      matmul_weight_cache.add(key, dnnl_params.weights.mem);
     }
     else {
       apilog_info("Read onednn cached weights WEIGHT_CACHE_OUT_OF_PLACE");
-      dnnl_params.weights.buffer = matmul_weight_cache.get(key).first;
-      dnnl_params.weights.format_tag = matmul_weight_cache.get(key).second;
+      dnnl_params.weights.mem = matmul_weight_cache.get(key);
     }
   }
   return true;

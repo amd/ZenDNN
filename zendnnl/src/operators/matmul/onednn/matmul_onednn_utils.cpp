@@ -40,15 +40,6 @@ dnnl::memory::format_tag onednn_utils_t::to_dnnl_format(std::string tag) {
   else if (tag == "acb") {
     return dnnl::memory::format_tag::acb;
   }
-  else if (tag == "BA16a64b2a") {
-    return dnnl::memory::format_tag::BA16a64b2a;
-  }
-  else if (tag == "BA16a64b") {
-    return dnnl::memory::format_tag::BA16a64b;
-  }
-  else if (tag == "AB8b64a2b") {
-    return dnnl::memory::format_tag::AB8b64a2b;
-  }
   else {
     return dnnl::memory::format_tag::any;
   }
@@ -79,8 +70,7 @@ dnnl::memory::desc onednn_utils_t::to_dnnl_tensor(const onednn_tensor_params
       params.format_tag);
 
   dnnl::memory::desc tensor_md;
-  if (params.format_tag == "any" || params.format_tag == "BA16a64b" ||
-      params.format_tag == "BA16a64b2a" || params.format_tag == "AB8b64a2b" || stride_dims.empty()) {
+  if (params.format_tag == "any" || stride_dims.empty()) {
     tensor_md = dnnl::memory::desc(tensor_dims, tensor_dtype, tensor_tag);
   }
   else {

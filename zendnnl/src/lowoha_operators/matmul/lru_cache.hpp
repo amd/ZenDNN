@@ -144,13 +144,6 @@ void lru_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
         std::free(oldest->second.value_);
       }
     }
-    else if constexpr(std::is_same_v<VALUE_T, std::pair<void*, std::string>>) {
-      // Handle the specific pair<void*, string> case
-      if (oldest->second.value_.first != nullptr) {
-        std::free(oldest->second.value_.first);
-      }
-      // String destructor handles itself automatically
-    }
     lru_cache_map_->erase(oldest);
   }
 }
@@ -164,13 +157,6 @@ void lru_cache_t<KEY_T, VALUE_T>::evict() {
       if (entry.second.value_ != nullptr) {
         std::free(entry.second.value_);
       }
-    }
-    else if constexpr(std::is_same_v<VALUE_T, std::pair<void*, std::string>>) {
-      // Handle the specific pair<void*, string> case
-      if (entry.second.value_.first != nullptr) {
-        std::free(entry.second.value_.first);
-      }
-      // String destructor handles itself automatically
     }
   }
   // Clear the cache
