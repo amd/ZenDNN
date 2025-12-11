@@ -6,9 +6,9 @@ name: ZenDNNL PR CI
 
 on:
   push:
-    branches: [zendnnl]
+    branches: [main]
   pull_request:
-    branches: [zendnnl]
+    branches: [main]
   workflow_dispatch:
     inputs:
       zendnn_ref:
