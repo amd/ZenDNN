@@ -1,0 +1,77 @@
+# ******************************************************************************
+# Copyright (c) 2025 Advanced Micro Devices, Inc.
+# All rights reserved.
+# ******************************************************************************
+name: JIRA ID Verification
+
+on:
+  workflow_call:
+    outputs:
+      result:
+        description: "Result of the JIRA ID check"
+        value: ${{ jobs.check-jira-id.outputs.result }}
+
+jobs:
+  check-jira-id:
+    name: Verify JIRA ID in Commit Messages
+    runs-on: jira_check_runner
+    outputs:
+      result: ${{ steps.jira-check.outputs.result }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for checking commits
+      
+    - name: Verify JIRA ID in commit message
+      id: jira-check
+      run: |
+        echo "Verifying JIRA ID in commit message..."
+        
+        # For pull request
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          # Get all commits in the PR
+          COMMITS=$(git log --format="%H" ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }})
+        else
+          # For push event, get the latest commit
+          COMMITS=$(git log -1 --format="%H")
+        fi
+        
+        VALID_JIRA_PATTERN="(ZENAI|LWPZENDNN)-[1-9][0-9]{2,4}"
+        INVALID_JIRA_PATTERN="(ZENAI|LWPZENDNN)-0{3,5}"
+        
+        JIRA_CHECK_PASSED=true
+        
+        for COMMIT in $COMMITS; do
+          COMMIT_MSG=$(git log --format=%B -n 1 $COMMIT)
+          echo "Checking commit: ${COMMIT:0:8}"
+          
+          if [[ ! $COMMIT_MSG =~ $VALID_JIRA_PATTERN ]]; then
+            echo "❌ ERROR: No valid JIRA ID found in commit message!"
+            echo "Commit message: $COMMIT_MSG"
+            echo "JIRA ID should follow the format ZENAI-XXX/ZENAI-XXXX/ZENAI-XXXXX or LWPZENDNN-XXX/LWPZENDNN-XXXX/LWPZENDNN-XXXXX where X is a non-zero digit"
+            JIRA_CHECK_PASSED=false
+            break
+          fi
+          
+          if [[ $COMMIT_MSG =~ $INVALID_JIRA_PATTERN ]]; then
+            echo "❌ ERROR: Invalid JIRA ID format found: ${BASH_REMATCH[0]}"
+            echo "Commit message: $COMMIT_MSG"
+            echo "JIRA ID cannot be ZENAI-000/ZENAI-0000/ZENAI-00000 or LWPZENDNN-000/LWPZENDNN-0000/LWPZENDNN-00000"
+            JIRA_CHECK_PASSED=false
+            break
+          fi
+          
+          echo "✅ Valid JIRA ID found: ${BASH_REMATCH[0]}"
+        done
+        
+        if [ "$JIRA_CHECK_PASSED" = true ]; then
+          echo "✅ JIRA ID verification passed!"
+          echo "result=success" >> $GITHUB_OUTPUT
+        else
+          echo "❌ JIRA ID verification failed!"
+          echo "result=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      shell: bash
