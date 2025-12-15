@@ -290,7 +290,7 @@ jobs:
       shell: bash
   trigger-zenTorch:
     #needs: [Zendnnl_build_PR]
-    runs-on: amd-zenai-arc-xsmall-dind
+    runs-on: amd-zenai-arc-small-dind
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     steps:
      - name: Trigger ZenTorch workflow
@@ -316,7 +316,7 @@ jobs:
        shell: bash
   check-zenTorch-status:
    needs: [trigger-zenTorch]
-   runs-on: amd-zenai-arc-xsmall-dind
+   runs-on: amd-zenai-arc-small-dind
    steps:
     - name: Check PyTorch status
       env:
