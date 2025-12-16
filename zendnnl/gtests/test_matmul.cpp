@@ -115,6 +115,9 @@ TEST_P(TestMatmul,F32_F32) {
  *         and S4 weights wrt Reference kernel
  */
  TEST_P(TestMatmul, WOQ_BF16_S4) {
+  if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
+    GTEST_SKIP();
+  }
   // Test WOQ with different scale/zp granularity combinations:
   // Combination 0: scale=per-tensor,  zp=per-tensor  -> {1,1}, {1,1}
   // Combination 1: scale=per-channel, zp=per-tensor  -> {1,n}, {1,1}

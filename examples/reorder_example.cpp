@@ -86,6 +86,7 @@ int reorder_outofplace_f32_kernel_contiguous_blocked_example() {
     }
     else {
       testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -107,7 +108,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
     status_t status;
 
     // Create scale and zero point tensors for quantization
-    auto src_scale  = tensor_factory.uniform_tensor({1,MATMUL_K},
+    auto src_scale  = tensor_factory.uniform_tensor({1,COLS},
                       data_type_t::f32,
                       0.25, "src_scale_tensor");
 
@@ -173,6 +174,7 @@ int reorder_outofplace_s8_kernel_contiguous_blocked_example() {
     }
     else {
       testlog_error("operator ", reorder_operator.get_name()," execution failed.");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -311,6 +313,7 @@ int reorder_outofplace_matmul_relu_f32_kernel_contiguous_blocked_example() {
     }
     else {
       testlog_error("operator ", matmul_operator.get_name(), " execution failed.");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -614,6 +617,7 @@ int reorder_outofplace_bf16_kernel_blocked_contiguous_example() {
     }
     else {
       testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -636,7 +640,7 @@ int reorder_inplace_s8_kernel_blocked_contiguous_example() {
     float range = 5.0f;
 
     // Create scale and zero point tensors for quantization
-    auto src_scale  = tensor_factory.uniform_tensor({1,MATMUL_K},
+    auto src_scale  = tensor_factory.uniform_tensor({1,COLS},
                       data_type_t::f32,
                       0.25, "src_scale_tensor");
 
@@ -765,6 +769,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
     }
     else {
       testlog_error("operator ", reorder_operator.get_name(), " execution failed.");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -778,6 +783,7 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
     // Check if unreorder operation creation is successful.
     if (unreorder_operator.is_bad_object()) {
       testlog_error("operator ", unreorder_operator.get_name(), " creation failed");
+      free(reorder_weights);
       return NOT_OK;
     }
 
@@ -807,6 +813,8 @@ int reorder_unreorder_outofplace_bf16_kernel_example() {
     }
     else {
       testlog_error("operator ", unreorder_operator.get_name(), " execution failed.");
+      free(reorder_weights);
+      free(unreorder_weights);
       return NOT_OK;
     }
 

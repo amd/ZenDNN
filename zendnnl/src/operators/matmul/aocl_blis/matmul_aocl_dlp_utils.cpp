@@ -66,7 +66,9 @@ size_t aocl_dlp_utils_t::reorder_weights_execute(
   size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
                                  k, n, nullptr);
   /*TODO: add support for tensor which will wrap the pointer instead of raw buffer*/
-  reordered_weights_ptr = aligned_alloc(64, b_reorder_buf_siz_req);
+  size_t alignment = 64;
+  size_t aligned_size = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
+  reordered_weights_ptr = aligned_alloc(alignment, aligned_size);
   reorder_func(order, trans, 'B', (T *)weights, (T *)reordered_weights_ptr, k, n,
                ldb, nullptr);
 
@@ -670,12 +672,6 @@ status_t aocl_dlp_utils_t::alloc_post_op(const std::vector<post_op_t>
 
     aocl_dlp_po_ptr = (dlp_metadata_t *) calloc(1, sizeof(dlp_metadata_t));
     if (aocl_dlp_po_ptr == NULL) {
-      return status_t::failure;
-    }
-
-    aocl_dlp_po_ptr->seq_vector = (DLP_POST_OP_TYPE *) calloc(total_po,
-                                  sizeof(DLP_POST_OP_TYPE));
-    if (aocl_dlp_po_ptr->seq_vector == NULL) {
       return status_t::failure;
     }
 
