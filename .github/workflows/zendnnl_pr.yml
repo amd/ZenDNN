@@ -299,7 +299,7 @@ jobs:
          -H "Accept: application/vnd.github.v3+json" \
          -H "Authorization: token ${{ secrets.ZIAIE_PAT }}" \
           "https://api.github.com/repos/AMD-Zenai/ZenDNN_tools/statuses/${{ github.event.client_payload.zendnntools_ref_sha }}" \
-          -d "{\"state\":\"${state}\",\"context\":\"${{ github.repository }} ZenDNN CI\",\"description\":\"${{ github.repository }} ${state}\"}"
+          -d "{\"state\":\"${state}\",\"context\":\"${{ github.repository }} CI\",\"description\":\"${{ github.repository }} ${state}\"}"
   trigger-zenTorch:
     #needs: [Zendnnl_build_PR]
     runs-on: amd-zenai-arc-small-dind
