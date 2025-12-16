@@ -44,6 +44,54 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            char mem_format_a, char mem_format_b,
                            lowoha_params &lowoha_param, const void *bias,
                            bool is_weights_const, bool can_reorder = false);
+
+/**
+ * @brief Execute Batch Matrix Multiplication (BMM) for batch_count > 1
+ *
+ * This function handles all batched matrix multiplication scenarios including:
+ * - Batch GEMM using batched_sgemm kernel
+ * - OneDNN batched execution
+ * - Parallel partitioning across batches and M dimension
+ */
+void bmm_execute(const char layout, const char trans_input,
+                 const char trans_weight,
+                 const bool transA, const bool transB,
+                 const int M, const int N, const int K, const float alpha,
+                 const void *src, const int lda,
+                 const void *weight, const int ldb,
+                 const void *bias, const float beta,
+                 void *dst, const int ldc,
+                 const bool is_weights_const,
+                 const int batch_count, const int Batch_A, const int Batch_B,
+                 const size_t src_batch_stride, const size_t weight_batch_stride,
+                 const size_t dst_batch_stride,
+                 const size_t src_type_size, const size_t out_type_size,
+                 const int num_threads,
+                 matmul_algo_t kernel, lowoha_params &params);
+
+/**
+ * @brief Execute single Matrix Multiplication (Matmul) for batch_count == 1
+ *
+ * This function handles all single matrix multiplication scenarios including:
+ * - Auto-tuner based kernel selection
+ * - LIBXSMM blocked execution with tiling
+ * - BRGEMM kernel execution
+ * - Standard matmul kernel execution
+ */
+void matmul_execute(const char layout, const char trans_input,
+                    const char trans_weight,
+                    const bool transA, const bool transB,
+                    const int M, const int N, const int K, const float alpha,
+                    const void *src, const int lda,
+                    const void *weight, const int ldb,
+                    const void *bias, const float beta,
+                    void *dst, const int ldc,
+                    const bool is_weights_const,
+                    const size_t src_type_size, const size_t out_type_size,
+                    const int num_threads,
+                    matmul_algo_t kernel, lowoha_params &params,
+                    unsigned int auto_version);
+
 /**
  * @brief Execute matrix multiplication with automatic kernel selection and optimization
  *
