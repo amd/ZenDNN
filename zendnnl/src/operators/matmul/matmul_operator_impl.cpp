@@ -494,7 +494,20 @@ std::string matmul_impl_t::op_execute_info() {
     }
   }
   else {
+    // When DLP is enabled, map aocl_blis to aocl_dlp in logs
+#if ZENDNNL_DEPENDS_AOCLDLP
+    if (forced_kernel == "aocl_blis") {
+      ss << "kernel:aocl_dlp" << ",";
+    }
+    else if (forced_kernel == "aocl_blis_blocked") {
+      ss << "kernel:aocl_dlp_blocked" << ",";
+    }
+    else {
+      ss << "kernel:" << forced_kernel << ",";
+    }
+#else
     ss << "kernel:" << forced_kernel << ",";
+#endif
   }
   ss << input.value().tensor_info() << ","
      << weights.tensor_info() << ",";
