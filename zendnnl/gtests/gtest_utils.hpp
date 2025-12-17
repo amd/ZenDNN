@@ -90,6 +90,7 @@ struct EmbagType {
   data_type_t indices_dtype;
   data_type_t offsets_dtype;
   int64_t scatter_stride;
+  bool fp16_scale_bias;
   EmbagType();
 };
 
@@ -101,6 +102,7 @@ struct EmbeddingType {
   int64_t padding_index;
   bool is_weights;
   data_type_t indices_dtype;
+  bool fp16_scale_bias;
   EmbeddingType();
 };
 
@@ -117,6 +119,7 @@ extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
 extern const float EMBAG_F32_TOL;
 extern const float EMBAG_BF16_TOL;
+extern const float EMBAG_INT4_TOL;
 extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;
@@ -174,6 +177,12 @@ class tensor_factory_t {
   tensor_t random_offsets_tensor(const std::vector<index_type> size_,
                                  uint64_t num_indices_, data_type_t offsets_dtype_,
                                  bool include_last_offset_ = true);
+
+  /** @brief Generate quantized random table tensor for embedding & embag */
+  tensor_t quantized_embedding_tensor_random(const std::vector<index_type> size_,
+      data_type dtype_, std::string tensor_name_="quant random",
+      bool fp16_scale_bias = true, float scale_min = 0.10,
+      float scale_max = 0.19, int8_t zp_min = 0, int8_t zp_max = 7);
 };
 
 /**
@@ -286,7 +295,8 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            int64_t padding_index,
                            bool include_last_offset,
                            bool is_weights,
-                           int64_t scatter_stride);
+                           int64_t scatter_stride,
+                           bool fp16_scale_bias = true);
 
 /** @fn embag_forced_ref_kernel_test
  *  @brief Test function for embag reference kernel (forced)
@@ -302,7 +312,8 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                       int64_t padding_index,
                                       bool include_last_offset,
                                       bool is_weights,
-                                      int64_t scatter_stride);
+                                      int64_t scatter_stride,
+                                      bool fp16_scale_bias = true);
 
 /** @fn embedding_kernel_test
  *  @brief Test function for embedding kernel
@@ -314,7 +325,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                tensor_t &weights_tensor,
                                tensor_t &output_tensor,
                                int64_t padding_index,
-                               bool is_weights);
+                               bool is_weights,
+                               bool fp16_scale_bias = true);
 
 /** @fn embedding_forced_ref_kernel_test
  *  @brief Test function for embedding reference kernel (forced)
@@ -326,7 +338,8 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     tensor_t &weights_tensor,
     tensor_t &output_tensor,
     int64_t padding_index,
-    bool is_weights);
+    bool is_weights,
+    bool fp16_scale_bias = true);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

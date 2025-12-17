@@ -101,7 +101,8 @@ int main() {
     embedding_bag_f32_kernel_example();
     embedding_bag_f32_forced_ref_kernel_example();
     embedding_f32_kernel_example();
-    //embedding_bag_int4_ref_kernel_example();
+    embedding_bag_u4_kernel_example();
+    embedding_bag_u4_ref_kernel_example();
 
     /** Sample functionality examples.
      *

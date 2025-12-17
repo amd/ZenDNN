@@ -162,6 +162,7 @@ EmbagType::EmbagType() {
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   offsets_dtype = indices_dtype;
   scatter_stride = -1;
+  fp16_scale_bias = std::rand() % 2;
 }
 
 // EmbeddingType constructor
@@ -172,6 +173,7 @@ EmbeddingType::EmbeddingType() {
   padding_index = -1;
   is_weights = std::rand() % 2;
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
+  fp16_scale_bias = std::rand() % 2;
 }
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
@@ -595,6 +597,138 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
   }
 
   return tensor;
+}
+
+// Convert float32 to float16 (stored as uint16_t)
+uint16_t float_to_half(float f) {
+  uint32_t x;
+  std::memcpy(&x, &f, sizeof(x));
+
+  uint32_t sign = (x >> 31) & 0x1;
+  int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mantissa = (x >> 13) & 0x3FF;
+
+  if (exponent <= 0) {
+    if (exponent < -10) {
+      return static_cast<uint16_t>(sign << 15);
+    }
+    mantissa = (x & 0x7FFFFF) | 0x800000;
+    mantissa >>= (1 - exponent + 13);
+    return static_cast<uint16_t>((sign << 15) | mantissa);
+  }
+  else if (exponent >= 31) {
+    return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+  }
+
+  return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
+}
+
+tensor_t tensor_factory_t::quantized_embedding_tensor_random(
+  const std::vector<index_type> size_,
+  data_type dtype_,
+  std::string tensor_name_,
+  bool fp16_scale_bias,
+  float scale_min,
+  float scale_max,
+  int8_t zp_min,
+  int8_t zp_max) {
+
+  const int num_embeddings = size_[0];
+  const int embedding_dim = size_[1];
+  const int quantized_size = (dtype_ == data_type_t::s4 ||
+                              dtype_ == data_type_t::u4) ?
+                             (embedding_dim + 1) / 2 :
+                             embedding_dim;
+  const int row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
+
+  uint64_t num_bytes = static_cast<uint64_t>(num_embeddings) *
+                       static_cast<uint64_t>(row_size) * sizeof(uint8_t);
+
+  void *raw_buffer = malloc(num_bytes);
+
+  if (!raw_buffer) {
+    log_warning("malloc failed for ", num_bytes, " bytes");
+    return tensor_t();
+  }
+  std::memset(raw_buffer, 0, num_bytes);
+
+  auto qtensor = tensor_t()
+                 .set_name(tensor_name_)
+                 .set_size({static_cast<size_t>(num_embeddings), static_cast<size_t>(embedding_dim)})
+                 .set_data_type(dtype_)
+                 .set_storage(raw_buffer, num_bytes - (fp16_scale_bias ? 4 : 8))
+                 .create();
+  if (! qtensor.check()) {
+    log_warning("tensor creation of ", qtensor.get_name(), " failed.");
+    std::free(raw_buffer);
+  }
+  else {
+    int8_t *input = static_cast<int8_t *>(raw_buffer);
+
+    // Random generators
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<int> dist_s4(-8, 7);
+    std::uniform_int_distribution<int> dist_u4(0, 15);
+    std::uniform_int_distribution<int> dist_s8(-128, 127);
+    std::uniform_real_distribution<float> scale_dist(scale_min, scale_max);
+    std::uniform_int_distribution<int8_t> zp_dist(zp_min, zp_max);
+
+    for (int i = 0; i < num_embeddings; ++i) {
+      const size_t row_base = i * row_size;
+      float scale = scale_dist(gen);
+      float zp = static_cast<float>(zp_dist(gen));
+
+      if (dtype_ == data_type_t::s4) {
+        std::memset(input + row_base, 0, quantized_size);
+        for (int j = 0; j < embedding_dim; ++j) {
+          int8_t qval = dist_s4(gen);
+          int byte_idx = j/2;
+          if (j % 2 == 0) {
+            input[row_base + byte_idx] = (qval & 0x0F);
+          }
+          else {
+            input[row_base + byte_idx] &= 0x0F;
+            input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+          }
+        }
+      }
+      else if (dtype_ == data_type_t::u4) {
+        std::memset(input + row_base, 0, quantized_size);
+        for (int j = 0; j < embedding_dim; ++j) {
+          uint8_t qval = dist_u4(gen);
+          int byte_idx = j/2;
+          if (j % 2 == 0) {
+            input[row_base + byte_idx] = (qval & 0x0F);
+          }
+          else {
+            input[row_base + byte_idx] &= 0x0F;
+            input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+          }
+        }
+      }
+      else {
+        for (int j = 0; j < embedding_dim; ++j) {
+          int8_t qval = dist_s8(gen);
+          input[row_base + j] = qval;
+        }
+      }
+
+      // Append scale and zp
+      if (fp16_scale_bias) {
+        uint16_t scale_fp16 = float_to_half(scale);
+        uint16_t zp_fp16 = float_to_half(zp);
+        std::memcpy(&input[row_base + quantized_size], &scale_fp16,
+                    sizeof(uint16_t));
+        std::memcpy(&input[row_base + quantized_size + 2], &zp_fp16,
+                    sizeof(uint16_t));
+      }
+      else {
+        std::memcpy(&input[row_base + quantized_size], &scale, sizeof(float));
+        std::memcpy(&input[row_base + quantized_size + 4], &zp, sizeof(float));
+      }
+    }
+  }
+  return qtensor;
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
@@ -1254,7 +1388,8 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            int64_t padding_index,
                            bool include_last_offset,
                            bool is_weights,
-                           int64_t scatter_stride) {
+                           int64_t scatter_stride,
+                           bool fp16_scale_bias) {
   try {
     status_t status;
 
@@ -1265,8 +1400,16 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                                             .set_padding_index(padding_index)
                                             .set_include_last_offset(include_last_offset)
                                             .set_is_weights(is_weights)
-                                            .set_scatter_stride(scatter_stride)
-                                            .create();
+                                            .set_scatter_stride(scatter_stride);
+    if (table_tensor.get_data_type() == data_type_t::s8 ||
+        table_tensor.get_data_type() == data_type_t::s4 ||
+        table_tensor.get_data_type() == data_type_t::u4) {
+      embedding_bag_context.set_fp16_scale_bias(fp16_scale_bias);
+      embedding_bag_context.create();
+    }
+    else {
+      embedding_bag_context.create();
+    }
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
@@ -1318,7 +1461,8 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                       int64_t padding_index,
                                       bool include_last_offset,
                                       bool is_weights,
-                                      int64_t scatter_stride) {
+                                      int64_t scatter_stride,
+                                      bool fp16_scale_bias) {
   try {
     status_t status;
 
@@ -1329,8 +1473,16 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                             .set_padding_index(padding_index)
                                             .set_include_last_offset(include_last_offset)
                                             .set_is_weights(is_weights)
-                                            .set_scatter_stride(scatter_stride)
-                                            .create();
+                                            .set_scatter_stride(scatter_stride);
+    if (table_tensor.get_data_type() == data_type_t::s8 ||
+        table_tensor.get_data_type() == data_type_t::s4 ||
+        table_tensor.get_data_type() == data_type_t::u4) {
+      embedding_bag_context.set_fp16_scale_bias(fp16_scale_bias);
+      embedding_bag_context.create();
+    }
+    else {
+      embedding_bag_context.create();
+    }
 
     //define embedding bag operator
     embag_operator_t embedding_bag_operator = embag_operator_t()
@@ -1382,7 +1534,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                tensor_t &weights_tensor,
                                tensor_t &output_tensor,
                                int64_t padding_index,
-                               bool is_weights) {
+                               bool is_weights,
+                               bool fp16_scale_bias) {
   try {
     status_t status;
 
@@ -1390,8 +1543,16 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
     embag_context_t embedding_context = embag_context_t()
                                         .set_param("table", table_tensor)
                                         .set_padding_index(padding_index)
-                                        .set_is_weights(is_weights)
-                                        .create();
+                                        .set_is_weights(is_weights);
+    if (table_tensor.get_data_type() == data_type_t::s8 ||
+        table_tensor.get_data_type() == data_type_t::s4 ||
+        table_tensor.get_data_type() == data_type_t::u4) {
+      embedding_context.set_fp16_scale_bias(fp16_scale_bias);
+      embedding_context.create();
+    }
+    else {
+      embedding_context.create();
+    }
 
     //define embedding operator
     embag_operator_t embedding_operator = embag_operator_t()
@@ -1437,7 +1598,8 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     tensor_t &weights_tensor,
     tensor_t &output_tensor,
     int64_t padding_index,
-    bool is_weights) {
+    bool is_weights,
+    bool fp16_scale_bias) {
   try {
     status_t status;
 
@@ -1445,8 +1607,16 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     embag_context_t embedding_context = embag_context_t()
                                         .set_param("table", table_tensor)
                                         .set_padding_index(padding_index)
-                                        .set_is_weights(is_weights)
-                                        .create();
+                                        .set_is_weights(is_weights);
+    if (table_tensor.get_data_type() == data_type_t::s8 ||
+        table_tensor.get_data_type() == data_type_t::s4 ||
+        table_tensor.get_data_type() == data_type_t::u4) {
+      embedding_context.set_fp16_scale_bias(fp16_scale_bias);
+      embedding_context.create();
+    }
+    else {
+      embedding_context.create();
+    }
 
     //define embedding operator
     embag_operator_t embedding_operator = embag_operator_t()

@@ -159,53 +159,6 @@ void embag_ref_kernel(
 
 }
 
-// Extracts a signed 4-bit integer from a byte.
-// If 'high' is true, extracts the high nibble; otherwise, the low nibble.
-// Sign-extends the 4-bit value to an 8-bit signed integer.
-inline int8_t extract_int4(int8_t byte, bool high) {
-  int8_t val = high ? (byte >> 4) & 0x0F : byte & 0x0F;
-  return (val & 0x08) ? (val | 0xF0) : val;
-}
-
-// Dequantizes a quantized value using scale and zero-point.
-inline float dequantize(int8_t val, float scale, float zp) {
-  return scale * (static_cast<int32_t>(val) - static_cast<int32_t>(zp));
-}
-
-// Convert float16 (stored as uint16_t) to float32
-inline float half_to_float(uint16_t h) {
-  uint32_t sign = (h >> 15) & 0x1;
-  uint32_t exponent = (h >> 10) & 0x1F;
-  uint32_t mantissa = h & 0x3FF;
-  uint32_t f_bits;
-
-  if (exponent == 0) {
-    if (mantissa == 0) {
-      f_bits = sign << 31; // Zero
-    }
-    else {
-      exponent = 1;
-      while ((mantissa & 0x400) == 0) {
-        mantissa <<= 1;
-        exponent--;
-      }
-      mantissa &= 0x3FF;
-      exponent += 127 - 15;
-      f_bits = (sign << 31) | (exponent << 23) | (mantissa << 13);
-    }
-  }
-  else if (exponent == 0x1F) {
-    f_bits = (sign << 31) | (0xFF << 23) | (mantissa << 13);
-  }
-  else {
-    exponent += 127 - 15;
-    f_bits = (sign << 31) | (exponent << 23) | (mantissa << 13);
-  }
-  float result;
-  std::memcpy(&result, &f_bits, sizeof(result));
-  return result;
-}
-
 template <
   bool IsInt4,
   typename InType,
@@ -226,6 +179,7 @@ void embag_int8_int4_ref_kernel(
   embag_algo_t algo,
   int64_t dst_stride,
   bool include_last_offset,
+  data_type_t table_dtype,
   bool fp16_scale_bias
 ) {
 
@@ -293,7 +247,7 @@ void embag_int8_int4_ref_kernel(
         int8_t qval;
         if constexpr(IsInt4) {
           int8_t packed = row[j / 2];
-          qval = extract_int4(packed, j % 2);
+          qval = extract_int4(packed, j % 2, table_dtype);
         }
         else {
           qval = row[j];
@@ -560,7 +514,7 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
   void         *dst      = dst_tensor.get_raw_handle_unsafe();
   float        *weights  = nullptr;
 
-  const int64_t  width            = dst_tensor.get_size(1);
+  const int64_t  width            = table_tensor.get_size(1);
   const int64_t  indsz            = indices_tensor.get_size(0);
   const int64_t  padidx           = context_.get_padding_index();
   int64_t stride                  = context_.get_scatter_stride();
@@ -616,7 +570,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, float>(
         input_s8, weights, indices, offsets, dst_f32, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else if (indices_data_type == data_type_t::s32) {
       int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
@@ -626,7 +581,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float>(
         input_s8, weights, indices, offsets, dst_f32, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else {
       apilog_error("Unsupported data type for indices and offsets");
@@ -644,7 +600,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, uint16_t>(
         input_s8, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else if (indices_data_type == data_type_t::s32) {
       int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
@@ -654,13 +611,15 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, uint16_t>(
         input_s8, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else {
       apilog_error("Unsupported data type for indices and offsets");
     }
   }
-  else if (table_dtype == data_type_t::s4 && dst_dtype == data_type_t::f32) {
+  else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+           dst_dtype == data_type_t::f32) {
     // INT4 input -> FP32 output
     const uint8_t *input_s4 = reinterpret_cast<const uint8_t *>(input);
     float *dst_f32 = reinterpret_cast<float *>(dst);
@@ -672,7 +631,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, float>(
         input_s4, weights, indices, offsets, dst_f32, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else if (indices_data_type == data_type_t::s32) {
       int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
@@ -682,13 +642,15 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float>(
         input_s4, weights, indices, offsets, dst_f32, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else {
       apilog_error("Unsupported data type for indices and offsets");
     }
   }
-  else if (table_dtype == data_type_t::s4 && dst_dtype == data_type_t::bf16) {
+  else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+           dst_dtype == data_type_t::bf16) {
     // INT4 input -> BF16 output
     const uint8_t *input_s4 = reinterpret_cast<const uint8_t *>(input);
     uint16_t *dst_bf16 = reinterpret_cast<uint16_t *>(dst);
@@ -700,7 +662,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
         input_s4, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else if (indices_data_type == data_type_t::s32) {
       int32_t *indices = (int32_t *)indices_tensor.get_raw_handle_unsafe();
@@ -710,7 +673,8 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
       }
       embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
         input_s4, weights, indices, offsets, dst_bf16, width, indsz, offsz,
-        padidx, is_weights, algo, stride, include_last_offset, fp16_scale_bias);
+        padidx, is_weights, algo, stride, include_last_offset, table_dtype,
+        fp16_scale_bias);
     }
     else {
       apilog_error("Unsupported data type for indices and offsets");
@@ -759,42 +723,50 @@ template void embag_ref_kernel<uint16_t, int32_t, int32_t, float>(
 template void
 embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, float>(
   const uint8_t *, const float *, const int64_t *, const int64_t *, float *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, float>(
   const uint8_t *, const float *, const int32_t *, const int32_t *, float *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
   const uint8_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
   const uint8_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, float>(
   const int8_t *, const float *, const int64_t *, const int64_t *, float *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, float>(
   const int8_t *, const float *, const int32_t *, const int32_t *, float *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<false, int8_t, int64_t, int64_t, uint16_t>(
   const int8_t *, const float *, const int64_t *, const int64_t *, uint16_t *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 template void
 embag_int8_int4_ref_kernel<false, int8_t, int32_t, int32_t, uint16_t>(
   const int8_t *, const float *, const int32_t *, const int32_t *, uint16_t *,
-  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool, bool);
+  int64_t, int64_t, int64_t, int64_t, bool, embag_algo_t, int64_t, bool,
+  data_type_t, bool);
 
 extern "C" {
   embag_ref_kernel_t *get_embag_ref_kernel() {

@@ -484,16 +484,16 @@ float tensor_t::at(const index_vec_type &index_) const {
       break;
     }
     case data_type_t::u8 : {
-        using cpptype = prec_traits<data_type_t::u8>::type;
-        const cpptype *handle = static_cast<const cpptype *>(raw_handle);
-        return static_cast<float>(handle[offset]);
-        break;
+      using cpptype = prec_traits<data_type_t::u8>::type;
+      const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+      return static_cast<float>(handle[offset]);
+      break;
     }
     case data_type_t::s32 : {
-        using cpptype = prec_traits<data_type_t::s32>::type;
-        const cpptype *handle = static_cast<const cpptype *>(raw_handle);
-        return static_cast<float>(handle[offset]);
-        break;
+      using cpptype = prec_traits<data_type_t::s32>::type;
+      const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+      return static_cast<float>(handle[offset]);
+      break;
     }
     default :
       std::string message  = "getting element with this data type is unimplemented";
@@ -551,7 +551,8 @@ void *tensor_t::get_raw_handle_unsafe(const index_vec_type &index_) const {
   }
 
   if (option.is_blocked() || option.is_oblique()) {
-    std::string message  = "attempt to get indexed raw handle of a blocked or oblique tensor.";
+    std::string message  =
+      "attempt to get indexed raw handle of a blocked or oblique tensor.";
     EXCEPTION_WITH_LOC(message);
   }
 
@@ -584,7 +585,8 @@ const void *tensor_t::get_raw_handle_const(const index_vec_type &index_) const {
   }
 
   if (option.is_blocked() || option.is_oblique()) {
-    std::string message  = "attempt to get indexed raw handle of a blocked or oblique tensor.";
+    std::string message  =
+      "attempt to get indexed raw handle of a blocked or oblique tensor.";
     EXCEPTION_WITH_LOC(message);
   }
 
@@ -653,8 +655,11 @@ tensor_t &tensor_t::create() {
     return (*this);
   }
 
-  float multiplier = option.data_type == data_type_t::s4 || option.data_type == data_type_t::u4 ? 2.0f : 1.0f;
-  uint64_t buffer_size = std::ceil(1.0 * option.aligned_nelem * size_of(option.data_type) / multiplier);
+  float multiplier = option.data_type == data_type_t::s4 ||
+                     option.data_type == data_type_t::u4 ? 2.0f : 1.0f;
+  uint64_t buffer_size = std::ceil(1.0 * option.aligned_nelem * size_of(
+                                         option.data_type) / multiplier);
+
   if (allocate) {
     // allocate new storage
     if (buffer_size) {
@@ -902,9 +907,9 @@ status_t tensor_t::stride_sanity_check_with_order() {
     auto loc           = option.order.find(ch);
 
     /* stride, size and aligned size of fastest moving axis */
-    auto& stride       = option.stride[loc];
-    auto& size         = option.size[loc];
-    auto& aligned_size = option.aligned_size[loc];
+    auto &stride       = option.stride[loc];
+    auto &size         = option.size[loc];
+    auto &aligned_size = option.aligned_size[loc];
 
     /* ignore zero stride, it belongs to broadcast axis */
     if (stride != 0) {
@@ -944,7 +949,7 @@ status_t tensor_t::stride_sanity_check_without_order() {
   /* fill broadcast axis */
   char axis = 'a';
   for (uint32_t i = 0; i < dim; ++i) {
-    if(option.stride[i] == 0) {
+    if (option.stride[i] == 0) {
       option.order.at(i) = axis++;
     }
   }
@@ -952,8 +957,9 @@ status_t tensor_t::stride_sanity_check_without_order() {
   /* if any size is 1, there is a possibility of duplicate strides */
   std::vector<uint32_t> dloc;
   for (uint32_t i = 0; i < dim; ++i) {
-    if(option.aligned_size[i] == 1)
+    if (option.aligned_size[i] == 1) {
       dloc.push_back(i);
+    }
   }
 
   /* make a copy of stride and intialize nelem and axis */
@@ -964,15 +970,19 @@ status_t tensor_t::stride_sanity_check_without_order() {
   for (uint32_t i = 0; i < dim; ++i) {
     /* search for first nonzero element in stride */
     uint32_t min_index  = 0;
-    while(min_index < dim) {
-      if (stride[min_index] == 0)
+    while (min_index < dim) {
+      if (stride[min_index] == 0) {
         min_index++;
-      else
+      }
+      else {
         break;
+      }
     }
 
     /* if stride is all zero terminate */
-    if (min_index >= dim) break;
+    if (min_index >= dim) {
+      break;
+    }
 
     /* search for minimum stride */
     for (uint32_t k = min_index + 1; k < dim; ++k) {
@@ -991,10 +1001,10 @@ status_t tensor_t::stride_sanity_check_without_order() {
 
     /* sanity check on stride */
     if (stride[min_index] != option.aligned_nelem) {
-        apilog_error("tensor < ", name, " > invalid stride at dimension ", min_index,
-                     ": got stride=", stride[min_index],
-                     " expected=", option.aligned_nelem);
-        return status_t::memory_bad_stride;
+      apilog_error("tensor < ", name, " > invalid stride at dimension ", min_index,
+                   ": got stride=", stride[min_index],
+                   " expected=", option.aligned_nelem);
+      return status_t::memory_bad_stride;
     }
 
     /* update order and elements */
@@ -1074,13 +1084,15 @@ status_t tensor_t::validate_meta_info() {
   // }
 
   if (option.is_oblique()) {
-    apilog_warning("tensor < ", name, " > is oblique, skipping meta information validation.");
+    apilog_warning("tensor < ", name,
+                   " > is oblique, skipping meta information validation.");
     return status_t::success;
   }
 
   /* if tensor size is provided, reset the sizes */
   if (option.nelem) {
-    apilog_warning("tensor < ", name, " > buffer size will be recomputed for contiguous/blocked tensor.");
+    apilog_warning("tensor < ", name,
+                   " > buffer size will be recomputed for contiguous/blocked tensor.");
     option.nelem = option.aligned_nelem = 0;
   }
 

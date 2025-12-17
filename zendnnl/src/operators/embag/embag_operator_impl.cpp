@@ -41,46 +41,20 @@ status_t embag_impl_t::validate() {
   auto indices_sizes       = get_input("indices")->get_size();
   auto output_sizes        = get_output("output")->get_size();
 
-  auto fp16_scale_bias   = context.get_fp16_scale_bias();
-
   //Get input-output data type
   auto table_data_type   = context.get_param("table")->get_data_type();
   auto indices_data_type = get_input("indices")->get_data_type();
   auto output_data_type  = get_output("output")->get_data_type();
 
   if (table_data_type == data_type_t::f32 ||
-      table_data_type == data_type_t::bf16) {
+      table_data_type == data_type_t::bf16 ||
+      table_data_type == data_type_t::s8 ||
+      table_data_type == data_type_t::s4 ||
+      table_data_type == data_type_t::u4) {
     if (output_sizes[1] != table_sizes[1]) {
       log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
                 " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
       return status_t::failure;
-    }
-  }
-  else if (table_data_type == data_type_t::s8) {
-    if (output_sizes[1] != table_sizes[1] - (fp16_scale_bias ? 4 : 8)) {
-      log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                " output_size=", output_sizes[1], " table_size=",
-                table_sizes[1] - (fp16_scale_bias ? 4 : 8));
-      return status_t::failure;
-    }
-  }
-  else if (table_data_type == data_type_t::s4) {
-    if (output_sizes[1] % 2 == 0) {
-      if (output_sizes[1] != (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) {
-        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                  " output_size=", output_sizes[1], " table_size=",
-                  (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2);
-        return status_t::failure;
-      }
-    }
-    else {
-      if (output_sizes[1] != ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) -
-          1)  {
-        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                  " output_size=", output_sizes[1], " table_size=",
-                  ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) - 1);
-        return status_t::failure;
-      }
     }
   }
   else {
@@ -90,7 +64,8 @@ status_t embag_impl_t::validate() {
   if ((table_data_type != data_type_t::f32 &&
        table_data_type != data_type_t::bf16 &&
        table_data_type != data_type_t::s8 &&
-       table_data_type != data_type_t::s4) ||
+       table_data_type != data_type_t::s4 &&
+       table_data_type != data_type_t::u4) ||
       (output_data_type != data_type_t::f32 &&
        output_data_type != data_type_t::bf16)) {
     apilog_error(obj_name,
@@ -173,41 +148,15 @@ status_t embag_impl_t::validate_forced_kernel() {
     auto indices_data_type = get_input("indices")->get_data_type();
     auto output_data_type  = get_output("output")->get_data_type();
 
-    auto fp16_scale_bias   = context.get_fp16_scale_bias();
-
     if (table_data_type == data_type_t::f32 ||
-        table_data_type == data_type_t::bf16) {
+        table_data_type == data_type_t::bf16 ||
+        table_data_type == data_type_t::s8 ||
+        table_data_type == data_type_t::s4 ||
+        table_data_type == data_type_t::u4) {
       if (output_sizes[1] != table_sizes[1]) {
         log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
                   " output_size=", output_sizes[1], " table_size=", table_sizes[1]);
         return status_t::failure;
-      }
-    }
-    else if (table_data_type == data_type_t::s8) {
-      if (output_sizes[1] != table_sizes[1] - (fp16_scale_bias ? 4 : 8)) {
-        log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                  " output_size=", output_sizes[1], " table_size=",
-                  table_sizes[1] - (fp16_scale_bias ? 4 : 8));
-        return status_t::failure;
-      }
-    }
-    else if (table_data_type == data_type_t::s4) {
-      if (output_sizes[1] % 2 == 0) {
-        if (output_sizes[1] != (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) {
-          log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                    " output_size=", output_sizes[1], " table_size=",
-                    (table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2);
-          return status_t::failure;
-        }
-      }
-      else {
-        if (output_sizes[1] != ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) -
-            1)  {
-          log_error(obj_name, ": size mismatch in input/output/params. ", obj_name,
-                    " output_size=", output_sizes[1], " table_size=",
-                    ((table_sizes[1] - (fp16_scale_bias ? 4 : 8)) * 2) - 1);
-          return status_t::failure;
-        }
       }
     }
     else {
@@ -217,7 +166,8 @@ status_t embag_impl_t::validate_forced_kernel() {
     if ((table_data_type != data_type_t::f32 &&
          table_data_type != data_type_t::bf16 &&
          table_data_type != data_type_t::s8 &&
-         table_data_type != data_type_t::s4) ||
+         table_data_type != data_type_t::s4 &&
+         table_data_type != data_type_t::u4) ||
         (output_data_type != data_type_t::f32 &&
          output_data_type != data_type_t::bf16)) {
       apilog_error(obj_name,
@@ -395,9 +345,12 @@ status_t embag_impl_t::kernel_factory() {
         }
       }
       else if (table_dtype == data_type_t::s8 ||
-               table_dtype == data_type_t::s4) {
-        kernel = std::shared_ptr<embag_int8_int4_ref_kernel_t>
-                 (get_embag_int8_int4_ref_kernel());
+               table_dtype == data_type_t::s4 ||
+               table_dtype == data_type_t::u4) {
+        if (platform_info.get_avx512f_status()) {
+          kernel = std::shared_ptr<embag_int8_int4_avx512_kernel_t>
+                   (get_embag_int8_int4_avx512_kernel());
+        }
       }
       else {
         apilog_error("<", obj_name, "> kernel unimplemented.");
@@ -412,7 +365,8 @@ status_t embag_impl_t::kernel_factory() {
       }
       else if (forced_kernel == "reference" &&
                (table_dtype == data_type_t::s8 ||
-                table_dtype == data_type_t::s4)) {
+                table_dtype == data_type_t::s4 ||
+                table_dtype == data_type_t::u4)) {
         kernel = std::shared_ptr<embag_int8_int4_ref_kernel_t>
                  (get_embag_int8_int4_ref_kernel());
       }

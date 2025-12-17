@@ -257,19 +257,19 @@ int embedding_f32_kernel_example() {
   return OK;
 }
 
-int embedding_bag_int4_ref_kernel_example() {
+int embedding_bag_u4_kernel_example() {
   try {
     status_t status;
     tensor_factory_t tensor_factory;
 
     auto table = tensor_factory.quantized_embedding_tensor_random({EMB_ROW, EMB_DIM},
-                 data_type_t::s4, "table", false);
+                 data_type_t::u4, "table", true);
 
     //define embedding bag context
     auto embedding_bag_context = embag_context_t()
                                  .set_param("table", table)
-                                 .set_algo(embag_algo_t::max)
-                                 .set_fp16_scale_bias(false)
+                                 .set_algo(embag_algo_t::sum)
+                                 .set_fp16_scale_bias(true)
                                  .create();
 
     if (! embedding_bag_context.check()) {
@@ -279,7 +279,7 @@ int embedding_bag_int4_ref_kernel_example() {
 
     //define embedding bag operator
     auto embedding_bag_operator = embag_operator_t()
-                                  .set_name("embedding_bag_int4_ref_operator")
+                                  .set_name("embedding_bag_int4_operator")
                                   .set_context(embedding_bag_context)
                                   .create();
 
@@ -290,12 +290,76 @@ int embedding_bag_int4_ref_kernel_example() {
     }
 
     auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
-                          data_type_t::s64,
-                          indices, "indices");
+                          data_type_t::s64, indices, "indices");
 
     auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
-                          data_type_t::s64,
-                          offsets, "offsets");
+                          data_type_t::s64, offsets, "offsets");
+
+    auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
+                         data_type_t::f32, "output");
+
+    status = embedding_bag_operator
+             .set_input("indices", indices_tensor)
+             .set_input("offsets", offsets_tensor)
+             .set_output("output", output_tensor)
+             .execute();
+
+    if (status == status_t::success) {
+      testlog_info("<",embedding_bag_operator.get_name(),">",
+                   " operator execution successful.");
+    }
+    else {
+      testlog_error("<",embedding_bag_operator.get_name(),">",
+                    " operator execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int embedding_bag_u4_ref_kernel_example() {
+  try {
+    status_t status;
+    tensor_factory_t tensor_factory;
+
+    auto table = tensor_factory.quantized_embedding_tensor_random({EMB_ROW, EMB_DIM},
+                 data_type_t::u4, "table", true);
+
+    //define embedding bag context
+    auto embedding_bag_context = embag_context_t()
+                                 .set_param("table", table)
+                                 .set_algo(embag_algo_t::sum)
+                                 .set_fp16_scale_bias(true)
+                                 .create();
+
+    if (! embedding_bag_context.check()) {
+      testlog_error("embedding bag context creation failed");
+      return NOT_OK;
+    }
+
+    //define embedding bag operator
+    auto embedding_bag_operator = embag_operator_t()
+                                  .set_name("embedding_bag_int4_ref")
+                                  .set_context(embedding_bag_context)
+                                  .create();
+
+    if (embedding_bag_operator.is_bad_object()) {
+      testlog_error(" operator ", embedding_bag_operator.get_name(),
+                    " creation failed.");
+      return NOT_OK;
+    }
+
+    auto indices_tensor = tensor_factory.non_uniform_tensor({indices.size()},
+                          data_type_t::s64, indices, "indices");
+
+    auto offsets_tensor = tensor_factory.non_uniform_tensor({EMB_BATCH_SIZE},
+                          data_type_t::s64, offsets, "offsets");
 
     auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
                          data_type_t::f32, "output");

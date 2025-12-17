@@ -100,7 +100,7 @@ class tensor_factory_t {
   tensor_t random_offsets_tensor(const std::vector<index_type> size_,
                                  uint64_t num_indices, bool include_last_offset = true);
 
-  /** @brief quantized embedding tensor random */
+  // /** @brief quant embag tensor random */
   tensor_t quantized_embedding_tensor_random(const std::vector<index_type> size_,
       data_type dtype_, std::string tensor_name_="quant random",
       bool fp16_scale_bias = true, float scale_min = 0.10,

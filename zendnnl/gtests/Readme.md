@@ -147,7 +147,7 @@ cmake --build .
 ```
 
 ### Embedding Bag Tests
- - Embedding Bag TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16)
+ - Embedding Bag TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U4_BF16)
 1. Run all F32 Input, F32 Output embedding bag tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.F32_F32/*
@@ -164,9 +164,33 @@ cmake --build .
 ``` bash
 ./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.BF16_BF16/*
 ```
+5. Run all INT8 Input, F32 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_F32/*
+```
+6. Run all INT8 Input, BF16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.INT8_BF16/*
+```
+7. Run all S4 Input, F32 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_F32/*
+```
+8. Run all S4 Input, BF16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.S4_BF16/*
+```
+9. Run all U4 Input, F32 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_F32/*
+```
+10. Run all U4 Input, BF16 Output embedding bag tests:
+``` bash
+./install/gtests/gtests --gtest_filter=EmbeddingBag/TestEmbag.U4_BF16/*
+```
 
 ### Embedding Tests
- - Embedding TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16)
+ - Embedding TestSuite has four testcases(F32_F32, F32_BF16, BF16_F32, BF16_BF16, INT8_F32, INT8_BF16, S4_F32, S4_BF16, U4_F32, U_BF16)
 1. Run all F32 Input, F32 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.F32_F32/*
@@ -182,6 +206,30 @@ cmake --build .
 4. Run all BF16 Input, BF16 Output embedding tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.BF16_BF16/*
+```
+5. Run all INT8 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_F32/*
+```
+6. Run all INT8 Input, BF16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.INT8_BF16/*
+```
+7. Run all S4 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_F32/*
+```
+8. Run all S4 Input, BF16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.S4_BF16/*
+```
+9. Run all U4 Input, F32 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_F32/*
+```
+10. Run all U4 Input, BF16 Output embedding tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Embedding/TestEmbedding.U4_BF16/*
 ```
 
 ### Example with more Arguments Support

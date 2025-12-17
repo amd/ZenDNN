@@ -151,18 +151,22 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       // Clamp val_ to S4 range [-8, 7] and quantize to nearest integer
       float clamped_val = val_;
-      if (clamped_val < -8.0f) clamped_val = -8.0f;
-      if (clamped_val > 7.0f) clamped_val = 7.0f;
+      if (clamped_val < -8.0f) {
+        clamped_val = -8.0f;
+      }
+      if (clamped_val > 7.0f) {
+        clamped_val = 7.0f;
+      }
       // Round to nearest integer: add 0.5 and truncate
-      int8_t quantized_val = static_cast<int8_t>(clamped_val >= 0.0f ? 
-                                                  clamped_val + 0.5f : 
-                                                  clamped_val - 0.5f);
-      
+      int8_t quantized_val = static_cast<int8_t>(clamped_val >= 0.0f ?
+                             clamped_val + 0.5f :
+                             clamped_val - 0.5f);
+
       // Pack the same value into both lower and upper halves of each byte
       // Lower 4 bits: quantized_val & 0x0F
       // Upper 4 bits: (quantized_val & 0x0F) << 4
       uint8_t packed_byte = (quantized_val & 0x0F) | ((quantized_val & 0x0F) << 4);
-      
+
       for (index_type i=0; i<ceil(buf_nelem/2.0); ++i) {
         buf_ptr[i] = static_cast<int8_t>(packed_byte);
       }
@@ -533,50 +537,83 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
   int8_t zp_min,
   int8_t zp_max) {
 
-  int num_embeddings = size_[0];
-  int embedding_dim = size_[1];
-  // Compute row size: embedding + metadata
-  int quantized_size = (dtype_ == data_type_t::s4) ? (embedding_dim + 1) / 2 :
-                       embedding_dim;
+  const int num_embeddings = size_[0];
+  const int embedding_dim = size_[1];
+  const int quantized_size = (dtype_ == data_type_t::s4 ||
+                              dtype_ == data_type_t::u4) ?
+                             (embedding_dim + 1) / 2 :
+                             embedding_dim;
   const int row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
+
+  uint64_t num_bytes = static_cast<uint64_t>(num_embeddings) *
+                       static_cast<uint64_t>(row_size) * sizeof(uint8_t);
+
+  void *raw_buffer = malloc(num_bytes);
+
+  if (!raw_buffer) {
+    log_warning("malloc failed for ", num_bytes, " bytes");
+    return tensor_t();
+  }
+  std::memset(raw_buffer, 0, num_bytes);
 
   auto qtensor = tensor_t()
                  .set_name(tensor_name_)
-                 .set_size({static_cast<size_t>(num_embeddings), static_cast<size_t>(row_size)})
+                 .set_size({static_cast<size_t>(num_embeddings), static_cast<size_t>(embedding_dim)})
                  .set_data_type(dtype_)
-                 .set_storage()
+                 .set_storage(raw_buffer, num_bytes - (fp16_scale_bias ? 4 : 8))
                  .create();
   if (! qtensor.check()) {
     log_warning("tensor creation of ", qtensor.get_name(), " failed.");
+    std::free(raw_buffer);
   }
   else {
-    int8_t *input = static_cast<int8_t *>(qtensor.get_raw_handle_unsafe());
+    int8_t *input = static_cast<int8_t *>(raw_buffer);
 
     // Random generators
     std::mt19937 gen(std::random_device{}());
-    std::uniform_int_distribution<int8_t> qval_dist(-8, 7); // quantized range
+    std::uniform_int_distribution<int> dist_s4(-8, 7);
+    std::uniform_int_distribution<int> dist_u4(0, 15);
+    std::uniform_int_distribution<int> dist_s8(-128, 127);
     std::uniform_real_distribution<float> scale_dist(scale_min, scale_max);
     std::uniform_int_distribution<int8_t> zp_dist(zp_min, zp_max);
 
     for (int i = 0; i < num_embeddings; ++i) {
+      const size_t row_base = i * row_size;
       float scale = scale_dist(gen);
       float zp = static_cast<float>(zp_dist(gen));
 
-      // Fill quantized values randomly
-      for (int j = 0; j < embedding_dim; ++j) {
-        int8_t qval = qval_dist(gen);
-        if (dtype_ == data_type_t::s4) {
-          int byte_idx = j / 2;
+      if (dtype_ == data_type_t::s4) {
+        std::memset(input + row_base, 0, quantized_size);
+        for (int j = 0; j < embedding_dim; ++j) {
+          int8_t qval = dist_s4(gen);
+          int byte_idx = j/2;
           if (j % 2 == 0) {
-            input[i * row_size + byte_idx] = (qval & 0x0F);
+            input[row_base + byte_idx] = (qval & 0x0F);
           }
           else {
-            input[i * row_size + byte_idx] &= 0x0F;
-            input[i * row_size + byte_idx] |= (qval & 0x0F) << 4;
+            input[row_base + byte_idx] &= 0x0F;
+            input[row_base + byte_idx] |= (qval & 0x0F) << 4;
           }
         }
-        else {
-          input[i * row_size + j] = qval;
+      }
+      else if (dtype_ == data_type_t::u4) {
+        std::memset(input + row_base, 0, quantized_size);
+        for (int j = 0; j < embedding_dim; ++j) {
+          uint8_t qval = dist_u4(gen);
+          int byte_idx = j/2;
+          if (j % 2 == 0) {
+            input[row_base + byte_idx] = (qval & 0x0F);
+          }
+          else {
+            input[row_base + byte_idx] &= 0x0F;
+            input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+          }
+        }
+      }
+      else {
+        for (int j = 0; j < embedding_dim; ++j) {
+          int8_t qval = dist_s8(gen);
+          input[row_base + j] = qval;
         }
       }
 
@@ -584,14 +621,14 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
       if (fp16_scale_bias) {
         uint16_t scale_fp16 = float_to_half(scale);
         uint16_t zp_fp16 = float_to_half(zp);
-        std::memcpy(&input[i * row_size + quantized_size], &scale_fp16,
+        std::memcpy(&input[row_base + quantized_size], &scale_fp16,
                     sizeof(uint16_t));
-        std::memcpy(&input[i * row_size + quantized_size + 2], &zp_fp16,
+        std::memcpy(&input[row_base + quantized_size + 2], &zp_fp16,
                     sizeof(uint16_t));
       }
       else {
-        std::memcpy(&input[i * row_size + quantized_size], &scale, sizeof(float));
-        std::memcpy(&input[i * row_size + quantized_size + 4], &zp, sizeof(float));
+        std::memcpy(&input[row_base + quantized_size], &scale, sizeof(float));
+        std::memcpy(&input[row_base + quantized_size + 4], &zp, sizeof(float));
       }
     }
   }

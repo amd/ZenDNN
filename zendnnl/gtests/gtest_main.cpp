@@ -41,6 +41,7 @@ const float rtol_bf16       = 1e-2;
 // Test tolerance constants
 const float EMBAG_F32_TOL  = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
+const float EMBAG_INT4_TOL = 0.01;
 
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;

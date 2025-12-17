@@ -21,6 +21,8 @@
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
 #include "operators/embag/embag_context.hpp"
+#include "embag_avx512_fp32_bf16_utils.hpp"
+#include "embag_avx512_int8_int4_utils.hpp"
 
 namespace zendnnl {
 namespace ops {
@@ -42,9 +44,18 @@ class embag_bf16_avx512_kernel_t final : public op_kernel_t<embag_context_t> {
 
 };
 
+class embag_int8_int4_avx512_kernel_t final : public
+  op_kernel_t<embag_context_t> {
+ public:
+  status_t execute(const context_type &context_,
+                   tensor_map_type &inputs_,
+                   tensor_map_type &outputs_) override;
+};
+
 extern "C" {
   embag_f32_avx512_kernel_t *get_embag_f32_avx512_kernel();
   embag_bf16_avx512_kernel_t *get_embag_bf16_avx512_kernel();
+  embag_int8_int4_avx512_kernel_t *get_embag_int8_int4_avx512_kernel();
 }
 
 } //namespace ops

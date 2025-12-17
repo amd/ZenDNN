@@ -21,6 +21,7 @@
 #include "common/zendnnl_global.hpp"
 #include "operators/common/operator_kernel.hpp"
 #include "embag_context.hpp"
+#include "native_kernels/embag_avx512_int8_int4_utils.hpp"
 
 namespace zendnnl {
 namespace ops {
