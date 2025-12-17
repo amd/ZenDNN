@@ -117,6 +117,8 @@ struct data_types {
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
 | BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ) |
+| U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
+| S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 
 
 ### `postop`
@@ -150,15 +152,15 @@ struct postop {
 
 ### `lowoha_quantization_params_t`
 
-Quantization scale and zero-point parameters for Weight-Only Quantization (WOQ):
+Quantization scale and zero-point parameters for quantized operations (WOQ and INT8):
 
 ```cpp
 struct lowoha_quantization_params_t {
   /**
    * Individual quantization parameter (scale or zero-point)
    * 
-   * Dimensions determine quantization granularity for weight matrix [K, N]:
-   *   - Per-tensor:  dims = {1} or {1,1}  → single scale for all weights
+   * Dimensions determine quantization granularity:
+   *   - Per-tensor:  dims = {1} or {1,1}  → single scale for entire tensor
    *   - Per-channel: dims = {1, N}        → one scale per output channel
    *   - Per-group:   dims = {G, N}        → G groups along K, where G = K/group_size
    */
@@ -168,12 +170,12 @@ struct lowoha_quantization_params_t {
     std::vector<int64_t> dims;     // Dimensions of the quantization tensor
   };
   
-  quant_t src_scale;     // Source tensor scale (not used for WOQ)
-  quant_t wei_scale;     // Weight tensor scale (required for WOQ)
-  quant_t dst_scale;     // Destination tensor scale (not used for WOQ)
-  quant_t src_zp;        // Source tensor zero-point (not used for WOQ)
-  quant_t wei_zp;        // Weight tensor zero-point (optional for asymmetric WOQ)
-  quant_t dst_zp;        // Destination tensor zero-point (not used for WOQ)
+  quant_t src_scale;     // Source tensor scale (for INT8)
+  quant_t wei_scale;     // Weight tensor scale (required for WOQ and INT8)
+  quant_t dst_scale;     // Destination tensor scale (for INT8)
+  quant_t src_zp;        // Source tensor zero-point (for INT8 asymmetric quantization)
+  quant_t wei_zp;        // Weight tensor zero-point (for WOQ asymmetric or INT8)
+  quant_t dst_zp;        // Destination tensor zero-point (for INT8)
 };
 ```
 
@@ -405,6 +407,113 @@ int lowoha_woq_bf16s4_matmul_example() {
 - **Dequantization Formula**: `dequant_value = (s4_weight - zero_point) * scale`
 
 
+### Example 4: INT8 MatMul with Zero-Point Compensation Caching
+
+This example demonstrates INT8 matmul with asymmetric quantization and automatic zero-point compensation caching:
+
+```cpp
+int lowoha_int8_matmul_example() {
+  using namespace zendnnl::lowoha;
+  
+  // Matrix dimensions (realistic sizes for LLM inference)
+  constexpr int M = 32;    // Batch size / sequence length
+  constexpr int K = 4096;  // Hidden dimension
+  constexpr int N = 4096;  // Output dimension
+  
+  // Create INT8 weights (s8)
+  std::vector<int8_t> weights(K * N);
+  for (size_t i = 0; i < weights.size(); ++i) {
+    weights[i] = static_cast<int8_t>((i % 7) - 3);  // Values: -3 to 3
+  }
+  
+  // Create U8 input (asymmetric quantization)
+  std::vector<uint8_t> input(M * K);
+  for (size_t i = 0; i < input.size(); ++i) {
+    input[i] = static_cast<uint8_t>(i % 256);
+  }
+  
+  // Output tensor
+  std::vector<float> output(M * N, 0.0f);
+  
+  // Quantization parameters
+  float src_scale_val = 0.05f;   // Source scale (per-tensor)
+  float dst_scale_val = 0.1f;    // Destination scale (per-tensor)
+  int32_t src_zp_val = 128;      // Source zero-point (asymmetric u8)
+  
+  // Weight scale: per-channel (one scale per output column)
+  std::vector<float> wei_scale(N);
+  for (int n = 0; n < N; ++n) {
+    wei_scale[n] = 0.01f + 0.0001f * (n % 100);
+  }
+  
+  // Configure data types for INT8
+  data_types dtypes;
+  dtypes.src = data_type_t::u8;   // Unsigned 8-bit activations
+  dtypes.wei = data_type_t::s8;   // Signed 8-bit weights
+  dtypes.dst = data_type_t::f32;  // Float32 output
+  dtypes.bias = data_type_t::none;
+  dtypes.compute = data_type_t::none;
+  
+  lowoha_params params;
+  params.dtypes = dtypes;
+  
+  // Set source scale (per-tensor)
+  params.quant_params.src_scale.buff = &src_scale_val;
+  params.quant_params.src_scale.dt = data_type_t::f32;
+  params.quant_params.src_scale.dims = {1};
+  
+  // Set weight scale (per-channel)
+  params.quant_params.wei_scale.buff = wei_scale.data();
+  params.quant_params.wei_scale.dt = data_type_t::f32;
+  params.quant_params.wei_scale.dims = {1, N};
+  
+  // Set destination scale (per-tensor)
+  params.quant_params.dst_scale.buff = &dst_scale_val;
+  params.quant_params.dst_scale.dt = data_type_t::f32;
+  params.quant_params.dst_scale.dims = {1};
+  
+  // Set source zero-point (triggers 1D compensation caching)
+  params.quant_params.src_zp.buff = &src_zp_val;
+  params.quant_params.src_zp.dt = data_type_t::s32;
+  params.quant_params.src_zp.dims = {1};
+  
+  // Note: Weight zero-point is 0 (symmetric) - no need to set
+  // This results in 1D compensation which is cached
+  
+  // Add ReLU post-op
+  postop relu_op;
+  relu_op.po_type = post_op_type_t::relu;
+  relu_op.buff = nullptr;
+  relu_op.dtype = data_type_t::none;
+  params.postop_.push_back(relu_op);
+  
+  // Batch parameters
+  batch_params_t batch_params;
+  batch_params.Batch_A = 1;
+  batch_params.Batch_B = 1;
+  
+  // Execute INT8 MatMul
+  // First execution: computes and caches zero-point compensation
+  // Subsequent executions: reuses cached compensation
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f,
+    input.data(), K,
+    weights.data(), N,
+    nullptr,  // no bias
+    0.0f,
+    output.data(), N,
+    true,  // is_weights_const (required for caching)
+    batch_params,
+    params
+  );
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+
 ## Weight Caching and Reordering
 
 One of the key features of LowOHA MatMul is **automatic weight reordering and caching**.
@@ -425,6 +534,28 @@ One of the key features of LowOHA MatMul is **automatic weight reordering and ca
    - When cache is full, least recently used weights are evicted
    - Evicted weights are freed to make room for new entries
 
+
+## Zero-Point Compensation Caching (INT8)
+
+For INT8 matmul with asymmetric quantization, LowOHA provides **automatic caching of 1D zero-point compensation**:
+
+### How It Works
+
+1. **1D Compensation (src_zp only)**:
+   - Compensation depends only on weight column sums: `comp[n] = -src_zp × Σ(B[k,n])`
+   - Computed once on first execution and stored in LRU cache
+   - Subsequent inferences reuse cached compensation
+
+2. **2D Compensation (wei_zp ≠ 0)**:
+   - Compensation depends on source row sums (changes per inference)
+   - Cannot be cached, recomputed every execution
+
+### Cache Configuration
+
+| Environment Variable | Values | Description |
+|---------------------|--------|-------------|
+| `ZENDNNL_ZP_COMP_CACHE` | `1` (default) | Enable ZP compensation caching |
+| `ZENDNNL_ZP_COMP_CACHE` | `0` | Disable ZP compensation caching |
 
 
 ## Backend Selection

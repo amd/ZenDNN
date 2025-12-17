@@ -24,6 +24,7 @@ void matmul_config_t::set_default_config() {
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
   set_weight_cache(0);
+  set_zp_comp_cache(false);  // Disable ZP compensation caching by default
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {
@@ -35,6 +36,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 0;
+  bool zp_comp_cache_enabled = false;  // Default disabled
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
     auto matmul_algo_json = matmul_json["kernel"];
@@ -59,9 +61,18 @@ status_t matmul_config_t::set_user_config(json config_json) {
         matmul_weight_cache = (matmul_weight_cache_str == "0") ? 0 : 1;
       }
     }
+    // Read ZP compensation cache setting from JSON
+    auto zp_comp_cache_json = matmul_json["zp_comp_cache"];
+    if (! zp_comp_cache_json.empty()) {
+      auto zp_comp_cache_str = zp_comp_cache_json.template get<std::string>();
+      if (! zp_comp_cache_str.empty()) {
+        zp_comp_cache_enabled = (zp_comp_cache_str != "0");
+      }
+    }
   }
   set_algo(matmul_algo);
   set_weight_cache(matmul_weight_cache);
+  set_zp_comp_cache(zp_comp_cache_enabled);
   return status_t::success;
 }
 
@@ -112,6 +123,14 @@ void matmul_config_t::set_env_config() {
     }
   }
   set_weight_cache(matmul_weight_cache);
+
+  // Read ZP compensation cache setting from environment
+  char *zp_comp_cache_env = std::getenv("ZENDNNL_ZP_COMP_CACHE");
+  bool zp_comp_cache_enabled = false;  // Default disabled
+  if (zp_comp_cache_env) {
+    zp_comp_cache_enabled = (std::stoi(zp_comp_cache_env) != 0);
+  }
+  set_zp_comp_cache(zp_comp_cache_enabled);
 }
 
 void matmul_config_t::set_algo(int32_t algo) {
@@ -128,6 +147,14 @@ void matmul_config_t::set_weight_cache(int32_t weight_cache) {
 
 int32_t matmul_config_t::get_weight_cache() {
   return matmul_weight_cache;
+}
+
+void matmul_config_t::set_zp_comp_cache(bool comp_cache) {
+  zp_comp_cache = comp_cache;
+}
+
+bool matmul_config_t::get_zp_comp_cache() {
+  return zp_comp_cache;
 }
 
 matmul_config_t &matmul_config_t::instance() {

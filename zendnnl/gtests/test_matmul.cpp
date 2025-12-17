@@ -551,11 +551,11 @@ TEST_P(TestMatmul, INT8) {
                             output_dtype, 2.0, false, dst_scale, dst_zp);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor,
-                            output_tensor, po_index, binary_tensor,0 /*Use lowoha*/, matmul_algo_t::none,
+                            output_tensor, po_index, binary_tensor, use_LOWOHA, algo,
                             1.0, 0.0);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index,
-                            binary_tensor, 0/*use lowoha*/, matmul_algo_t::none, 1.0, 0.0);
+                            binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);

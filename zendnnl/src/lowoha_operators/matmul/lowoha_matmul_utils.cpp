@@ -28,6 +28,12 @@
 namespace zendnnl {
 namespace lowoha {
 
+// Global mutex for thread-safe lowoha operations (cache, auto-tuner map, etc.)
+std::mutex& get_lowoha_mutex() {
+  static std::mutex lowoha_mutex;
+  return lowoha_mutex;
+}
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
@@ -60,38 +66,48 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   const bool is_woq = (params.dtypes.src == data_type_t::bf16) && 
                       (params.dtypes.wei == data_type_t::s4);
   
-  // WOQ requires constant weights for weight reordering/caching
+  // INT8 quantization: u8/s8 src with s8 weights
+  const bool is_int8 = (params.dtypes.src == data_type_t::u8 || 
+                        params.dtypes.src == data_type_t::s8) &&
+                       (params.dtypes.wei == data_type_t::s8);
+  
+  // WOQ and INT8 require constant weights for weight reordering/caching
   if (is_woq && !is_weights_const) {
-    log_error("WOQ (Weight-Only Quantization) requires constant weights (is_weights_const=true)");
+    log_error("WOQ quantization requires constant weights (is_weights_const=true)");
     return status_t::failure;
   }
   
-  // Source and destination quantization params are not supported
-  if (params.quant_params.src_scale.buff || params.quant_params.dst_scale.buff ||
-      params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) {
-    log_error("Source/destination quantization params are not supported in LOWOHA matmul_direct");
+  // Source and destination quantization params are only supported for INT8
+  if ((params.quant_params.src_scale.buff || params.quant_params.dst_scale.buff ||
+       params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) && !is_int8) {
+    log_error("Source/destination quantization params are only supported for INT8 (u8/s8 src + s8 weights)");
     return status_t::failure;
   }
   
-  // Weight quantization params only allowed for WOQ
-  if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) && !is_woq) {
-    log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights)");
+  // Weight quantization params only allowed for WOQ or INT8
+  if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) && !is_woq && !is_int8) {
+    log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights) or INT8");
     return status_t::failure;
   }
 
   // Validate data types
   const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
   const bool is_bf16_src = (params.dtypes.src == data_type_t::bf16);
+  const bool is_u8_src   = (params.dtypes.src == data_type_t::u8);
+  const bool is_s8_src   = (params.dtypes.src == data_type_t::s8);
   const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
   const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
+  const bool is_u8_out   = (params.dtypes.dst == data_type_t::u8);
+  const bool is_s8_out   = (params.dtypes.dst == data_type_t::s8);
+  const bool is_s32_out  = (params.dtypes.dst == data_type_t::s32);
 
-  if ((!is_f32_src && !is_bf16_src)) {
+  if ((!is_f32_src && !is_bf16_src && !is_u8_src && !is_s8_src)) {
     log_error("Unsupported source data type: ",
               data_type_to_string(params.dtypes.src));
     return status_t::failure;
   }
 
-  if ((!is_f32_out && !is_bf16_out)) {
+  if ((!is_f32_out && !is_bf16_out && !is_u8_out && !is_s8_out && !is_s32_out)) {
     log_error("Unsupported destination data type: ",
               data_type_to_string(params.dtypes.dst));
     return status_t::failure;
@@ -210,6 +226,12 @@ const char *data_type_to_string(data_type_t dtype) {
     return "bf16";
   case data_type_t::s4:
     return "s4";
+  case data_type_t::s8:
+    return "s8";
+  case data_type_t::u8:
+    return "u8";
+  case data_type_t::s32:
+    return "s32";
   default:
     return "unknown";
   }

@@ -15,222 +15,31 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
+#include "lowoha_operators/matmul/lowoha_cache.hpp"
+#include <cstdlib>
+#include <cstring>
 
 namespace zendnnl {
 namespace lowoha {
 
-// Helper function to create post_op structure for bias and post-ops
+// Helper function to compute number of elements from dimension vector
+// Returns 1 for empty dims (per-tensor case), or product of all dims
+static inline size_t get_num_elements(const std::vector<int64_t>& dims) {
+  if (dims.empty()) return 1;
+  size_t count = 1;
+  for (auto d : dims) count *= static_cast<size_t>(d);
+  return count;
+}
+
+// Helper function to setup post-ops (eltwise, binary_add, binary_mul)
 #if ZENDNNL_DEPENDS_AOCLDLP
-dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N, int K) {
-  // Count total operations (bias + post-ops)
-  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
-
-  // Check if this is a WOQ case (need metadata even if no post-ops)
-  bool is_woq = dtypes.wei == data_type_t::s4 && dtypes.src == data_type_t::bf16;
-
-  if (total_ops == 0 && !is_woq) {
-    return nullptr;
-  }
-
-  dlp_metadata_t *dlp_metadata = static_cast<dlp_metadata_t *>(calloc(1,
-                                 sizeof(dlp_metadata_t)));
-  if (!dlp_metadata) {
-    return nullptr;
-  }
-
-  // Initialize all pointers to null
-  dlp_metadata->eltwise = nullptr;
-  dlp_metadata->bias = nullptr;
-  dlp_metadata->scale = nullptr;
-  dlp_metadata->matrix_add = nullptr;
-  dlp_metadata->matrix_mul = nullptr;
-  dlp_metadata->pre_ops = nullptr;
-  dlp_metadata->post_op_grp = nullptr;
-
-  // Count different types of operations
-  int eltwise_count = 0;
-  int matrix_add_count = 0;
-  int matrix_mul_count = 0;
-  int bias_count = bias ? 1 : 0;
-
-  // Count post-ops by type
-  for (const auto &po : lowoha_param.postop_) {
-    switch (po.po_type) {
-    case post_op_type_t::relu:
-    case post_op_type_t::leaky_relu:
-    case post_op_type_t::gelu_tanh:
-    case post_op_type_t::gelu_erf:
-    case post_op_type_t::sigmoid:
-    case post_op_type_t::swish:
-    case post_op_type_t::tanh:
-      eltwise_count++;
-      break;
-    case post_op_type_t::binary_add:
-      matrix_add_count++;
-      break;
-    case post_op_type_t::binary_mul:
-      matrix_mul_count++;
-      break;
-    default:
-      // Skip unsupported post-ops
-      break;
-    }
-  }
-
-  // Allocate seq_vector first (only if we have post-ops)
-  if (total_ops > 0) {
-    dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
-                               sizeof(DLP_POST_OP_TYPE)));
-    if (!dlp_metadata->seq_vector) {
-      free(dlp_metadata);
-      return nullptr;
-    }
-  } else {
-    dlp_metadata->seq_vector = nullptr;
-  }
-
-  // Allocate memory for different post-op types
-  if (bias_count > 0) {
-    dlp_metadata->bias = static_cast<dlp_post_op_bias *>(calloc(bias_count,
-                         sizeof(dlp_post_op_bias)));
-    if (!dlp_metadata->bias) {
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-  }
-
-  if (eltwise_count > 0) {
-    dlp_metadata->eltwise = static_cast<dlp_post_op_eltwise *>(calloc(eltwise_count,
-                            sizeof(dlp_post_op_eltwise)));
-    if (!dlp_metadata->eltwise) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-  }
-
-  if (matrix_add_count > 0) {
-    dlp_metadata->matrix_add = static_cast<dlp_post_op_matrix_add *>(calloc(
-                                 matrix_add_count, sizeof(dlp_post_op_matrix_add)));
-    if (!dlp_metadata->matrix_add) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-    // Allocate sf structures for matrix_add operations
-    for (int i = 0; i < matrix_add_count; ++i) {
-      dlp_metadata->matrix_add[i].sf = static_cast<dlp_sf_t *>(calloc(1,
-                                       sizeof(dlp_sf_t)));
-      if (!dlp_metadata->matrix_add[i].sf) {
-        // Clean up partially allocated sf structures
-        for (int j = 0; j < i; ++j) {
-          free(dlp_metadata->matrix_add[j].sf);
-        }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
-        free(dlp_metadata->matrix_add);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
-        return nullptr;
-      }
-    }
-  }
-
-  if (matrix_mul_count > 0) {
-    dlp_metadata->matrix_mul = static_cast<dlp_post_op_matrix_mul *>(calloc(
-                                 matrix_mul_count, sizeof(dlp_post_op_matrix_mul)));
-    if (!dlp_metadata->matrix_mul) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
-      if (dlp_metadata->matrix_add) {
-        for (int i = 0; i < matrix_add_count; ++i) {
-          if (dlp_metadata->matrix_add[i].sf) {
-            free(dlp_metadata->matrix_add[i].sf);
-          }
-        }
-        free(dlp_metadata->matrix_add);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
-      return nullptr;
-    }
-    // Allocate sf structures for matrix_mul operations
-    for (int i = 0; i < matrix_mul_count; ++i) {
-      dlp_metadata->matrix_mul[i].sf = static_cast<dlp_sf_t *>(calloc(1,
-                                       sizeof(dlp_sf_t)));
-      if (!dlp_metadata->matrix_mul[i].sf) {
-        // Clean up partially allocated sf structures
-        for (int j = 0; j < i; ++j) {
-          free(dlp_metadata->matrix_mul[j].sf);
-        }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
-        if (dlp_metadata->matrix_add) {
-          for (int k = 0; k < matrix_add_count; ++k) {
-            if (dlp_metadata->matrix_add[k].sf) {
-              free(dlp_metadata->matrix_add[k].sf);
-            }
-          }
-          free(dlp_metadata->matrix_add);
-        }
-        free(dlp_metadata->matrix_mul);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
-        return nullptr;
-      }
-    }
-  }
-
-  int op_index = 0;
-  int eltwise_index = 0;
-  int matrix_add_index = 0;
-  int matrix_mul_index = 0;
-
-  // Add bias if present
-  if (bias && bias_count > 0) {
-    dlp_metadata->seq_vector[op_index++] = BIAS;
-    dlp_metadata->bias[0].bias = const_cast<void *>(bias);
-
-    // Set storage type based on bias data type
-    switch (dtypes.bias) {
-    case data_type_t::f32:
-      dlp_metadata->bias[0].stor_type = DLP_F32;
-      break;
-    case data_type_t::bf16:
-      dlp_metadata->bias[0].stor_type = DLP_BF16;
-      break;
-    default:
-      dlp_metadata->bias[0].stor_type = DLP_F32;
-      break;
-    }
-    dlp_metadata->bias[0].sf = nullptr; // No scale factor for bias
-  }
-
-  // Add post-ops
-  for (const auto &po : lowoha_param.postop_) {
+static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
+                              const std::vector<postop> &postops,
+                              int &op_index, int &eltwise_index,
+                              int &matrix_add_index, int &matrix_mul_index,
+                              int eltwise_count, int matrix_add_count,
+                              int matrix_mul_count) {
+  for (const auto &po : postops) {
     switch (po.po_type) {
     case post_op_type_t::relu:
       if (eltwise_index >= eltwise_count) {
@@ -354,75 +163,434 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
       break;
     }
   }
+}
+
+// Helper function to setup pre-ops for WOQ (Weight-Only Quantization)
+static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
+                              const lowoha_params &lowoha_param,
+                              int64_t K, int64_t N) {
+  dlp_metadata->pre_ops = static_cast<dlp_pre_op *>(malloc(sizeof(dlp_pre_op)));
+  if (!dlp_metadata->pre_ops) {
+    return;
+  }
+
+  const auto& wei_scale = lowoha_param.quant_params.wei_scale;
+  const auto& wei_zp = lowoha_param.quant_params.wei_zp;
+
+  // Setup weight scale factor
+  dlp_metadata->pre_ops->b_scl = static_cast<dlp_sf_t *>(malloc(sizeof(dlp_sf_t)));
+  if (dlp_metadata->pre_ops->b_scl) {
+    size_t scale_len = get_num_elements(wei_scale.dims);
+    dlp_metadata->pre_ops->b_scl->scale_factor = const_cast<void*>(wei_scale.buff);
+    dlp_metadata->pre_ops->b_scl->scale_factor_len = scale_len;
+    dlp_metadata->pre_ops->b_scl->scale_factor_type =
+        (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
+  }
+
+  // Setup weight zero-point
+  dlp_metadata->pre_ops->b_zp = static_cast<dlp_zp_t *>(malloc(sizeof(dlp_zp_t)));
+  if (dlp_metadata->pre_ops->b_zp) {
+    dlp_metadata->pre_ops->b_zp->zero_point = const_cast<void*>(wei_zp.buff);
+    dlp_metadata->pre_ops->b_zp->zero_point_len = get_num_elements(wei_zp.dims);
+    dlp_metadata->pre_ops->b_zp->zero_point_type = DLP_S8;
+  }
+
+  dlp_metadata->pre_ops->seq_length = 1;
+
+  // Determine group_size from scale dimensions
+  // wei_scale.dims determines granularity:
+  //   - Per-tensor:  dims = {} or {1}     → group_size = K
+  //   - Per-channel: dims = {1, N}        → group_size = K
+  //   - Per-group:   dims = {G, N}        → group_size = K / G
+  int64_t group_size = K;  // Default per-tensor
+  const auto& dims = wei_scale.dims;
+  if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
+    // Not per-tensor, check for per-group
+    if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
+      group_size = K / dims[0];  // Per-group: dims = {G, N}
+    }
+    // Per-channel (dims={N} or {1,N}) keeps group_size = K
+  }
+
+  // Validation: group_size must divide K evenly
+  if (K % group_size != 0) {
+    log_error("WOQ: group_size (", group_size, ") must divide K (", K, ") evenly");
+    group_size = K;  // Fallback to per-tensor
+  }
+
+  dlp_metadata->pre_ops->group_size = static_cast<int>(group_size);
+
+  log_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=", group_size);
+}
+
+// Helper function to create post_op structure for bias and post-ops
+dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
+                                   const void *bias, const data_types &dtypes, int N, int K,
+                                   int M, int32_t *zp_comp_acc, int zp_comp_ndim) {
+  // Count total operations (bias + post-ops + zp_comp)
+  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
+
+  // Check if this is a WOQ case (need metadata even if no post-ops)
+  bool is_woq = dtypes.wei == data_type_t::s4 && dtypes.src == data_type_t::bf16;
+
+  // Check if this is INT8 quantization case
+  bool is_int8 = (dtypes.src == data_type_t::u8 || dtypes.src == data_type_t::s8) &&
+                 dtypes.wei == data_type_t::s8;
+
+  // Count INT8 scale post-ops
+  int int8_scale_count = 0;
+  if (is_int8) {
+    // Source scale
+    if (lowoha_param.quant_params.src_scale.buff) int8_scale_count++;
+    // Weight scale
+    if (lowoha_param.quant_params.wei_scale.buff) int8_scale_count++;
+    // Destination scale (applied at the end)
+    if (lowoha_param.quant_params.dst_scale.buff) int8_scale_count++;
+    total_ops += int8_scale_count;
+  }
+
+  // Add zero-point compensation to total ops
+  if (zp_comp_ndim > 0) {
+    total_ops++;
+  }
+
+  if (total_ops == 0 && !is_woq && !is_int8) {
+    return nullptr;
+  }
+
+  dlp_metadata_t *dlp_metadata = static_cast<dlp_metadata_t *>(calloc(1,
+                                 sizeof(dlp_metadata_t)));
+  if (!dlp_metadata) {
+    return nullptr;
+  }
+
+  // Initialize all pointers to null
+  dlp_metadata->eltwise = nullptr;
+  dlp_metadata->bias = nullptr;
+  dlp_metadata->scale = nullptr;
+  dlp_metadata->matrix_add = nullptr;
+  dlp_metadata->matrix_mul = nullptr;
+  dlp_metadata->pre_ops = nullptr;
+  dlp_metadata->post_op_grp = nullptr;
+
+  // Count different types of operations
+  int eltwise_count = 0;
+  int matrix_add_count = 0;
+  int matrix_mul_count = 0;
+  int bias_count = bias ? 1 : 0;
+  int scale_count = 0;
+
+  // For INT8, add scale count
+  if (is_int8) {
+    scale_count = int8_scale_count;
+  }
+
+  // Add zp_comp to appropriate count
+  if (zp_comp_ndim == 1) {
+    bias_count++;  // 1D compensation is added as bias
+  } else if (zp_comp_ndim == 2) {
+    matrix_add_count++;  // 2D compensation is added as matrix_add
+  }
+
+  // Count post-ops by type
+  for (const auto &po : lowoha_param.postop_) {
+    switch (po.po_type) {
+    case post_op_type_t::relu:
+    case post_op_type_t::leaky_relu:
+    case post_op_type_t::gelu_tanh:
+    case post_op_type_t::gelu_erf:
+    case post_op_type_t::sigmoid:
+    case post_op_type_t::swish:
+    case post_op_type_t::tanh:
+      eltwise_count++;
+      break;
+    case post_op_type_t::binary_add:
+      matrix_add_count++;
+      break;
+    case post_op_type_t::binary_mul:
+      matrix_mul_count++;
+      break;
+    default:
+      // Skip unsupported post-ops
+      break;
+    }
+  }
+
+  // Allocate seq_vector first (only if we have post-ops)
+  if (total_ops > 0) {
+    dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
+                               sizeof(DLP_POST_OP_TYPE)));
+    if (!dlp_metadata->seq_vector) {
+      free(dlp_metadata);
+      return nullptr;
+    }
+  } else {
+    dlp_metadata->seq_vector = nullptr;
+  }
+
+  // Allocate scale for INT8
+  if (scale_count > 0) {
+    dlp_metadata->scale = static_cast<dlp_scale_t *>(calloc(scale_count,
+                          sizeof(dlp_scale_t)));
+    if (!dlp_metadata->scale) {
+      if (dlp_metadata->seq_vector) free(dlp_metadata->seq_vector);
+      free(dlp_metadata);
+      return nullptr;
+    }
+    // Allocate nested sf and zp structures for each scale
+    for (int i = 0; i < scale_count; ++i) {
+      dlp_metadata->scale[i].sf = static_cast<dlp_sf_t *>(calloc(1, sizeof(dlp_sf_t)));
+      dlp_metadata->scale[i].zp = static_cast<dlp_zp_t *>(calloc(1, sizeof(dlp_zp_t)));
+      if (!dlp_metadata->scale[i].sf || !dlp_metadata->scale[i].zp) {
+        // Cleanup on failure
+        for (int j = 0; j <= i; ++j) {
+          if (dlp_metadata->scale[j].sf) free(dlp_metadata->scale[j].sf);
+          if (dlp_metadata->scale[j].zp) free(dlp_metadata->scale[j].zp);
+        }
+        free(dlp_metadata->scale);
+        if (dlp_metadata->seq_vector) free(dlp_metadata->seq_vector);
+        free(dlp_metadata);
+        return nullptr;
+      }
+    }
+  }
+
+  // Allocate memory for different post-op types
+  if (bias_count > 0) {
+    dlp_metadata->bias = static_cast<dlp_post_op_bias *>(calloc(bias_count,
+                         sizeof(dlp_post_op_bias)));
+    if (!dlp_metadata->bias) {
+      free(dlp_metadata->seq_vector);
+      free(dlp_metadata);
+      return nullptr;
+    }
+  }
+
+  if (eltwise_count > 0) {
+    dlp_metadata->eltwise = static_cast<dlp_post_op_eltwise *>(calloc(eltwise_count,
+                            sizeof(dlp_post_op_eltwise)));
+    if (!dlp_metadata->eltwise) {
+      if (dlp_metadata->bias) {
+        free(dlp_metadata->bias);
+      }
+      free(dlp_metadata->seq_vector);
+      free(dlp_metadata);
+      return nullptr;
+    }
+  }
+
+  if (matrix_add_count > 0) {
+    dlp_metadata->matrix_add = static_cast<dlp_post_op_matrix_add *>(calloc(
+                                 matrix_add_count, sizeof(dlp_post_op_matrix_add)));
+    if (!dlp_metadata->matrix_add) {
+      if (dlp_metadata->bias) {
+        free(dlp_metadata->bias);
+      }
+      if (dlp_metadata->eltwise) {
+        free(dlp_metadata->eltwise);
+      }
+      free(dlp_metadata->seq_vector);
+      free(dlp_metadata);
+      return nullptr;
+    }
+    // Allocate sf structures for matrix_add operations
+    for (int i = 0; i < matrix_add_count; ++i) {
+      dlp_metadata->matrix_add[i].sf = static_cast<dlp_sf_t *>(calloc(1,
+                                       sizeof(dlp_sf_t)));
+      if (!dlp_metadata->matrix_add[i].sf) {
+        // Clean up partially allocated sf structures
+        for (int j = 0; j < i; ++j) {
+          free(dlp_metadata->matrix_add[j].sf);
+        }
+        if (dlp_metadata->bias) {
+          free(dlp_metadata->bias);
+        }
+        if (dlp_metadata->eltwise) {
+          free(dlp_metadata->eltwise);
+        }
+        free(dlp_metadata->matrix_add);
+        free(dlp_metadata->seq_vector);
+        free(dlp_metadata);
+        return nullptr;
+      }
+    }
+  }
+
+  if (matrix_mul_count > 0) {
+    dlp_metadata->matrix_mul = static_cast<dlp_post_op_matrix_mul *>(calloc(
+                                 matrix_mul_count, sizeof(dlp_post_op_matrix_mul)));
+    if (!dlp_metadata->matrix_mul) {
+      if (dlp_metadata->bias) {
+        free(dlp_metadata->bias);
+      }
+      if (dlp_metadata->eltwise) {
+        free(dlp_metadata->eltwise);
+      }
+      if (dlp_metadata->matrix_add) {
+        for (int i = 0; i < matrix_add_count; ++i) {
+          if (dlp_metadata->matrix_add[i].sf) {
+            free(dlp_metadata->matrix_add[i].sf);
+          }
+        }
+        free(dlp_metadata->matrix_add);
+      }
+      free(dlp_metadata->seq_vector);
+      free(dlp_metadata);
+      return nullptr;
+    }
+    // Allocate sf structures for matrix_mul operations
+    for (int i = 0; i < matrix_mul_count; ++i) {
+      dlp_metadata->matrix_mul[i].sf = static_cast<dlp_sf_t *>(calloc(1,
+                                       sizeof(dlp_sf_t)));
+      if (!dlp_metadata->matrix_mul[i].sf) {
+        // Clean up partially allocated sf structures
+        for (int j = 0; j < i; ++j) {
+          free(dlp_metadata->matrix_mul[j].sf);
+        }
+        if (dlp_metadata->bias) {
+          free(dlp_metadata->bias);
+        }
+        if (dlp_metadata->eltwise) {
+          free(dlp_metadata->eltwise);
+        }
+        if (dlp_metadata->matrix_add) {
+          for (int k = 0; k < matrix_add_count; ++k) {
+            if (dlp_metadata->matrix_add[k].sf) {
+              free(dlp_metadata->matrix_add[k].sf);
+            }
+          }
+          free(dlp_metadata->matrix_add);
+        }
+        free(dlp_metadata->matrix_mul);
+        free(dlp_metadata->seq_vector);
+        free(dlp_metadata);
+        return nullptr;
+      }
+    }
+  }
+
+  int op_index = 0;
+  int eltwise_index = 0;
+  int matrix_add_index = 0;
+  int matrix_mul_index = 0;
+
+  // Helper lambda to convert data_type_t to DLP_TYPE
+  auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
+    switch (dt) {
+    case data_type_t::f32: return DLP_F32;
+    case data_type_t::bf16: return DLP_BF16;
+    case data_type_t::s32: return DLP_S32;
+    case data_type_t::s8: return DLP_S8;
+    case data_type_t::u8: return DLP_U8;
+    default: return DLP_F32;
+    }
+  };
+
+  int bias_index = 0;
+  int scale_index = 0;
+
+  // For INT8: Add zero-point compensation FIRST (before scales)
+  if (zp_comp_ndim == 1 && zp_comp_acc) {
+    dlp_metadata->seq_vector[op_index++] = BIAS;
+    dlp_metadata->bias[bias_index].bias = zp_comp_acc;
+    dlp_metadata->bias[bias_index].stor_type = DLP_S32;
+    dlp_metadata->bias[bias_index].sf = nullptr;
+    bias_index++;
+  } else if (zp_comp_ndim == 2 && zp_comp_acc) {
+    dlp_metadata->seq_vector[op_index++] = MATRIX_ADD;
+    dlp_metadata->matrix_add[matrix_add_index].matrix = zp_comp_acc;
+    dlp_metadata->matrix_add[matrix_add_index].stor_type = DLP_S32;
+    dlp_metadata->matrix_add[matrix_add_index].ldm = N;
+    // Allocate and set scale factor to 1.0
+    dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(float));
+    *static_cast<float *>(dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
+    dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_len = 1;
+    dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_type = DLP_F32;
+    matrix_add_index++;
+  }
+
+  // For INT8: Add source scale
+  if (is_int8 && lowoha_param.quant_params.src_scale.buff) {
+    dlp_metadata->seq_vector[op_index++] = SCALE;
+    dlp_metadata->scale[scale_index].sf->scale_factor =
+        const_cast<void *>(lowoha_param.quant_params.src_scale.buff);
+    dlp_metadata->scale[scale_index].sf->scale_factor_type =
+        to_dlp_type(lowoha_param.quant_params.src_scale.dt);
+    dlp_metadata->scale[scale_index].sf->scale_factor_len =
+        get_num_elements(lowoha_param.quant_params.src_scale.dims);
+    // Set dummy zero point
+    static int32_t dummy_zp = 0;
+    dlp_metadata->scale[scale_index].zp->zero_point = &dummy_zp;
+    dlp_metadata->scale[scale_index].zp->zero_point_type = DLP_S32;
+    dlp_metadata->scale[scale_index].zp->zero_point_len = 1;
+    scale_index++;
+  }
+
+  // For INT8: Add weight scale
+  if (is_int8 && lowoha_param.quant_params.wei_scale.buff) {
+    dlp_metadata->seq_vector[op_index++] = SCALE;
+    dlp_metadata->scale[scale_index].sf->scale_factor =
+        const_cast<void *>(lowoha_param.quant_params.wei_scale.buff);
+    dlp_metadata->scale[scale_index].sf->scale_factor_type =
+        to_dlp_type(lowoha_param.quant_params.wei_scale.dt);
+    dlp_metadata->scale[scale_index].sf->scale_factor_len =
+        get_num_elements(lowoha_param.quant_params.wei_scale.dims);
+    // Set dummy zero point
+    static int32_t dummy_zp_wei = 0;
+    dlp_metadata->scale[scale_index].zp->zero_point = &dummy_zp_wei;
+    dlp_metadata->scale[scale_index].zp->zero_point_type = DLP_S32;
+    dlp_metadata->scale[scale_index].zp->zero_point_len = 1;
+    scale_index++;
+  }
+
+  // Add bias if present
+  if (bias && bias_count > 0) {
+    dlp_metadata->seq_vector[op_index++] = BIAS;
+    dlp_metadata->bias[bias_index].bias = const_cast<void *>(bias);
+
+    // Set storage type based on bias data type
+    dlp_metadata->bias[bias_index].stor_type = to_dlp_type(dtypes.bias);
+    dlp_metadata->bias[bias_index].sf = nullptr; // No scale factor for bias
+    bias_index++;
+  }
+
+  // Add post-ops
+  setup_dlp_postops(dlp_metadata, lowoha_param.postop_,
+                    op_index, eltwise_index, matrix_add_index, matrix_mul_index,
+                    eltwise_count, matrix_add_count, matrix_mul_count);
+
+  // For INT8: Add destination scale at the end (after eltwise post-ops)
+  if (is_int8 && lowoha_param.quant_params.dst_scale.buff) {
+    dlp_metadata->seq_vector[op_index++] = SCALE;
+    dlp_metadata->scale[scale_index].sf->scale_factor =
+        const_cast<void *>(lowoha_param.quant_params.dst_scale.buff);
+    dlp_metadata->scale[scale_index].sf->scale_factor_type =
+        to_dlp_type(lowoha_param.quant_params.dst_scale.dt);
+    dlp_metadata->scale[scale_index].sf->scale_factor_len =
+        get_num_elements(lowoha_param.quant_params.dst_scale.dims);
+    // Set destination zero-point if present
+    if (lowoha_param.quant_params.dst_zp.buff) {
+      dlp_metadata->scale[scale_index].zp->zero_point =
+          const_cast<void *>(lowoha_param.quant_params.dst_zp.buff);
+      dlp_metadata->scale[scale_index].zp->zero_point_type =
+          to_dlp_type(lowoha_param.quant_params.dst_zp.dt);
+      dlp_metadata->scale[scale_index].zp->zero_point_len =
+          get_num_elements(lowoha_param.quant_params.dst_zp.dims);
+    } else {
+      static int32_t dummy_dst_zp = 0;
+      dlp_metadata->scale[scale_index].zp->zero_point = &dummy_dst_zp;
+      dlp_metadata->scale[scale_index].zp->zero_point_type = DLP_S32;
+      dlp_metadata->scale[scale_index].zp->zero_point_len = 1;
+    }
+    scale_index++;
+  }
 
   dlp_metadata->seq_length = op_index;
   dlp_metadata->num_eltwise = eltwise_count;
 
   // Setup pre-ops for WOQ (Weight-Only Quantization)
   if (is_woq) {
-    dlp_metadata->pre_ops = static_cast<dlp_pre_op *>(malloc(sizeof(dlp_pre_op)));
-    if (dlp_metadata->pre_ops) {
-      const auto& wei_scale = lowoha_param.quant_params.wei_scale;
-      const auto& wei_zp = lowoha_param.quant_params.wei_zp;
-      
-      // Helper to compute num_elements from dims
-      auto get_num_elements = [](const std::vector<int64_t>& dims) -> size_t {
-        if (dims.empty()) return 0;
-        size_t count = 1;
-        for (auto d : dims) count *= static_cast<size_t>(d);
-        return count;
-      };
-      
-      // Setup weight scale factor
-      dlp_metadata->pre_ops->b_scl = static_cast<dlp_sf_t *>(malloc(sizeof(dlp_sf_t)));
-      if (dlp_metadata->pre_ops->b_scl) {
-        size_t scale_len = get_num_elements(wei_scale.dims);
-        dlp_metadata->pre_ops->b_scl->scale_factor = const_cast<void*>(wei_scale.buff);
-        dlp_metadata->pre_ops->b_scl->scale_factor_len = scale_len;
-        dlp_metadata->pre_ops->b_scl->scale_factor_type = 
-            (wei_scale.dt == data_type_t::bf16) ? DLP_BF16 : DLP_F32;
-      }
-      
-      // Setup weight zero-point
-      dlp_metadata->pre_ops->b_zp = static_cast<dlp_zp_t *>(malloc(sizeof(dlp_zp_t)));
-      if (dlp_metadata->pre_ops->b_zp) {
-        if (wei_zp.buff) {
-          dlp_metadata->pre_ops->b_zp->zero_point = const_cast<void*>(wei_zp.buff);
-          dlp_metadata->pre_ops->b_zp->zero_point_len = get_num_elements(wei_zp.dims);
-        } else {
-          dlp_metadata->pre_ops->b_zp->zero_point = nullptr;
-          dlp_metadata->pre_ops->b_zp->zero_point_len = 0;
-        }
-        dlp_metadata->pre_ops->b_zp->zero_point_type = DLP_S8;
-      }
-      
-      dlp_metadata->pre_ops->seq_length = 1;
-      
-      // Determine group_size from scale dimensions
-      // wei_scale.dims determines granularity:
-      //   - Per-tensor:  dims = {} or {1}     → group_size = K
-      //   - Per-channel: dims = {1, N}        → group_size = K  
-      //   - Per-group:   dims = {G, N}        → group_size = K / G
-      int64_t group_size = K;  // Default per-tensor
-      const auto& dims = wei_scale.dims;
-      if (!dims.empty() && !(dims.size() == 1 && dims[0] == 1)) {
-        // Not per-tensor, check for per-group
-        if (dims.size() == 2 && dims[1] == N && dims[0] > 1) {
-          group_size = K / dims[0];  // Per-group: dims = {G, N}
-        }
-        // Per-channel (dims={N} or {1,N}) keeps group_size = K
-      }
-      
-      // Validation: group_size must divide K evenly
-      if (K % group_size != 0) {
-        log_error("WOQ: group_size (", group_size, ") must divide K (", K, ") evenly");
-        group_size = K;  // Fallback to per-tensor
-      }
-      
-      dlp_metadata->pre_ops->group_size = static_cast<int>(group_size);
-      
-      log_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=", group_size);
-    }
+    setup_woq_pre_ops(dlp_metadata, lowoha_param, K, N);
   }
 
   return dlp_metadata;
@@ -693,15 +861,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
     if (aocl_po->pre_ops) {
       const auto& wei_scale = lowoha_param.quant_params.wei_scale;
       const auto& wei_zp = lowoha_param.quant_params.wei_zp;
-      
-      // Helper to compute num_elements from dims
-      auto get_num_elements = [](const std::vector<int64_t>& dims) -> size_t {
-        if (dims.empty()) return 0;
-        size_t count = 1;
-        for (auto d : dims) count *= static_cast<size_t>(d);
-        return count;
-      };
-      
+
       // Setup weight scale factor
       aocl_po->pre_ops->b_scl = static_cast<aocl_pre_op_sf *>(malloc(sizeof(aocl_pre_op_sf)));
       if (aocl_po->pre_ops->b_scl) {
@@ -761,31 +921,29 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
 void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
                          const lowoha_params &lowoha_param) {
   if (aocl_po) {
-    // Count operations for proper cleanup
+    // Count operations from seq_vector for proper cleanup
+    // This is more accurate than counting from lowoha_param.postop_ because
+    // it includes zp_comp matrix_add entries added internally
     int eltwise_count = 0;
     int matrix_add_count = 0;
     int matrix_mul_count = 0;
 
-    // Count post-ops by type for cleanup
-    for (const auto &po : lowoha_param.postop_) {
-      switch (po.po_type) {
-      case post_op_type_t::relu:
-      case post_op_type_t::leaky_relu:
-      case post_op_type_t::gelu_tanh:
-      case post_op_type_t::gelu_erf:
-      case post_op_type_t::sigmoid:
-      case post_op_type_t::swish:
-      case post_op_type_t::tanh:
-        eltwise_count++;
-        break;
-      case post_op_type_t::binary_add:
-        matrix_add_count++;
-        break;
-      case post_op_type_t::binary_mul:
-        matrix_mul_count++;
-        break;
-      default:
-        break;
+    // Count from seq_vector to include all operations (including zp_comp)
+    if (aocl_po->seq_vector) {
+      for (int i = 0; i < aocl_po->seq_length; i++) {
+        switch (aocl_po->seq_vector[i]) {
+        case ELTWISE:
+          eltwise_count++;
+          break;
+        case MATRIX_ADD:
+          matrix_add_count++;
+          break;
+        case MATRIX_MUL:
+          matrix_mul_count++;
+          break;
+        default:
+          break;
+        }
       }
     }
 
@@ -833,6 +991,26 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
     }
 
     if (aocl_po->scale) {
+      // Count scale entries in seq_vector to properly free nested structures
+      int scale_count = 0;
+      if (aocl_po->seq_vector) {
+        for (int i = 0; i < aocl_po->seq_length; i++) {
+          if (aocl_po->seq_vector[i] == SCALE) {
+            scale_count++;
+          }
+        }
+      }
+      // Free nested sf and zp structures for each scale
+      for (int i = 0; i < scale_count; i++) {
+        if (aocl_po->scale[i].sf) {
+          // Note: scale_factor is user-provided buffer, don't free it
+          free(aocl_po->scale[i].sf);
+        }
+        if (aocl_po->scale[i].zp) {
+          // Note: zero_point is user-provided buffer, don't free it
+          free(aocl_po->scale[i].zp);
+        }
+      }
       free(aocl_po->scale);
     }
 
@@ -1008,42 +1186,99 @@ void run_blis(char layout, char transA, char transB, int M, int N,
   void *reordered_mem = nullptr;
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
+  
+  // Create cache key once for both weight reordering and ZP compensation caching
+  Key_matmul cache_key(transB == 't', K, N, ldb, B,
+                       static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
+  
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
       can_reorder && is_weights_const) {
-    Key_matmul key_(transB == 't' ? true : false, K, N, ldb, B,
-                    static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
     //call reorder and cache function
     bool blocked_flag = false;
     if (lowoha_param.dtypes.wei == data_type_t::f32) {
-      blocked_flag = reorderAndCacheWeights<float>(key_, B, reordered_mem, K, N,
+      blocked_flag = reorderAndCacheWeights<float>(cache_key, B, reordered_mem, K, N,
                      ldb,
                      'r', transB, mem_format_b,
                      aocl_get_reorder_buf_size_f32f32f32of32, aocl_reorder_f32f32f32of32,
                      weight_cache_type);
     }
     else if (lowoha_param.dtypes.wei == data_type_t::bf16) {
-      blocked_flag = reorderAndCacheWeights<int16_t>(key_, B, reordered_mem, K,
+      blocked_flag = reorderAndCacheWeights<int16_t>(cache_key, B, reordered_mem, K,
                      N, ldb,
                      'r', transB, mem_format_b,
                      aocl_get_reorder_buf_size_bf16bf16f32of32, aocl_reorder_bf16bf16f32of32,
                      weight_cache_type);
     }
     else if (lowoha_param.dtypes.wei == data_type_t::s4) {
-      blocked_flag = reorderAndCacheWeights<int8_t>(key_, B, reordered_mem, K,
+      blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B, reordered_mem, K,
                      N, ldb,
                      'r', transB, mem_format_b,
                      aocl_get_reorder_buf_size_bf16s4f32of32, aocl_reorder_bf16s4f32of32,
                      weight_cache_type);
+    }
+    else if (lowoha_param.dtypes.wei == data_type_t::s8) {
+      // INT8 weight reordering - select based on source data type
+      if (lowoha_param.dtypes.src == data_type_t::s8) {
+        blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B, reordered_mem, K,
+                       N, ldb,
+                       'r', transB, mem_format_b,
+                       aocl_get_reorder_buf_size_s8s8s32os32, aocl_reorder_s8s8s32os32,
+                       weight_cache_type);
+      }
+      else if (lowoha_param.dtypes.src == data_type_t::u8) {
+        blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B, reordered_mem, K,
+                       N, ldb,
+                       'r', transB, mem_format_b,
+                       aocl_get_reorder_buf_size_u8s8s32os32, aocl_reorder_u8s8s32os32,
+                       weight_cache_type);
+      }
     }
     if (blocked_flag) {
       is_weight_blocked = true;
       mem_format_b = 'r';
     }
   }
+
+  // Compute zero-point compensation for INT8 (with caching for 1D case)
+  int32_t *zp_comp_acc = nullptr;
+  int zp_comp_ndim = 0;
+  int32_t src_zp = 0;
+  int32_t wei_zp = 0;
+  bool is_int8 = (dtypes.src == data_type_t::u8 || dtypes.src == data_type_t::s8) &&
+                 dtypes.wei == data_type_t::s8;
+  if (is_int8) {
+    // Extract zero-point values
+    if (lowoha_param.quant_params.src_zp.buff) {
+      src_zp = read_and_cast<int32_t>(lowoha_param.quant_params.src_zp.buff,
+                                      lowoha_param.quant_params.src_zp.dt);
+    }
+    if (lowoha_param.quant_params.wei_zp.buff) {
+      wei_zp = read_and_cast<int32_t>(lowoha_param.quant_params.wei_zp.buff,
+                                      lowoha_param.quant_params.wei_zp.dt);
+    }
+
+    // Compute or retrieve cached zero-point compensation
+    if (src_zp != 0 || wei_zp != 0) {
+      zp_comp_acc = cache_or_compute_zp_compensation(
+          cache_key, M, N, K, A, B,
+          src_zp, wei_zp,
+          transA == 't', transB == 't',
+          lda, ldb,
+          dtypes.src,
+          zp_comp_ndim);
+      
+      if (zp_comp_acc) {
+        log_info("INT8 ZP compensation: src_zp=", src_zp, ", wei_zp=", wei_zp,
+                 ", ndim=", zp_comp_ndim, ", cached=", (wei_zp == 0 ? "yes" : "no"));
+      }
+    }
+  }
+
   // Create aocl_post_op structure for bias, post-ops, and WOQ pre-ops
 #if ZENDNNL_DEPENDS_AOCLDLP
-  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N, K);
+  dlp_metadata_t *aocl_po = create_dlp_post_op(lowoha_param, bias, dtypes, N, K, M,
+                                               zp_comp_acc, zp_comp_ndim);
 #else
   aocl_post_op *aocl_po = create_blis_post_op(lowoha_param, bias, dtypes, N, K);
 #endif
@@ -1083,16 +1318,102 @@ void run_blis(char layout, char transA, char transB, int M, int N,
                               is_weight_blocked ? (int16_t *)reordered_mem : static_cast<const int16_t *>(B),
                               ldb,mem_format_b, beta,static_cast<float *>(C),ldc,aocl_po);
   }
+  // INT8 kernels: u8 source
+  else if (dtypes.src == data_type_t::u8 && dtypes.wei == data_type_t::s8) {
+    const int8_t *weight_ptr = is_weight_blocked ? static_cast<int8_t *>(reordered_mem) :
+                               static_cast<const int8_t *>(B);
+    switch (dtypes.dst) {
+    case data_type_t::u8:
+      aocl_gemm_u8s8s32ou8(layout, transA, transB, M, N, K, alpha,
+                           static_cast<const uint8_t *>(A), lda, mem_format_a,
+                           weight_ptr, ldb, mem_format_b, beta,
+                           static_cast<uint8_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::s8:
+      aocl_gemm_u8s8s32os8(layout, transA, transB, M, N, K, alpha,
+                           static_cast<const uint8_t *>(A), lda, mem_format_a,
+                           weight_ptr, ldb, mem_format_b, beta,
+                           static_cast<int8_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::s32:
+      aocl_gemm_u8s8s32os32(layout, transA, transB, M, N, K, alpha,
+                            static_cast<const uint8_t *>(A), lda, mem_format_a,
+                            weight_ptr, ldb, mem_format_b, beta,
+                            static_cast<int32_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::f32:
+      aocl_gemm_u8s8s32of32(layout, transA, transB, M, N, K, alpha,
+                            static_cast<const uint8_t *>(A), lda, mem_format_a,
+                            weight_ptr, ldb, mem_format_b, beta,
+                            static_cast<float *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::bf16:
+      aocl_gemm_u8s8s32obf16(layout, transA, transB, M, N, K, alpha,
+                             static_cast<const uint8_t *>(A), lda, mem_format_a,
+                             weight_ptr, ldb, mem_format_b, beta,
+                             static_cast<int16_t *>(C), ldc, aocl_po);
+      break;
+    default:
+      log_error("Unsupported output data type for u8 source");
+      break;
+    }
+  }
+  // INT8 kernels: s8 source
+  else if (dtypes.src == data_type_t::s8 && dtypes.wei == data_type_t::s8) {
+    const int8_t *weight_ptr = is_weight_blocked ? static_cast<int8_t *>(reordered_mem) :
+                               static_cast<const int8_t *>(B);
+    switch (dtypes.dst) {
+    case data_type_t::u8:
+      aocl_gemm_s8s8s32ou8(layout, transA, transB, M, N, K, alpha,
+                           static_cast<const int8_t *>(A), lda, mem_format_a,
+                           weight_ptr, ldb, mem_format_b, beta,
+                           static_cast<uint8_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::s8:
+      aocl_gemm_s8s8s32os8(layout, transA, transB, M, N, K, alpha,
+                           static_cast<const int8_t *>(A), lda, mem_format_a,
+                           weight_ptr, ldb, mem_format_b, beta,
+                           static_cast<int8_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::s32:
+      aocl_gemm_s8s8s32os32(layout, transA, transB, M, N, K, alpha,
+                            static_cast<const int8_t *>(A), lda, mem_format_a,
+                            weight_ptr, ldb, mem_format_b, beta,
+                            static_cast<int32_t *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::f32:
+      aocl_gemm_s8s8s32of32(layout, transA, transB, M, N, K, alpha,
+                            static_cast<const int8_t *>(A), lda, mem_format_a,
+                            weight_ptr, ldb, mem_format_b, beta,
+                            static_cast<float *>(C), ldc, aocl_po);
+      break;
+    case data_type_t::bf16:
+      aocl_gemm_s8s8s32obf16(layout, transA, transB, M, N, K, alpha,
+                             static_cast<const int8_t *>(A), lda, mem_format_a,
+                             weight_ptr, ldb, mem_format_b, beta,
+                             static_cast<int16_t *>(C), ldc, aocl_po);
+      break;
+    default:
+      log_error("Unsupported output data type for s8 source");
+      break;
+    }
+  }
   else {
     log_info("Data type not supported");
   }
   // Free reordered buffer for AOCL blocked non-cached
-  bool free_buff = (weight_cache_type == 0 && reordered_mem != nullptr &&
+  bool weight_cache_disabled = (weight_cache_type == 0 && reordered_mem != nullptr &&
                     lowoha_param.mem_format_b != 'r'
                     && kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked && can_reorder);
-  if (free_buff)  {
+  if (weight_cache_disabled)  {
     free(reordered_mem);
     reordered_mem = nullptr;
+  }
+  // Free zero-point compensation buffer (only if not cached)
+  // 1D compensation (wei_zp == 0) is cached, 2D compensation is always freed
+  bool zp_cache_enabled = matmul_config.get_zp_comp_cache();
+  if (zp_comp_acc && (!zp_cache_enabled || wei_zp != 0)) {
+    std::free(zp_comp_acc);
   }
   
   // Clean up aocl_post_op structure

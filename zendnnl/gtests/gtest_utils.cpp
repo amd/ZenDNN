@@ -958,11 +958,14 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         matmul_dtypes.compute = data_type_t::none;
 
         // Validate data types
-        if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16) {
+        if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16 &&
+            src_data_type != data_type_t::u8 && src_data_type != data_type_t::s8) {
           log_error("LOWOHA: Unsupported source data type");
           return status_t::failure;
         }
-        if (out_data_type != data_type_t::f32 && out_data_type != data_type_t::bf16) {
+        if (out_data_type != data_type_t::f32 && out_data_type != data_type_t::bf16 &&
+            out_data_type != data_type_t::u8 && out_data_type != data_type_t::s8 &&
+            out_data_type != data_type_t::s32) {
           log_error("LOWOHA: Unsupported output data type");
           return status_t::failure;
         }
@@ -971,9 +974,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         bool is_woq = (src_data_type == data_type_t::bf16 &&
                        wei_data_type == data_type_t::s4);
 
+        // Check if this is INT8 quantization
+        bool is_int8 = (src_data_type == data_type_t::u8 || src_data_type == data_type_t::s8) &&
+                       wei_data_type == data_type_t::s8;
+
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
                  batchB, " M:", M, " N:", N, " K:", K,
-                 " alpha:", alpha, " beta:", beta, " is_woq:", is_woq);
+                 " alpha:", alpha, " beta:", beta, " is_woq:", is_woq, " is_int8:", is_int8);
 
         // Extract batch strides from tensors if they have batch dimension (3D)
         // Batch strides are in elements, not bytes
@@ -1027,6 +1034,78 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           }
         }
 
+        // For INT8: Extract quantization parameters from all tensors
+        if (is_int8) {
+          // Extract source scale
+          if (input_tensor.is_quantized()) {
+            const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
+            if (src_scale_buff) {
+              params.quant_params.src_scale.buff = src_scale_buff;
+              params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
+              auto src_scale_size = input_tensor.get_quant_scale_size();
+              params.quant_params.src_scale.dims.assign(src_scale_size.begin(), src_scale_size.end());
+              log_info("LOWOHA INT8: Source scale extracted");
+            }
+            // Extract source zero point (for asymmetric quantization)
+            if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+              const void *src_zp_buff = input_tensor.get_quant_zero_raw_handle_const();
+              if (src_zp_buff) {
+                params.quant_params.src_zp.buff = src_zp_buff;
+                params.quant_params.src_zp.dt = input_tensor.get_quant_zero_data_type();
+                auto src_zp_size = input_tensor.get_quant_zero_size();
+                params.quant_params.src_zp.dims.assign(src_zp_size.begin(), src_zp_size.end());
+                log_info("LOWOHA INT8: Source zero-point extracted");
+              }
+            }
+          }
+
+          // Extract weight scale
+          if (weight_tensor.is_quantized()) {
+            const void *wei_scale_buff = weight_tensor.get_quant_scale_raw_handle_const();
+            if (wei_scale_buff) {
+              params.quant_params.wei_scale.buff = wei_scale_buff;
+              params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
+              auto wei_scale_size = weight_tensor.get_quant_scale_size();
+              params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(), wei_scale_size.end());
+              log_info("LOWOHA INT8: Weight scale extracted");
+            }
+            // Extract weight zero point (for asymmetric quantization)
+            if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+              const void *wei_zp_buff = weight_tensor.get_quant_zero_raw_handle_const();
+              if (wei_zp_buff) {
+                params.quant_params.wei_zp.buff = wei_zp_buff;
+                params.quant_params.wei_zp.dt = weight_tensor.get_quant_zero_data_type();
+                auto wei_zp_size = weight_tensor.get_quant_zero_size();
+                params.quant_params.wei_zp.dims.assign(wei_zp_size.begin(), wei_zp_size.end());
+                log_info("LOWOHA INT8: Weight zero-point extracted");
+              }
+            }
+          }
+
+          // Extract destination scale and zero-point
+          if (output_tensor.is_quantized()) {
+            const void *dst_scale_buff = output_tensor.get_quant_scale_raw_handle_const();
+            if (dst_scale_buff) {
+              params.quant_params.dst_scale.buff = dst_scale_buff;
+              params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
+              auto dst_scale_size = output_tensor.get_quant_scale_size();
+              params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(), dst_scale_size.end());
+              log_info("LOWOHA INT8: Destination scale extracted");
+            }
+            // Extract destination zero point (for asymmetric quantization)
+            if (output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+              const void *dst_zp_buff = output_tensor.get_quant_zero_raw_handle_const();
+              if (dst_zp_buff) {
+                params.quant_params.dst_zp.buff = dst_zp_buff;
+                params.quant_params.dst_zp.dt = output_tensor.get_quant_zero_data_type();
+                auto dst_zp_size = output_tensor.get_quant_zero_size();
+                params.quant_params.dst_zp.dims.assign(dst_zp_size.begin(), dst_zp_size.end());
+                log_info("LOWOHA INT8: Destination zero-point extracted");
+              }
+            }
+          }
+        }
+
         // Create batch_params structure
         batch_params_t batch_params;
         batch_params.Batch_A = batchA;
@@ -1060,7 +1139,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
-                            beta, C_data, ldc, is_woq ? true : rand() % 2 == 0 ? true : false,
+                            beta, C_data, ldc, (is_woq || is_int8) ? true : rand() % 2 == 0 ? true : false,
                             batch_params, params);
         if (status != status_t::success) {
           log_error("LOWOHA matmul_direct execution failed.");

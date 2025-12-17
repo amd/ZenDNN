@@ -84,13 +84,18 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
  * @param bias Pointer to the bias data to be added (can be nullptr if no bias)
  * @param dtypes Data types structure specifying source, weight, and destination tensor types
  * @param N The number of columns in the output matrix
+ * @param K The number of columns in the input matrix / rows in weight matrix
+ * @param M The number of rows in the output matrix (used for INT8 zero-point compensation)
+ * @param zp_comp_acc Pointer to zero-point compensation buffer (nullptr if no ZP compensation)
+ * @param zp_comp_ndim Dimensionality of ZP compensation: 0=none, 1=bias(N), 2=matrix(M*N)
  * @return Pointer to the created dlp_metadata_t object
  */
 dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N, int K);
+                                   const void *bias, const data_types &dtypes, int N, int K,
+                                   int M = 0, int32_t *zp_comp_acc = nullptr, int zp_comp_ndim = 0);
 
 /**
-* @brief Cleans up DLP (Deep Learning Post-op) metadata.
+* @brief Cleans up DLP (Deep Learning Primitives) metadata.
 *
 * This function releases the resources allocated for the `dlp_metadata_t`
 * object used in post-operations.

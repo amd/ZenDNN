@@ -18,11 +18,18 @@
 #define LOWOHA_MATMUL_UTILS_HPP
 
 #include <utility>
+#include <mutex>
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
+
+/**
+ * @brief Get global mutex for thread-safe lowoha operations
+ * @return Reference to the lowoha mutex
+ */
+std::mutex& get_lowoha_mutex();
 
 inline int64_t divup(int64_t x, int64_t y) {
   return (x + y - 1) / y;

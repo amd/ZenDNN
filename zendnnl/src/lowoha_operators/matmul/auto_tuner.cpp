@@ -15,8 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/auto_tuner.hpp"
-
-std::mutex zendnnl_map_mutex;
+#include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -115,12 +114,12 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
       cur_algo_time = profiler.tbp_elapsedtime();
 
       //Create new entry
-      zendnnl_map_mutex.lock();
+      get_lowoha_mutex().lock();
       //Map value is tuple of (iteration count, execution time of algo, Algo Path)
       matmul_kernel_map1_helper[key_obj_auto] = {1, cur_algo_time, matmul_algo_t::onednn_blocked};
       //Simplified Map having Key as struct and value as Algo.
       matmul_kernel_map[key_obj_auto] = matmul_algo_t::onednn_blocked;
-      zendnnl_map_mutex.unlock();
+      get_lowoha_mutex().unlock();
     }
     //If key found then increment the iter_count and run next algo.
     else {
@@ -238,11 +237,11 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
       cur_algo_time = profiler.tbp_elapsedtime();
 
       //Create new entry
-      zendnnl_map_mutex.lock();
+      get_lowoha_mutex().lock();
       //Map value is toggle_ value for algo
       matmul_kernel_map1_helper[key_obj_auto] = {1};
       algo_time_vec[0] = INT_MAX;
-      zendnnl_map_mutex.unlock();
+      get_lowoha_mutex().unlock();
     }
     //If key found then increment the iter_count and run next algo.
     else {

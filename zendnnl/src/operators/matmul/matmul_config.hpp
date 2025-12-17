@@ -97,6 +97,18 @@ class matmul_config_t final : public op_config_t {
    */
   int32_t get_weight_cache();
 
+  /** @brief Sets zp_comp_cache enable flag.
+  *
+  * @param enable Whether to enable zero-point compensation caching.
+  */
+  void set_zp_comp_cache(bool enable);
+
+  /** @brief Get zp_comp_cache enable flag.
+   *
+   * @return true if ZP compensation caching is enabled.
+   */
+  bool get_zp_comp_cache();
+
   /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -124,8 +136,9 @@ class matmul_config_t final : public op_config_t {
   */
   matmul_config_t() = default;
 
-  int32_t matmul_algo;       /**< Matmul runtime algorithm. */
+  int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
+  bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
 };
 
 }

@@ -52,6 +52,25 @@ int run_lowoha_matmul_fp32_test();
  */
 int run_lowoha_matmul_woq_bf16s4_test();
 
+/** @fn run_lowoha_matmul_int8_caching_test
+ *  @brief Demonstrates INT8 matmul with zero-point compensation caching.
+ *
+ *  This example shows how 1D zero-point compensation is cached when:
+ *    - Source has a zero-point (src_zp != 0)
+ *    - Weights have no zero-point (wei_zp == 0, symmetric quantization)
+ *
+ *  Configuration:
+ *    - Input: U8 [M, K]
+ *    - Weights: S8 [K, N]
+ *    - Output: F32 [M, N]
+ *    - Per-tensor source scale and zero-point
+ *    - Per-channel weight scale
+ *
+ *  Environment variables:
+ *    - ZENDNNL_ZP_COMP_CACHE=1/0 (enable/disable ZP compensation caching)
+ */
+int run_lowoha_matmul_int8_caching_test();
+
 } // examples
 } // zendnnl
 
