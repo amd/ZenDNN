@@ -955,12 +955,15 @@ To achieve optimal performance for the MatMul operator, you can configure runtim
 ### Supported Matmul Kernels
 | Algo |       Kernel       |
 |------|--------------------|
-| 1    | aocl_blis          |
-| 2    | aocl_blis_blocked  |
-| 3    | onednn             |
-| 4    | onednn_blocked     |
-| 5    | libxsmm            |
-| 6    | reference          |
+| 1    | aocl_blis_blocked  |
+| 2    | onednn_blocked     |
+| 3    | -NA-               |
+| 4    | aocl_blis          |
+| 5    | onednn             |
+| 6    | -NA-               |
+| 7    | batched_sgemm      |
+| 8    | -NA-               |
+| 9    | reference          |
 
 ### Configuration methods
 
