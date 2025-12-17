@@ -30,6 +30,10 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   alpha    = dist(gen);
   beta     = dist(gen);
 
+  use_LOWOHA = false;
+  if (!cmd_lowoha.empty()) {
+    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  }
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo_ = matmul_config.get_algo();
   algo = static_cast<matmul_algo_t>(algo_);
@@ -39,22 +43,29 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
     if (!cmd_backend.empty()) {
       // Handle oneDNN dependency check for command-line backends
 #if ZENDNNL_DEPENDS_ONEDNN
-      algo = (cmd_backend == "onednn_blocked") ? matmul_algo_t::onednn_blocked : strToAlgo(
-               cmd_backend);
+      algo = strToAlgo(cmd_backend);
 #else
       // Fallback to AOCL BLIS if oneDNN backends requested but not available
       algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
              ? matmul_algo_t::aocl_blis
              : strToAlgo(cmd_backend);
 #endif
-      //TODO: Add command-line arg support for LOWOHA
-      use_LOWOHA = (algo == matmul_algo_t::libxsmm);
-      if (algo == matmul_algo_t::libxsmm) {
+      // Configure algorithm-specific parameters and LOWOHA settings
+      if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
         alpha = 1.0f;
         beta  = rand() % 2;
+        use_LOWOHA = true;
         //ToDo: Need to support silu, gelu_tanh, F32 postops.
         if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
           po_index = 8;
+        }
+      }
+      else {
+        if (!cmd_lowoha.empty()) {
+          use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+        }
+        else {
+          use_LOWOHA = rand() % 2;
         }
       }
     }
@@ -63,33 +74,54 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       int algo_range_max = 6; // 6 algorithms in total
       std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
       algo = static_cast<matmul_algo_t>(algo_dist(gen));
-      if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked)) {
+      if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn ||
+                                      algo == matmul_algo_t::onednn_blocked)) {
         algo = matmul_algo_t::aocl_blis;
       }
-      if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-        algo = matmul_algo_t::aocl_blis;
-      }
-      // Control LOWOHA and LIBXSMM based on test index
-      // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
-      uint32_t third = total_tests / TEST_PARTITIONS;
 
-      if (test_index < third) {
-        use_LOWOHA = false;
-      }
-      else if (test_index < 2 * third) {
-        use_LOWOHA = true;
-      }
-      else {
-        use_LOWOHA = true;
-        alpha = 1.0f;
-        beta = rand() % 2;
-        algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
-        if (!ZENDNNL_DEPENDS_LIBXSMM) {
+      // If no lowoha argument is provided, automatically partition tests into three
+      if (cmd_lowoha.empty()) {
+        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
           algo = matmul_algo_t::aocl_blis;
         }
-        // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
-        if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
-          po_index = 8;
+        // Control LOWOHA and LIBXSMM based on test index
+        // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
+        uint32_t third = total_tests / TEST_PARTITIONS;
+
+        use_LOWOHA = (test_index >= third);
+        if (test_index >= 2 * third) {
+          use_LOWOHA = true;
+          alpha = 1.0f;
+          beta = rand() % 2;
+          algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
+          if (!ZENDNNL_DEPENDS_LIBXSMM) {
+            algo = matmul_algo_t::aocl_blis;
+          }
+          // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
+          if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+            po_index = 8;
+          }
+        }
+      }
+      // If lowoha argument is explicitly set to true
+      else if (use_LOWOHA) {
+        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
+          alpha = 1.0f;
+          beta = rand() % 2;
+          algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
+          if (!ZENDNNL_DEPENDS_LIBXSMM) {
+            algo = matmul_algo_t::aocl_blis;
+          }
+          // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
+          if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+            po_index = 8;
+          }
+        }
+      }
+      // If lowoha argument is explicitly set to false
+      else {
+        if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
+          algo = matmul_algo_t::aocl_blis;
         }
       }
     }
@@ -566,7 +598,7 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
-                        uint32_t &tests, std::string &po, std::string &backend) {
+                        uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -578,6 +610,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("test", tests);
   read_from_umap("postop", po);
   read_from_umap("backend", backend);
+  read_from_umap("lowoha", lowoha);
   return;
 }
 
@@ -666,6 +699,9 @@ matmul_algo_t strToAlgo(std::string str) {
   if (str == "libxsmm") {
     return matmul_algo_t::libxsmm;
   }
+  if (str == "libxsmm_blocked") {
+    return matmul_algo_t::libxsmm_blocked;
+  }
   return matmul_algo_t::none;
 }
 
@@ -681,6 +717,8 @@ std::string algoToStr(matmul_algo_t algo) {
     return "onednn_blocked";
   case matmul_algo_t::libxsmm:
     return "libxsmm";
+  case matmul_algo_t::libxsmm_blocked:
+    return "libxsmm_blocked";
   default:
     return "none";
   }
@@ -796,7 +834,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
 
         // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
-        bool is_woq = (src_data_type == data_type_t::bf16 && wei_data_type == data_type_t::s4);
+        bool is_woq = (src_data_type == data_type_t::bf16 &&
+                       wei_data_type == data_type_t::s4);
 
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
                  batchB, " M:", M, " N:", N, " K:", K,
@@ -835,9 +874,11 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           auto scale_size = weight_tensor.get_quant_scale_size();
           params.quant_params.wei_scale.dims.assign(scale_size.begin(), scale_size.end());
           log_info("LOWOHA WOQ: Weight scale extracted, dims: [",
-                    params.quant_params.wei_scale.dims.size() > 0 ? params.quant_params.wei_scale.dims[0] : 0,
-                    params.quant_params.wei_scale.dims.size() > 1 ? params.quant_params.wei_scale.dims[1] : 0, "]");
-          
+                   params.quant_params.wei_scale.dims.size() > 0 ?
+                   params.quant_params.wei_scale.dims[0] : 0,
+                   params.quant_params.wei_scale.dims.size() > 1 ?
+                   params.quant_params.wei_scale.dims[1] : 0, "]");
+
 
           // Extract weight zero point (if asymmetric quantization)
           if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {

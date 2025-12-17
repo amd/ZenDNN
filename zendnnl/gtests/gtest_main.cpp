@@ -47,6 +47,7 @@ uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
 std::string cmd_backend {};
+std::string cmd_lowoha {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -79,29 +80,29 @@ int main(int argc, char **argv) {
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;
-    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend);
+    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, cmd_lowoha);
     srand(static_cast<unsigned int>(seed));
     std::cout<<"Value "<<seed<<" is used as seed. \n";
 
-  // Creating Random parameters for Matmul
-  matmul_test.resize(test_num);
-  for (uint32_t i = 0; i < test_num; ++i) {
-    matmul_test[i] = MatmulType(i, test_num);
-  }
-  // Creating Random parameters for BatchMatmul
-  batchmatmul_test.resize(test_num);
-  for (uint32_t i = 0; i < test_num; ++i) {
-    batchmatmul_test[i] = BatchMatmulType(i, test_num);
-  }
-  // Creating Random parameters for Reorder
-  reorder_test.resize(test_num);
-  for (uint32_t i = 0; i < test_num; ++i) {
-    reorder_test[i] = ReorderType(i, test_num);
-  }
-  // Creating Random parameters for Embedding Bag
-  embag_test.resize(test_num);
-  // Creating Random parameters for Embedding
-  embedding_test.resize(test_num);
+    // Creating Random parameters for Matmul
+    matmul_test.resize(test_num);
+    for (uint32_t i = 0; i < test_num; ++i) {
+      matmul_test[i] = MatmulType(i, test_num);
+    }
+    // Creating Random parameters for BatchMatmul
+    batchmatmul_test.resize(test_num);
+    for (uint32_t i = 0; i < test_num; ++i) {
+      batchmatmul_test[i] = BatchMatmulType(i, test_num);
+    }
+    // Creating Random parameters for Reorder
+    reorder_test.resize(test_num);
+    for (uint32_t i = 0; i < test_num; ++i) {
+      reorder_test[i] = ReorderType(i, test_num);
+    }
+    // Creating Random parameters for Embedding Bag
+    embag_test.resize(test_num);
+    // Creating Random parameters for Embedding
+    embedding_test.resize(test_num);
 
     ::testing :: InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

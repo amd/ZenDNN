@@ -111,6 +111,7 @@ extern const uint32_t dtype_size;
 extern int64_t seed;
 extern std::string cmd_post_op;
 extern std::string cmd_backend;
+extern std::string cmd_lowoha;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
@@ -196,7 +197,8 @@ class Parser {
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
-                  int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend);
+                  int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
+                  std::string &lowoha);
 };
 
 bool is_binary_postop(const std::string post_op);
