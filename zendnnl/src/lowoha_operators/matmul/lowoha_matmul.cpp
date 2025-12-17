@@ -25,6 +25,7 @@ namespace zendnnl {
 namespace lowoha {
 
 using namespace zendnnl::ops;
+using zendnnl::common::size_of;
 
 void matmul_kernel_wrapper(char layout, char transA, char transB,
                            int M, int N, int K,
@@ -36,8 +37,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            data_types &dtypes,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b,
-                           lowoha_params &lowoha_param, const void *bias,
-                           bool is_weights_const, bool can_reorder) {
+                           lowoha_params &lowoha_param, batch_params_t &batch_params,
+                           const void *bias, bool is_weights_const, bool can_reorder) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     if (run_libxsmm(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
@@ -52,7 +53,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
       kernel == matmul_algo_t::onednn_blocked) {
     log_info("Using onednn kernel");
     matmul_onednn_wrapper(transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C,
-                          ldc, lowoha_param, 1, 1, bias, kernel, is_weights_const);
+                          ldc, lowoha_param, batch_params, bias, kernel, is_weights_const);
     return;
   }
 #endif
@@ -74,21 +75,39 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
   //   }
 }
 
-void bmm_execute(const char layout, const char trans_input,
-                 const char trans_weight,
-                 const bool transA, const bool transB,
+void bmm_execute(const char layout, const bool transA, const bool transB,
                  const int M, const int N, const int K, const float alpha,
                  const void *src, const int lda,
                  const void *weight, const int ldb,
                  const void *bias, const float beta,
                  void *dst, const int ldc,
                  const bool is_weights_const,
-                 const int batch_count, const int Batch_A, const int Batch_B,
-                 const size_t src_batch_stride, const size_t weight_batch_stride,
-                 const size_t dst_batch_stride,
+                 batch_params_t &batch_params,
                  const size_t src_type_size, const size_t out_type_size,
                  const int num_threads,
                  matmul_algo_t kernel, lowoha_params &params) {
+
+  const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
+  const char trans_input  = transA ? 't' : 'n';
+  const char trans_weight = transB ? 't' : 'n';
+
+  // Calculate batch strides in elements (not bytes)
+  size_t src_batch_stride_elems = (batch_params.batch_stride_src !=
+                                   static_cast<size_t>(-1))
+                                  ? batch_params.batch_stride_src
+                                  : (transA ? K * lda : M * lda);
+  size_t weight_batch_stride_elems = (batch_params.batch_stride_wei !=
+                                      static_cast<size_t>(-1))
+                                     ? batch_params.batch_stride_wei
+                                     : (transB ? N * ldb : K * ldb);
+  size_t dst_batch_stride_elems = (batch_params.batch_stride_dst !=
+                                   static_cast<size_t>(-1))
+                                  ? batch_params.batch_stride_dst
+                                  : M * ldc;
+
+  size_t src_batch_stride_bytes = src_batch_stride_elems * src_type_size;
+  size_t weight_batch_stride_bytes = weight_batch_stride_elems * src_type_size;
+  size_t dst_batch_stride_bytes = dst_batch_stride_elems * out_type_size;
 
   if (kernel == matmul_algo_t::batched_sgemm) {
     apilog_info("Executing BMM LOWOHA kernel with batch SGEMM, algo: ",
@@ -98,7 +117,7 @@ void bmm_execute(const char layout, const char trans_input,
                               src, lda, weight, ldb, beta, dst, ldc,
                               params.dtypes, batch_count,
                               params.mem_format_a, params.mem_format_b,
-                              src_batch_stride, weight_batch_stride, dst_batch_stride,
+                              src_batch_stride_bytes, weight_batch_stride_bytes, dst_batch_stride_bytes,
                               params, bias);
     return;
   }
@@ -109,8 +128,9 @@ void bmm_execute(const char layout, const char trans_input,
     apilog_info("Executing BMM LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                          weight, ldb, beta, dst, ldc, params, Batch_A, Batch_B, bias, kernel,
-                          is_weights_const);
+                          weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
+                          is_weights_const, src_batch_stride_elems, weight_batch_stride_elems,
+                          dst_batch_stride_elems);
     return;
   }
 #endif
@@ -177,10 +197,11 @@ void bmm_execute(const char layout, const char trans_input,
           int m_len = std::min(M_block, M - m_start);
 
           const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                      get_batch_index(b, Batch_A) * src_batch_stride;
+                                      get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
           const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, Batch_B) * weight_batch_stride;
-          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
+                                      get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
+          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b *
+                                      dst_batch_stride_bytes;
 
           const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                            src_type_size);
@@ -193,8 +214,7 @@ void bmm_execute(const char layout, const char trans_input,
                 po.po_type == post_op_type_t::binary_mul) {
               if (po.buff != nullptr) {
                 // Calculate offset based on m_start and data type
-                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
-                                        uint16_t);
+                size_t element_size = size_of(po.dtype);
                 size_t row_offset = m_start * N * element_size;
                 po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
               }
@@ -206,8 +226,8 @@ void bmm_execute(const char layout, const char trans_input,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, bias,
-                                is_weights_const);
+                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, batch_params,
+                                bias, is_weights_const);
         }
       });
     }
@@ -219,10 +239,10 @@ void bmm_execute(const char layout, const char trans_input,
           int m_len = std::min(M_block, M - m_start);
 
           const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
-                                   get_batch_index(b, Batch_A) * src_batch_stride;
+                                   get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
           const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, Batch_B) * weight_batch_stride;
-          uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
+                                      get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
+          uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride_bytes;
 
           const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                            src_type_size);
@@ -235,8 +255,7 @@ void bmm_execute(const char layout, const char trans_input,
                 po.po_type == post_op_type_t::binary_mul) {
               if (po.buff != nullptr) {
                 // Calculate offset based on m_start and data type
-                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
-                                        uint16_t);
+                size_t element_size = size_of(po.dtype);
                 size_t row_offset = m_start * N * element_size;
                 po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
               }
@@ -248,8 +267,8 @@ void bmm_execute(const char layout, const char trans_input,
                                 A, lda, weight_ptr, ldb,
                                 beta, C, ldc,
                                 params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, bias,
-                                is_weights_const);
+                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, batch_params,
+                                bias, is_weights_const);
         }
       }
     }
@@ -266,24 +285,23 @@ void bmm_execute(const char layout, const char trans_input,
                 static_cast<int>(kernel));
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
-                               get_batch_index(b, Batch_A) * src_batch_stride;
+                               get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                  get_batch_index(b, Batch_B) * weight_batch_stride;
-      uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride;
+                                  get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
+      uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride_bytes;
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr,
                             ldb, beta, dst_ptr, ldc,
                             params.dtypes, kernel,
-                            params.mem_format_a, params.mem_format_b, params, bias,
-                            is_weights_const, false);
+                            params.mem_format_a, params.mem_format_b, params, batch_params,
+                            bias, is_weights_const, false);
     }
   }
 }
 
-void matmul_execute(const char layout, const char trans_input,
-                    const char trans_weight,
+void matmul_execute(const char layout,
                     const bool transA, const bool transB,
                     const int M, const int N, const int K, const float alpha,
                     const void *src, const int lda,
@@ -294,7 +312,11 @@ void matmul_execute(const char layout, const char trans_input,
                     const size_t src_type_size, const size_t out_type_size,
                     const int num_threads,
                     matmul_algo_t kernel, lowoha_params &params,
+                    batch_params_t &batch_params,
                     unsigned int auto_version) {
+
+  const char trans_input  = transA ? 't' : 'n';
+  const char trans_weight = transB ? 't' : 'n';
 
   // Auto-tuner kernel selection for single batch
   if (kernel == matmul_algo_t::auto_tuner) {
@@ -303,14 +325,14 @@ void matmul_execute(const char layout, const char trans_input,
                                       N, K, alpha, src, lda, weight, ldb,
                                       beta, dst, ldc, params.dtypes,
                                       kernel, params.mem_format_a, params.mem_format_b,
-                                      params, bias, is_weights_const);
+                                      params, batch_params, bias, is_weights_const);
     }
     else {
       kernel = auto_compute_matmul_v2(layout, trans_input, trans_weight, M,
                                       N, K, alpha, src, lda, weight, ldb,
                                       beta, dst, ldc, params.dtypes,
                                       kernel, params.mem_format_a, params.mem_format_b,
-                                      params, bias, is_weights_const);
+                                      params, batch_params, bias, is_weights_const);
     }
     return;
   }
@@ -321,7 +343,7 @@ void matmul_execute(const char layout, const char trans_input,
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                          weight, ldb, beta, dst, ldc, params, 1, 1, bias, kernel,
+                          weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
                           is_weights_const);
     return;
   }
@@ -330,7 +352,7 @@ void matmul_execute(const char layout, const char trans_input,
   // LIBXSMM blocked execution with tiling
   if (kernel == matmul_algo_t::libxsmm_blocked) {
     apilog_info("Executing matmul LOWOHA kernel with libxsmm tiling, algo: ",
-      static_cast<int>(kernel));
+                static_cast<int>(kernel));
 #if ENABLE_BRGEMM_KERNEL
     auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
     int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
@@ -368,9 +390,7 @@ void matmul_execute(const char layout, const char trans_input,
         // Offset bias pointer for the current N tile
         const void *tile_bias = nullptr;
         if (bias != nullptr) {
-          size_t bias_element_size = (params.dtypes.bias == data_type_t::f32)
-                                     ? sizeof(float)
-                                     : sizeof(uint16_t);
+          size_t bias_element_size = size_of(params.dtypes.bias);
           size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
           tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
         }
@@ -415,8 +435,7 @@ void matmul_execute(const char layout, const char trans_input,
                  po.po_type == post_op_type_t::binary_mul) &&
                 po.buff != nullptr) {
 
-              size_t element_size =
-                (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+              size_t element_size = size_of(po.dtype);
               size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
                                     (po.leading_dim) + static_cast<size_t>(j);
 
@@ -427,9 +446,7 @@ void matmul_execute(const char layout, const char trans_input,
           }
           const void *tile_bias = nullptr;
           if (bias != nullptr) {
-            size_t bias_element_size = (params.dtypes.bias == data_type_t::f32)
-                                       ? sizeof(float)
-                                       : sizeof(uint16_t);
+            size_t bias_element_size = size_of(params.dtypes.bias);
             size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
             tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
           }
@@ -441,7 +458,7 @@ void matmul_execute(const char layout, const char trans_input,
                                 ldb, tile_beta, C_tile, ldc,
                                 tile_params.dtypes, tile_kernel,
                                 tile_params.mem_format_a, tile_params.mem_format_b,
-                                tile_params, tile_bias, is_weights_const);
+                                tile_params, batch_params, tile_bias, is_weights_const);
         }
       }
     }
@@ -453,7 +470,7 @@ void matmul_execute(const char layout, const char trans_input,
                             ldb, beta, dst, ldc,
                             params.dtypes,  matmul_algo_t::aocl_blis,
                             params.mem_format_a, params.mem_format_b,
-                            params, bias, is_weights_const);
+                            params, batch_params, bias, is_weights_const);
     }
 #endif
     return;
@@ -473,8 +490,8 @@ void matmul_execute(const char layout, const char trans_input,
                         src, lda, weight,
                         ldb, beta, dst, ldc,
                         params.dtypes, kernel,
-                        params.mem_format_a, params.mem_format_b, params, bias,
-                        is_weights_const, true);
+                        params.mem_format_a, params.mem_format_b, params,
+                        batch_params, bias, is_weights_const, true);
 }
 
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
@@ -489,41 +506,21 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     profiler.tbp_start();
   }
 
-  int Batch_A = batch_params.Batch_A;
-  int Batch_B = batch_params.Batch_B;
-
-  if (validate_matmul_direct_inputs(src, weight, dst, M, N, K, Batch_A, Batch_B,
+  if (validate_matmul_direct_inputs(src, weight, dst, M, N, K,
+                                    batch_params.Batch_A, batch_params.Batch_B,
                                     params, is_weights_const) != status_t::success) {
     return status_t::failure;
   }
 
-  const bool is_f32_src  = (params.dtypes.src == data_type_t::f32);
-  const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
+  size_t src_type_size = size_of(params.dtypes.src);
+  size_t out_type_size = size_of(params.dtypes.dst);
 
-  const char trans_input  = transA ? 't' : 'n';
-  const char trans_weight = transB ? 't' : 'n';
-
-  size_t src_type_size = is_f32_src ? sizeof(float) : sizeof(int16_t);
-  size_t out_type_size = is_f32_out ? sizeof(float) : sizeof(int16_t);
-
-  size_t src_batch_stride = batch_params.batch_stride_src ==
-                            static_cast<size_t>(-1)
-                            ? (transA ? K *lda : M * lda) * src_type_size
-                            : batch_params.batch_stride_src * src_type_size;
-  size_t weight_batch_stride = batch_params.batch_stride_wei ==
-                               static_cast<size_t>(-1)
-                               ? (transB ? N *ldb : K * ldb) * src_type_size
-                               : batch_params.batch_stride_wei * src_type_size;
-  size_t dst_batch_stride = batch_params.batch_stride_dst ==
-                            static_cast<size_t>(-1)
-                            ? M * ldc * out_type_size
-                            : batch_params.batch_stride_dst * out_type_size;
-
-  const int batch_count = std::max(Batch_A, Batch_B);
+  const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
   const int num_threads = params.num_threads > 0 ? params.num_threads :
                           omp_get_max_threads();
 
-  matmul_algo_t kernel = kernel_select(params, Batch_A, Batch_B, batch_count, M,
+  matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
+                                       batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const);
 
   static unsigned int auto_version = get_auto_tuner_ver();
@@ -545,7 +542,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
       return dtypes.empty() ? "none" : dtypes;
     })()
         << "]"
-        << ", Batch_A=" << Batch_A << ", Batch_B=" << Batch_B;
+        << ", Batch_A=" << batch_params.Batch_A << ", Batch_B=" << batch_params.Batch_B;
 
     if (kernel == matmul_algo_t::auto_tuner) {
       apilog_info(ss.str(), ", kernel=", kernel_to_string(kernel),
@@ -564,18 +561,17 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   // Dispatch to BMM or Matmul based on batch_count
   if (batch_count > 1) {
     // Batch Matrix Multiplication (BMM)
-    bmm_execute(layout, trans_input, trans_weight, transA, transB,
+    bmm_execute(layout, transA, transB,
                 M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
-                is_weights_const, batch_count, Batch_A, Batch_B,
-                src_batch_stride, weight_batch_stride, dst_batch_stride,
+                is_weights_const, batch_params,
                 src_type_size, out_type_size, num_threads, kernel, params);
   }
   else {
     // Single Matrix Multiplication (Matmul)
-    matmul_execute(layout, trans_input, trans_weight, transA, transB,
+    matmul_execute(layout, transA, transB,
                    M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
                    is_weights_const, src_type_size, out_type_size, num_threads,
-                   kernel, params, auto_version);
+                   kernel, params, batch_params, auto_version);
   }
 
   if (is_profile) {

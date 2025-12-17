@@ -114,7 +114,7 @@ TEST_P(TestMatmul,F32_F32) {
  *  @brief Test to validate matmul WOQ (Weight-Only Quantization) with BF16 input
  *         and S4 weights wrt Reference kernel
  */
- TEST_P(TestMatmul, WOQ_BF16_S4) {
+TEST_P(TestMatmul, WOQ_BF16_S4) {
   if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
     GTEST_SKIP();
   }
@@ -153,55 +153,60 @@ TEST_P(TestMatmul,F32_F32) {
   }
 
   switch (quant_combo) {
-    case 0:
-      // scale=per-tensor, zp=per-tensor
-      scale_size = {1, 1};
-      zp_size = {1, 1};
-      scale_granularity = "per-tensor";
-      zp_granularity = "per-tensor";
-      break;
+  case 0:
+    // scale=per-tensor, zp=per-tensor
+    scale_size = {1, 1};
+    zp_size = {1, 1};
+    scale_granularity = "per-tensor";
+    zp_granularity = "per-tensor";
+    break;
 
-    case 1:
-      // scale=per-channel, zp=per-tensor
-      scale_size = {1, n};
-      zp_size = {1, 1};
-      scale_granularity = "per-channel";
-      zp_granularity = "per-tensor";
-      break;
+  case 1:
+    // scale=per-channel, zp=per-tensor
+    scale_size = {1, n};
+    zp_size = {1, 1};
+    scale_granularity = "per-channel";
+    zp_granularity = "per-tensor";
+    break;
 
-    case 2:
-      // scale=per-tensor, zp=per-channel
-      scale_size = {1, 1};
-      zp_size = {1, n};
-      scale_granularity = "per-tensor";
-      zp_granularity = "per-channel";
-      break;
+  case 2:
+    // scale=per-tensor, zp=per-channel
+    scale_size = {1, 1};
+    zp_size = {1, n};
+    scale_granularity = "per-tensor";
+    zp_granularity = "per-channel";
+    break;
 
-    case 3: {
-      // scale=per-group, zp=per-group
-      // Randomly select one of the valid group sizes (safe here since we checked has_valid_group_size)
-      uint64_t valid_group_size = valid_group_sizes[rand() % valid_group_sizes.size()];
-      group_size = valid_group_size;
-      num_groups = k / group_size;
-      scale_size = {num_groups, n};
-      zp_size = {num_groups, n};
-      scale_granularity = "per-group";
-      zp_granularity = "per-group";
-      break;
-    }
+  case 3: {
+    // scale=per-group, zp=per-group
+    // Randomly select one of the valid group sizes (safe here since we checked has_valid_group_size)
+    uint64_t valid_group_size = valid_group_sizes[rand() %
+                                       valid_group_sizes.size()];
+    group_size = valid_group_size;
+    num_groups = k / group_size;
+    scale_size = {num_groups, n};
+    zp_size = {num_groups, n};
+    scale_granularity = "per-group";
+    zp_granularity = "per-group";
+    break;
+  }
   }
 
   auto scale_dtype = (rand() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
-  auto wei_scale = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 2.0);
+  auto wei_scale = tensor_factory.uniform_dist_tensor(scale_size, scale_dtype,
+                   2.0);
   auto wei_zp = tensor_factory.uniform_tensor(zp_size, data_type_t::s8, 0);
 
   // Log test configuration
   std::string group_info = quant_combo > 2
-      ? " group_size=" + std::to_string(group_size) + " num_groups=" + std::to_string(num_groups)
-      : "";
-  log_info("WOQ test: scale=", scale_granularity, "[", scale_size[0], ",", scale_size[1], "]",
+                           ? " group_size=" + std::to_string(group_size) + " num_groups=" + std::to_string(
+                             num_groups)
+                           : "";
+  log_info("WOQ test: scale=", scale_granularity, "[", scale_size[0], ",",
+           scale_size[1], "]",
            " zp=", zp_granularity, "[", zp_size[0], ",", zp_size[1], "]",
-           " scale_dtype=", (scale_dtype == data_type_t::f32 ? "f32" : "bf16"), group_info);
+           " scale_dtype=", (scale_dtype == data_type_t::f32 ? "f32" : "bf16"),
+           group_info);
 
   // Create S4 quantized weight tensor with scale and zero point
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
@@ -221,14 +226,16 @@ TEST_P(TestMatmul,F32_F32) {
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
 
-  auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32;
+  auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 :
+                            data_type_t::f32;
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0);
 
   // Run kernel test and reference test
-  status_t status         = matmul_kernel_test(input_tensor, weight_tensor, bias_tensor,
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor,
                             output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index,
@@ -363,10 +370,6 @@ TEST_P(TestMatmul,F32_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn ||
-                     algo == matmul_algo_t::onednn_blocked)) {
-    GTEST_SKIP();
-  }
 
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha,
@@ -428,10 +431,6 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn ||
-                     algo == matmul_algo_t::onednn_blocked)) {
-    GTEST_SKIP();
-  }
 
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha,
@@ -493,10 +492,6 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
-  if (use_LOWOHA && (algo == matmul_algo_t::onednn ||
-                     algo == matmul_algo_t::onednn_blocked)) {
-    GTEST_SKIP();
-  }
 
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
                             bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha,

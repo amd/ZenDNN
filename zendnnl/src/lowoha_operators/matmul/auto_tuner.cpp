@@ -59,7 +59,8 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                      float beta, void *C, int ldc, data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, const void *bias, bool is_weights_const) {
+                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     const void *bias, bool is_weights_const) {
 
   //It is used to know the size of bin.
   // unsigned int autoBinSize = zendnn::zendnn_getenv_int("ZENDNNL_AUTO_BIN_SIZE", 1);
@@ -108,7 +109,7 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                             A, lda, B,
                             ldb, beta, C, ldc,
                             dtypes, kernel, mem_format_a, mem_format_b,
-                            lowoha_param, bias, is_weights_const, true);
+                            lowoha_param, batch_params, bias, is_weights_const, true);
       //Time end
       profiler.tbp_stop();
       cur_algo_time = profiler.tbp_elapsedtime();
@@ -130,7 +131,8 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                             A, lda, B,
                             ldb, beta, C, ldc,
                             dtypes, kernel,
-                            mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                            mem_format_a, mem_format_b, lowoha_param, batch_params,
+                            bias, is_weights_const, true);
     }
   }
   //Read Value from map.
@@ -145,7 +147,8 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                           A, lda, B,
                           ldb, beta, C, ldc,
                           dtypes, kernel,
-                          mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                          mem_format_a, mem_format_b, lowoha_param, batch_params, bias, is_weights_const,
+                          true);
   }
   //Updates the map values by running different algorithms
   else {
@@ -162,7 +165,8 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                           A, lda, B,
                           ldb, beta, C, ldc,
                           dtypes, kernel,
-                          mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                          mem_format_a, mem_format_b, lowoha_param, batch_params,
+                          bias, is_weights_const, true);
 
     //Time end
     profiler.tbp_stop();
@@ -186,7 +190,8 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                      float beta, void *C, int ldc, data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, const void *bias, bool is_weights_const) {
+                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     const void *bias, bool is_weights_const) {
   //Map value is toggle_ value for algo
   static std::unordered_map<Key_matmul,unsigned int>
   matmul_kernel_map1_helper;
@@ -227,7 +232,7 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                             A, lda, B,
                             ldb, beta, C, ldc,
                             dtypes, kernel, mem_format_a, mem_format_b,
-                            lowoha_param, bias, is_weights_const, true);
+                            lowoha_param, batch_params, bias, is_weights_const, true);
       //Time end
       profiler.tbp_stop();
       cur_algo_time = profiler.tbp_elapsedtime();
@@ -250,7 +255,8 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                             A, lda, B,
                             ldb, beta, C, ldc,
                             dtypes, kernel,
-                            mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                            mem_format_a, mem_format_b, lowoha_param, batch_params,
+                            bias, is_weights_const, true);
     }
   }
   //Read Value from map.
@@ -268,7 +274,8 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                           A, lda, B,
                           ldb, beta, C, ldc,
                           dtypes, kernel,
-                          mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                          mem_format_a, mem_format_b, lowoha_param, batch_params,
+                          bias, is_weights_const, true);
   }
   //Updates the map values by running different algorithms
   else {
@@ -285,7 +292,8 @@ matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                           A, lda, B,
                           ldb, beta, C, ldc,
                           dtypes, kernel,
-                          mem_format_a, mem_format_b, lowoha_param, bias, is_weights_const, true);
+                          mem_format_a, mem_format_b, lowoha_param, batch_params,
+                          bias, is_weights_const, true);
 
     //Time end
     profiler.tbp_stop();

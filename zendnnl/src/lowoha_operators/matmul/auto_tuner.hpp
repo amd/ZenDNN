@@ -103,15 +103,18 @@ namespace lowoha {
  * @param mem_format_a Memory format specifier for matrix A
  * @param mem_format_b Memory format specifier for matrix B
  * @param lowoha_param Parameters containing post-operations chain
+ * @param batch_params Batch parameters for batched matrix multiplication
  * @param bias Optional bias vector pointer (can be nullptr)
  * @param is_weights_const Flag indicating if weights are constant (considers weight address as param for key)
  * @return matmul_algo_t The selected algorithm that was used for execution
  */
-matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB, int M,
+matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
+                                     int M,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                      float beta, void *C, int ldc, data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, const void *bias, bool is_weights_const);
+                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     const void *bias, bool is_weights_const);
 
 /**
  * @brief Auto-tunes and executes matrix multiplication using alternative tuning strategy
@@ -156,15 +159,18 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB, int 
  * @param mem_format_a Memory format specifier for matrix A
  * @param mem_format_b Memory format specifier for matrix B
  * @param lowoha_param Parameters containing post-operations chain
+ * @param batch_params Parameters related to batching
  * @param bias Optional bias vector pointer (can be nullptr)
  * @param is_weights_const Flag indicating if weights are constant (considers weight address as param for key)
  * @return matmul_algo_t The selected algorithm that was used for execution
  */
-matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB, int M,
+matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
+                                     int M,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                      float beta, void *C, int ldc, data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, const void *bias, bool is_weights_const);
+                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     const void *bias, bool is_weights_const);
 } // namespace lowoha
 } // namespace zendnnl
 

@@ -22,8 +22,9 @@ namespace lowoha {
 #if ZENDNNL_DEPENDS_ONEDNN
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                           void *C, int ldc, lowoha_params &lowoha_params, int batchA, int batchB,
-                           const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const) {
+                           void *C, int ldc, lowoha_params &lowoha_params, batch_params_t &batch_params,
+                           const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const,
+                           size_t src_batch_stride, size_t weight_batch_stride, size_t dst_batch_stride) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
   onednn_utils_t::onednn_matmul_params dnnl_params;
@@ -41,7 +42,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     dnnl_params.bias.dtype = lowoha_params.dtypes.bias;
   }
 
-  int batch_count = std::max(batchA, batchB);
+  int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
   if (batch_count == 1) {
     dnnl_params.src.dims = {M, K};
     dnnl_params.weights.dims = {K, N};
@@ -49,8 +50,8 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     if (bias != nullptr) dnnl_params.bias.dims = {1, N};
   }
   else {
-    dnnl_params.src.dims = {batchA, M, K};
-    dnnl_params.weights.dims = {batchB, K, N};
+    dnnl_params.src.dims = {batch_params.Batch_A, M, K};
+    dnnl_params.weights.dims = {batch_params.Batch_B, K, N};
     dnnl_params.dst.dims = {batch_count, M, N};
     if (bias != nullptr) dnnl_params.bias.dims = {1, 1, N};
   }
@@ -61,18 +62,40 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   if (batch_count == 1) {
     dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
+    dnnl_params.src.strides    = (transA == 'n') ? std::vector<long int> {lda, 1} :
+                                 std::vector<long int> {1, lda};
     dnnl_params.weights.format_tag = (transB == 'n') ? "ab" : "ba";
+    dnnl_params.weights.strides = (transB == 'n') ? std::vector<long int> {ldb, 1} :
+                                  std::vector<long int> {1, ldb};
     dnnl_params.dst.format_tag = "ab";
+    dnnl_params.dst.strides    = std::vector<long int> {ldc, 1};
     if (bias != nullptr) {
       dnnl_params.bias.format_tag = "ab";
+      dnnl_params.bias.strides    = std::vector<long int> {0, 1};
     }
   }
   else {
+    // Cast size_t strides to long int to avoid narrowing conversion warnings
+    long int src_stride = static_cast<long int>(src_batch_stride);
+    long int wei_stride = static_cast<long int>(weight_batch_stride);
+    long int dst_stride = static_cast<long int>(dst_batch_stride);
+
     dnnl_params.src.format_tag = (transA == 'n') ? "abc" : "acb";
+    dnnl_params.src.strides = (transA == 'n') ?
+                              std::vector<long int> {src_stride, lda, 1} :
+                              std::vector<long int> {src_stride, 1, lda};
+
     dnnl_params.weights.format_tag = (transB == 'n') ? "abc" : "acb";
+    dnnl_params.weights.strides = (transB == 'n') ?
+                                  std::vector<long int> {wei_stride, ldb, 1} :
+                                  std::vector<long int> {wei_stride, 1, ldb};
+
     dnnl_params.dst.format_tag = "abc";
+    dnnl_params.dst.strides = std::vector<long int> {dst_stride, ldc, 1};
+
     if (bias != nullptr) {
       dnnl_params.bias.format_tag = "abc";
+      dnnl_params.bias.strides = std::vector<long int> {0, 0, 1};
     }
   }
 
