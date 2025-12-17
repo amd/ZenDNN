@@ -11,7 +11,7 @@ This describes all ways to provide input for the reorder benchmark in BenchDNN, 
 Run the reorder benchmark using one of the following input methods:
 
 ```sh
-./benchdnn/benchdnn --op=reorder --input_file=reorder_inputs.txt
+./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_inputs.txt
 ```
 
 ---
@@ -28,7 +28,7 @@ Provide a file with one configuration per line. Each line should contain:
 
 **Example usage:**
 ```sh
-./benchdnn/benchdnn --op=reorder --input_file=reorder_inputs.txt
+./install/benchdnn/bin/benchdnn --op=reorder --input_file=reorder_inputs.txt
 ```
 
 **Example input file (`reorder_inputs.txt`):**

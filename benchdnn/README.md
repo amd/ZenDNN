@@ -110,7 +110,7 @@ cmake --build .
 To run a benchmark, specify the operator and input method as command-line arguments from the build directory. For example:
 
 ```sh
-./benchdnn/benchdnn --op=<operator> [--input_file=<file>] [command-line options] [--input_model_file=<model_file>]
+./install/benchdnn/bin/benchdnn --op=<operator> [--input_file=<file>] [command-line options] [--input_model_file=<model_file>]
 ```
 
 - `<operator>`: Operator can be one of the following :

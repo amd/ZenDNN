@@ -19,6 +19,7 @@ ZenDNN* GTest provides flexibility in configuring tests through command-line arg
 - **Filter Tests**: Run specific test suites or cases using `--gtest_filter`.
 - **Set Random Seed**: Provide a seed value for reproducible random test data generation.
 - **Specify Post-Operations**: Apply post-operations like `relu`, `gelu_tanh`, etc., during matrix multiplication tests.
+- **Backend Selection**: Choose specific computational backends using `--backend` parameter to control algorithm selection (e.g., `aocl_blis`, `onednn`, `libxsmm`).
 
 ## **Configurable Parameters**
 You can modify the following parameters in the source code (`gtest_main.cpp`):
@@ -66,7 +67,7 @@ cmake --build .
 
 ### **General Command Structure**
 ```bash
-./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests>
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend>
 ```
 
 ## **Parameters**
@@ -76,22 +77,35 @@ cmake --build .
      - `Reorder/TestReorder.BF16_F32/*`: Runs all tests for BF16 reorder followed by Matrix (BF16 Input and FP32 Output).
      - `Matmul/TestMatmul.BF16_BF16/23`: Runs the 23rd test case for BF16 Input and BF16 Output with matrix multiplication.
 
-2. **`<Seed>`** (Optional):
+2. **`--seed <Seed>`** (Optional):
    - Sets the seed based on the seed value for generating test data.
    - *Example*:
      - `1245`: Uses 1245 as the seed for randomization.
 
-3. **`<PostOp>`** (Optional):
+3. **`--postop <PostOp>`** (Optional):
    - Specifies the post-operation to apply during tests.
 
-4. **`<num_of_tests>`** (Optional):
+4. **`--test <num_of_tests>`** (Optional):
    - Specifies the number of tests to be run for test-suite.
+
+5. **`--backend <Backend>`** (Optional):
+   - Specifies the computational backend/algorithm to use.
+   - *Supported backends*:
+     - `aocl_blis`
+     - `aocl_blis_blocked`
+     - `onednn`
+     - `onednn_blocked`
+     - `libxsmm`
+     - `libxsmm_blocked`
+   - *Example*:
+     - `aocl_blis`: Uses AOCL BLIS backend for computations
 
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
  - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
- - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops.
+ - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
+ - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops and backends.
 
 ## **Examples**
 ### Reorder Tests (Reorder + Matmul)
@@ -107,6 +121,10 @@ cmake --build .
 3. Run all FP32 reorder tests followed by Matmul(F32 Input, F32 Output):
 ``` bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/*
+```
+4. Run BF16 matmul tests with specific backend (AOCL BLIS):
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_blis
 ```
 
 ### Matmul Tests

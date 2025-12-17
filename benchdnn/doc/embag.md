@@ -11,7 +11,7 @@ This describes all ways to provide input for the embag benchmark in BenchDNN, in
 Run the embag benchmark using the following input methods:
 
 ```sh
-./benchdnn/benchdnn --op=embag --input_file=embag_inputs.txt
+./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt
 ```
 
 ---
@@ -33,7 +33,7 @@ Provide a file with one configuration per line. Each line should contain:
 
 **Example usage:**
 ```sh
-./benchdnn/benchdnn --op=embag --input_file=embag_inputs.txt
+./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt
 ```
 
 **Example input file (`embag_inputs.txt`):**

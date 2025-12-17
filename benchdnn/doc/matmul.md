@@ -11,7 +11,7 @@ This describes all ways to provide input for the matmul benchmark in BenchDNN, i
 Run the matmul benchmark using one of the following input methods:
 
 ```sh
-./benchdnn/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha]
+./install/benchdnn/bin/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha]
 ```
 
 > **Note:**
@@ -36,7 +36,7 @@ Provide a file with one configuration per line. Each line should contain:
 
 **Example usage:**
 ```sh
-./benchdnn/benchdnn --op=matmul --input_file=inputs.txt
+./install/benchdnn/bin/benchdnn --op=matmul --input_file=inputs.txt
 ```
 
 **Example input file (`inputs.txt`):**
@@ -73,11 +73,11 @@ Other options (e.g., `iters`, `dt`, etc.) can be provided via command-line argum
 
 **Example usage:**
 ```sh
-./benchdnn/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/pytorch_hugging_face_bmm.txt --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
+./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/pytorch_hugging_face_bmm.txt --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
 ```
 
 ```sh
-./benchdnn/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/recsys.txt --m=256 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
+./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/recsys.txt --m=256 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
 ```
 
 ---
@@ -87,7 +87,7 @@ All configuration parameters can be provided directly via command-line options.
 
 **Example usage:**
 ```sh
-./benchdnn/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=30 --ndims=3
+./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=30 --ndims=3
 ```
 > **Note:** For BMM benchmarking, always specify `--ndims=3` and provide `bs`.
 

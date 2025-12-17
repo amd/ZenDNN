@@ -84,7 +84,11 @@ Please refer to the [build system documentation](docs/zendnnl_build.md) for buil
 
 ## 3.1. Examples
 
-ZenDNN* provides many examples demonstrating the usage of the library API. Executables of these examples can be found in the `install/examples/bin/` folder.
+ZenDNN* provides many examples demonstrating the usage of the library API. Executables of these examples can be found in the `install/examples/bin/` directory, and can be executed as follows:
+
+```bash
+./install/examples/bin/examples
+```
 
 For detailed logging support and control, please see [logging support documentation](docs/logging.md).
 
@@ -92,7 +96,7 @@ For detailed logging support and control, please see [logging support documentat
 
 GTests are found in `install/gtests`, and can be executed as follows:
 ```bash
-./gtests/gtests
+./install/gtests/gtests
 ```
 
 For detailed usage instructions, refer to the [zendnn* gtests documentation](zendnnl/gtests/Readme.md).
