@@ -17,14 +17,15 @@
 #message(DEBUG "Searching for AMDBLIS in ${AMDBLIS_INSTALL_DIR}")
 
 set(DNNL_LIB_ROOT "${DNNL_INSTALL_DIR}/lib")
+set(DNNL_LIB_ROOT64 "${DNNL_INSTALL_DIR}/lib64")
 find_library(DNNL_LIB
   NAMES dnnl.so
-  PATHS ${DNNL_LIB_ROOT}
+  PATHS ${DNNL_LIB_ROOT} ${DNNL_LIB_ROOT64}
   NO_DEFAULT_PATH)
 
 find_library(DNNL_ARCHIVE_LIB
-  NAMES dnnl.a
-  PATHS ${DNNL_LIB_ROOT}
+  NAMES libdnnl.a dnnl.a
+  PATHS ${DNNL_LIB_ROOT} ${DNNL_LIB_ROOT64}
   NO_DEFAULT_PATH)
 
 set(DNNL_INCLUDE_ROOT "${DNNL_INSTALL_DIR}/include")
@@ -36,20 +37,21 @@ find_path(DNNL_INCLUDE_DIR
 
 include(FindPackageHandleStandardArgs)
 if(DNNL_LIB-NOTFOUND)
-  find_package_handle_standard_args(ONEDNN
+  find_package_handle_standard_args(ZLONEDNN
     DEFAULT_MSG
     DNNL_ARCHIVE_LIB
     DNNL_INCLUDE_DIR)
 else()
-  find_package_handle_standard_args(ONEDNN
+  # For zentf build, DNNL_LIB is found but its failed to link.
+  find_package_handle_standard_args(ZLONEDNN
     DEFAULT_MSG
-    DNNL_LIB
+    # DNNL_LIB
     DNNL_ARCHIVE_LIB
     DNNL_INCLUDE_DIR)
 endif()
 
-if(ONEDNN_FOUND)
-  if(ONEDNN_LIB-NOTFOUND)
+if(ZLONEDNN_FOUND)
+  if(DNNL_LIB-NOTFOUND)
     message(STATUS "onednn shared library not found.")
   # else()
   #   add_library(DNNL::dnnl SHARED IMPORTED GLOBAL)
