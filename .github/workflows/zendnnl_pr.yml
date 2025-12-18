@@ -70,6 +70,12 @@ jobs:
       TEST_ITERATIONS: ${{ github.event.inputs.test_iterations || '50' }}
       ZENDNN_REF: ${{ github.event.inputs.zendnn_ref || github.event.client_payload.zendnn_ref || '' }}
       ZENDNNL_REF: ${{ github.event.inputs.zendnnl_ref || github.event.client_payload.zendnnl_ref || '' }}
+      TRIGGERING_PR_NUMBER: ${{ github.event.client_payload.zendnntools_pr_number || '' }}
+      TRIGGERING_PR_TITLE: ${{ github.event.client_payload.zendnntools_pr_title || '' }}
+      TRIGGERING_PR_AUTHOR: ${{ github.event.client_payload.zendnntools_pr_author || '' }}
+      TRIGGERING_PR_URL: ${{ github.event.client_payload.zendnntools_pr_url || '' }}
+      TRIGGERING_REPO: ${{ github.event.client_payload.triggering_repo || '' }}
+      TRIGGERING_EVENT: ${{ github.event.client_payload.triggering_event || '' }}
     
     
     steps:
@@ -82,6 +88,62 @@ jobs:
          echo "Workspace cleaned."
          ls -al $GITHUB_WORKSPACE
       shell: bash
+    - name: Display Triggering PR Information
+      if: github.event_name == 'repository_dispatch'
+      run: |
+         echo "=============================================="
+         echo "   TRIGGERED BY EXTERNAL REPOSITORY PR"
+         echo "=============================================="
+         echo "This workflow was triggered by repository dispatch"
+         echo "   Dispatch Type: ${{ github.event.action }}"
+         echo ""
+         # Check which repository triggered this workflow
+         if [ "${{ github.event.action }}" = "zendnn-pr" ] || [ "${{ github.event.action }}" = "zendnn-zentorch-zendnnl-pr" ]; then
+          # ZenDNN repository triggered this workflow
+          if [ -n "${{ env.ZENDNN_TRIGGERING_PR_NUMBER }}" ]; then
+           echo "🔵 TRIGGERED BY ZENDNN PR:"
+           echo "   Repository: ${{ env.ZENDNN_TRIGGERING_REPO }}"
+           echo "   PR Number: #${{ env.ZENDNN_TRIGGERING_PR_NUMBER }}"
+           echo "   PR Title: ${{ env.ZENDNN_TRIGGERING_PR_TITLE }}"
+           echo "   PR Author: ${{ env.ZENDNN_TRIGGERING_PR_AUTHOR }}"
+           echo "   PR URL: ${{ env.ZENDNN_TRIGGERING_PR_URL }}"
+           echo "   Original Event: ${{ env.ZENDNN_TRIGGERING_EVENT }}"
+           echo "   ZenDNN Ref: ${{ github.event.client_payload.zendnn_ref }}"
+           echo "   ZenDNN SHA: ${{ github.event.client_payload.zendnn_ref_sha }}"
+          else
+           echo "🔵 TRIGGERED BY ZENDNN (No PR info - likely push/dispatch)"
+           echo "   Repository: AMD-Zenai/ZenDNN"
+           echo "   ZenDNN Ref: ${{ github.event.client_payload.zendnn_ref }}"
+           echo "   ZenDNN SHA: ${{ github.event.client_payload.zendnn_ref_sha }}"
+          fi
+         elif [ "${{ github.event.action }}" = "zendnnTools-pr" ] || [ "${{ github.event.action }}" = "zendnnTools-zentorch-zendnnl-pr" ]; then
+          # ZenDNN_tools repository triggered this workflow
+          if [ -n "${{ env.TRIGGERING_PR_NUMBER }}" ]; then
+           echo "🟡 TRIGGERED BY ZENDNN_TOOLS PR:"
+           echo "   Repository: ${{ env.TRIGGERING_REPO }}"
+           echo "   PR Number: #${{ env.TRIGGERING_PR_NUMBER }}"
+           echo "   PR Title: ${{ env.TRIGGERING_PR_TITLE }}"
+           echo "   PR Author: ${{ env.TRIGGERING_PR_AUTHOR }}"
+           echo "   PR URL: ${{ env.TRIGGERING_PR_URL }}"
+           echo "   Original Event: ${{ env.TRIGGERING_EVENT }}"
+           echo "   ZenDNN_tools Ref: ${{ github.event.client_payload.zendnntools_ref }}"
+           echo "   ZenDNN_tools SHA: ${{ github.event.client_payload.zendnntools_ref_sha }}"
+          else
+           echo "🟡 TRIGGERED BY ZENDNN_TOOLS (No PR info - likely push/dispatch)"
+           echo "   Repository: AMD-Zenai/ZenDNN_tools"
+           echo "   ZenDNN_tools Ref: ${{ github.event.client_payload.zendnntools_ref }}"
+           echo "   ZenDNN_tools SHA: ${{ github.event.client_payload.zendnntools_ref_sha }}"
+          fi
+         else
+          # Unknown or other trigger type
+          echo "⚠️  TRIGGERED BY UNKNOWN SOURCE:"
+          echo "   Dispatch Type: ${{ github.event.action }}"
+          echo "   Available payload:"
+          echo '${{ toJson(github.event.client_payload) }}'
+         fi
+         echo "=============================================="
+         echo ""
+      shell: bash 
     - name: Verify user account
       run: |
         echo "Running as user: $(whoami)"
