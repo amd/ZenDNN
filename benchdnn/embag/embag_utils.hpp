@@ -37,7 +37,8 @@ namespace embag {
  * @var num_indices Total number of indices across all bags.
  * @var algo Algorithm used for embag computation (e.g., "sum", "mean", "max").
  * @var iters Number of iterations to run the benchmark.
- * @var dt Data types for input, weights, and output (e.g., f32:f32:f32).
+ * @var dt Data types for table and output (e.g., f32:f32).
+ * @var fp16_scale_bias Flag indicating the data type of scale and bias.
  * @var padding_index Index used for padding; ignored during computation.
  * @var include_last_offset Flag indicating whether to include the last offset in the offsets array.
  * @var is_weights Flag indicating if weights are used for each index in the embag.
@@ -54,6 +55,7 @@ struct EmbagConfig {
   int iters; /**< Number of iterations to run the benchmark. */
   std::vector<zendnnl::common::data_type_t> dt; /**< Data type for
                                                 input and output (e.g., f32:f32). */
+  bool fp16_scale_bias; /**< Flag indicating the data type of scale and bias. */
   int64_t padding_index; /**< Index used for padding; ignored during computation. */
   bool include_last_offset; /**< Flag indicating whether to include the last offset in the offsets array. */
   bool is_weights; /**< Flag indicating if weights are used for each index in the embag. */

@@ -41,6 +41,11 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
     if (cfg.is_weights) {
       embag_context.set_is_weights(cfg.is_weights);
     }
+    if (cfg.dt[0] == data_type_t::s8 ||
+        cfg.dt[0] == data_type_t::s4 ||
+        cfg.dt[0] == data_type_t::u4) {
+      embag_context.set_fp16_scale_bias(cfg.fp16_scale_bias);
+    }
     embag_context.create();
 
     if (! embag_context.check()) {
@@ -98,6 +103,11 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
     if (cfg.is_weights) {
       embag_context.set_is_weights(cfg.is_weights);
     }
+    if (cfg.dt[0] == data_type_t::s8 ||
+        cfg.dt[0] == data_type_t::s4 ||
+        cfg.dt[0] == data_type_t::u4) {
+      embag_context.set_fp16_scale_bias(cfg.fp16_scale_bias);
+    }
     embag_context.create();
     auto end_context_creation = std::chrono::high_resolution_clock::now();
 
@@ -114,7 +124,7 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
                           .create();
     auto end_operator_creation = std::chrono::high_resolution_clock::now();
 
-    if (! embag_operator.check()) {
+    if (embag_operator.is_bad_object()) {
       testlog_error(" operator ", embag_operator.get_name(), " creation failed.");
       return NOT_OK;
     }

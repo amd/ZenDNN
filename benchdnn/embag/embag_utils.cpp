@@ -57,9 +57,9 @@ void inputParser(std::ifstream &infile, std::vector<EmbagConfig> &configs) {
 
     // Split the line into fields and validate
     auto fields = split(line, ',');
-    if (fields.size() < 11) {
+    if (fields.size() < 12) {
       commonlog_error(
-        "Invalid line (expected 11 fields): [num_embeddings, embedding_dims, num_bags, num_indices, algo, iterations, dtype, padding_index, include_last_offset, is_weights, scatter_stride, warmup_iters (optional)]");
+        "Invalid line (expected 12 fields): [num_embeddings, embedding_dims, num_bags, num_indices, algo, iterations, dtype, fp16_scale_bias, padding_index, include_last_offset, is_weights, scatter_stride, warmup_iters (optional)]");
       continue;
     }
     EmbagConfig cfg;
@@ -88,12 +88,27 @@ void inputParser(std::ifstream &infile, std::vector<EmbagConfig> &configs) {
         cfg.dt.push_back(data_type_t::f32);
         commonlog_warning("No data types specified. Defaulting all to f32.");
       }
-      cfg.padding_index = std::stoi(fields[7]);
-      if (fields[8].empty()) {
+      if (!fields[7].empty()) {
+        std::string fp16_scale_bias_flag = fields[7];
+        std::transform(fp16_scale_bias_flag.begin(), fp16_scale_bias_flag.end(),
+                        fp16_scale_bias_flag.begin(),::tolower);
+        if (fp16_scale_bias_flag == "true" || fp16_scale_bias_flag == "1") {
+          cfg.fp16_scale_bias = true;
+        }
+        else if (fp16_scale_bias_flag == "false" || fp16_scale_bias_flag == "0") {
+          cfg.fp16_scale_bias = false;
+        }
+        else {
+          commonlog_error("Invalid value for fp16_scale_bias. Use true/false or 1/0.");
+          continue;
+        }
+      }
+      cfg.padding_index = std::stoi(fields[8]);
+      if (fields[9].empty()) {
         commonlog_error("Field for include_last_offset is empty. Please provide a value.");
         continue;
       }
-      std::string offset_flag = fields[8];
+      std::string offset_flag = fields[9];
       std::transform(offset_flag.begin(), offset_flag.end(), offset_flag.begin(),
                      ::tolower);
       if (offset_flag == "true" || offset_flag == "1") {
@@ -106,7 +121,7 @@ void inputParser(std::ifstream &infile, std::vector<EmbagConfig> &configs) {
         commonlog_error("Include calue for include_last_offset. Use true/false or 1/0.");
         continue;
       }
-      std::string weights_flag = fields[9];
+      std::string weights_flag = fields[10];
       std::transform(weights_flag.begin(), weights_flag.end(), weights_flag.begin(),
                      ::tolower);
       if (weights_flag == "true" || weights_flag == "1") {
@@ -119,9 +134,9 @@ void inputParser(std::ifstream &infile, std::vector<EmbagConfig> &configs) {
         commonlog_error("Include calue for is_weights. Use true/false or 1/0.");
         continue;
       }
-      cfg.scatter_stride = std::stoi(fields[10]);
-      if (fields.size() == 12) {
-        cfg.warmup_iters = std::stoi(fields[11]);
+      cfg.scatter_stride = std::stoi(fields[11]);
+      if (fields.size() == 13) {
+        cfg.warmup_iters = std::stoi(fields[12]);
       }
       else {
         cfg.warmup_iters = 0.2 * cfg.iters;
@@ -140,15 +155,15 @@ void log_benchmark_failure(const EmbagConfig &cfg) {
   testlog_error("Benchmark failed for ", cfg.num_embeddings, ", ",
                 cfg.embedding_dims, ", ", cfg.num_bags, ", ", cfg.num_indices, ", ",
                 embagalgoToStr(cfg.algo), ", ", cfg.iters, ", ", datatypeToStr(cfg.dt[0]), ", ",
-                datatypeToStr(cfg.dt[1]), ", ", cfg.padding_index, ", ",
-                cfg.include_last_offset, ", ", cfg.is_weights, ", ", cfg.scatter_stride, ", ",
-                cfg.warmup_iters);
+                datatypeToStr(cfg.dt[1]), ", ", cfg.fp16_scale_bias, ", ", 
+                cfg.padding_index, ", ", cfg.include_last_offset, ", ", cfg.is_weights, ", ", 
+                cfg.scatter_stride, ", ", cfg.warmup_iters);
 }
 
 void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
                    &embag_results, std::ostream &outfile) {
   std::vector<std::string> headers = {
-    "Num_Embeddings", "Embedding_Dims", "Num_Bags", "Num_Indices", "Algo", "Iterations", "Data_type", "Padding_Index", "Include_Last_Offset", "Is_Weights", "Scatter_Stride", "Warmup_iters", "Total_time(ms) (all iters)"
+    "Num_Embeddings", "Embedding_Dims", "Num_Bags", "Num_Indices", "Algo", "Iterations", "Data_type", "Fp16_Scale_Bias", "Padding_Index", "Include_Last_Offset", "Is_Weights", "Scatter_Stride", "Warmup_iters", "Total_time(ms) (all iters)"
   };
 #if MEASURE_INDIVIDUAL_TIMINGS
   headers.push_back("Ctx_Creation(ms_%)");
@@ -179,19 +194,24 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
     std::string dt_str = datatypeToStr(config.dt[0]) + ":" + datatypeToStr(
                            config.dt[1]);
     col_widths[6] = std::max(col_widths[6], dt_str.size() + 2);
-    col_widths[7] = std::max(col_widths[7],
-                             std::to_string(config.padding_index).size() + 2);
+    std::string fp16_scale_bias = (config.dt[0] == data_type_t::s8 ||
+                                   config.dt[0] == data_type_t::s4 ||
+                                   config.dt[0] == data_type_t::u4) ?
+                                  std::to_string(config.fp16_scale_bias) : "";
+    col_widths[7] = std::max(col_widths[7], fp16_scale_bias.size() + 2);
     col_widths[8] = std::max(col_widths[8],
-                             std::to_string(config.include_last_offset).size() + 2);
+                             std::to_string(config.padding_index).size() + 2);
     col_widths[9] = std::max(col_widths[9],
-                             std::to_string(config.is_weights).size() + 2);
+                             std::to_string(config.include_last_offset).size() + 2);
     col_widths[10] = std::max(col_widths[10],
-                              std::to_string(config.scatter_stride).size() + 2);
+                              std::to_string(config.is_weights).size() + 2);
     col_widths[11] = std::max(col_widths[11],
+                              std::to_string(config.scatter_stride).size() + 2);
+    col_widths[12] = std::max(col_widths[12],
                               std::to_string(config.warmup_iters).size() + 2);
     std::ostringstream total_time_ss;
     total_time_ss << std::fixed << std::setprecision(2) << stat.total_time_ms;
-    col_widths[12] = std::max(col_widths[12], total_time_ss.str().size() + 2);
+    col_widths[13] = std::max(col_widths[13], total_time_ss.str().size() + 2);
 #if MEASURE_INDIVIDUAL_TIMINGS
     std::ostringstream ctx_str, op_create_str, op_exec_str;
     double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
@@ -206,9 +226,9 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
                   << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
     op_exec_str << std::fixed << std::setprecision(2)
                 << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
-    col_widths[13] = std::max(col_widths[13], ctx_str.str().size() + 2);
-    col_widths[14] = std::max(col_widths[14], op_create_str.str().size() + 2);
-    col_widths[15] = std::max(col_widths[15], op_exec_str.str().size() + 2);
+    col_widths[14] = std::max(col_widths[14], ctx_str.str().size() + 2);
+    col_widths[15] = std::max(col_widths[15], op_create_str.str().size() + 2);
+    col_widths[16] = std::max(col_widths[16], op_exec_str.str().size() + 2);
 #endif
   }
   // Helper lambda to print a row for the table
@@ -236,6 +256,10 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
     row.push_back(embagalgoToStr(config.algo));
     row.push_back(std::to_string(config.iters));
     row.push_back(datatypeToStr(config.dt[0]) + ":" + datatypeToStr(config.dt[1]));
+    row.push_back((config.dt[0] == data_type_t::s8 ||
+                   config.dt[0] == data_type_t::s4 ||
+                   config.dt[0] == data_type_t::u4) ?
+                   std::to_string(config.fp16_scale_bias) : "");
     row.push_back(std::to_string(config.padding_index));
     row.push_back(std::to_string(config.include_last_offset));
     row.push_back(std::to_string(config.is_weights));
@@ -270,7 +294,7 @@ void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
                  &embag_results, std::ostream &outfile) {
   // Write CSV header
   outfile <<
-          "Num_Embeddings, Embedding_Dims, Num_Bags, Num_Indices, Algo, Iterations, Data_type, Padding_Index, Include_Last_Offset, Is_Weights, Scatter_Stride, Warmup_iters, Total_time(ms) (all iters)";
+          "Num_Embeddings, Embedding_Dims, Num_Bags, Num_Indices, Algo, Iterations, Data_type, Fp16_Scale_Bias, Padding_Index, Include_Last_Offset, Is_Weights, Scatter_Stride, Warmup_iters, Total_time(ms) (all iters)";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation Time (ms & %), Operator Creation Time (ms & %), Operator Execution Time (ms & %)";
@@ -289,6 +313,10 @@ void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
             embagalgoToStr(config.algo) << ", " <<
             config.iters << ", " <<
             datatypeToStr(config.dt[0]) << ":" << datatypeToStr(config.dt[1]) << ", " <<
+            ((config.dt[0] == data_type_t::s8 ||
+              config.dt[0] == data_type_t::s4 ||
+              config.dt[0] == data_type_t::u4) ?
+              std::to_string(config.fp16_scale_bias) : "") << ", " <<
             config.padding_index << ", " <<
             config.include_last_offset << ", " <<
             config.is_weights << ", " <<

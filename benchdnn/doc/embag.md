@@ -25,6 +25,7 @@ Provide a file with one configuration per line. Each line should contain:
 - `algo` (Algorithm used for embag computation (e.g., "sum", "mean", "max"))
 - `iters` (Number of iterations)
 - `dt` (Data types: src:dst)
+- `fp16_scale_bias` (Flag indicating the data type of Scale and ZeroPoint used only for INT8/INT4 table data types)
 - `padding_index` (Index used for padding)
 - `include_last_offset` (Flag indicating whether to include the last offset in the offsets array)
 - `is_weights` (Flag indicating if weights are used for each index in the embag)
@@ -38,8 +39,8 @@ Provide a file with one configuration per line. Each line should contain:
 
 **Example input file (`embag_inputs.txt`):**
 ```
-20, 6, 5, 15, sum, 100, f32:f32, -1, true, true, -1, 50
-40, 8, 6, 20, mean, 100, f32:bf16, -1, true, true, -1, 50
+100, 16, 5, 10, max, 100, f32:f32, , -1, true, true, -1, 50
+100, 16, 5, 10, sum, 100, s4:f32, true, -1, true, true, -1, 50
 ```
 ---
 
@@ -59,7 +60,7 @@ Output is printed to the console and also saved to a CSV file named `timings_<cu
 
 ### Example (embag, console/CSV)
 ```
-Num_Embeddings  Embedding_Dims  Num_Bags  Num_Indices  Algo  Iterations  Data_type  Padding_Index  Include_Last_Offset  Is_Weights  Scatter_Stride  Warmup_iters  Total_time(ms) (all iters)  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)
-20              6               5         15           sum   100         f32:f32    -1             1                    1           -1              50            1094.51                     0.20 (0.02 %)       0.09 (0.01 %)      1094.22 (99.97 %)
-40              8               6         20           mean  100         f32:bf16   -1             1                    1           -1              50            1060.42                     0.24 (0.02 %)       0.10 (0.01 %)      1060.08 (99.97 %)
+Num_Embeddings  Embedding_Dims  Num_Bags  Num_Indices  Algo  Iterations  Data_type  Fp16_Scale_Bias  Padding_Index  Include_Last_Offset  Is_Weights  Scatter_Stride  Warmup_iters  Total_time(ms) (all iters)  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
+100             16              5         10           sum   100         s4:f32     1                -1             1                    1           -1              50            1114.37                     1.36 (0.12 %)       1.42 (0.13 %)      1111.59 (99.75 %)   
+100             16              5         10           max   100         f32:f32                     -1             1                    1           -1              50            1112.32                     1.17 (0.10 %)       1.10 (0.10 %)      1110.06 (99.80 %)   
 ```

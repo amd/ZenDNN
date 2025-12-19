@@ -22,9 +22,15 @@ namespace embag {
 
 int create_table_tensor(tensor_factory_t &tensor_factory, EmbagConfig cfg,
                         tensor_t &table) {
-
-  table = tensor_factory.uniform_dist_tensor({cfg.num_embeddings, cfg.embedding_dims},cfg.dt[0],
-          2.0f, "table_tensor");
+  if (cfg.dt[0] == data_type_t::f32 ||
+      cfg.dt[0] == data_type_t::bf16) {
+    table = tensor_factory.uniform_dist_tensor({cfg.num_embeddings, cfg.embedding_dims},cfg.dt[0],
+            2.0f, "table_tensor");
+  }
+  else {
+    table = tensor_factory.quantized_embedding_tensor_random({cfg.num_embeddings, cfg.embedding_dims},
+            cfg.dt[0], "table_tensor", cfg.fp16_scale_bias);
+  }
 
   return OK;
 }
