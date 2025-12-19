@@ -117,6 +117,35 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     post_op_index++;
   }
 
+  if (lowoha_params.quant_params.src_scale.buff != nullptr) {
+    dnnl_params.src_quant.scales      = lowoha_params.quant_params.src_scale.buff;
+    dnnl_params.src_quant.scale_dtype = lowoha_params.quant_params.src_scale.dt;
+    dnnl_params.src_quant.scale_size  = lowoha_params.quant_params.src_scale.dims;
+    matmul_attr.set_scales_mask(DNNL_ARG_SRC,
+                                dnnl_params.src_quant.scale_size[dnnl_params.src_quant.scale_size.size() - 1] ==
+                                1 ? 0 : 1 << 1);
+  }
+
+  if (lowoha_params.quant_params.wei_scale.buff != nullptr) {
+    dnnl_params.weights_quant.scales      =
+      lowoha_params.quant_params.wei_scale.buff;
+    dnnl_params.weights_quant.scale_dtype = lowoha_params.quant_params.wei_scale.dt;
+    dnnl_params.weights_quant.scale_size  =
+      lowoha_params.quant_params.wei_scale.dims;
+    matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS,
+                                dnnl_params.weights_quant.scale_size[dnnl_params.weights_quant.scale_size.size()
+                                    - 1] == 1 ? 0 : 1 << 1);
+  }
+
+  if (lowoha_params.quant_params.dst_scale.buff != nullptr) {
+    dnnl_params.dst_quant.scales      = lowoha_params.quant_params.dst_scale.buff;
+    dnnl_params.dst_quant.scale_dtype = lowoha_params.quant_params.dst_scale.dt;
+    dnnl_params.dst_quant.scale_size  = lowoha_params.quant_params.dst_scale.dims;
+    matmul_attr.set_scales_mask(DNNL_ARG_DST,
+                                dnnl_params.dst_quant.scale_size[dnnl_params.dst_quant.scale_size.size() - 1] ==
+                                1 ? 0 : 1 << 1);
+  }
+
   if (lowoha_params.postop_.size() > 0) {
     for (size_t po = 0; po < lowoha_params.postop_.size(); po++) {
       // float po_alpha = 0.0f, po_beta = 0.0f;

@@ -63,7 +63,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   // Check quantization parameters
   // WOQ (Weight-Only Quantization) is supported for BF16 src with S4 weights
   // Only weight scale and weight zero point are allowed for WOQ
-  const bool is_woq = (params.dtypes.src == data_type_t::bf16) && 
+  const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                       (params.dtypes.wei == data_type_t::s4);
   
   // INT8 quantization: u8/s8 src with s8 weights
@@ -73,7 +73,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   
   // WOQ and INT8 require constant weights for weight reordering/caching
   if (is_woq && !is_weights_const) {
-    log_error("WOQ quantization requires constant weights (is_weights_const=true)");
+    log_error("WOQ requires constant weights (is_weights_const=true)");
     return status_t::failure;
   }
   
@@ -420,7 +420,7 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_blis
-                         : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
+                          : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
 
   // TODO: Fallback to reference/supported kernel
   if (kernel == matmul_algo_t::auto_tuner && (Batch_A != 1 || Batch_B != 1 ||
@@ -458,7 +458,7 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
 
   // Force aocl_blis for WOQ (Weight-Only Quantization) cases
   // WOQ uses specialized AOCL kernels that don't support blocked format
-  const bool is_woq = (params.dtypes.src == data_type_t::bf16) && 
+  const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                       (params.dtypes.wei == data_type_t::s4);
   if (is_woq) {
     log_info("WOQ detected, switching to aocl_blis_blocked kernel");

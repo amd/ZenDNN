@@ -517,10 +517,6 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, INT8) {
-  if (algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) {
-    GTEST_SKIP();
-  }
-
   // TODO: Extend support for test cases with a wider range of values.
   auto wei_scale          = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 0.2);
@@ -528,11 +524,17 @@ TEST_P(TestMatmul, INT8) {
                             data_type_t::f32, 0.3);
   auto dst_scale          = !(output_dtype == data_type_t::f32 ||
                               output_dtype == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
-                                  data_type_t::f32, 1.2) : tensor_t();
-  auto src_zp             = source_dtype == data_type_t::u8 ?
+                                  data_type_t::f32, 2) : tensor_t();
+  auto dst_inv_scale      = !(output_dtype == data_type_t::f32 ||
+                              output_dtype == data_type_t::bf16) ? tensor_factory.inverse_tensor(dst_scale)
+                            : tensor_t();
+
+  auto src_zp             = ((algo == matmul_algo_t::aocl_blis ||
+                              algo == matmul_algo_t::aocl_blis_blocked) && source_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
                                 data_type_t::s8, 16) : tensor_t();
-  auto dst_zp             = output_dtype == data_type_t::u8 ?
+  auto dst_zp             = ((algo == matmul_algo_t::aocl_blis ||
+                              algo == matmul_algo_t::aocl_blis_blocked) && output_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
                                 data_type_t::u8, 53) : tensor_t();
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
@@ -546,13 +548,14 @@ TEST_P(TestMatmul, INT8) {
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            output_dtype, 2.0, false, dst_scale, dst_zp);
+                            output_dtype, 2.0, false,
+                            (algo == matmul_algo_t::onednn ||
+                             algo == matmul_algo_t::onednn_blocked) ? dst_inv_scale : dst_scale, dst_zp);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0, false, dst_scale, dst_zp);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor,
-                            output_tensor, po_index, binary_tensor, use_LOWOHA, algo,
-                            1.0, 0.0);
+                            bias_tensor, output_tensor, po_index, binary_tensor,
+                            use_LOWOHA, algo, 1.0, 0.0);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index,
                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0);

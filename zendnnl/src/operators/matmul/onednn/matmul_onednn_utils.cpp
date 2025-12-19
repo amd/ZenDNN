@@ -52,6 +52,12 @@ dnnl::memory::data_type onednn_utils_t::to_dnnl_datatype(
     return dnnl::memory::data_type::f32;
   case data_type_t::bf16:
     return dnnl::memory::data_type::bf16;
+  case data_type_t::u8:
+    return dnnl::memory::data_type::u8;
+  case data_type_t::s8:
+    return dnnl::memory::data_type::s8;
+  case data_type_t::s32:
+    return dnnl::memory::data_type::s32;
   default:
     return dnnl::memory::data_type::f32;
   }

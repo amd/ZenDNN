@@ -53,6 +53,16 @@ class onednn_utils_t {
 #endif
   };
 
+  struct onednn_quant_params {
+    std::vector<int64_t>  scale_size;
+    const void            *scales = nullptr;
+    data_type_t           scale_dtype = data_type_t::none;
+
+    std::vector<int64_t>  zero_size;
+    const void            *zero_points = nullptr;
+    data_type_t           zero_dtype = data_type_t::none;
+  };
+
   // Holds all parameters for the complete matmul operation.
   struct onednn_matmul_params {
     // Tensor descriptors
@@ -67,6 +77,11 @@ class onednn_utils_t {
 
     matmul_algo_t algo = matmul_algo_t::none;
     bool is_blocked = false;
+
+    // Quantization parameters
+    onednn_quant_params src_quant;
+    onednn_quant_params weights_quant;
+    onednn_quant_params dst_quant;
   };
 
 #if ZENDNNL_DEPENDS_ONEDNN
