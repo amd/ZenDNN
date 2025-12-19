@@ -163,6 +163,7 @@ EmbagType::EmbagType() {
   offsets_dtype = indices_dtype;
   scatter_stride = -1;
   fp16_scale_bias = std::rand() % 2;
+  use_LOWOHA = std::rand() % 2;
 }
 
 // EmbeddingType constructor
@@ -174,6 +175,7 @@ EmbeddingType::EmbeddingType() {
   is_weights = std::rand() % 2;
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   fp16_scale_bias = std::rand() % 2;
+  use_LOWOHA = std::rand() % 2;
 }
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
@@ -1490,18 +1492,97 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            bool include_last_offset,
                            bool is_weights,
                            int64_t scatter_stride,
-                           bool fp16_scale_bias) {
+                           bool fp16_scale_bias,
+                           bool use_LOWOHA) {
   try {
     status_t status;
 
-    //define embag context
-    embag_context_t embedding_bag_context = embag_context_t()
-                                            .set_param("table", table_tensor)
-                                            .set_algo(algo)
-                                            .set_padding_index(padding_index)
-                                            .set_include_last_offset(include_last_offset)
-                                            .set_is_weights(is_weights)
-                                            .set_scatter_stride(scatter_stride);
+    if (use_LOWOHA) {
+      // LOWOHA path - use embedding_bag_direct API
+      try {
+        // Validate input tensors
+        if (!table_tensor.check() || !indices_tensor.check() ||
+            !offsets_tensor.check() || !output_tensor.check()) {
+          log_error("LOWOHA embag: Invalid tensor state detected");
+          return status_t::failure;
+        }
+
+        // Get raw data pointers
+        void *table_data = table_tensor.get_raw_handle_unsafe();
+        void *indices_data = indices_tensor.get_raw_handle_unsafe();
+        void *offsets_data = offsets_tensor.get_raw_handle_unsafe();
+        float *weights_data = is_weights ? (float*)weights_tensor.get_raw_handle_unsafe() : nullptr;
+        void *output_data = output_tensor.get_raw_handle_unsafe();
+
+        if (!table_data || !indices_data || !offsets_data || !output_data) {
+          log_error("LOWOHA embag: Null data pointer detected");
+          return status_t::failure;
+        }
+
+        // Build embag_params_t structure
+        embag_params_t params;
+
+        // Set data types
+        params.dtypes.table = table_tensor.get_data_type();
+        params.dtypes.output = output_tensor.get_data_type();
+        params.dtypes.indices = indices_tensor.get_data_type();
+        params.dtypes.offsets = offsets_tensor.get_data_type();
+
+        // Use algo directly (embag_algo_t is aliased to ops::embag_algo_t)
+        params.algo = algo;
+
+        // Set dimensions
+        params.num_embeddings = table_tensor.get_size(0);
+        params.embedding_dim = table_tensor.get_size(1);
+        params.num_indices = indices_tensor.get_size(0);
+        params.num_bags = include_last_offset ?
+                          offsets_tensor.get_size(0) - 1 :
+                          offsets_tensor.get_size(0);
+        params.is_weights = is_weights;
+        params.include_last_offset = include_last_offset;
+        params.padding_idx = padding_index;
+        params.scatter_stride = scatter_stride;
+        params.num_threads = 0;  // Use default (omp_get_max_threads)
+
+        log_info("LOWOHA embag: Calling embedding_bag_direct with "
+                 "num_embeddings=", params.num_embeddings,
+                 ", embedding_dim=", params.embedding_dim,
+                 ", num_indices=", params.num_indices,
+                 ", num_bags=", params.num_bags);
+
+        // Call LOWOHA embedding_bag_direct API
+        status = embedding_bag_direct(
+            table_data,
+            indices_data,
+            offsets_data,
+            weights_data,
+            output_data,
+            params);
+
+        if (status != status_t::success) {
+          log_error("LOWOHA embedding_bag_direct execution failed.");
+          return status_t::failure;
+        }
+      }
+      catch (const std::exception &e) {
+        log_error("LOWOHA embedding_bag_direct execution failed: ", e.what());
+        return status_t::failure;
+      }
+      catch (...) {
+        log_error("LOWOHA embedding_bag_direct execution failed with unknown exception");
+        return status_t::failure;
+      }
+    }
+    else {
+      // Regular operator API path
+      //define embag context
+      embag_context_t embedding_bag_context = embag_context_t()
+                                              .set_param("table", table_tensor)
+                                              .set_algo(algo)
+                                              .set_padding_index(padding_index)
+                                              .set_include_last_offset(include_last_offset)
+                                              .set_is_weights(is_weights)
+                                              .set_scatter_stride(scatter_stride);
     if (table_tensor.get_data_type() == data_type_t::s8 ||
         table_tensor.get_data_type() == data_type_t::s4 ||
         table_tensor.get_data_type() == data_type_t::u4) {
@@ -1512,38 +1593,39 @@ status_t embag_kernel_test(tensor_t &table_tensor,
       embedding_bag_context.create();
     }
 
-    //define embedding bag operator
-    embag_operator_t embedding_bag_operator = embag_operator_t()
-        .set_name("embedding_bag")
-        .set_context(embedding_bag_context)
-        .create();
+      //define embedding bag operator
+      embag_operator_t embedding_bag_operator = embag_operator_t()
+          .set_name("embedding_bag")
+          .set_context(embedding_bag_context)
+          .create();
 
-    if (embedding_bag_operator.is_bad_object()) {
-      testlog_error(" operator ", embedding_bag_operator.get_name(),
-                    " creation failed.");
-      return status_t::failure;
-    }
+      if (embedding_bag_operator.is_bad_object()) {
+        testlog_error(" operator ", embedding_bag_operator.get_name(),
+                      " creation failed.");
+        return status_t::failure;
+      }
 
-    if (is_weights) {
-      // Execute operator
-      status = embedding_bag_operator
-               .set_input("indices", indices_tensor)
-               .set_input("weights", weights_tensor)
-               .set_input("offsets", offsets_tensor)
-               .set_output("output", output_tensor)
-               .execute();
-    }
-    else {
-      status = embedding_bag_operator
-               .set_input("indices", indices_tensor)
-               .set_input("offsets", offsets_tensor)
-               .set_output("output", output_tensor)
-               .execute();
-    }
+      if (is_weights) {
+        // Execute operator
+        status = embedding_bag_operator
+                 .set_input("indices", indices_tensor)
+                 .set_input("weights", weights_tensor)
+                 .set_input("offsets", offsets_tensor)
+                 .set_output("output", output_tensor)
+                 .execute();
+      }
+      else {
+        status = embedding_bag_operator
+                 .set_input("indices", indices_tensor)
+                 .set_input("offsets", offsets_tensor)
+                 .set_output("output", output_tensor)
+                 .execute();
+      }
 
-    if (status != status_t::success) {
-      log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
-      return status_t::failure;
+      if (status != status_t::success) {
+        log_info("operator ", embedding_bag_operator.get_name(), " execution failed.");
+        return status_t::failure;
+      }
     }
   }
   catch (const exception_t &ex) {
@@ -1636,15 +1718,85 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                tensor_t &output_tensor,
                                int64_t padding_index,
                                bool is_weights,
-                               bool fp16_scale_bias) {
+                               bool fp16_scale_bias,
+                               bool use_LOWOHA) {
   try {
     status_t status;
 
-    //define embedding context
-    embag_context_t embedding_context = embag_context_t()
-                                        .set_param("table", table_tensor)
-                                        .set_padding_index(padding_index)
-                                        .set_is_weights(is_weights);
+    if (use_LOWOHA) {
+      // LOWOHA path - use embedding_direct API
+      try {
+        // Validate input tensors
+        if (!table_tensor.check() || !indices_tensor.check() || !output_tensor.check()) {
+          log_error("LOWOHA embedding: Invalid tensor state detected");
+          return status_t::failure;
+        }
+
+        // Get raw data pointers
+        void *table_data = table_tensor.get_raw_handle_unsafe();
+        void *indices_data = indices_tensor.get_raw_handle_unsafe();
+        float *weights_data = is_weights ? (float*)weights_tensor.get_raw_handle_unsafe() : nullptr;
+        void *output_data = output_tensor.get_raw_handle_unsafe();
+
+        if (!table_data || !indices_data || !output_data) {
+          log_error("LOWOHA embedding: Null data pointer detected");
+          return status_t::failure;
+        }
+
+        // Build embag_params_t structure
+        embag_params_t params;
+
+        // Set data types
+        params.dtypes.table = table_tensor.get_data_type();
+        params.dtypes.output = output_tensor.get_data_type();
+        params.dtypes.indices = indices_tensor.get_data_type();
+
+        // Embedding uses algo = none (no reduction)
+        params.algo = embag_algo_t::none;
+
+        // Set dimensions
+        params.num_embeddings = table_tensor.get_size(0);
+        params.embedding_dim = table_tensor.get_size(1);
+        params.num_indices = indices_tensor.get_size(0);
+        params.is_weights = is_weights;
+        params.padding_idx = padding_index;
+        params.scatter_stride = 0;
+        params.num_threads = 0;  // Use default (omp_get_max_threads)
+
+        log_info("LOWOHA embedding: Calling embedding_direct with "
+                 "num_embeddings=", params.num_embeddings,
+                 ", embedding_dim=", params.embedding_dim,
+                 ", num_indices=", params.num_indices);
+
+        // Call LOWOHA embedding_direct API
+        status = embedding_direct(
+            table_data,
+            indices_data,
+            weights_data,
+            output_data,
+            params);
+
+        if (status != status_t::success) {
+          log_error("LOWOHA embedding_direct execution failed.");
+          return status_t::failure;
+        }
+      }
+      catch (const std::exception &e) {
+        log_error("LOWOHA embedding_direct execution failed: ", e.what());
+        return status_t::failure;
+      }
+      catch (...) {
+        log_error("LOWOHA embedding_direct execution failed with unknown exception");
+        return status_t::failure;
+      }
+    }
+    else {
+      // Regular operator API path
+      //define embedding context
+      embag_context_t embedding_context = embag_context_t()
+                                          .set_param("table", table_tensor)
+                                          .set_padding_index(padding_index)
+                                          .set_is_weights(is_weights);
     if (table_tensor.get_data_type() == data_type_t::s8 ||
         table_tensor.get_data_type() == data_type_t::s4 ||
         table_tensor.get_data_type() == data_type_t::u4) {
@@ -1654,37 +1806,37 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
     else {
       embedding_context.create();
     }
+      //define embedding operator
+      embag_operator_t embedding_operator = embag_operator_t()
+                                            .set_name("embedding_bag")
+                                            .set_context(embedding_context)
+                                            .create();
 
-    //define embedding operator
-    embag_operator_t embedding_operator = embag_operator_t()
-                                          .set_name("embedding_bag")
-                                          .set_context(embedding_context)
-                                          .create();
+      if (embedding_operator.is_bad_object()) {
+        testlog_error(" operator ", embedding_operator.get_name(),
+                      " creation failed.");
+        return status_t::failure;
+      }
 
-    if (embedding_operator.is_bad_object()) {
-      testlog_error(" operator ", embedding_operator.get_name(),
-                    " creation failed.");
-      return status_t::failure;
-    }
+      if (is_weights) {
+        // Execute operator
+        status = embedding_operator
+                 .set_input("indices", indices_tensor)
+                 .set_input("weights", weights_tensor)
+                 .set_output("output", output_tensor)
+                 .execute();
+      }
+      else {
+        status = embedding_operator
+                 .set_input("indices", indices_tensor)
+                 .set_output("output", output_tensor)
+                 .execute();
+      }
 
-    if (is_weights) {
-      // Execute operator
-      status = embedding_operator
-               .set_input("indices", indices_tensor)
-               .set_input("weights", weights_tensor)
-               .set_output("output", output_tensor)
-               .execute();
-    }
-    else {
-      status = embedding_operator
-               .set_input("indices", indices_tensor)
-               .set_output("output", output_tensor)
-               .execute();
-    }
-
-    if (status != status_t::success) {
-      log_info("operator ", embedding_operator.get_name(), " execution failed.");
-      return status_t::failure;
+      if (status != status_t::success) {
+        log_info("operator ", embedding_operator.get_name(), " execution failed.");
+        return status_t::failure;
+      }
     }
   }
   catch (const exception_t &ex) {

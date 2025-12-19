@@ -36,10 +36,12 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
     is_weights         = params.is_weights;
     indices_dtype      = params.indices_dtype;
     fp16_scale_bias    = params.fp16_scale_bias;
+    use_LOWOHA         = params.use_LOWOHA;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_indices: ", num_indices, " padding_index: ", padding_index,
-             " is_weights: ", is_weights);
+             " is_weights: ", is_weights, " fp16_scale_bias: ", fp16_scale_bias,
+             " use_LOWOHA: ", use_LOWOHA);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -49,6 +51,7 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
   int64_t padding_index;
   bool is_weights, fp16_scale_bias;
   data_type_t indices_dtype;
+  bool use_LOWOHA;
   tensor_factory_t tensor_factory{};
 };
 
@@ -71,10 +74,11 @@ TEST_P(TestEmbedding, F32_F32) {
                            data_type_t::f32);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
-                            weights_tensor, output_tensor, padding_index, is_weights);
+                            weights_tensor, output_tensor, padding_index, is_weights, 
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor,
-                            output_tensor_ref, padding_index, is_weights);
+                            output_tensor_ref, padding_index, is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -105,10 +109,10 @@ TEST_P(TestEmbedding, F32_BF16) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor,
-                            padding_index, is_weights);
+                            padding_index, is_weights, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor,
-                            output_tensor_ref, padding_index, is_weights);
+                            output_tensor_ref, padding_index, is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
   if (is_test_successful) {
@@ -138,10 +142,10 @@ TEST_P(TestEmbedding, BF16_F32) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor,
-                            padding_index, is_weights);
+                            padding_index, is_weights, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor,
-                            output_tensor_ref, padding_index, is_weights);
+                            output_tensor_ref, padding_index, is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -171,10 +175,11 @@ TEST_P(TestEmbedding, BF16_BF16) {
                            data_type_t::bf16);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
-                            weights_tensor, output_tensor, padding_index, is_weights);
+                            weights_tensor, output_tensor, padding_index, is_weights,
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor,
-                            output_tensor_ref, padding_index, is_weights);
+                            output_tensor_ref, padding_index, is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

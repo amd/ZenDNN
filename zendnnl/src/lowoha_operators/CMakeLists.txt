@@ -14,3 +14,4 @@
 # * limitations under the License.
 # *******************************************************************************/
 add_subdirectory(matmul)
+add_subdirectory(embedding_bag)

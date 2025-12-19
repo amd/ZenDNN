@@ -41,11 +41,13 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
     offsets_dtype      = params.offsets_dtype;
     scatter_stride     = params.scatter_stride;
     fp16_scale_bias    = params.fp16_scale_bias;
+    use_LOWOHA         = params.use_LOWOHA;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_bags: ", num_bags, " num_indices: ", num_indices,
              " algo: ", static_cast<int>(algo), " padding_index: ", padding_index,
-             " include_last_offset: ", include_last_offset, " is_weights: ", is_weights);
+             " include_last_offset: ", include_last_offset, " is_weights: ", is_weights,
+             " use_LOWOHA: ", use_LOWOHA);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -57,6 +59,7 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
   bool include_last_offset, is_weights, fp16_scale_bias;
   data_type_t indices_dtype, offsets_dtype;
   int64_t scatter_stride;
+  bool use_LOWOHA;
   tensor_factory_t tensor_factory{};
 };
 
@@ -84,12 +87,12 @@ TEST_P(TestEmbag, F32_F32) {
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -124,12 +127,12 @@ TEST_P(TestEmbag, F32_BF16) {
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -164,12 +167,12 @@ TEST_P(TestEmbag, BF16_F32) {
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -204,12 +207,12 @@ TEST_P(TestEmbag, BF16_BF16) {
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride);
+                            scatter_stride, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

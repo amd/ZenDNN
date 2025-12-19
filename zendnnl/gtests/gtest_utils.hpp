@@ -30,6 +30,7 @@
 #include "operators/embag/embag_context.hpp"
 #include "operators/embag/embag_operator.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 
 #define MATMUL_SIZE_START 1
 #define MATMUL_SIZE_END 3000
@@ -91,6 +92,7 @@ struct EmbagType {
   data_type_t offsets_dtype;
   int64_t scatter_stride;
   bool fp16_scale_bias;
+  bool use_LOWOHA;
   EmbagType();
 };
 
@@ -103,6 +105,7 @@ struct EmbeddingType {
   bool is_weights;
   data_type_t indices_dtype;
   bool fp16_scale_bias;
+  bool use_LOWOHA;
   EmbeddingType();
 };
 
@@ -299,7 +302,8 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            bool include_last_offset,
                            bool is_weights,
                            int64_t scatter_stride,
-                           bool fp16_scale_bias = true);
+                           bool fp16_scale_bias,
+                           bool use_LOWOHA=false);
 
 /** @fn embag_forced_ref_kernel_test
  *  @brief Test function for embag reference kernel (forced)
@@ -329,7 +333,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                tensor_t &output_tensor,
                                int64_t padding_index,
                                bool is_weights,
-                               bool fp16_scale_bias = true);
+                               bool fp16_scale_bias,
+                               bool use_LOWOHA=false);
 
 /** @fn embedding_forced_ref_kernel_test
  *  @brief Test function for embedding reference kernel (forced)
