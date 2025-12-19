@@ -67,7 +67,7 @@ option(JSON_GIT_PROGRESS ON)
 set(ONEDNN_ROOT_DIR "${ZENDNNL_DEPS_DIR}/onednn"
   CACHE PATH "ONEDNN root dir")
 set(ONEDNN_GIT_REPO "https://github.com/oneapi-src/oneDNN.git")
-set(ONEDNN_GIT_TAG "v3.7.1")
+set(ONEDNN_GIT_TAG "v3.10.2")
 option(ONEDNN_GIT_PROGRESS ON)
 
 # libxsmm repo information
