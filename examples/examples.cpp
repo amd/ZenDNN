@@ -22,6 +22,7 @@
 #include "compare_op_example.hpp"
 #include "embedding_bag_example.hpp"
 #include "lowoha_matmul_example.hpp"
+#include "lowoha_reorder_example.hpp"
 #include <iostream>
 
 
@@ -64,6 +65,15 @@ int main() {
     matmul_woq_bf16_kernel_example();
     run_lowoha_matmul_woq_bf16s4_test();
     run_lowoha_matmul_int8_caching_test();
+
+    /** LOWOHA Reorder operator functionality examples.
+     *  Demonstrates data type conversion between BF16 and INT8/UINT8 using
+     *  the low-overhead LOWOHA reorder API.
+     */
+    run_lowoha_reorder_bf16_to_int8_test();
+    run_lowoha_reorder_int8_to_bf16_test();
+    run_lowoha_reorder_bf16_to_uint8_test();
+    run_lowoha_reorder_uint8_to_bf16_test();
 
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,

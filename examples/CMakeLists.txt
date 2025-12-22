@@ -59,6 +59,7 @@ endif()
    sample_example.cpp
    matmul_example.cpp
    lowoha_matmul_example.cpp
+   lowoha_reorder_example.cpp
    batchmatmul_example.cpp
    compare_op_example.cpp
    reorder_example.cpp
@@ -70,6 +71,7 @@ endif()
    sample_example.hpp
    matmul_example.hpp
    lowoha_matmul_example.hpp
+   lowoha_reorder_example.hpp
    batchmatmul_example.hpp
    compare_op_example.hpp
    reorder_example.hpp
