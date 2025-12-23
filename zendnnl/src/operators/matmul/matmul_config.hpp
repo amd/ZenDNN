@@ -109,6 +109,18 @@ class matmul_config_t final : public op_config_t {
    */
   bool get_zp_comp_cache();
 
+  /** @brief Sets lru_cache_capacity.
+  *
+  * @param capacity The LRU cache capacity to set.
+  */
+  void set_lru_cache_capacity(uint32_t capacity);
+
+  /** @brief Get lru_cache_capacity.
+   *
+   * @return lru_cache_capacity.
+   */
+  uint32_t get_lru_cache_capacity();
+
   /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -139,6 +151,7 @@ class matmul_config_t final : public op_config_t {
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
+  uint32_t lru_cache_capacity; /**< LRU cache capacity. */
 };
 
 }

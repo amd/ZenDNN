@@ -37,6 +37,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 0;
   bool zp_comp_cache_enabled = false;  // Default disabled
+  uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
     auto matmul_algo_json = matmul_json["kernel"];
@@ -70,9 +71,19 @@ status_t matmul_config_t::set_user_config(json config_json) {
       }
     }
   }
+  // Read LRU cache capacity setting from JSON
+  auto lru_cache_json = config_json["lru_cache"];
+  if (!lru_cache_json.empty()) {
+    //get log levels of each log
+    auto capacity_json = lru_cache_json["capacity"];
+    if (!capacity_json.empty()) {
+      lru_cache_capacity = capacity_json.get<uint32_t>();
+    }
+  }
   set_algo(matmul_algo);
   set_weight_cache(matmul_weight_cache);
   set_zp_comp_cache(zp_comp_cache_enabled);
+  set_lru_cache_capacity(lru_cache_capacity);
   return status_t::success;
 }
 
@@ -83,7 +94,9 @@ void matmul_config_t::set_env_config() {
   if (algo_env) {
     std::string algoStr(algo_env);
     std::transform(algoStr.begin(), algoStr.end(), algoStr.begin(),
-               [](unsigned char c) { return std::tolower(c); });
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
     if (algoStr == "auto") {
       matmul_algo = static_cast<int32_t>(matmul_algo_t::auto_tuner);
     }
@@ -98,10 +111,10 @@ void matmul_config_t::set_env_config() {
           matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
         }
       }
-      catch (const std::invalid_argument& e) {
+      catch (const std::invalid_argument &e) {
         matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
       }
-      catch (const std::out_of_range& e) {
+      catch (const std::out_of_range &e) {
         matmul_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
       }
     }
@@ -131,6 +144,12 @@ void matmul_config_t::set_env_config() {
     zp_comp_cache_enabled = (std::stoi(zp_comp_cache_env) != 0);
   }
   set_zp_comp_cache(zp_comp_cache_enabled);
+  char *lru_cache_capacity_env = std::getenv("ZENDNNL_LRU_CACHE_CAPACITY");
+  uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
+  if (lru_cache_capacity_env) {
+    lru_cache_capacity = std::stoi(lru_cache_capacity_env);
+  }
+  set_lru_cache_capacity(lru_cache_capacity);
 }
 
 void matmul_config_t::set_algo(int32_t algo) {
@@ -155,6 +174,14 @@ void matmul_config_t::set_zp_comp_cache(bool comp_cache) {
 
 bool matmul_config_t::get_zp_comp_cache() {
   return zp_comp_cache;
+}
+
+void matmul_config_t::set_lru_cache_capacity(uint32_t capacity) {
+  lru_cache_capacity = capacity;
+}
+
+uint32_t matmul_config_t::get_lru_cache_capacity() {
+  return lru_cache_capacity;
 }
 
 matmul_config_t &matmul_config_t::instance() {

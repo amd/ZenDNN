@@ -19,7 +19,6 @@
 
 #include "memory/memory_utils.hpp"
 #include "operators/common/post_op.hpp"
-#include "operators/matmul/matmul_config.hpp"
 #include "lowoha_operators/matmul/zendnnl_key.hpp"
 #include "lowoha_operators/matmul/lru_cache.hpp"
 

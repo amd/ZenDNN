@@ -24,6 +24,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <algorithm>
+#include "operators/matmul/matmul_config.hpp"
 namespace zendnnl {
 namespace lowoha {
 
@@ -33,13 +34,14 @@ class lru_cache_t {
   using value_t = VALUE_T;
  public:
   //Constructor
-  lru_cache_t(int capacity=std::numeric_limits<int>::max());
+  lru_cache_t(uint32_t capacity =
+                ops::matmul_config_t::instance().get_lru_cache_capacity());
   // Destructor
   ~lru_cache_t();
 
   // Public methods
-  void set_capacity(int capacity);
-  int get_capacity() const;
+  void set_capacity(uint32_t capacity);
+  uint32_t get_capacity() const;
   value_t get_or_add(const lru_key_t &key, const value_t &value);
   void remove_if_invalidated(const lru_key_t &key);
   int get_size() const;
@@ -60,13 +62,13 @@ class lru_cache_t {
   void evict(size_t n);
 
   // Private members
-  size_t capacity_;
+  uint32_t capacity_;
   std::atomic<size_t> current_timestamp_;
   std::unique_ptr<std::unordered_map<lru_key_t, timed_entry_t>> lru_cache_map_;
 };
 
 template <typename KEY_T, typename VALUE_T>
-lru_cache_t<KEY_T, VALUE_T>::lru_cache_t(int capacity) :
+lru_cache_t<KEY_T, VALUE_T>::lru_cache_t(uint32_t capacity) :
   capacity_(capacity) {
   lru_cache_map_ = std::make_unique<
                    std::unordered_map<lru_key_t, timed_entry_t>>();
@@ -79,10 +81,7 @@ lru_cache_t<KEY_T, VALUE_T>::~lru_cache_t() {
 }
 
 template <typename KEY_T, typename VALUE_T>
-void lru_cache_t<KEY_T, VALUE_T>::set_capacity(int capacity) {
-  if (capacity < 0) {
-    throw std::invalid_argument("Capacity cannot be negative");
-  }
+void lru_cache_t<KEY_T, VALUE_T>::set_capacity(uint32_t capacity) {
   capacity_ = capacity;
   if (capacity_ < lru_cache_map_->size()) {
     evict(lru_cache_map_->size() - capacity_);
@@ -90,8 +89,8 @@ void lru_cache_t<KEY_T, VALUE_T>::set_capacity(int capacity) {
 }
 
 template <typename KEY_T, typename VALUE_T>
-int lru_cache_t<KEY_T, VALUE_T>::get_capacity() const {
-  return static_cast<int>(capacity_);
+uint32_t lru_cache_t<KEY_T, VALUE_T>::get_capacity() const {
+  return capacity_;
 }
 
 template <typename KEY_T, typename VALUE_T>
@@ -132,7 +131,7 @@ lru_cache_t<KEY_T, VALUE_T>::timed_entry_t::timed_entry_t(
 
 template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::evict(size_t n) {
-  while (capacity_ < std::numeric_limits<int>::max() &&
+  while (capacity_ < std::numeric_limits<uint32_t>::max() &&
          lru_cache_map_->size() > capacity_ - n) {
     auto oldest = std::min_element(
                     lru_cache_map_->begin(), lru_cache_map_->end(),
