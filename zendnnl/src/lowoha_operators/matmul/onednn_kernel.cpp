@@ -117,33 +117,54 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     post_op_index++;
   }
 
-  if (lowoha_params.quant_params.src_scale.buff != nullptr) {
+  if (lowoha_params.quant_params.src_scale.buff) {
     dnnl_params.src_quant.scales      = lowoha_params.quant_params.src_scale.buff;
     dnnl_params.src_quant.scale_dtype = lowoha_params.quant_params.src_scale.dt;
     dnnl_params.src_quant.scale_size  = lowoha_params.quant_params.src_scale.dims;
     matmul_attr.set_scales_mask(DNNL_ARG_SRC,
-                                dnnl_params.src_quant.scale_size[dnnl_params.src_quant.scale_size.size() - 1] ==
-                                1 ? 0 : 1 << 1);
+                                dnnl_params.src_quant.scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (lowoha_params.quant_params.src_zp.buff) {
+      dnnl_params.src_quant.zero_points      = lowoha_params.quant_params.src_zp.buff;
+      dnnl_params.src_quant.zero_dtype       = lowoha_params.quant_params.src_zp.dt;
+      dnnl_params.src_quant.zero_size        = lowoha_params.quant_params.src_zp.dims;
+      matmul_attr.set_zero_points_mask(DNNL_ARG_SRC,
+                                       dnnl_params.src_quant.zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
-  if (lowoha_params.quant_params.wei_scale.buff != nullptr) {
+  if (lowoha_params.quant_params.wei_scale.buff) {
     dnnl_params.weights_quant.scales      =
       lowoha_params.quant_params.wei_scale.buff;
     dnnl_params.weights_quant.scale_dtype = lowoha_params.quant_params.wei_scale.dt;
     dnnl_params.weights_quant.scale_size  =
       lowoha_params.quant_params.wei_scale.dims;
     matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS,
-                                dnnl_params.weights_quant.scale_size[dnnl_params.weights_quant.scale_size.size()
-                                    - 1] == 1 ? 0 : 1 << 1);
+                                dnnl_params.weights_quant.scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (lowoha_params.quant_params.wei_zp.buff) {
+      dnnl_params.weights_quant.zero_points      = lowoha_params.quant_params.wei_zp.buff;
+      dnnl_params.weights_quant.zero_dtype       = lowoha_params.quant_params.wei_zp.dt;
+      dnnl_params.weights_quant.zero_size        = lowoha_params.quant_params.wei_zp.dims;
+      matmul_attr.set_zero_points_mask(DNNL_ARG_WEIGHTS,
+                                       dnnl_params.weights_quant.zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
-  if (lowoha_params.quant_params.dst_scale.buff != nullptr) {
+  if (lowoha_params.quant_params.dst_scale.buff) {
     dnnl_params.dst_quant.scales      = lowoha_params.quant_params.dst_scale.buff;
     dnnl_params.dst_quant.scale_dtype = lowoha_params.quant_params.dst_scale.dt;
     dnnl_params.dst_quant.scale_size  = lowoha_params.quant_params.dst_scale.dims;
     matmul_attr.set_scales_mask(DNNL_ARG_DST,
-                                dnnl_params.dst_quant.scale_size[dnnl_params.dst_quant.scale_size.size() - 1] ==
-                                1 ? 0 : 1 << 1);
+                                dnnl_params.dst_quant.scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (lowoha_params.quant_params.dst_zp.buff) {
+      dnnl_params.dst_quant.zero_points      = lowoha_params.quant_params.dst_zp.buff;
+      dnnl_params.dst_quant.zero_dtype       = lowoha_params.quant_params.dst_zp.dt;
+      dnnl_params.dst_quant.zero_size        = lowoha_params.quant_params.dst_zp.dims;
+      matmul_attr.set_zero_points_mask(DNNL_ARG_DST,
+                                       dnnl_params.dst_quant.zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
   if (lowoha_params.postop_.size() > 0) {

@@ -107,8 +107,15 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.src_quant.scale_dtype = input_tensor.get_quant_scale_data_type();
     auto src_scale_size = input_tensor.get_quant_scale_size();
     params.src_quant.scale_size.assign(src_scale_size.begin(), src_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_SRC,
-                                src_scale_size[src_scale_size.size() - 1] == 1 ? 0 : 1 << 1);
+    matmul_attr.set_scales_mask(DNNL_ARG_SRC, src_scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+      params.src_quant.zero_points = input_tensor.get_quant_zero_raw_handle_const();
+      params.src_quant.zero_dtype = input_tensor.get_quant_zero_data_type();
+      auto src_zero_size = input_tensor.get_quant_zero_size();
+      params.src_quant.zero_size.assign(src_zero_size.begin(), src_zero_size.end());
+      matmul_attr.set_zero_points_mask(DNNL_ARG_SRC, src_zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
   if (weight_tensor.is_quantized()) {
@@ -116,8 +123,15 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.weights_quant.scale_dtype = weight_tensor.get_quant_scale_data_type();
     auto wei_scale_size = weight_tensor.get_quant_scale_size();
     params.weights_quant.scale_size.assign(wei_scale_size.begin(), wei_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS,
-                                wei_scale_size[wei_scale_size.size() - 1] == 1 ? 0 : 1 << 1);
+    matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+      params.weights_quant.zero_points = weight_tensor.get_quant_zero_raw_handle_const();
+      params.weights_quant.zero_dtype = weight_tensor.get_quant_zero_data_type();
+      auto wei_zero_size = weight_tensor.get_quant_zero_size();
+      params.weights_quant.zero_size.assign(wei_zero_size.begin(), wei_zero_size.end());
+      matmul_attr.set_zero_points_mask(DNNL_ARG_WEIGHTS, wei_zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
   if (output_tensor.is_quantized()) {
@@ -125,8 +139,15 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.dst_quant.scale_dtype = output_tensor.get_quant_scale_data_type();
     auto dst_scale_size = output_tensor.get_quant_scale_size();
     params.dst_quant.scale_size.assign(dst_scale_size.begin(), dst_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_DST,
-                                dst_scale_size[dst_scale_size.size() - 1] == 1 ? 0 : 1 << 1);
+    matmul_attr.set_scales_mask(DNNL_ARG_DST, dst_scale_size.back() == 1 ? 0 : 1 << 1);
+
+    if (output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+      params.dst_quant.zero_points = output_tensor.get_quant_zero_raw_handle_const();
+      params.dst_quant.zero_dtype = output_tensor.get_quant_zero_data_type();
+      auto dst_zero_size = output_tensor.get_quant_zero_size();
+      params.dst_quant.zero_size.assign(dst_zero_size.begin(), dst_zero_size.end());
+      matmul_attr.set_zero_points_mask(DNNL_ARG_DST, dst_zero_size.back() == 1 ? 0 : 1 << 1);
+    }
   }
 
   dnnl::post_ops matmul_pops;
@@ -324,33 +345,62 @@ void matmul_onednn_kernel_t::execute_matmul(const
   dnnl::memory        dnnl_bias_tensor   = dnnl::memory(dnnl_bias_desc, eng,
       params.bias.buffer);
 
-  [[maybe_unused]] dnnl::memory::desc  dnnl_blocked_weight_desc;
-  [[maybe_unused]] dnnl::memory        dnnl_blocked_weight_tensor;
-
-  [[maybe_unused]] dnnl::memory src_scale_mem, wei_scale_mem, dst_scale_mem;
   if (params.src_quant.scale_size.size()) {
     dnnl::memory::desc src_scale_desc(params.src_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.src_quant.scale_dtype),
                                       dnnl::memory::format_tag::ab);
-    src_scale_mem = dnnl::memory(src_scale_desc, eng,
+    dnnl::memory src_scale_mem = dnnl::memory(src_scale_desc, eng,
                                  const_cast<void *>(params.src_quant.scales));
+    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scale_mem});
+
+    if (params.src_quant.zero_size.size()) {
+      dnnl::memory::desc src_zero_desc(params.src_quant.zero_size,
+                                       onednn_utils_t::to_dnnl_datatype(params.src_quant.zero_dtype),
+                                       dnnl::memory::format_tag::ab);
+      dnnl::memory src_zero_mem = dnnl::memory(src_zero_desc, eng,
+                                  const_cast<void *>(params.src_quant.zero_points));
+      matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_mem});
+    }
   }
 
   if (params.weights_quant.scale_size.size()) {
     dnnl::memory::desc wei_scale_desc(params.weights_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.weights_quant.scale_dtype),
                                       dnnl::memory::format_tag::ab);
-    wei_scale_mem = dnnl::memory(wei_scale_desc, eng,
+    dnnl::memory wei_scale_mem = dnnl::memory(wei_scale_desc, eng,
                                  const_cast<void *>(params.weights_quant.scales));
+    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scale_mem});
+
+    if (params.weights_quant.zero_size.size()) {
+      dnnl::memory::desc wei_zero_desc(params.weights_quant.zero_size,
+                                       onednn_utils_t::to_dnnl_datatype(params.weights_quant.zero_dtype),
+                                       dnnl::memory::format_tag::ab);
+      dnnl::memory wei_zero_mem = dnnl::memory(wei_zero_desc, eng,
+                                  const_cast<void *>(params.weights_quant.zero_points));
+      matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, wei_zero_mem});
+    }
   }
 
   if (params.dst_quant.scale_size.size()) {
     dnnl::memory::desc dst_scale_desc(params.dst_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.dst_quant.scale_dtype),
                                       dnnl::memory::format_tag::ab);
-    dst_scale_mem = dnnl::memory(dst_scale_desc, eng,
+    dnnl::memory dst_scale_mem = dnnl::memory(dst_scale_desc, eng,
                                  const_cast<void *>(params.dst_quant.scales));
+    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem});
+
+    if (params.dst_quant.zero_size.size()) {
+      dnnl::memory::desc dst_zero_desc(params.dst_quant.zero_size,
+                                       onednn_utils_t::to_dnnl_datatype(params.dst_quant.zero_dtype),
+                                       dnnl::memory::format_tag::ab);
+      dnnl::memory dst_zero_mem = dnnl::memory(dst_zero_desc, eng,
+                                  const_cast<void *>(params.dst_quant.zero_points));
+      matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zero_mem});
+    }
   }
+
+  [[maybe_unused]] dnnl::memory::desc  dnnl_blocked_weight_desc;
+  [[maybe_unused]] dnnl::memory        dnnl_blocked_weight_tensor;
 
   bool is_reorder = !params.is_blocked && params.weights.dims.size() == 2 &&
                     params.algo == matmul_algo_t::onednn_blocked;
@@ -384,20 +434,11 @@ void matmul_onednn_kernel_t::execute_matmul(const
   auto matmul_prim = dnnl::matmul(matmul_pd);
   // Set up arguments
   matmul_args.insert({DNNL_ARG_SRC, dnnl_input_tensor});
-  if (params.src_quant.scale_size.size()) {
-    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scale_mem});
-  }
   matmul_args.insert({DNNL_ARG_WEIGHTS, (is_reorder) ? dnnl_blocked_weight_tensor : dnnl_weight_tensor});
-  if (params.weights_quant.scale_size.size()) {
-    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scale_mem});
-  }
   if (params.bias.buffer != nullptr) {
     matmul_args.insert({DNNL_ARG_BIAS, dnnl_bias_tensor});
   }
   matmul_args.insert({DNNL_ARG_DST, dnnl_output_tensor});
-  if (params.dst_quant.scale_size.size()) {
-    matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem});
-  }
 
   // Execute primitive
   matmul_prim.execute(eng_stream, matmul_args);

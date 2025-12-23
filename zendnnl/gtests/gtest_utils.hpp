@@ -62,6 +62,7 @@ struct MatmulType {
   matmul_algo_t algo = matmul_algo_t::none;
   data_type_t source_dtype;
   data_type_t output_dtype;
+  quant_granularity_t weight_granularity;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 

@@ -30,7 +30,6 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   alpha    = dist(gen);
   beta     = dist(gen);
 
-  use_LOWOHA = false;
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
@@ -61,12 +60,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         }
       }
       else {
-        if (!cmd_lowoha.empty()) {
-          use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
-        }
-        else {
-          use_LOWOHA = rand() % 2;
-        }
+        use_LOWOHA = rand() % 2;
       }
     }
     else {
@@ -90,7 +84,6 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
 
         use_LOWOHA = (test_index >= third);
         if (test_index >= 2 * third) {
-          use_LOWOHA = true;
           alpha = 1.0f;
           beta = rand() % 2;
           algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
@@ -142,6 +135,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   }
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   output_dtype = dtype_arr[rand() % dtype_size];
+  weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
+                         quant_granularity_t::channel;
 }
 
 // EmbagType constructor

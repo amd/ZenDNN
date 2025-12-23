@@ -39,6 +39,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     beta         = params.beta;
     source_dtype = params.source_dtype;
     output_dtype = params.output_dtype;
+    weight_granularity = params.weight_granularity;
     if (!cmd_post_op.empty()) {
       auto it = find_if(po_arr.begin(), po_arr.end(),
       [&](const std::pair<std::string, post_op_type_t> &po) {
@@ -65,6 +66,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   float alpha, beta;
   bool use_LOWOHA;
   data_type_t source_dtype, output_dtype;
+  quant_granularity_t weight_granularity;
   matmul_algo_t algo;
 };
 
@@ -518,7 +520,11 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  */
 TEST_P(TestMatmul, INT8) {
   // TODO: Extend support for test cases with a wider range of values.
-  auto wei_scale          = tensor_factory.uniform_dist_tensor({1, n},
+  std::vector<uint64_t> wei_scale_size = (weight_granularity ==
+                                          quant_granularity_t::tensor) ?
+                                         std::vector<uint64_t> {1, 1} :
+                                         std::vector<uint64_t> {1, n};
+  auto wei_scale          = tensor_factory.uniform_dist_tensor(wei_scale_size,
                             data_type_t::f32, 0.2);
   auto src_scale          = tensor_factory.uniform_dist_tensor({1, 1},
                             data_type_t::f32, 0.3);
@@ -529,16 +535,17 @@ TEST_P(TestMatmul, INT8) {
                               output_dtype == data_type_t::bf16) ? tensor_factory.inverse_tensor(dst_scale)
                             : tensor_t();
 
-  auto src_zp             = ((algo == matmul_algo_t::aocl_blis ||
-                              algo == matmul_algo_t::aocl_blis_blocked) && source_dtype == data_type_t::u8) ?
+  auto src_zp             = (source_dtype == data_type_t::u8) ?
+                            tensor_factory.uniform_tensor({1, 1},
+                                data_type_t::u8, 16) : tensor_t();
+  auto wei_zp             = (weight_granularity == quant_granularity_t::tensor) ?
                             tensor_factory.uniform_tensor({1, 1},
                                 data_type_t::s8, 16) : tensor_t();
-  auto dst_zp             = ((algo == matmul_algo_t::aocl_blis ||
-                              algo == matmul_algo_t::aocl_blis_blocked) && output_dtype == data_type_t::u8) ?
+  auto dst_zp             = (output_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
                                 data_type_t::u8, 53) : tensor_t();
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
-                            data_type_t::s8, 25.0, transB, wei_scale);
+                            data_type_t::s8, 25.0, transB, wei_scale, wei_zp);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
                             source_dtype, 25.0, transA, src_scale, src_zp);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
