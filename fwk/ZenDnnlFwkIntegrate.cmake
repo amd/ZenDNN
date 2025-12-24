@@ -259,6 +259,14 @@ else()
 
     target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
 
+    zendnnl_add_dependency(NAME onednn
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+        LIB_SUFFIX lib64
+        ARCHIVE_FILE "libdnnl.a"
+        ALIAS "DNNL::dnnl")
+
+    target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+
   else()
     zendnnl_add_dependency(NAME aoclutils
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
@@ -273,6 +281,13 @@ else()
       ALIAS "au::au_cpuid")
 
     target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+
+    zendnnl_add_dependency(NAME onednn
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+      ARCHIVE_FILE "libdnnl.a"
+      ALIAS "DNNL::dnnl")
+
+    target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
 
   endif()
 
@@ -293,15 +308,6 @@ else()
         ALIAS "aocldlp::aocl_dlp_static")
 
       target_link_libraries(zendnnl_library INTERFACE aocldlp::aocl_dlp_static)
-  endif()
-
-  if (ZENDNNL_DEPENDS_ONEDNN)
-      zendnnl_add_dependency(NAME onednn
-        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-        ARCHIVE_FILE "libdnnl.a"
-        ALIAS "DNNL::dnnl")
-
-      target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
   endif()
 
   # libxsmm dependency
