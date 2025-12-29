@@ -316,6 +316,18 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
     }
   }
 
+  // Helper lambda to convert data_type_t to DLP_TYPE
+  auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
+    switch (dt) {
+    case data_type_t::f32: return DLP_F32;
+    case data_type_t::bf16: return DLP_BF16;
+    case data_type_t::s32: return DLP_S32;
+    case data_type_t::s8: return DLP_S8;
+    case data_type_t::u8: return DLP_U8;
+    default: return DLP_F32;
+    }
+  };
+
   // Allocate seq_vector first (only if we have post-ops)
   if (total_ops > 0) {
     dlp_metadata->seq_vector = static_cast<DLP_POST_OP_TYPE *>(calloc(total_ops,
@@ -397,6 +409,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
     for (int i = 0; i < matrix_add_count; ++i) {
       dlp_metadata->matrix_add[i].sf = static_cast<dlp_sf_t *>(calloc(1,
                                        sizeof(dlp_sf_t)));
+      dlp_metadata->matrix_add[i].sf->scale_factor_type = to_dlp_type(data_type_t::f32);
       if (!dlp_metadata->matrix_add[i].sf) {
         // Clean up partially allocated sf structures
         for (int j = 0; j < i; ++j) {
@@ -442,6 +455,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
     for (int i = 0; i < matrix_mul_count; ++i) {
       dlp_metadata->matrix_mul[i].sf = static_cast<dlp_sf_t *>(calloc(1,
                                        sizeof(dlp_sf_t)));
+      dlp_metadata->matrix_mul[i].sf->scale_factor_type = to_dlp_type(data_type_t::f32);
       if (!dlp_metadata->matrix_mul[i].sf) {
         // Clean up partially allocated sf structures
         for (int j = 0; j < i; ++j) {
@@ -473,19 +487,6 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
   int eltwise_index = 0;
   int matrix_add_index = 0;
   int matrix_mul_index = 0;
-
-  // Helper lambda to convert data_type_t to DLP_TYPE
-  auto to_dlp_type = [](data_type_t dt) -> DLP_TYPE {
-    switch (dt) {
-    case data_type_t::f32: return DLP_F32;
-    case data_type_t::bf16: return DLP_BF16;
-    case data_type_t::s32: return DLP_S32;
-    case data_type_t::s8: return DLP_S8;
-    case data_type_t::u8: return DLP_U8;
-    default: return DLP_F32;
-    }
-  };
-
   int bias_index = 0;
   int scale_index = 0;
 

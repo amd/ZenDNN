@@ -102,7 +102,7 @@ status_t aocl_dlp_utils_t::set_runtime_post_op_buffer(tensor_map_type
       if (found_obj_mul != inputs_.end()) {
         auto mul_buff_tensor = inputs_[key_mul];
         if (found_obj_mul->second.get_size().size() == 1 &&
-            aocl_dlp_po_ptr->bias != nullptr) {
+            aocl_dlp_po_ptr->scale != nullptr) {
           (aocl_dlp_po_ptr->scale + mul_idx_1d)->sf->scale_factor  =
             mul_buff_tensor.get_raw_handle_unsafe();
           (aocl_dlp_po_ptr->scale + mul_idx_1d)->zp->zero_point    = &dummy_zp;
@@ -298,9 +298,11 @@ status_t aocl_dlp_utils_t::aocl_post_op_memory_alloc(const
     }
     for (int i = 0; i < num_post_ops_binary_add; ++i) {
       aocl_dlp_po_ptr->matrix_add[i].sf = (dlp_sf_t *) calloc(1, sizeof(dlp_sf_t));
+      aocl_dlp_po_ptr->matrix_add[i].sf->scale_factor_type = get_aocl_store_type(data_type_t::f32);
     }
     for (int i = 0; i < num_post_ops_binary_mul; ++i) {
       aocl_dlp_po_ptr->matrix_mul[i].sf = (dlp_sf_t *) calloc(1, sizeof(dlp_sf_t));
+      aocl_dlp_po_ptr->matrix_mul[i].sf->scale_factor_type = get_aocl_store_type(data_type_t::f32);
     }
   }
   return status_t::success;
