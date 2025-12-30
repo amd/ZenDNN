@@ -85,7 +85,7 @@ status_t embag_f32_avx512_kernel_t::execute(const context_type &context_,
                                     offsets_iter->second.get_data_type() : data_type_t::none;
   auto output_data_type           = dst_tensor.get_data_type();
   const int64_t  padidx           = context_.get_padding_index();
-  int64_t stride                  = context_.get_scatter_stride();
+  int64_t stride                  = dst_tensor.get_stride()[0];
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
@@ -109,10 +109,6 @@ status_t embag_f32_avx512_kernel_t::execute(const context_type &context_,
     if (include_last_offset==1) {
       offsz -= 1;
     }
-  }
-
-  if (stride==-1) {
-    stride=width;
   }
 
   if (output_data_type == data_type_t::f32) {
@@ -213,7 +209,7 @@ status_t embag_bf16_avx512_kernel_t::execute(const context_type &context_,
                                     offsets_iter->second.get_data_type() : data_type_t::none;
   auto output_data_type           = dst_tensor.get_data_type();
   const int64_t  padidx           = context_.get_padding_index();
-  int64_t stride                  = context_.get_scatter_stride();
+  int64_t stride                  = dst_tensor.get_stride()[0];
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
@@ -237,10 +233,6 @@ status_t embag_bf16_avx512_kernel_t::execute(const context_type &context_,
     if (include_last_offset==1) {
       offsz -= 1;
     }
-  }
-
-  if (stride==-1) {
-    stride=width;
   }
 
   if (output_data_type == data_type_t::f32) {
@@ -340,7 +332,7 @@ status_t embag_int8_int4_avx512_kernel_t::execute(const context_type &context_,
   auto offsets_data_type          = is_offsets ?
                                     offsets_iter->second.get_data_type() : data_type_t::none;
   const int64_t  padidx           = context_.get_padding_index();
-  int64_t stride                  = context_.get_scatter_stride();
+  int64_t stride                  = dst_tensor.get_stride()[0];
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
@@ -365,10 +357,6 @@ status_t embag_int8_int4_avx512_kernel_t::execute(const context_type &context_,
     if (include_last_offset==1) {
       offsz -= 1;
     }
-  }
-
-  if (stride==-1) {
-    stride=width;
   }
 
   if (table_dtype == data_type_t::s8 && dst_dtype == data_type_t::f32) {

@@ -53,12 +53,6 @@ class embag_context_t final : public op_context_t<embag_context_t> {
   embag_context_t &set_padding_index(int64_t padding_index_);
   int64_t          get_padding_index() const;
 
-  embag_context_t &set_scatter_stride(int64_t scatter_stride_);
-  int64_t         get_scatter_stride() const;
-
-  embag_context_t &set_scatter_offset(int64_t scatter_offset_);
-  int64_t         get_scatter_offset() const;
-
   embag_context_t &set_include_last_offset(bool include_last_offset_);
   bool             get_include_last_offset() const;
 
@@ -78,8 +72,6 @@ class embag_context_t final : public op_context_t<embag_context_t> {
  private:
   embag_algo_t  algo;
   int64_t       padding_index;
-  int64_t       scatter_stride;
-  int64_t       scatter_offset;
   bool          include_last_offset;
   bool          is_weights;
   bool          fp16_scale_bias;

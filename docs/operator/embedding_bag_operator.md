@@ -227,6 +227,22 @@ Describes how the tensor is stored in memory, which affects performance and acce
 tensor.set_layout(tensor_layout_t::contiguous);
 ```
 
+#### Stride
+The **stride** of a tensor defines the number of elements to skip in memory to move to the next element along each dimension.
+
+**Example:**
+For output tensor with shape `[B, D]` where `B=4` and `D=128`:
+- Default contiguous stride: `[128, 1]`
+- Custom padded stride (e.g., aligned to 256): `[256, 1]`
+
+```cpp
+// Set stride for output tensor
+// For shape [B, D], stride specifies memory layout
+output.set_stride({D, 1});  // Row-major contiguous layout
+
+// Example with custom stride for memory alignment
+output.set_stride({256, 1});  // Padded row stride for alignment
+```
 #### Example:
 ```cpp
 auto table = tensor_t()
@@ -234,6 +250,7 @@ auto table = tensor_t()
              .set_size({R, D})
              .set_data_type(data_type_t::f32)
              .set_layout(tensor_layout_t::contiguous)
+             .set_stride({D, 1})  // Row-major contiguous stride
              .set_storage()
              .create();
 ```
@@ -246,6 +263,7 @@ auto table = tensor_t()
              .set_size({R, D})
              .set_data_type(data_type_t::f32)
              .set_layout(tensor_layout_t::contiguous)
+             .set_stride({D, 1})  // Row-major contiguous stride
              .set_storage()
              .create();
 ```
@@ -326,6 +344,10 @@ int embag_sum_f32_kernel_example() {
     auto output_tensor = tensor_factory.zero_tensor({B, D},
                                                     data_type_t::f32,
                                                     "output");
+
+    // Set stride for output tensor - defines memory layout
+    // For shape [B, D], stride {D, 1} specifies row-major contiguous layout
+    output_tensor.set_stride({D, 1});
 
     // Set the input and output tensors and execute the embag operator
     status = embag_operator
@@ -427,6 +449,11 @@ int embedding_bag_u4_kernel_example() {
     // Create output tensor with dimensions [NUM_BAGS, EMBEDDING_DIM]
     auto output_tensor = tensor_factory.zero_tensor({EMB_BATCH_SIZE, EMB_DIM},
                          data_type_t::f32, "output");
+
+    // Set stride for output tensor - defines memory layout
+    // For shape [EMB_BATCH_SIZE, EMB_DIM], stride {EMB_DIM, 1} specifies
+    // row-major contiguous layout
+    output_tensor.set_stride({EMB_DIM, 1});
 
     // Set the input and output tensors and execute the embag operator
     status = embedding_bag_operator

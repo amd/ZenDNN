@@ -1576,8 +1576,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                                               .set_algo(algo)
                                               .set_padding_index(padding_index)
                                               .set_include_last_offset(include_last_offset)
-                                              .set_is_weights(is_weights)
-                                              .set_scatter_stride(scatter_stride);
+                                              .set_is_weights(is_weights);
     if (table_tensor.get_data_type() == data_type_t::s8 ||
         table_tensor.get_data_type() == data_type_t::s4 ||
         table_tensor.get_data_type() == data_type_t::u4) {
@@ -1650,8 +1649,7 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                             .set_algo(algo)
                                             .set_padding_index(padding_index)
                                             .set_include_last_offset(include_last_offset)
-                                            .set_is_weights(is_weights)
-                                            .set_scatter_stride(scatter_stride);
+                                            .set_is_weights(is_weights);
     if (table_tensor.get_data_type() == data_type_t::s8 ||
         table_tensor.get_data_type() == data_type_t::s4 ||
         table_tensor.get_data_type() == data_type_t::u4) {

@@ -323,7 +323,7 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
   const int64_t  width            = table_tensor.get_size(1);
   const int64_t  indsz            = indices_tensor.get_size(0);
   const int64_t  padidx           = context_.get_padding_index();
-  int64_t stride                  = context_.get_scatter_stride();
+  int64_t stride                  = dst_tensor.get_stride()[0];
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
@@ -356,10 +356,6 @@ status_t embag_ref_kernel_t::execute(const context_type &context_,
     if (include_last_offset==1) {
       offsz -= 1;
     }
-  }
-
-  if (stride==-1) {
-    stride=width;
   }
 
   // Dispatch to appropriate template instantiation based on data types
@@ -517,7 +513,7 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
   const int64_t  width            = table_tensor.get_size(1);
   const int64_t  indsz            = indices_tensor.get_size(0);
   const int64_t  padidx           = context_.get_padding_index();
-  int64_t stride                  = context_.get_scatter_stride();
+  int64_t stride                  = dst_tensor.get_stride()[0];
   const embag_algo_t algo         = context_.get_algo();
   const bool include_last_offset  = context_.get_include_last_offset();
   const bool is_weights           = context_.get_is_weights();
@@ -551,10 +547,6 @@ status_t embag_int8_int4_ref_kernel_t::execute(const context_type &context_,
     if (include_last_offset==1) {
       offsz -= 1;
     }
-  }
-
-  if (stride==-1) {
-    stride=width;
   }
 
   // Dispatch to appropriate template instantiation based on data types

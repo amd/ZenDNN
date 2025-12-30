@@ -24,8 +24,6 @@ embag_context_t::embag_context_t()
   : op_context_t(),
     algo{embag_algo_t::none},
     padding_index{-1},
-    scatter_stride{-1},
-    scatter_offset{0},
     include_last_offset{false},
     is_weights{false},
     fp16_scale_bias{true} {
@@ -51,28 +49,6 @@ embag_context_t &embag_context_t::set_padding_index(int64_t padding_index_) {
 int64_t embag_context_t::get_padding_index() const {
   LOG_DEBUG_INFO("Getting padding index for embag_context_t");
   return padding_index;
-}
-
-embag_context_t &embag_context_t::set_scatter_stride(int64_t scatter_stride_) {
-  LOG_DEBUG_INFO("Setting scatter_stride for embag_context_t");
-  scatter_stride = scatter_stride_;
-  return *this;
-}
-
-int64_t embag_context_t::get_scatter_stride() const {
-  LOG_DEBUG_INFO("Getting scatter_stride for embag_context_t");
-  return scatter_stride;
-}
-
-embag_context_t &embag_context_t::set_scatter_offset(int64_t scatter_offset_) {
-  LOG_DEBUG_INFO("Setting scatter_offset for embag_context_t");
-  scatter_offset = scatter_offset_;
-  return *this;
-}
-
-int64_t embag_context_t::get_scatter_offset() const {
-  LOG_DEBUG_INFO("Getting scatter_offset for embag_context_t");
-  return scatter_offset;
 }
 
 embag_context_t &embag_context_t::set_include_last_offset(
