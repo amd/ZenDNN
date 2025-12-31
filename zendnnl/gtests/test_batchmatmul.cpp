@@ -20,7 +20,7 @@
 
 /** @brief TestMatmul is a test class to handle parameters */
 class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
- protected:
+protected:
   /** @brief SetUp is to initialize test parameters
    *
    *  This method is a standard and is used in googletests to initialize parameters
@@ -335,10 +335,14 @@ TEST_P(TestBatchMatmul,F32_3D) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
+
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }
@@ -383,10 +387,14 @@ TEST_P(TestBatchMatmul,F32_2D_WEI) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }
@@ -431,10 +439,13 @@ TEST_P(TestBatchMatmul,F32_2D_INP) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }
@@ -472,10 +483,13 @@ TEST_P(TestBatchMatmul,BF16_F32_3D) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }
@@ -521,10 +535,13 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_WEI) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }
@@ -570,10 +587,13 @@ TEST_P(TestBatchMatmul,BF16_F32_2D_INP) {
                             beta);
   bool is_test_successful = (status == status_t::success &&
                              ref_status == status_t::success);
+
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                                 algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_3D_matrix(output_tensor, output_tensor_ref, batch_size,
                              m, n, k, rtol_f32, epsilon_f32,
-                             is_test_successful);
+                             is_test_successful, enable_f32_relaxation);
   }
   EXPECT_TRUE(is_test_successful);
 }

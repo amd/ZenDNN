@@ -38,6 +38,7 @@
 #define BATCH_START 1
 #define BATCH_END 256
 #define TEST_PARTITIONS 3
+#define ENABLE_F32_RELAXATION 0
 
 using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
@@ -137,7 +138,7 @@ extern std::vector<EmbeddingType> embedding_test;
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
 class tensor_factory_t {
- public:
+public:
   /** @brief Index type */
   using index_type = tensor_t::index_type;
   using data_type  = data_type_t;
@@ -209,7 +210,7 @@ class Parser {
   void read_from_umap(const std::string &key, int64_t &num);
   void read_from_umap(const std::string &key, uint32_t &num);
   void read_from_umap(const std::string &key, std::string &num);
- public:
+public:
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
@@ -374,7 +375,8 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
 void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               tensor_t &output_tensor_ref, uint64_t m,
                               uint64_t n, uint64_t k, const float rtol,
-                              const float epsilon, bool &flag);
+                              const float epsilon, bool &flag,
+                              bool enable_f32_relaxation = false);
 
 /** @fn compare_tensor_3D_matrix
  *  @brief Function to compare two matrix result after batch-matrix matmul
@@ -388,7 +390,8 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
 void compare_tensor_3D_matrix(tensor_t &output_tensor,
                               tensor_t &output_tensor_ref, uint64_t batch_size,
                               uint64_t m, uint64_t n, uint64_t k, const float rtol,
-                              const float epsilon, bool &flag);
+                              const float epsilon, bool &flag,
+                              bool enable_f32_relaxation = false);
 
 /** @fn get_aligned_size
  *  @brief Function to align the given size_ according to the alignment

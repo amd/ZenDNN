@@ -27,6 +27,49 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `MATMUL_BF16_TOL`: Tolerance for BF16 precision in tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `100`).
 
+## **Accuracy Validation**
+
+ZenDNN* GTest validates numerical accuracy by comparing optimized implementations against reference results using dynamic tolerance algorithms that adapt to matrix dimensions and data types.
+
+### **Tolerance Calculation**
+
+**BF16 Operations:**
+```
+abs_bound = k * epsilon_bf16
+allowed_error = abs_bound + rtol_bf16 * |reference_value|
+```
+
+**F32 Operations:**
+```
+abs_bound = ((20 + log2(k)/4) * k + 15) * epsilon_f32
+allowed_error = abs_bound + rtol_f32 * |reference_value|
+```
+
+Where `k` is the inner matrix dimension that determines accumulation error scaling.
+
+**Relaxation Features:**
+- **Zero-reference tolerance**: `8e-4` for near-zero reference values (`< 1e-6`)
+- **Additional slack**: `2e-4` buffer for F32 operations
+
+**Note**: Relaxation can be enabled via `ENABLE_F32_RELAXATION` macro in `gtest_utils.hpp` and is enabled by default for LIBXSMM backends.
+
+### **Configuration**
+Key tolerance parameters in `gtest_main.cpp`:
+```cpp
+const float epsilon_f32     = 1.19e-7;  // Base F32 tolerance
+const float epsilon_bf16    = 9.76e-4;    // Base BF16 tolerance
+const float rtol_f32        = 1e-5;    // F32 relative tolerance
+const float rtol_bf16       = 1e-2;;    // BF16 relative tolerance
+```
+
+### **Adaptive Scaling**
+- **Small matrices**: Tolerance based on base epsilon values
+- **Large matrices**: Logarithmic scaling prevents excessive tolerance growth
+- **Post-operations**: Additional margin (P=15) for accumulation errors
+
+This ensures accuracy validation scales with computational complexity while maintaining precision standards across different backends and data types.
+
+
 ## **Supported Post-Operations**
 The following post-operations are supported for matmul and its variations:
 - `relu`
@@ -39,6 +82,12 @@ The following post-operations are supported for matmul and its variations:
 - `binary_mul`
 
 **Note:** If specified post-op is not from above mention list, then no post-op will be applied to operator.
+
+## **Bias Support**
+- **Default Behavior**: Bias is enabled by default for all matrix multiplication tests
+- **Data Types**: Bias tensors support both F32 and BF16 data types, randomly selected during test execution
+
+**Note**: GTest currently excludes bias operations for LIBXSMM BF16 backends
 
 ## **Directory Structure**
 

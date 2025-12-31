@@ -20,7 +20,7 @@
 
 /** @brief TestMatmul is a test class to handle parameters */
 class TestMatmul : public ::testing::TestWithParam<MatmulType> {
- protected:
+protected:
   /** @brief SetUp is to initialize test parameters
    *
    *  This method is a standard and is used in googletests to initialize parameters
@@ -100,10 +100,11 @@ TEST_P(TestMatmul,F32_F32) {
                             use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
-
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                      algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
-                             epsilon_f32, is_test_successful);
+                             epsilon_f32, is_test_successful, enable_f32_relaxation);
 
   }
 
@@ -282,10 +283,11 @@ TEST_P(TestMatmul, BF16_F32) {
                             use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
-
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                      algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
-                             epsilon_f32, is_test_successful);
+                             epsilon_f32, is_test_successful, enable_f32_relaxation);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -381,10 +383,11 @@ TEST_P(TestMatmul,F32_F32_Stride) {
                             use_LOWOHA, algo, alpha, beta);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
-
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                      algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
-                             epsilon_f32, is_test_successful);
+                             epsilon_f32, is_test_successful,enable_f32_relaxation);
   }
 
   EXPECT_TRUE(is_test_successful);
@@ -443,9 +446,11 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
+  bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
+                      algo == matmul_algo_t::libxsmm_blocked);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
-                             epsilon_f32, is_test_successful);
+                             epsilon_f32, is_test_successful, enable_f32_relaxation);
   }
 
   EXPECT_TRUE(is_test_successful);

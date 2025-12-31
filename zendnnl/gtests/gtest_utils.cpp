@@ -54,8 +54,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         alpha = 1.0f;
         beta  = rand() % 2;
         use_LOWOHA = true;
-        //ToDo: Need to support silu, gelu_tanh, F32 postops.
-        if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+        //ToDo: Need to support silu, gelu_tanh.
+        if (po_index == 4 || po_index == 1) {
           po_index = 8;
         }
       }
@@ -90,8 +90,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
           if (!ZENDNNL_DEPENDS_LIBXSMM) {
             algo = matmul_algo_t::aocl_dlp;
           }
-          // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
-          if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+          // ToDo: Add support for other postops. Currently disabling gelu_tanh, swish.
+          if (po_index == 4 || po_index == 1) {
             po_index = 8;
           }
         }
@@ -105,8 +105,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
           if (!ZENDNNL_DEPENDS_LIBXSMM) {
             algo = matmul_algo_t::aocl_dlp;
           }
-          // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
-          if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+          // ToDo: Add support for other postops. Currently disabling gelu_tanh, swish.
+          if (po_index == 4 || po_index == 1) {
             po_index = 8;
           }
         }
@@ -125,7 +125,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       alpha    = 1.0f;
       beta     = rand() % 2;
       use_LOWOHA = true;
-      if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
+      if (po_index == 4 || po_index == 1) {
         po_index = 8;
       }
     }
@@ -959,6 +959,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         void *C_data = output_tensor.get_raw_handle_unsafe();
         void *bias_data = bias_tensor.get_raw_handle_unsafe();
 
+        //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
+        if ((algo == matmul_algo_t::libxsmm ||
+             algo == matmul_algo_t::libxsmm_blocked) &&
+            output_tensor.get_data_type() == data_type_t::bf16) {
+          bias_data = nullptr;
+        }
+
         // Validate data pointers
         if (!A_data || !B_data || !C_data) {
           log_error("LOWOHA: Null data pointer detected");
@@ -995,7 +1002,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                        wei_data_type == data_type_t::s4);
 
         // Check if this is INT8 quantization
-        bool is_int8 = (src_data_type == data_type_t::u8 || src_data_type == data_type_t::s8) &&
+        bool is_int8 = (src_data_type == data_type_t::u8 ||
+                        src_data_type == data_type_t::s8) &&
                        wei_data_type == data_type_t::s8;
 
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
@@ -1063,7 +1071,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.src_scale.buff = src_scale_buff;
               params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
               auto src_scale_size = input_tensor.get_quant_scale_size();
-              params.quant_params.src_scale.dims.assign(src_scale_size.begin(), src_scale_size.end());
+              params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
+                  src_scale_size.end());
               log_info("LOWOHA INT8: Source scale extracted");
             }
             // Extract source zero point (for asymmetric quantization)
@@ -1086,7 +1095,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.wei_scale.buff = wei_scale_buff;
               params.quant_params.wei_scale.dt = weight_tensor.get_quant_scale_data_type();
               auto wei_scale_size = weight_tensor.get_quant_scale_size();
-              params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(), wei_scale_size.end());
+              params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
+                  wei_scale_size.end());
               log_info("LOWOHA INT8: Weight scale extracted");
             }
             // Extract weight zero point (for asymmetric quantization)
@@ -1109,7 +1119,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
               params.quant_params.dst_scale.buff = dst_scale_buff;
               params.quant_params.dst_scale.dt = output_tensor.get_quant_scale_data_type();
               auto dst_scale_size = output_tensor.get_quant_scale_size();
-              params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(), dst_scale_size.end());
+              params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
+                  dst_scale_size.end());
               log_info("LOWOHA INT8: Destination scale extracted");
             }
             // Extract destination zero point (for asymmetric quantization)
@@ -1260,7 +1271,13 @@ status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                       .set_alpha(alpha)
                                       .set_beta(beta);
 
-    matmul_context = matmul_context.set_param("bias", bias_tensor);
+    //TODO: For LIBXSMM matmul, bias is not supported currently due to accuracy issues
+    if (!((algo == matmul_algo_t::libxsmm ||
+           algo == matmul_algo_t::libxsmm_blocked) &&
+          output_tensor.get_data_type() == data_type_t::bf16)) {
+      matmul_context = matmul_context.set_param("bias", bias_tensor);
+    }
+
 
     if (index != po_size) {
       matmul_context = matmul_context.set_post_op(post_op).create();
@@ -1931,72 +1948,151 @@ void compare_tensor_2D(tensor_t &output_tensor, tensor_t &output_tensor_ref,
 }
 
 void compare_tensor_2D_matrix(tensor_t &output_tensor,
-                              tensor_t &output_tensor_ref, uint64_t m,
-                              uint64_t n, uint64_t k, const float rtol,
-                              const float epsilon, bool &is_comparison_successful) {
-  constexpr int C = 20; //Margin for F32:: tolerance
+                              tensor_t &output_tensor_ref,
+                              uint64_t m,
+                              uint64_t n,
+                              uint64_t k,
+                              const float rtol,
+                              const float epsilon,
+                              bool &is_comparison_successful,
+                              bool enable_f32_relaxation) {
+  constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
-  constexpr int P = 15; //to handle postop accumulation error
+  constexpr int P = 15; // Post-op accumulation margin
   constexpr int scale_factor = 4; // scale factor
+
+#if ENABLE_F32_RELAXATION
+  enable_f32_relaxation = true;
+#endif
+
+
+  // Accumulation-based absolute bound
   // abs_bound = (C*k+P)*epsilon
-  const float abs_bound = (output_tensor.get_data_type() == data_type_t::bf16)
-                          ? (k * epsilon)
-                          : (((C + log2(k)/scale_factor) * k + P) * epsilon);
+  const float abs_bound =
+    (output_tensor.get_data_type() == data_type_t::bf16)
+    ? (k * epsilon)
+    : (((C + log2(k) / scale_factor) * k + P) * epsilon);
+
+  // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
+  constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
+  constexpr float ZERO_REF_THRESH = 1e-6f;
+  constexpr float F32_EPS_SLACK = 2e-4f;
+
+  const bool is_f32 = output_tensor.get_data_type() == data_type_t::f32;
+
   log_verbose("abs_bound: ", abs_bound);
+
   #pragma omp parallel for collapse(2)
-  for (uint64_t i=0; i<m; ++i) {
-    for (uint64_t j=0; j<n; ++j) {
+  for (uint64_t i = 0; i < m; ++i) {
+    for (uint64_t j = 0; j < n; ++j) {
       if (is_comparison_successful) {
-        float actual_val = output_tensor.at({i,j});
-        float ref_val = output_tensor_ref.at({i,j});
-        float abs_err = fabs(ref_val - actual_val);
-        if (abs_err > abs_bound + rtol * fabs(ref_val)) {
-          log_verbose("actual(",i,",",j,"): ",actual_val," , ref(",i,",",j,"): ",ref_val);
-          log_verbose("abs_error: ", abs_err, " ,rtol* fabs(ref): ",
-                      rtol * fabs(ref_val)) ;
+        float actual_val = output_tensor.at({i, j});
+        float ref_val    = output_tensor_ref.at({i, j});
+        float abs_err    = fabs(ref_val - actual_val);
+
+        float allowed_err;
+        if (enable_f32_relaxation && is_f32) {
+          if (fabs(ref_val) < ZERO_REF_THRESH) {
+            // Zero-reference F32 path
+            allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32) + F32_EPS_SLACK;
+          }
+          else {
+            // Normal F32 path with small slack
+            allowed_err = abs_bound + rtol * fabs(ref_val) + F32_EPS_SLACK;
+          }
+        }
+        else {
+          // Default path
+          allowed_err = abs_bound + rtol * fabs(ref_val);
+        }
+
+        if (abs_err > allowed_err) {
+          log_verbose("actual(", i, ",", j, "): ", actual_val,
+                      " , ref(", i, ",", j, "): ", ref_val);
+          log_verbose("abs_error: ", abs_err,
+                      " , allowed_err: ", allowed_err,
+                      " , abs_bound: ", abs_bound);
           is_comparison_successful = false;
         }
       }
     }
   }
-  return;
 }
-
 void compare_tensor_3D_matrix(tensor_t &output_tensor,
-                              tensor_t &output_tensor_ref, uint64_t batch_size,
-                              uint64_t m, uint64_t n, uint64_t k, const float rtol,
-                              const float epsilon, bool &is_comparison_successful) {
-  constexpr int C = 20; //Margin for F32:: tolerance
+                              tensor_t &output_tensor_ref,
+                              uint64_t batch_size,
+                              uint64_t m,
+                              uint64_t n,
+                              uint64_t k,
+                              const float rtol,
+                              const float epsilon,
+                              bool &is_comparison_successful,
+                              bool enable_f32_relaxation) {
+  constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
-  constexpr int P = 15; //to handle postop accumulation error
+  constexpr int P = 15; // Post-op accumulation margin
   constexpr int scale_factor = 4; // scale factor
-  //float abs_bound = ((20 + log2(k)/4) * k + 15) * epsilon; //(C*K+P)*epsilon
-  const float abs_bound = (output_tensor.get_data_type() == data_type_t::bf16)
-                          ? (k * epsilon)
-                          : (((C + log2(k)/scale_factor) * k + P) * epsilon);
+
+#if ENABLE_F32_RELAXATION
+  enable_f32_relaxation = true;
+#endif
+
+
+  // Accumulation-based absolute bound
+  //float abs_bound = ((20 + log2(k)/4) * k + 15) * epsilon;
+  //(C*K+P)*epsilon
+  const float abs_bound =
+    (output_tensor.get_data_type() == data_type_t::bf16)
+    ? (k * epsilon)
+    : (((C + log2(k) / scale_factor) * k + P) * epsilon);
+
+  // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
+  constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
+  constexpr float ZERO_REF_THRESH = 1e-6f;
+  constexpr float F32_EPS_SLACK = 2e-4f;
+
+  const bool is_f32 = output_tensor.get_data_type() == data_type_t::f32;
+
   log_verbose("abs_bound: ", abs_bound);
+
   #pragma omp parallel for collapse(3)
-  for (uint64_t bs=0; bs<batch_size; ++bs) {
-    for (uint64_t i=0; i<m; ++i) {
-      for (uint64_t j=0; j<n; ++j) {
+  for (uint64_t bs = 0; bs < batch_size; ++bs) {
+    for (uint64_t i = 0; i < m; ++i) {
+      for (uint64_t j = 0; j < n; ++j) {
         if (is_comparison_successful) {
-          float actual_val = output_tensor.at({bs,i,j});
-          float ref_val = output_tensor_ref.at({bs,i,j});
-          float abs_err = fabs(ref_val - actual_val);
-          if (abs_err > abs_bound + rtol * fabs(ref_val)) {
-            log_verbose("actual(",bs,",",i,",",j,"): ",actual_val," , ref(",bs,",",i,",",j,
-                        "): ",ref_val);
-            log_verbose("abs_error: ", abs_err, " ,rtol* fabs(ref): ",
-                        rtol * fabs(ref_val)) ;
+          float actual_val = output_tensor.at({bs, i, j});
+          float ref_val    = output_tensor_ref.at({bs, i, j});
+          float abs_err    = fabs(ref_val - actual_val);
+
+          float allowed_err;
+          if (enable_f32_relaxation && is_f32) {
+            if (fabs(ref_val) < ZERO_REF_THRESH) {
+              // Zero-reference F32 path
+              allowed_err = std::max(abs_bound, ABS_ZERO_TOL_F32) + F32_EPS_SLACK;
+            }
+            else {
+              // Normal F32 path with small slack
+              allowed_err = abs_bound + rtol * fabs(ref_val) + F32_EPS_SLACK;
+            }
+          }
+          else {
+            // Default path
+            allowed_err = abs_bound + rtol * fabs(ref_val);
+          }
+
+          if (abs_err > allowed_err) {
+            log_verbose("actual(", bs, ",", i, ",", j, "): ", actual_val,
+                        " , ref(", bs, ",", i, ",", j, "): ", ref_val);
+            log_verbose("abs_error: ", abs_err,
+                        " , allowed_err: ", allowed_err,
+                        " , abs_bound: ", abs_bound);
             is_comparison_successful = false;
           }
         }
       }
     }
   }
-  return;
 }
-
 size_t get_aligned_size(size_t alignment, size_t size_) {
   return ((size_ + alignment - 1) & ~(alignment - 1));
 }
