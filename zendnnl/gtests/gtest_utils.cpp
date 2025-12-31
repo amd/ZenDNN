@@ -44,9 +44,9 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
 #if ZENDNNL_DEPENDS_ONEDNN
       algo = strToAlgo(cmd_backend);
 #else
-      // Fallback to AOCL BLIS if oneDNN backends requested but not available
+      // Fallback to AOCL DLP if oneDNN backends requested but not available
       algo = (cmd_backend == "onednn" || cmd_backend == "onednn_blocked")
-             ? matmul_algo_t::aocl_blis
+             ? matmul_algo_t::aocl_dlp
              : strToAlgo(cmd_backend);
 #endif
       // Configure algorithm-specific parameters and LOWOHA settings
@@ -70,13 +70,13 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       algo = static_cast<matmul_algo_t>(algo_dist(gen));
       if (!ZENDNNL_DEPENDS_ONEDNN && (algo == matmul_algo_t::onednn ||
                                       algo == matmul_algo_t::onednn_blocked)) {
-        algo = matmul_algo_t::aocl_blis;
+        algo = matmul_algo_t::aocl_dlp;
       }
 
       // If no lowoha argument is provided, automatically partition tests into three
       if (cmd_lowoha.empty()) {
         if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-          algo = matmul_algo_t::aocl_blis;
+          algo = matmul_algo_t::aocl_dlp;
         }
         // Control LOWOHA and LIBXSMM based on test index
         // First third: both off, second third: LOWOHA on LIBXSMM off, last third: both on
@@ -88,7 +88,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
           beta = rand() % 2;
           algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
           if (!ZENDNNL_DEPENDS_LIBXSMM) {
-            algo = matmul_algo_t::aocl_blis;
+            algo = matmul_algo_t::aocl_dlp;
           }
           // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
           if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
@@ -103,7 +103,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
           beta = rand() % 2;
           algo = (rand() % 2) ? matmul_algo_t::libxsmm : matmul_algo_t::libxsmm_blocked;
           if (!ZENDNNL_DEPENDS_LIBXSMM) {
-            algo = matmul_algo_t::aocl_blis;
+            algo = matmul_algo_t::aocl_dlp;
           }
           // ToDo: Add support for other postops. Currently disabling gelu_tanh, gelu_erf, swish, tanh.
           if (po_index == 4 || po_index == 1 || po_index == 5 || po_index == 2) {
@@ -114,7 +114,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
       // If lowoha argument is explicitly set to false
       else {
         if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked) {
-          algo = matmul_algo_t::aocl_blis;
+          algo = matmul_algo_t::aocl_dlp;
         }
       }
     }
@@ -838,11 +838,11 @@ bool Parser::isInteger(const std::string &s) {
 }
 
 matmul_algo_t strToAlgo(std::string str) {
-  if (str == "aocl_blis") {
-    return matmul_algo_t::aocl_blis;
+  if (str == "aocl_dlp") {
+    return matmul_algo_t::aocl_dlp;
   }
-  if (str == "aocl_blis_blocked") {
-    return matmul_algo_t::aocl_blis_blocked;
+  if (str == "aocl_dlp_blocked") {
+    return matmul_algo_t::aocl_dlp_blocked;
   }
   if (str == "onednn") {
     return matmul_algo_t::onednn;
@@ -861,10 +861,10 @@ matmul_algo_t strToAlgo(std::string str) {
 
 std::string algoToStr(matmul_algo_t algo) {
   switch (algo) {
-  case matmul_algo_t::aocl_blis:
-    return "aocl_blis";
-  case matmul_algo_t::aocl_blis_blocked:
-    return "aocl_blis_blocked";
+  case matmul_algo_t::aocl_dlp:
+    return "aocl_dlp";
+  case matmul_algo_t::aocl_dlp_blocked:
+    return "aocl_dlp_blocked";
   case matmul_algo_t::onednn:
     return "onednn";
   case matmul_algo_t::onednn_blocked:

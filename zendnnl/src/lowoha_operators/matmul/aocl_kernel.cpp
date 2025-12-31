@@ -1106,7 +1106,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   // Weight caching
   static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
 
-  // Weights are already reordered and algo is aocl_blis_blocked
+  // Weights are already reordered and algo is aocl_dlp_blocked
   // Add the key into map and value as nullptr
   // Modify the reorder_weight as weight.
   if (mem_format_b == 'r') {
@@ -1174,7 +1174,7 @@ template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<int8_t>, int);
 
-void run_blis(char layout, char transA, char transB, int M, int N,
+void run_dlp(char layout, char transA, char transB, int M, int N,
               int K,
               float alpha, float beta, int lda, int ldb, int ldc,
               char mem_format_a, char mem_format_b, const void *A,
@@ -1190,10 +1190,10 @@ void run_blis(char layout, char transA, char transB, int M, int N,
   
   // Create cache key once for both weight reordering and ZP compensation caching
   Key_matmul cache_key(transB == 't', K, N, ldb, B,
-                       static_cast<uint32_t>(matmul_algo_t::aocl_blis_blocked));
+                       static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked));
   
   // AOCL blocked kernel reordering for 2D MatMul
-  if (kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked &&
+  if (kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked &&
       can_reorder && is_weights_const) {
     //call reorder and cache function
     bool blocked_flag = false;
@@ -1405,7 +1405,7 @@ void run_blis(char layout, char transA, char transB, int M, int N,
   // Free reordered buffer for AOCL blocked non-cached
   bool weight_cache_disabled = (weight_cache_type == 0 && reordered_mem != nullptr &&
                     lowoha_param.mem_format_b != 'r'
-                    && kernel==zendnnl::ops::matmul_algo_t::aocl_blis_blocked && can_reorder);
+                    && kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked && can_reorder);
   if (weight_cache_disabled)  {
     free(reordered_mem);
     reordered_mem = nullptr;

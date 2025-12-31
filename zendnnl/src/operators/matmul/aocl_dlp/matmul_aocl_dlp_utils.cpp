@@ -13,7 +13,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#include "operators/matmul/aocl_blis/matmul_aocl_dlp_utils.hpp"
+#include "operators/matmul/aocl_dlp/matmul_aocl_dlp_utils.hpp"
 #include "common/data_types.hpp"
 
 namespace zendnnl {

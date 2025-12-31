@@ -57,8 +57,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
     return;
   }
 #endif
-  log_info("Using BLIS/AOCL kernel");
-  run_blis(layout, transA, transB, M, N, K, alpha, beta,
+  log_info("Using AOCL DLP kernel");
+  run_dlp(layout, transA, transB, M, N, K, alpha, beta,
            lda, ldb, ldc, mem_format_a, mem_format_b,
            A, B, C, dtypes, lowoha_param,bias, kernel, is_weights_const, can_reorder);
   return;
@@ -172,7 +172,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
                           params.dtypes, params, kernel))) {
-      kernel = matmul_algo_t::aocl_blis;
+      kernel = matmul_algo_t::aocl_dlp;
     }
 
     apilog_info("Executing BMM LOWOHA kernel with parallel partitioning, algo: ",
@@ -278,7 +278,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
                           params.dtypes, params, kernel))) {
-      kernel = matmul_algo_t::aocl_blis;
+      kernel = matmul_algo_t::aocl_dlp;
     }
 
     apilog_info("Executing BMM LOWOHA kernel without zendnnl-partitioner, algo: ",
@@ -468,7 +468,7 @@ void matmul_execute(const char layout,
                             src, lda,
                             weight,
                             ldb, beta, dst, ldc,
-                            params.dtypes,  matmul_algo_t::aocl_blis,
+                            params.dtypes,  matmul_algo_t::aocl_dlp,
                             params.mem_format_a, params.mem_format_b,
                             params, batch_params, bias, is_weights_const);
     }
@@ -480,7 +480,7 @@ void matmul_execute(const char layout,
   if (kernel == matmul_algo_t::libxsmm &&
       !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
                         params.dtypes, params, kernel))) {
-    kernel = matmul_algo_t::aocl_blis;
+    kernel = matmul_algo_t::aocl_dlp;
   }
 
   apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",

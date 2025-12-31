@@ -163,7 +163,7 @@ const char *data_type_to_string(data_type_t dtype);
  */
 std::string post_op_data_types_to_string(const lowoha_params &params);
 
-inline bool may_i_use_blis_partition(int batch_count, int M, int N,
+inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
                                      int num_threads, data_type_t dtype);
 
 inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
@@ -189,7 +189,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 * @param num_threads Number of available threads for parallel execution
 * @param bias Pointer to bias data; nullptr if no bias is used
 * @param is_weights_const Indicates if the weights are constant
-* @return matmul_algo_t The selected kernel algorithm (e.g., AOCL BLIS, OneDNN, LibXSMM)
+* @return matmul_algo_t The selected kernel algorithm (e.g., AOCL DLP, OneDNN, LibXSMM)
 */
 matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,

@@ -34,7 +34,7 @@
             "__description" : [
                 "sets matmul configs",
                 "acceptable values for kernel are as follows",
-                "none, aocl_blis, aocl_blis_blocked, ",
+                "none, aocl_dlp, aocl_dlp_blocked, ",
                 "onednn, onednn_blocked, reference",
                 "acceptable values for weight_cache are as follows",
                 "0, 1"

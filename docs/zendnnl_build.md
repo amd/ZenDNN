@@ -223,8 +223,9 @@ ZenDNN
  |- build
      |- install
          |- deps     : contains installed dependencies
-         |   |- amdblis   : amdblis installation
+         |   |- aocldlp   : aocldlp installation
          |   |- aoclutils : aoclutils installation
+         |   |- json      : json installation
          |   |- gtests    : gtests installation
          |   |- <any other optional dependencies>
          |- zendnnl  : zendnnl library installation

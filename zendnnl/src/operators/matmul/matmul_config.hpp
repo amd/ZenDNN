@@ -33,10 +33,10 @@ namespace ops {
 enum class matmul_algo_t : int32_t {
   none = -1,             /*!< No algorithm selected */
   dynamic_dispatch = 0,  /*!< Dynamic dispatch */
-  aocl_blis_blocked = 1, /*!< Blocked AOCL */
+  aocl_dlp_blocked = 1,  /*!< Blocked AOCL */
   onednn_blocked = 2,    /*!< Blocked OneDNN */
   libxsmm_blocked = 3,   /*!< Blocked LIBXSMM */
-  aocl_blis = 4,         /*!< AOCL */
+  aocl_dlp  = 4,         /*!< AOCL */
   onednn = 5,            /*!< OneDNN */
   libxsmm = 6,           /*!< LIBXSMM */
   batched_sgemm = 7,     /*!< Batched SGEMM */

@@ -566,16 +566,16 @@ LowOHA MatMul supports multiple backends. The backend can be selected:
 
 ```cpp
 lowoha_params params;
-params.lowoha_algo = matmul_algo_t::aocl_blis;  
+params.lowoha_algo = matmul_algo_t::aocl_dlp;  
 ```
 
 **Available Algorithms:**
 - `matmul_algo_t::auto_tuner` - Auto Tuner (selects performant backend at runtime)
 - `matmul_algo_t::dynamic_dispatch` - Automatic backend selection based on heuristics
-- `matmul_algo_t::aocl_blis_blocked` - Blocked AOCL BLIS/DLP backend
+- `matmul_algo_t::aocl_dlp_blocked` - Blocked AOCL DLP backend
 - `matmul_algo_t::onednn_blocked` - Blocked OneDNN backend
 - `matmul_algo_t::libxsmm_blocked` - Blocked LibXSMM backend
-- `matmul_algo_t::aocl_blis` - AOCL BLIS/DLP backend
+- `matmul_algo_t::aocl_dlp` - AOCL DLP backend
 - `matmul_algo_t::onednn` - OneDNN backend
 - `matmul_algo_t::libxsmm` - LibXSMM backend
 
@@ -592,9 +592,9 @@ export ZENDNNL_MATMUL_ALGO=1
 |------|-----------------------|
 | auto | auto_tuner            |
 | 0    | dynamic_dispatch      |
-| 1    | aocl_blis_blocked     |
+| 1    | aocl_dlp_blocked      |
 | 2    | onednn_blocked        |
 | 3    | libxsmm_blocked       |
-| 4    | aocl_blis             |
+| 4    | aocl_dlp              |
 | 5    | onednn                |
 | 6    | libxsmm               |

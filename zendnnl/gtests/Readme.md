@@ -19,7 +19,7 @@ ZenDNN* GTest provides flexibility in configuring tests through command-line arg
 - **Filter Tests**: Run specific test suites or cases using `--gtest_filter`.
 - **Set Random Seed**: Provide a seed value for reproducible random test data generation.
 - **Specify Post-Operations**: Apply post-operations like `relu`, `gelu_tanh`, etc., during matrix multiplication tests.
-- **Backend Selection**: Choose specific computational backends using `--backend` parameter to control algorithm selection (e.g., `aocl_blis`, `onednn`, `libxsmm`).
+- **Backend Selection**: Choose specific computational backends using `--backend` parameter to control algorithm selection (e.g., `aocl_dlp`, `onednn`, `libxsmm`).
 
 ## **Configurable Parameters**
 You can modify the following parameters in the source code (`gtest_main.cpp`):
@@ -91,14 +91,14 @@ cmake --build .
 5. **`--backend <Backend>`** (Optional):
    - Specifies the computational backend/algorithm to use.
    - *Supported backends*:
-     - `aocl_blis`
-     - `aocl_blis_blocked`
+     - `aocl_dlp`
+     - `aocl_dlp_blocked`
      - `onednn`
      - `onednn_blocked`
      - `libxsmm`
      - `libxsmm_blocked`
    - *Example*:
-     - `aocl_blis`: Uses AOCL BLIS backend for computations
+     - `aocl_dlp`: Uses AOCL DLP backend for computations
 
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
@@ -122,9 +122,9 @@ cmake --build .
 ``` bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/*
 ```
-4. Run BF16 matmul tests with specific backend (AOCL BLIS):
+4. Run BF16 matmul tests with specific backend (AOCL DLP):
 ``` bash
-./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_blis
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_dlp
 ```
 
 ### Matmul Tests

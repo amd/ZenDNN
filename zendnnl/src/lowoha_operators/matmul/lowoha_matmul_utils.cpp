@@ -185,14 +185,14 @@ std::string post_op_names_to_string(const lowoha_params &params) {
 const char *kernel_to_string(matmul_algo_t kernel) {
   switch (kernel) {
 #if ZENDNNL_DEPENDS_AOCLDLP
-  case matmul_algo_t::aocl_blis:
+  case matmul_algo_t::aocl_dlp:
     return "aocl_dlp";
-  case matmul_algo_t::aocl_blis_blocked:
+  case matmul_algo_t::aocl_dlp_blocked:
     return "aocl_dlp_blocked";
 #else
-  case matmul_algo_t::aocl_blis:
+  case matmul_algo_t::aocl_dlp:
     return "aocl_blis";
-  case matmul_algo_t::aocl_blis_blocked:
+  case matmul_algo_t::aocl_dlp_blocked:
     return "aocl_blis_blocked";
 #endif
   case matmul_algo_t::onednn:
@@ -253,17 +253,17 @@ std::string post_op_data_types_to_string(const lowoha_params &params) {
   return post_op_dtypes.str();
 }
 
-inline bool may_i_use_blis_partition(int batch_count, int M, int N,
+inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
                                      int num_threads, data_type_t dtype) {
 
   // Set thresholds based on thread count and data type (powers of 2 only)
   int M_threshold = 0, N_threshold = 0, work_threshold = 0;
 
-  /*BLIS performs better when M and N are large and thread count is moderate to high.
+  /*DLP performs better when M and N are large and thread count is moderate to high.
    It uses internal tiling and cache-aware scheduling,
    where each 8-core cluster shares a 32MB L3 cache. Manual OpenMP partitioning
-   can disrupt BLIS's optimized workload distribution, leading to contention.
-   Delegating to BLIS ensures better throughput and efficient hardware utilization.*/
+   can disrupt DLP's optimized workload distribution, leading to contention.
+   Delegating to DLP ensures better throughput and efficient hardware utilization.*/
   // TODO: Tune it more based on heuristics (threshold relies on problem size and data type)
   if (num_threads <= 16) {
     M_threshold    = 512;
@@ -283,7 +283,7 @@ inline bool may_i_use_blis_partition(int batch_count, int M, int N,
   // Estimate effective workload per thread
   int work_per_thread = (batch_count * M) / num_threads;
 
-  // Allow BLIS if batch size is small and M is reasonably large
+  // Allow DLP if batch size is small and M is reasonably large
   bool small_batch_override = (batch_count <= 8 && M >= 1024);
 
   return ((M >= M_threshold &&
@@ -302,7 +302,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
           return matmul_algo_t::libxsmm;
         }
         else {
-          return matmul_algo_t::aocl_blis;
+          return matmul_algo_t::aocl_dlp;
         }
       }
       else {
@@ -314,7 +314,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
         return matmul_algo_t::libxsmm;
       }
       else {
-        return matmul_algo_t::aocl_blis;
+        return matmul_algo_t::aocl_dlp;
       }
     }
   }
@@ -324,14 +324,14 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
     }
     else {
       if (K < 50) {
-        return matmul_algo_t::aocl_blis;
+        return matmul_algo_t::aocl_dlp;
       }
       else {
         if (K <= 196) {
           return matmul_algo_t::libxsmm;
         }
         else {
-          return matmul_algo_t::aocl_blis;
+          return matmul_algo_t::aocl_dlp;
         }
       }
     }
@@ -342,7 +342,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
   if (M <= 12288) {
     if (M <= 3072) {
       if (M <= 768) {
-        return matmul_algo_t::aocl_blis_blocked;
+        return matmul_algo_t::aocl_dlp_blocked;
       }
       else {
         if (K <= 1280) {
@@ -350,12 +350,12 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
             return matmul_algo_t::onednn_blocked;
           }
           else {
-            return matmul_algo_t::aocl_blis_blocked;
+            return matmul_algo_t::aocl_dlp_blocked;
           }
         }
         else {
           if (N <= 1280) {
-            return matmul_algo_t::aocl_blis_blocked;
+            return matmul_algo_t::aocl_dlp_blocked;
           }
           else {
             return matmul_algo_t::onednn_blocked;
@@ -371,7 +371,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
     if (K <= 320) {
       if (K <= 192) {
         if (N <= 15517) {
-          return matmul_algo_t::aocl_blis_blocked;
+          return matmul_algo_t::aocl_dlp_blocked;
         }
         else {
           return matmul_algo_t::onednn_blocked;
@@ -383,14 +383,14 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
     }
     else {
       if (K <= 896) {
-        return matmul_algo_t::aocl_blis_blocked;
+        return matmul_algo_t::aocl_dlp_blocked;
       }
       else {
         if (K <= 2048) {
           return matmul_algo_t::onednn_blocked;
         }
         else {
-          return matmul_algo_t::aocl_blis_blocked;
+          return matmul_algo_t::aocl_dlp_blocked;
         }
       }
     }
@@ -419,7 +419,7 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
                  matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
-                         ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_blis
+                         ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_dlp
                           : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
 
   // TODO: Fallback to reference/supported kernel
@@ -431,7 +431,7 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
        kernel == matmul_algo_t::onednn_blocked) && (Batch_A != 1 && Batch_B != 1 &&
            Batch_A != Batch_B)) {
     log_info("OneDNN kernel is not supported for the given batch sizes");
-    kernel = matmul_algo_t::aocl_blis;
+    kernel = matmul_algo_t::aocl_dlp;
   }
 
   if (kernel==matmul_algo_t::dynamic_dispatch) {
@@ -453,27 +453,27 @@ matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
       (!ZENDNNL_DEPENDS_LIBXSMM && (kernel == matmul_algo_t::libxsmm ||
                                     kernel == matmul_algo_t::libxsmm_blocked)) ||
       (kernel >= matmul_algo_t::algo_count)) {
-    kernel = matmul_algo_t::aocl_blis;
+    kernel = matmul_algo_t::aocl_dlp;
   }
 
-  // Force aocl_blis for WOQ (Weight-Only Quantization) cases
+  // Force aocl_dlp for WOQ (Weight-Only Quantization) cases
   // WOQ uses specialized AOCL kernels that don't support blocked format
   const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                       (params.dtypes.wei == data_type_t::s4);
   if (is_woq) {
-    log_info("WOQ detected, switching to aocl_blis_blocked kernel");
-    kernel = matmul_algo_t::aocl_blis_blocked;
+    log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
+    kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 
   // AOCL blocked kernel is not supported for batched matmul
   if ((Batch_A > 1 || Batch_B > 1) &&
-      kernel == matmul_algo_t::aocl_blis_blocked) {
-    kernel = matmul_algo_t::aocl_blis;
+      kernel == matmul_algo_t::aocl_dlp_blocked) {
+    kernel = matmul_algo_t::aocl_dlp;
   }
   // TODO: Update the conditon once prepack supports other formats
   // Current prepack supports only AOCL blocked kernel
   if (params.mem_format_b == 'r') {
-    kernel = matmul_algo_t::aocl_blis_blocked;
+    kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 
   params.lowoha_algo = kernel;

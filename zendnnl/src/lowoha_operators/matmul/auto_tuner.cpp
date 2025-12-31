@@ -29,7 +29,7 @@ namespace lowoha {
  *
  * @param toggle_ Integer value used to select the algorithm:
  *                - 1: Returns oneDNN blocked algorithm
- *                - 2: Returns AOCL BLIS blocked algorithm
+ *                - 2: Returns AOCL DLP blocked algorithm
  *
  * @return matmul_algo_t The selected algorithm based on the toggle value.
  *
@@ -41,7 +41,7 @@ matmul_algo_t get_algo(int toggle_) {
     return matmul_algo_t::onednn_blocked;
   }
   else {
-    return matmul_algo_t::aocl_blis_blocked;
+    return matmul_algo_t::aocl_dlp_blocked;
   }
 }
 

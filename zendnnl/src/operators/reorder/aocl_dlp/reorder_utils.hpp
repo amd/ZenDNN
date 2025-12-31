@@ -26,16 +26,16 @@ namespace ops {
 using namespace zendnnl::memory;
 
 /** @class aocl_dlp_reorder_utils_t
- *  @brief Utility class for AOCL BLIS reorder operations.
+ *  @brief Utility class for AOCL DLP reorder operations.
  *
  */
 class aocl_dlp_reorder_utils_t {
  public:
 
-  /** @brief Computes size for AOCL BLIS reorder/unreorder operations
+  /** @brief Computes size for AOCL DLP reorder/unreorder operations
   *  @param context The reorder context containing configuration parameters.
   *  @param input_tensor The input tensor for which the reorder/unreorder size is computed.
-  *  @return The size required for the AOCL BLIS reorder/unreorder operation.
+  *  @return The size required for the AOCL DLP reorder/unreorder operation.
   */
   static size_t get_aocl_reorder_size(const reorder_context_t &context,
                                       const tensor_t &input_tensor);

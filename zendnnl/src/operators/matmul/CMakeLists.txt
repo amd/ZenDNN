@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-add_subdirectory(aocl_blis)
+add_subdirectory(aocl_dlp)
 add_subdirectory(onednn)
 
 set(matmul_operator_sources

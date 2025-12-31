@@ -134,7 +134,7 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op);
 #endif
 
 /**
- * @brief Execute single matrix multiplication using AOCL BLIS backend
+ * @brief Execute single matrix multiplication using AOCL DLP backend
  *
  * Performs C = alpha * op(A) * op(B) + beta * C using AMD's optimized
  * AOCL library with support for post-operations and bias addition.
@@ -163,7 +163,7 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op);
  * @param is_weights_const Flag indicating if weights are constant (enables caching)
  * @param can_reorder Flag indicating if weight reordering is allowed (default: false)
  */
-void run_blis(char layout, char transA, char transB, int M, int N,
+void run_dlp(char layout, char transA, char transB, int M, int N,
               int K,
               float alpha, float beta, int lda, int ldb, int ldc,
               char mem_format_a, char mem_format_b, const void *A,

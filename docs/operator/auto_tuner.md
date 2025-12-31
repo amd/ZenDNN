@@ -117,7 +117,7 @@ The AutoTuner currently evaluates between the following high-performance backend
    - Efficient cache utilization through blocking strategies
    - Strong performance across diverse matrix dimensions
 
-2. **AOCL DLP/BLIS Blocked Algorithm** (`matmul_algo_t::aocl_blis_blocked`)
+2. **AOCL DLP Blocked Algorithm** (`matmul_algo_t::aocl_dlp_blocked`)
    - AMD-optimized implementation leveraging AOCL libraries
    - Tailored for AMD CPU architectures
    - Excellent performance for specific problem sizes and data layouts

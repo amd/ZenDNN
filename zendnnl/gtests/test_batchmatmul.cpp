@@ -50,8 +50,8 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     }
     algo = params.mat.algo;
     use_LOWOHA = params.mat.use_LOWOHA;
-    if (algo == matmul_algo_t::aocl_blis_blocked) {
-      algo = matmul_algo_t::aocl_blis;
+    if (algo == matmul_algo_t::aocl_dlp_blocked) {
+      algo = matmul_algo_t::aocl_dlp;
     }
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
              transA, " TransB: ", transB, " po_index: ",po_index, " algo: ",

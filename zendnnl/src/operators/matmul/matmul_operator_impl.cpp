@@ -128,11 +128,11 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
 status_t matmul_impl_t::update_matmul_kernel() {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo = matmul_config.get_algo();
-  if (algo == static_cast<int>(matmul_algo_t::aocl_blis)) {
-    forced_kernel = "aocl_blis";
+  if (algo == static_cast<int>(matmul_algo_t::aocl_dlp)) {
+    forced_kernel = "aocl_dlp";
   }
-  else if (algo == static_cast<int>(matmul_algo_t::aocl_blis_blocked)) {
-    forced_kernel = "aocl_blis_blocked";
+  else if (algo == static_cast<int>(matmul_algo_t::aocl_dlp_blocked)) {
+    forced_kernel = "aocl_dlp_blocked";
   }
   else if (algo == static_cast<int>(matmul_algo_t::onednn)) {
     forced_kernel = "onednn";
@@ -309,7 +309,7 @@ status_t matmul_impl_t::validate() {
     }
   }
   //Hard Force to Reference Kernel if 2D Matrix is broadcasted from user-side
-  //No-Support in AOCL-BLIS
+  //No-Support in AOCL-DLP
   {
     auto inp_stride = input->get_stride();
     auto wei_stride = weights->get_stride();
@@ -335,8 +335,8 @@ status_t matmul_impl_t::validate() {
 status_t matmul_impl_t::validate_forced_kernel() {
 
 // TODO: Move optional dependency prerpocessor to respective kernel file.
-  if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
-      forced_kernel == "aocl_blis_blocked"
+  if (forced_kernel.empty() || forced_kernel == "aocl_dlp" ||
+      forced_kernel == "aocl_dlp_blocked"
       || forced_kernel == "onednn" || forced_kernel == "onednn_blocked"
      ) {
     return status_t::success;
@@ -400,11 +400,11 @@ status_t matmul_impl_t::preprocess() {
   // For WOQ (S4 weights), always use blocked kernel for better performance
   auto weight_tensor = context.get_param("weights");
   if (weight_tensor && weight_tensor->get_data_type() == data_type_t::s4) {
-    forced_kernel = "aocl_blis_blocked";
+    forced_kernel = "aocl_dlp_blocked";
   }
 
-  if (forced_kernel.empty() || forced_kernel == "aocl_blis" ||
-      forced_kernel == "aocl_blis_blocked") {
+  if (forced_kernel.empty() || forced_kernel == "aocl_dlp" ||
+      forced_kernel == "aocl_dlp_blocked") {
     LOG_DEBUG_INFO("<", get_name(), "> Preprocessing matmul_operator_t");
     //get bias tensor
     auto optional_bias_tensor = context.get_param("bias");
@@ -412,7 +412,7 @@ status_t matmul_impl_t::preprocess() {
     // output tensor
     auto output_tensor = outputs["matmul_output"];
 
-    if (forced_kernel == "aocl_blis_blocked") {
+    if (forced_kernel == "aocl_dlp_blocked") {
       // input tensor
       auto input_dt = inputs["matmul_input"].get_data_type();
       if (context.aocl_dlp_utils_ptr->reorder_weights(weight_tensor, input_dt)
@@ -494,13 +494,13 @@ std::string matmul_impl_t::op_execute_info() {
     }
   }
   else {
-    // When DLP is enabled, map aocl_blis to aocl_dlp in logs
-#if ZENDNNL_DEPENDS_AOCLDLP
-    if (forced_kernel == "aocl_blis") {
-      ss << "kernel:aocl_dlp" << ",";
+    // When BLIS is enabled, map aocl_dlp to aocl_blis in logs
+#if ZENDNNL_DEPENDS_AOCLBLIS
+    if (forced_kernel == "aocl_dlp") {
+      ss << "kernel:aocl_blis" << ",";
     }
-    else if (forced_kernel == "aocl_blis_blocked") {
-      ss << "kernel:aocl_dlp_blocked" << ",";
+    else if (forced_kernel == "aocl_dlp_blocked") {
+      ss << "kernel:aocl_blis_blocked" << ",";
     }
     else {
       ss << "kernel:" << forced_kernel << ",";
@@ -539,12 +539,12 @@ status_t matmul_impl_t::kernel_factory() {
   auto output_dtype   = get_output("matmul_output")->get_data_type();
 
   //get forced kernel if any
-  if (forced_kernel.empty() || forced_kernel == "aocl_blis_blocked" ||
-      forced_kernel == "aocl_blis") {
+  if (forced_kernel.empty() || forced_kernel == "aocl_dlp_blocked" ||
+      forced_kernel == "aocl_dlp") {
     /**TODO: check Use of blocked BMM weights with new AOCL BMM API */
-    if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_blis_blocked") {
-      apilog_info("<", obj_name, "> kernel unimplemented using aocl_blis_blocked.");
-      forced_kernel = "aocl_blis";
+    if (weight_tensor.get_dim() == 3 && forced_kernel == "aocl_dlp_blocked") {
+      apilog_info("<", obj_name, "> kernel unimplemented using aocl_dlp_blocked.");
+      forced_kernel = "aocl_dlp";
     }
 
     /**TODO: move the preprocess to specific kernel */

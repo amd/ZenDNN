@@ -32,7 +32,7 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
     tensor_t weights_tensor;
 
     // Apply reorder for regular API, not for LOWOHA
-    if (cfg.kernel_name == "aocl_blis_blocked" && !isLOWOHA) {
+    if (cfg.kernel_name == "aocl_dlp_blocked" && !isLOWOHA) {
       auto wei_scale = (dt == data_type_t::s8) ? tensor_factory.uniform_dist_tensor({1, n},
                        data_type_t::f32, 0.2) : tensor_t();
 

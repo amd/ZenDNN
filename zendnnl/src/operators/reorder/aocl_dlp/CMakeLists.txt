@@ -14,32 +14,32 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-set(aocl_blis_reorder_operator_sources
+set(aocl_dlp_reorder_operator_sources
   reorder_kernel.cpp
   reorder_utils.cpp)
 
-set(aocl_blis_reorder_operator_public_headers
+set(aocl_dlp_reorder_operator_public_headers
   reorder_utils.hpp)
 
-set(aocl_blis_reorder_operator_private_headers
+set(aocl_dlp_reorder_operator_private_headers
   reorder_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
-    PRIVATE ${aocl_blis_reorder_operator_sources}
+    PRIVATE ${aocl_dlp_reorder_operator_sources}
     PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers}
+            TYPE HEADERS FILES ${aocl_dlp_reorder_operator_private_headers}
     PUBLIC FILE_SET zendnnl_headers
-           TYPE HEADERS FILES ${aocl_blis_reorder_operator_public_headers})
+           TYPE HEADERS FILES ${aocl_dlp_reorder_operator_public_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
-    PRIVATE ${aocl_blis_reorder_operator_sources}
+    PRIVATE ${aocl_dlp_reorder_operator_sources}
     PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${aocl_blis_reorder_operator_private_headers}
+            TYPE HEADERS FILES ${aocl_dlp_reorder_operator_private_headers}
     PUBLIC FILE_SET zendnnl_headers
-           TYPE HEADERS FILES ${aocl_blis_reorder_operator_public_headers})
+           TYPE HEADERS FILES ${aocl_dlp_reorder_operator_public_headers})
 endif()
 
 # append header files to top level include file
@@ -48,8 +48,8 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-list(APPEND aocl_blis_reorder_operator_public_headers_list
-  ${aocl_blis_reorder_operator_public_headers})
+list(APPEND aocl_dlp_reorder_operator_public_headers_list
+  ${aocl_dlp_reorder_operator_public_headers})
 create_header_file(${zendnnl_inc_file}
   ${inc_subdir}
-  "${aocl_blis_reorder_operator_public_headers_list}")
+  "${aocl_dlp_reorder_operator_public_headers_list}")

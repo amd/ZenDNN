@@ -24,9 +24,9 @@
 #include "operators/common/operator_context.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
-#include "operators/matmul/aocl_blis/matmul_aocl_dlp_utils.hpp"
+#include "operators/matmul/aocl_dlp/matmul_aocl_dlp_utils.hpp"
 #else
-#include "operators/matmul/aocl_blis/matmul_aocl_blis_utils.hpp"
+#include "operators/matmul/aocl_dlp/matmul_aocl_blis_utils.hpp"
 #endif
 
 namespace zendnnl {
@@ -85,7 +85,7 @@ class matmul_context_t final : public op_context_t<matmul_context_t> {
   /** @brief Returns matmul context information */
   std::string context_info() override;
 
-  std::shared_ptr<aocl_dlp_utils_t> aocl_dlp_utils_ptr; /**< aocl blis utils */
+  std::shared_ptr<aocl_dlp_utils_t> aocl_dlp_utils_ptr; /**< aocl dlp utils */
   friend class matmul_operator_t;
   friend class matmul_impl_t;
 

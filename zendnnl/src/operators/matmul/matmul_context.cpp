@@ -151,12 +151,12 @@ dlp_metadata_t *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
 #else
 aocl_post_op *matmul_context_t::get_aocl_dlp_post_op_ptr_unsafe() const {
 #endif
-  LOG_DEBUG_INFO("Getting aocl_blis_post_op_ptr from matmul_context_t");
+  LOG_DEBUG_INFO("Getting aocl_dlp_post_op_ptr from matmul_context_t");
   return aocl_dlp_utils_ptr->get_aocl_dlp_post_op_ptr_unsafe();
 }
 
 void *matmul_context_t::get_aocl_dlp_reordered_weights_ptr_unsafe() const {
-  LOG_DEBUG_INFO("Getting aocl_blis_reordered_weights_ptr from matmul_context_t");
+  LOG_DEBUG_INFO("Getting aocl_dlp_reordered_weights_ptr from matmul_context_t");
   return aocl_dlp_utils_ptr->get_aocl_dlp_reordered_weights_ptr_unsafe();
 }
 

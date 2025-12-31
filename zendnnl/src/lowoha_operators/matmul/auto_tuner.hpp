@@ -57,7 +57,7 @@ namespace lowoha {
  *
  * Currently supports two algorithms:
  * 1. oneDNN blocked algorithm
- * 2. AOCL BLIS blocked algorithm
+ * 2. AOCL DLP blocked algorithm
  *
  * This value is used to cycle through algorithms during the evaluation phase
  * using modulo arithmetic: (iteration_count % NUM_OF_ALGO) + 1

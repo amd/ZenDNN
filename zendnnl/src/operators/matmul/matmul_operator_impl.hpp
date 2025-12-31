@@ -31,7 +31,7 @@ namespace ops {
  *
  * Given a KxN weight matrix, (optional) 1xN bias vector, and MxK input, it computes
  * MxN output = weight*input + bias. Matrix multiplication is generally implemented
- * by using a BLAS library for GEMM. This implementation uses AMD AOCL BLIS library
+ * by using a BLAS library for GEMM. This implementation uses AMD AOCL DLP library
  * for GEMM.
  *
  * In order to elable chaining, the first parameter in @c operator_t template

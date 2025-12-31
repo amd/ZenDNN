@@ -43,17 +43,17 @@ Provide a file with one configuration per line. Each line should contain:
 
 - Single-layer matmul:
   ```
-  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_blis_blocked, false, false, 30
-  128, 9216, 4096, 100, f32:f32:f32, true, f32, relu, aocl_blis_blocked, false, false, 30
+  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 30
+  128, 9216, 4096, 100, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 30
   ```
 - Multi-layer (pipeline) matmul:
   ```
-  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, false, false, 30
-  4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_blis_blocked, false, false, 30
+  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 30
+  4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 30
   ```
 - Batched matmul (BMM):
   ```
-  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_blis, false, false, 20
+  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_dlp, false, false, 20
   ```
   > **Note:** For BMM, ensure you specify `--ndims=3` on the command line and provide `bs` in the input file.
 
@@ -73,11 +73,11 @@ Other options (e.g., `iters`, `dt`, etc.) can be provided via command-line argum
 
 **Example usage:**
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/pytorch_hugging_face_bmm.txt --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
+./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/pytorch_hugging_face_bmm.txt --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_dlp --isTransA=false --isTransB=false --warmup_iters=100
 ```
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/recsys.txt --m=256 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=100
+./install/benchdnn/bin/benchdnn --op=matmul --input_model_file=../benchdnn/input/matmul/recsys.txt --m=256 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias_dt=f32 --kernel_name=aocl_dlp --isTransA=false --isTransB=false --warmup_iters=100
 ```
 
 ---
@@ -87,7 +87,7 @@ All configuration parameters can be provided directly via command-line options.
 
 **Example usage:**
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --kernel_name=aocl_blis --isTransA=false --isTransB=false --warmup_iters=30 --ndims=3
+./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --kernel_name=aocl_dlp --isTransA=false --isTransB=false --warmup_iters=30 --ndims=3
 ```
 > **Note:** For BMM benchmarking, always specify `--ndims=3` and provide `bs`.
 
@@ -109,5 +109,5 @@ Output is printed to the console and also saved to a CSV file named `timings_<cu
 ### Example (batched matmul, console/CSV)
 ```
 BS  M     K    N    Iters  Data_type    Bias_Enabled  Bias_dt  PostOp  Kernel_Name  isTransA  isTransB  Warmup_iters  Total_time(ms, all iters)  GFLOPS  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
-2   1024  256  512  10     f32:f32:f32  0                              aocl_blis    0         0         10            223.42                     24.03   0.19 (0.09 %)       0.04 (0.02 %)      223.18 (99.89 %) 
+2   1024  256  512  10     f32:f32:f32  0                              aocl_dlp    0         0         10            223.42                     24.03   0.19 (0.09 %)       0.04 (0.02 %)      223.18 (99.89 %) 
 ```

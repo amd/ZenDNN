@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-add_subdirectory(aocl_blis)
+add_subdirectory(aocl_dlp)
 
 set(reorder_operator_sources
   reorder_context.cpp

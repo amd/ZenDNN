@@ -708,11 +708,11 @@ int batch_matmul_relu_bf16_kernel_example() {
                          data_type_t::bf16,
                          "matmul_output");
 
-    // Set inputs and outputs for the operator, force aocl-blis kernel and execute
+    // Set inputs and outputs for the operator, force aocl-dlp kernel and execute
     status = batch_matmul_operator
              .set_input("matmul_input", input_tensor)
              .set_output("matmul_output", output_tensor)
-             .set_forced_kernel("aocl_blis")
+             .set_forced_kernel("aocl_dlp")
              .execute();
 
     // Log the result of execution
@@ -800,11 +800,11 @@ int batch_matmul_inp2d_relu_f32_kernel_example() {
     auto output_tensor = tensor_factory.zero_tensor({BATCH_SIZE, BATCH_MATMUL_M, BATCH_MATMUL_N},
                          data_type_t::f32, "matmul_output");
     
-    // Set inputs and outputs for the operator, force aocl-blis kernel and execute
+    // Set inputs and outputs for the operator, force aocl-dlp kernel and execute
     status = batch_matmul_operator
              .set_input("matmul_input", input_tensor)
              .set_output("matmul_output", output_tensor)
-             .set_forced_kernel("aocl_blis")
+             .set_forced_kernel("aocl_dlp")
              .execute();
 
     // Log the result of execution
@@ -955,13 +955,13 @@ To achieve optimal performance for the MatMul operator, you can configure runtim
 ### Supported Matmul Kernels
 | Algo |       Kernel       |
 |------|--------------------|
-| 1    | aocl_blis_blocked  |
+| 1    | aocl_dlp_blocked   |
 | 2    | onednn_blocked     |
 | 3    | -NA-               |
-| 4    | aocl_blis          |
+| 4    | aocl_dlp           |
 | 5    | onednn             |
 | 6    | -NA-               |
-| 7    | batched_sgemm      |
+| 7    | -NA-               |
 | 8    | -NA-               |
 | 9    | reference          |
 
@@ -976,14 +976,14 @@ Specify the desired kernel in your JSON config file:
   }
 }
 ```
-Example: `"kernel": "aocl_blis_blocked"`
+Example: `"kernel": "aocl_dlp_blocked"`
 
 #### 2. Environment Variable
 Set the environment variable before running your application:
 ```
 export ZENDNNL_MATMUL_ALGO = <algo>
 ```
-Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_blis_blocked)
+Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_dlp_blocked)
 
 - Note: Runtime variable can be set via either method, precedence is given to JSON configuration if both are provided.
 

@@ -1,3 +1,6 @@
+
+(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+
 # ZenDNNL Runtime Environment Variables
 
 This document lists all environment variables available for configuring ZenDNNL at runtime.

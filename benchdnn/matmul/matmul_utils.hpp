@@ -43,7 +43,7 @@ namespace matmul {
  * @var bias_dt Data type for the bias tensor (e.g., f32, bf16). Defaults to f32 if not specified.
  * @var post_ops List of post-operations to apply after matmul (e.g., relu, gelu). Parsed from a colon-separated string (e.g., "relu:gelu").
  * @var binary_post_ops_pos List of positions for binary post-operations (indices in the post_ops list where binary ops are applied).
- * @var kernel_name Name of the kernel backend to invoke (e.g., aocl_blis, aocl_blis_blocked).
+ * @var kernel_name Name of the kernel backend to invoke (e.g., aocl_dlp, aocl_dlp_blocked).
  * @var isTransA Transpose flag for input matrix.
  * @var isTransB Transpose flag for weight matrix.
  * @var warmup_iters Number of warmup iterations to run before actual benchmarking.
@@ -67,7 +67,7 @@ struct MatmulConfig {
   std::vector<int> binary_post_ops_pos; /**< List of positions for
                                         binary post-operations. */
   std::string kernel_name; /**< Name of the kernel backend
-                            to invoke (e.g., aocl_blis, aocl_blis_blocked). */
+                            to invoke (e.g., aocl_dlp, aocl_dlp_blocked). */
   bool isTransA; /** Transpose flag for input matrix */
   bool isTransB; /** Transpose flag for weight matrix */
   float alpha, beta; /**< Scaling factors for the matrix multiplication. */

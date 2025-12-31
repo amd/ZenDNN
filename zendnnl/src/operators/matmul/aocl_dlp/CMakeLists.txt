@@ -14,23 +14,23 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-set(aocl_blis_matmul_operator_sources
+set(aocl_dlp_matmul_operator_sources
   matmul_fp32_avx512_kernel.cpp
   matmul_bf16_avx512_kernel.cpp
   matmul_int8_avx512_kernel.cpp
   matmul_bf16s4_avx512_kernel.cpp)
 
 if (ZENDNNL_DEPENDS_AOCLDLP)
-  list(APPEND aocl_blis_matmul_operator_sources matmul_aocl_dlp_utils.cpp)
-  set(aocl_blis_matmul_operator_public_headers
+  list(APPEND aocl_dlp_matmul_operator_sources matmul_aocl_dlp_utils.cpp)
+  set(aocl_dlp_matmul_operator_public_headers
     matmul_aocl_dlp_utils.hpp)
 elseif(ZENDNNL_DEPENDS_AMDBLIS)
-  list(APPEND aocl_blis_matmul_operator_sources matmul_aocl_blis_utils.cpp)
-  set(aocl_blis_matmul_operator_public_headers
+  list(APPEND aocl_dlp_matmul_operator_sources matmul_aocl_blis_utils.cpp)
+  set(aocl_dlp_matmul_operator_public_headers
     matmul_aocl_blis_utils.hpp)
 endif()
 
-set(aocl_blis_matmul_operator_private_headers
+set(aocl_dlp_matmul_operator_private_headers
   matmul_fp32_avx512_kernel.hpp
   matmul_bf16_avx512_kernel.hpp
   matmul_int8_avx512_kernel.hpp
@@ -38,20 +38,20 @@ set(aocl_blis_matmul_operator_private_headers
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
-    PRIVATE ${aocl_blis_matmul_operator_sources}
+    PRIVATE ${aocl_dlp_matmul_operator_sources}
     PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
+            TYPE HEADERS FILES ${aocl_dlp_matmul_operator_private_headers}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
+            TYPE HEADERS FILES ${aocl_dlp_matmul_operator_public_headers})
 endif()
 
 if(ZENDNNL_LIB_BUILD_SHARED)
   target_sources(zendnnl
-    PRIVATE ${aocl_blis_matmul_operator_sources}
+    PRIVATE ${aocl_dlp_matmul_operator_sources}
     PRIVATE FILE_SET zendnnl_pvt_headers
-            TYPE HEADERS FILES ${aocl_blis_matmul_operator_private_headers}
+            TYPE HEADERS FILES ${aocl_dlp_matmul_operator_private_headers}
     PUBLIC  FILE_SET zendnnl_headers
-            TYPE HEADERS FILES ${aocl_blis_matmul_operator_public_headers})
+            TYPE HEADERS FILES ${aocl_dlp_matmul_operator_public_headers})
 endif()
 
 # append header files to top level include file
@@ -60,16 +60,16 @@ cmake_path(RELATIVE_PATH inc_subdir
   BASE_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # append header files to top level include file
-list(APPEND aocl_blis_matmul_operator_public_headers_list
-  ${aocl_blis_matmul_operator_public_headers})
+list(APPEND aocl_dlp_matmul_operator_public_headers_list
+  ${aocl_dlp_matmul_operator_public_headers})
 create_header_file(${zendnnl_inc_file}
   ${inc_subdir}
-  "${aocl_blis_matmul_operator_public_headers_list}")
+  "${aocl_dlp_matmul_operator_public_headers_list}")
 # add_custom_target(append_matmul_operator_headers ALL
 #   COMMAND ${CMAKE_COMMAND}
 #   -DINC_FILE_NAME=${zendnnl_inc_file}
 #   -DINC_SUBDIR=${inc_subdir}
-#   -DINC_FILE_LIST="${aocl_blis_matmul_operator_public_headers}"
+#   -DINC_FILE_LIST="${aocl_dlp_matmul_operator_public_headers}"
 #   -P${CMAKE_MODULE_PATH}/CreateIncludeFiles.cmake
 #   BYPRODUCTS ${include_file})
 

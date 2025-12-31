@@ -93,8 +93,8 @@ TEST_P(TestMatmul,F32_F32) {
                             data_type_t::f32, 2.0);
 
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
-                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo, alpha,
-                            beta);
+                            bias_tensor, output_tensor, po_index, binary_tensor, use_LOWOHA, algo,
+                            alpha, beta);
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
                             weight_tensor, bias_tensor, output_tensor_ref, po_index, binary_tensor,
                             use_LOWOHA, algo, alpha, beta);

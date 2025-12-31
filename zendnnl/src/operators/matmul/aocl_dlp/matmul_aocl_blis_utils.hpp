@@ -13,8 +13,8 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # *******************************************************************************/
-#ifndef _MATMUL_AOCL_BLIS_CONTEXT_HPP_
-#define _MATMUL_AOCL_BLIS_CONTEXT_HPP_
+#ifndef _MATMUL_AOCL_BLIS_UTILS_HPP_
+#define _MATMUL_AOCL_BLIS_UTILS_HPP_
 
 #include <vector>
 #include <map>

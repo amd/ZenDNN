@@ -139,7 +139,7 @@ int matmul_relu_bf16_kernel_example() {
     status = matmul_operator
              .set_input("matmul_input", input_tensor)
              .set_output("matmul_output", output_tensor)
-             .set_forced_kernel("aocl_blis")
+             .set_forced_kernel("aocl_dlp")
              .execute();
 
     if (status == status_t::success) {

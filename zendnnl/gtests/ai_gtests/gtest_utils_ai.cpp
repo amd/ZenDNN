@@ -490,7 +490,7 @@ void AITestUtils::log_tensor_info(const tensor_t &tensor,
 // -----------------------------------------------------------------------------
 // is_aocl_kernel_supported
 //
-// Checks if AOCL BLIS kernel is supported for given data types and post-ops.
+// Checks if AOCL DLP kernel is supported for given data types and post-ops.
 // Returns true if supported, false otherwise.
 // -----------------------------------------------------------------------------
 bool AITestUtils::is_aocl_kernel_supported(data_type_t input_dtype,

@@ -49,7 +49,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     }
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
     if ((static_cast<matmul_algo_t>(matmul_algo) ==
-         matmul_algo_t::aocl_blis_blocked) ||
+         matmul_algo_t::aocl_dlp_blocked) ||
         (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
         (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch) ||
         (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
@@ -123,7 +123,7 @@ void matmul_config_t::set_env_config() {
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
   [[maybe_unused]] int32_t matmul_weight_cache = 0;
   if ((static_cast<matmul_algo_t>(matmul_algo) ==
-       matmul_algo_t::aocl_blis_blocked) ||
+       matmul_algo_t::aocl_dlp_blocked) ||
       (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
       (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)||
       (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
@@ -204,11 +204,11 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   else if (algo == "dynamic_dispatch") {
     return matmul_algo_t::dynamic_dispatch;
   }
-  else if (algo == "aocl_blis") {
-    return matmul_algo_t::aocl_blis;
+  else if (algo == "aocl_dlp") {
+    return matmul_algo_t::aocl_dlp;
   }
-  else if (algo == "aocl_blis_blocked") {
-    return matmul_algo_t::aocl_blis_blocked;
+  else if (algo == "aocl_dlp_blocked") {
+    return matmul_algo_t::aocl_dlp_blocked;
   }
   else if (algo == "onednn") {
     return matmul_algo_t::onednn;

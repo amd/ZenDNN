@@ -15,7 +15,7 @@
 # *******************************************************************************/
 #include "reorder_operator_impl.hpp"
 #include "reorder_kernel_list.hpp"
-#include "aocl_blis/reorder_utils.hpp"
+#include "aocl_dlp/reorder_utils.hpp"
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   #include "aocl_dlp.h"

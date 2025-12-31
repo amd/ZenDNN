@@ -152,16 +152,16 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
           binary_post_op_pos++;
         }
       }
-      // Parse kernel name (default to 'aocl_blis' if empty)
+      // Parse kernel name (default to 'aocl_dlp' if empty)
       if (fields[id++].empty()) {
-        commonlog_warning("No kernel name specified. Defaulting to 'aocl_blis'.");
-        cfg.kernel_name = "aocl_blis";
+        commonlog_warning("No kernel name specified. Defaulting to 'aocl_dlp'.");
+        cfg.kernel_name = "aocl_dlp";
       }
       else {
         cfg.kernel_name = fields[id - 1];
-        if (options.ndims > 2 && (cfg.kernel_name != "aocl_blis" &&
+        if (options.ndims > 2 && (cfg.kernel_name != "aocl_dlp" &&
                                   cfg.kernel_name != "onednn")) {
-          commonlog_error("For BMM, kernel name should be 'aocl_blis'.");
+          commonlog_error("For BMM, kernel name should be 'aocl_dlp'.");
           continue;
         }
       }

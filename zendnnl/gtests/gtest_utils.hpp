@@ -231,7 +231,7 @@ extern std::vector<data_type_t> dtype_arr;
  *  This function converts a string representation of a matrix multiplication
  *  algorithm to the corresponding matmul_algo_t enumeration value.
  *
- *  @param str String representation of the algorithm (e.g., "onednn", "aocl_blis", etc.)
+ *  @param str String representation of the algorithm (e.g., "onednn", "aocl_dlp", etc.)
  *  @return matmul_algo_t The corresponding algorithm enumeration value
  */
 matmul_algo_t strToAlgo(std::string str);
