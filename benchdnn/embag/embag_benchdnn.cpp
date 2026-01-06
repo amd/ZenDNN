@@ -33,8 +33,7 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
     auto embag_context = embag_context_t()
                          .set_param("table", table_tensor)
                          .set_algo(cfg.algo)
-                         .set_padding_index(cfg.padding_index)
-                         .set_scatter_stride(cfg.scatter_stride);
+                         .set_padding_index(cfg.padding_index);
     if (cfg.include_last_offset) {
       embag_context.set_include_last_offset(cfg.include_last_offset);
     }
@@ -95,8 +94,7 @@ int run_embag(tensor_t output_tensor, tensor_t table_tensor,
     auto embag_context = embag_context_t()
                          .set_param("table", table_tensor)
                          .set_algo(cfg.algo)
-                         .set_padding_index(cfg.padding_index)
-                         .set_scatter_stride(cfg.scatter_stride);
+                         .set_padding_index(cfg.padding_index);
     if (cfg.include_last_offset) {
       embag_context.set_include_last_offset(cfg.include_last_offset);
     }
