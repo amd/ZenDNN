@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -338,62 +338,69 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
   }
 }
 
+/* ML-generated heuristics using decision tree with instance-weighted training, cross-validation, and pruning.
+   Optimized via grid search on stratified train-test split.*/
 inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
-  if (M <= 12288) {
-    if (M <= 3072) {
-      if (M <= 768) {
-        return matmul_algo_t::aocl_dlp_blocked;
+  if (M <= 493) {
+      if (K <= 352) {
+          if (K <= 124) {
+              return matmul_algo_t::onednn_blocked;
+          } else {
+              return matmul_algo_t::aocl_dlp_blocked;
+          }
+      } else {
+          if (M <= 352) {
+              if (K <= 1344) {
+                  return matmul_algo_t::onednn_blocked;
+              } else {
+                  if (N <= 2548) {
+                      return matmul_algo_t::aocl_dlp_blocked;
+                  } else {
+                      return matmul_algo_t::onednn_blocked;
+                  }
+              }
+          } else {
+              return matmul_algo_t::onednn_blocked;
+          }
       }
-      else {
-        if (K <= 1280) {
-          if (K <= 256) {
-            return matmul_algo_t::onednn_blocked;
+  } else {
+      if (M <= 187680) {
+          if (K <= 896) {
+              if (K <= 248) {
+                  if (N <= 2560) {
+                      if (N <= 136) {
+                          if (N <= 40) {
+                              return matmul_algo_t::onednn_blocked;
+                          } else {
+                              return matmul_algo_t::aocl_dlp_blocked;
+                          }
+                      } else {
+                          return matmul_algo_t::onednn_blocked;
+                      }
+                  } else {
+                      return matmul_algo_t::aocl_dlp_blocked;
+                  }
+              } else {
+                  if (N <= 96) {
+                      return matmul_algo_t::aocl_dlp_blocked;
+                  } else {
+                      if (N <= 248) {
+                          return matmul_algo_t::onednn_blocked;
+                      } else {
+                          if (K <= 448) {
+                              return matmul_algo_t::aocl_dlp_blocked;
+                          } else {
+                              return matmul_algo_t::onednn_blocked;
+                          }
+                      }
+                  }
+              }
+          } else {
+              return matmul_algo_t::aocl_dlp_blocked;
           }
-          else {
-            return matmul_algo_t::aocl_dlp_blocked;
-          }
-        }
-        else {
-          if (N <= 1280) {
-            return matmul_algo_t::aocl_dlp_blocked;
-          }
-          else {
-            return matmul_algo_t::onednn_blocked;
-          }
-        }
-      }
-    }
-    else {
-      return matmul_algo_t::onednn_blocked;
-    }
-  }
-  else {
-    if (K <= 320) {
-      if (K <= 192) {
-        if (N <= 15517) {
+      } else {
           return matmul_algo_t::aocl_dlp_blocked;
-        }
-        else {
-          return matmul_algo_t::onednn_blocked;
-        }
       }
-      else {
-        return matmul_algo_t::onednn_blocked;
-      }
-    }
-    else {
-      if (K <= 896) {
-        return matmul_algo_t::aocl_dlp_blocked;
-      }
-      else {
-        if (K <= 2048) {
-          return matmul_algo_t::onednn_blocked;
-        }
-        else {
-          return matmul_algo_t::aocl_dlp_blocked;
-        }
-      }
-    }
   }
 }
 
