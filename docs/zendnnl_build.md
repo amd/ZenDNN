@@ -1,5 +1,5 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # The ZenDNN* Build System
 
@@ -100,8 +100,8 @@ In order to configure the build according to dependencies, components, and stand
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
 | ZENDNNL_DEPENDS_AOCLDLP | aocl-dlp is default BLAS backend for ZenDNN*. If this option is OFF, then amd-blis becomes default BLAS backend of ZenDNN* | BOOL | ON |
-| ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN* | BOOL | OFF |
-| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN* | BOOL | OFF |
+| ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN* | BOOL | ON |
+| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN* | BOOL | ON |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN* | BOOL | OFF |
 | ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publically available, or a varsion still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |

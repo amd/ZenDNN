@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -31,8 +31,8 @@ endif()
 set(AOCLDLP_ROOT_DIR "${ZENDNNL_DEPS_DIR}/aocldlp"
   CACHE PATH "AOCL DLP root dir")
 set(AOCLDLP_GIT_REPO "https://github.com/amd/aocl-dlp.git")
-# aocl-dlp tag AOCL-Weekly-121225
-set(AOCLDLP_GIT_TAG "a6a5456bc8da007633ffe6241851739353f356e0")
+# aocl-dlp tag AOCL-Weekly-050126
+set(AOCLDLP_GIT_TAG "a6b041c8eeec1ae8b8bc33f79833655f09f6167e")
 option(AOCLDLP_GIT_PROGRESS ON)
 
 # amdblis repo information

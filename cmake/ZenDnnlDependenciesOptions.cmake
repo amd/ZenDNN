@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ include_guard(GLOBAL)
 include(CMakeDependentOption)
 
 set(ZENDNNL_DEPENDS_AOCLDLP ON CACHE BOOL "Add AOCL DLP as a dependency")
-set(ZENDNNL_DEPENDS_ONEDNN  OFF CACHE BOOL "Add ONEDNN as a dependency")
+set(ZENDNNL_DEPENDS_ONEDNN  ON CACHE BOOL "Add ONEDNN as a dependency")
 set(ZENDNNL_DEPENDS_LIBXSMM  ON CACHE BOOL "Add LIBXSMM as a dependency")
 set(ZENDNNL_DEPENDS_PARLOOPER  OFF CACHE BOOL "Add PARLOOPER as a dependency")
 
