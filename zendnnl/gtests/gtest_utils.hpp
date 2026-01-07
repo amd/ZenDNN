@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ struct MatmulType {
   uint64_t matmul_m;
   uint64_t matmul_k;
   uint64_t matmul_n;
-  uint32_t po_index;
+  post_op_type_t po_type;
   bool     transA;
   bool     transB;
   //TODO: Add support for other data_types as well
@@ -138,7 +138,7 @@ extern std::vector<EmbeddingType> embedding_test;
 // TODO: Unify the tensor_factory in examples and gtest
 //To generate random tensor
 class tensor_factory_t {
-public:
+ public:
   /** @brief Index type */
   using index_type = tensor_t::index_type;
   using data_type  = data_type_t;
@@ -210,7 +210,7 @@ class Parser {
   void read_from_umap(const std::string &key, int64_t &num);
   void read_from_umap(const std::string &key, uint32_t &num);
   void read_from_umap(const std::string &key, std::string &num);
-public:
+ public:
   /** @brief to make object callable */
   void operator()(const int &argc,
                   char *argv[],
@@ -218,10 +218,19 @@ public:
                   std::string &lowoha);
 };
 
-bool is_binary_postop(const std::string post_op);
-
-//Supported Postops declaration
-extern std::vector<std::pair<std::string, post_op_type_t>> po_arr;
+bool is_binary_postop(post_op_type_t post_op);
+// Array of supported post operations
+const post_op_type_t post_op_arr[] = {
+  post_op_type_t::relu,
+  post_op_type_t::gelu_tanh,
+  post_op_type_t::gelu_erf,
+  post_op_type_t::sigmoid,
+  post_op_type_t::swish,
+  post_op_type_t::tanh,
+  post_op_type_t::binary_add,
+  post_op_type_t::binary_mul,
+  post_op_type_t::none
+};
 
 //Supported Dtype declaration
 extern std::vector<data_type_t> dtype_arr;
@@ -248,6 +257,29 @@ matmul_algo_t strToAlgo(std::string str);
  */
 std::string algoToStr(matmul_algo_t algo);
 
+/**
+* @fn strToPostOps
+* @brief Converts a string representation of a post operation to its corresponding enum value
+*
+* This function translates a string such as "relu", "gelu_tanh" into the
+* corresponding `post_op_type_t`
+*
+* @param str String representation of the post operation (e.g., "relu", "gelu_tanh").
+* @return post_op_type_t Corresponding enum value.
+*/
+post_op_type_t strToPostOps(const std::string &str);
+
+/**
+ * @brief Converts a post_op_type_t enum value to its string representation.
+ *
+ * This function maps a post_op_type_t value (e.g., relu, gelu_tanh) to its corresponding
+ * string (e.g., "relu", "gelu_tanh") for display or output purposes.
+ *
+ * @param post_op The post_op_type_t enum value to convert.
+ * @return std::string The string representation of the post operation.
+ */
+std::string postOpsToStr(post_op_type_t post_op);
+
 /** @fn matmul_kernel_test
  *  @brief Compute Matmul Operation using AOCL kernel.
  *
@@ -257,7 +289,7 @@ std::string algoToStr(matmul_algo_t algo);
  *  @return matmul status
  * */
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
-                            tensor_t &bias, tensor_t &output_tensor, uint32_t index,
+                            tensor_t &bias, tensor_t &output_tensor, post_op_type_t po_type,
                             tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
                             float alpha = 1.0f,
                             float beta = 0.0f);
@@ -274,7 +306,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weights,
 status_t matmul_forced_ref_kernel_test(tensor_t &input_tensor,
                                        tensor_t &weights,
                                        tensor_t &bias, tensor_t &output_tensor,
-                                       uint32_t index, tensor_t &binary_tensor, bool use_LOWOHA, matmul_algo_t algo,
+                                       post_op_type_t po_type, tensor_t &binary_tensor, bool use_LOWOHA,
+                                       matmul_algo_t algo,
                                        float alpha = 1.0f,
                                        float beta = 0.0f);
 

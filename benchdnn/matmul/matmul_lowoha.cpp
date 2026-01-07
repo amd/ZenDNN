@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -117,17 +117,21 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       batch_params.Batch_B = batchB;
 
       // Validate data types
-      if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16) {
+      if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16 &&
+          cfg.dt[0] != data_type_t::u8 && cfg.dt[0] != data_type_t::s8) {
         testlog_error("LOWOHA: Unsupported source data type");
         log_benchmark_failure(cfg);
         continue;
       }
-      if (cfg.dt[1] != data_type_t::f32 && cfg.dt[1] != data_type_t::bf16) {
+      if (cfg.dt[1] != data_type_t::f32 && cfg.dt[1] != data_type_t::bf16 &&
+          cfg.dt[1] != data_type_t::u8 && cfg.dt[1] != data_type_t::s8) {
         testlog_error("LOWOHA: Unsupported weight data type");
         log_benchmark_failure(cfg);
         continue;
       }
-      if (cfg.dt[2] != data_type_t::f32 && cfg.dt[2] != data_type_t::bf16) {
+      if (cfg.dt[2] != data_type_t::f32 && cfg.dt[2] != data_type_t::bf16 &&
+          cfg.dt[2] != data_type_t::u8 && cfg.dt[2] != data_type_t::s8 &&
+          cfg.dt[2] != data_type_t::s32) {
         testlog_error("LOWOHA: Unsupported output data type");
         log_benchmark_failure(cfg);
         continue;

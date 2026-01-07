@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@
 using namespace std;
 
 const uint32_t po_size = 8; //Supported postop
-vector<std::pair<std::string, post_op_type_t>> po_arr(po_size);
 
 const uint32_t dtype_size = 4; //Supported dtype
 vector<data_type_t> dtype_arr(dtype_size);
@@ -67,17 +66,6 @@ std::vector<EmbeddingType> embedding_test{};
 
 int main(int argc, char **argv) {
   try {
-    //Supported Postop
-    po_arr = { {"relu", post_op_type_t::relu},
-      {"gelu_tanh", post_op_type_t::gelu_tanh},
-      {"gelu_erf", post_op_type_t::gelu_erf},
-      {"sigmoid", post_op_type_t::sigmoid},
-      {"swish", post_op_type_t::swish},
-      {"tanh", post_op_type_t::tanh},
-      {"binary_add", post_op_type_t::binary_add},
-      {"binary_mul", post_op_type_t::binary_mul}
-    };
-
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;

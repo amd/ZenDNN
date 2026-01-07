@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -149,7 +149,7 @@ int create_input_tensor(tensor_factory_t &tensor_factory,
                       cfg.dt[0] == data_type_t::u8) ? tensor_factory.uniform_dist_tensor({1, 1},
                           data_type_t::f32, 0.3) : tensor_t();
     auto src_zp = cfg.dt[0] == data_type_t::u8 ? tensor_factory.uniform_tensor({1, 1},
-                  data_type_t::s8, 16) : tensor_t();
+                  data_type_t::u8, 16) : tensor_t();
     input = tensor_factory.uniform_dist_tensor({cfg.m, cfg.k},
             cfg.dt[0],
             1.0, "matmul_input", cfg.isTransA, src_scale, src_zp);

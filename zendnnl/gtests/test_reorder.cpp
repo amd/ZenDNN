@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -35,21 +35,13 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
     k        = params.mat.matmul_k;
     transA   = params.mat.transA;
     transB   = params.mat.transB;
-    if (!cmd_post_op.empty()) {
-      auto it = find_if(po_arr.begin(), po_arr.end(),
-      [&](const std::pair<std::string, post_op_type_t> &po) {
-        return po.first == cmd_post_op;
-      });
-      po_index = it != po_arr.end() ? distance(po_arr.begin(), it) : po_size;
-    }
-    else {
-      po_index = params.mat.po_index;
-    }
+    po_type = params.mat.po_type;
     algo = matmul_algo_t::aocl_dlp; //TODO: Implement dynamic backend selection when additional backends are supported
     inplace_reorder = params.inplace_reorder;
     use_LOWOHA = 0; // TODO: Enable LOWOHA support
     source_dtype = params.mat.source_dtype;
-    log_info("m: ",m, " k: ",k, " n: ",n," po_index: ",po_index, " reorder: ",
+    log_info("m: ",m, " k: ",k, " n: ",n," postop: ", postOpsToStr(po_type),
+             " reorder: ",
              inplace_reorder ? "In Place" : "Out of Place");
   }
 
@@ -57,7 +49,7 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
   virtual void TearDown() {}
   uint64_t m, k, n;
   bool transA, transB;
-  uint32_t po_index;
+  post_op_type_t po_type;
   bool inplace_reorder;
   data_type_t source_dtype;
   bool use_LOWOHA;
@@ -77,13 +69,12 @@ TEST_P(TestReorder,F32_F32) {
                             data_type_t::f32, 1.0f);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
-                            output_tensor_ref, po_index,
+                            output_tensor_ref, po_type,
                             binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
@@ -98,7 +89,7 @@ TEST_P(TestReorder,F32_F32) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -128,13 +119,12 @@ TEST_P(TestReorder, BF16_F32) {
                             data_type_t::bf16, 1.0f);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
-                            output_tensor_ref, po_index,
+                            output_tensor_ref, po_type,
                             binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
@@ -149,7 +139,7 @@ TEST_P(TestReorder, BF16_F32) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -179,13 +169,12 @@ TEST_P(TestReorder, BF16_BF16) {
                             data_type_t::bf16, 1.0f);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t ref_status     = matmul_kernel_test(input_tensor, weights, bias_tensor,
-                            output_tensor_ref, po_index, binary_tensor, use_LOWOHA, algo);
+                            output_tensor_ref, po_type, binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -199,7 +188,7 @@ TEST_P(TestReorder, BF16_BF16) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
@@ -396,8 +385,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
                             stride_in, data_type_t::f32, 1.0f, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
                             data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -406,7 +394,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -420,7 +408,7 @@ TEST_P(TestReorder, F32_F32_Stride) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -465,8 +453,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
                             stride_in, data_type_t::bf16, 1.0f, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
@@ -475,7 +462,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -489,7 +476,7 @@ TEST_P(TestReorder, BF16_F32_Stride) {
   auto output_tensor      = tensor_factory.zero_tensor({m, n}, data_type_t::f32);
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor, output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -534,8 +521,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
                             stride_in, data_type_t::bf16, 1.0f, transA);
   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, rand() % 2
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 1.0f);
-  auto binary_tensor      = (po_index < po_arr.size() &&
-                             is_binary_postop(po_arr[po_index].first)) ?
+  auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 1.0f) : tensor_t();
   auto output_tensor_ref  = tensor_factory.zero_tensor({m, n}, data_type_t::bf16);
@@ -544,7 +530,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
            ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor, weights,
                             bias_tensor, output_tensor_ref,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
 
   void *weights_buff      = nullptr;
   auto [reorder_weights, reorder_status] = reorder_kernel_test(weights,
@@ -559,7 +545,7 @@ TEST_P(TestReorder, BF16_BF16_Stride) {
   status_t status         = matmul_kernel_test(input_tensor, reorder_weights,
                             bias_tensor,
                             output_tensor,
-                            po_index, binary_tensor, use_LOWOHA, algo);
+                            po_type, binary_tensor, use_LOWOHA, algo);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
