@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 #include "lowoha_embedding_bag.hpp"
 #include "dispatch_kernel.hpp"
 
-#include <omp.h>
 #include <sstream>
 
 namespace zendnnl {
@@ -33,7 +32,6 @@ status_t embedding_bag_direct(
   const float *weights,
   void *dst,
   embag_params_t params) {
-
   // Create profiler instance for timing
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
@@ -54,9 +52,7 @@ status_t embedding_bag_direct(
                           ? static_cast<int>(params.num_threads)
                           : omp_get_max_threads();
 
-  if (params.num_threads > 0) {
-    omp_set_num_threads(num_threads);
-  }
+  embag_threadlimit thread_guard(num_threads);
 
   [[maybe_unused]] std::ostringstream ss;
   if (apilog_info_enabled()) {
@@ -71,12 +67,12 @@ status_t embedding_bag_direct(
        << ", num_threads=" << num_threads;
     apilog_info(ss.str());
   }
-
   dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
 
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                       profiler.get_res_str());
   }
   return status_t::success;
 }

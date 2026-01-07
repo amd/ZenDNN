@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -111,7 +111,39 @@ using zendnnl::memory::data_type_t;
  * @endcode
  */
 status_t reorder_direct(const void *src, void *dst, size_t nelems,
-                         lowoha_reorder_params_t params);
+                        lowoha_reorder_params_t params);
+
+
+/**
+ * @brief RAII helper to temporarily set OpenMP thread count.
+ *        Automatically restores original thread count on scope exit.
+ *
+ * @example
+ *   {
+ *       reorder_threadlimit guard(4);   // Set to 4 threads
+ *       // ... parallel work ...
+ *   }  // Restored to original
+ *
+ */
+struct reorder_threadlimit {
+  int old_num_threads;
+  bool is_modified;
+
+  reorder_threadlimit(int num_threads) : old_num_threads(0), is_modified(false) {
+    if (num_threads != omp_get_max_threads()) {
+      old_num_threads = omp_get_max_threads();
+      omp_set_num_threads(num_threads);
+      is_modified = true;
+    }
+  }
+
+  ~reorder_threadlimit() {
+    if (is_modified) {
+      omp_set_num_threads(old_num_threads);
+    }
+  }
+};
+
 
 } // namespace lowoha
 } // namespace zendnnl

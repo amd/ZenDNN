@@ -111,13 +111,15 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
   if (kernel == matmul_algo_t::batched_sgemm) {
     apilog_info("Executing BMM LOWOHA kernel with batch SGEMM, algo: ",
                 static_cast<int>(kernel));
+
+
     matmul_batch_gemm_wrapper(layout, trans_input, trans_weight,
                               M, N, K, alpha,
                               src, lda, weight, ldb, beta, dst, ldc,
                               params.dtypes, batch_count,
                               params.mem_format_a, params.mem_format_b,
                               src_batch_stride_bytes, weight_batch_stride_bytes, dst_batch_stride_bytes,
-                              params, bias);
+                              params, bias, num_threads);
     return;
   }
 
@@ -126,6 +128,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
       kernel == matmul_algo_t::onednn_blocked) {
     apilog_info("Executing BMM LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
+
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
                           weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
                           is_weights_const, src_batch_stride_elems, weight_batch_stride_elems,
@@ -187,6 +190,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
       int total_m_blocks = (M + M_block - 1) / M_block;
       int total_work_items = batch_count * total_m_blocks;
 
+
       zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
         for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
           // Convert linear work index back to (batch, m_block) coordinates
@@ -232,7 +236,8 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     }
     else {
       apilog_info("Using OpenMP parallel for");
-      #pragma omp parallel for collapse(2)
+
+      #pragma omp parallel for collapse(2) num_threads(num_threads)
       for (int b = 0; b < batch_count; ++b) {
         for (int m_start = 0; m_start < M; m_start += M_block) {
           int m_len = std::min(M_block, M - m_start);
@@ -282,6 +287,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
 
     apilog_info("Executing BMM LOWOHA kernel without zendnnl-partitioner, algo: ",
                 static_cast<int>(kernel));
+
     for (int b = 0; b < batch_count; ++b) {
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
                                get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
@@ -341,6 +347,8 @@ void matmul_execute(const char layout,
       kernel == matmul_algo_t::onednn_blocked) {
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
+
+
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
                           weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
                           is_weights_const);
@@ -358,7 +366,6 @@ void matmul_execute(const char layout,
       auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
       const int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
       const int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
-
       size_t bias_element_size = 0;
       const bool has_bias = (bias != nullptr);
       if (has_bias) {
@@ -501,7 +508,7 @@ void matmul_execute(const char layout,
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
       matmul_algo_t tile_kernel = matmul_algo_t::libxsmm;
 
-      #pragma omp parallel for collapse(2)
+      #pragma omp parallel for collapse(2) num_threads(num_threads)
       for (int i = 0; i < M; i += M_BLOCK) {
         for (int j = 0; j < N; j += N_BLOCK) {
           int m_tile = std::min(M_BLOCK, M - i);
@@ -550,6 +557,8 @@ void matmul_execute(const char layout,
       }
     }
     else {
+
+
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
                             src, lda,
@@ -572,6 +581,8 @@ void matmul_execute(const char layout,
 
   apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
               static_cast<int>(kernel));
+
+
   matmul_kernel_wrapper(layout, trans_input, trans_weight,
                         M, N, K, alpha,
                         src, lda, weight,
@@ -646,6 +657,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   // if (params.mem_format_b) {}
 
   // Dispatch to BMM or Matmul based on batch_count
+  matmul_threadlimit thread_guard(num_threads);
   if (batch_count > 1) {
     // Batch Matrix Multiplication (BMM)
     bmm_execute(layout, transA, transB,

@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -1429,7 +1429,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                float beta, void *C, int ldc, data_types &dtypes, int batch_count,
                                char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias) {
+                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias, int num_threads) {
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
@@ -1459,7 +1459,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   std::vector<void *> c_ptrs(batch_count);
 
   // Set up pointers for each batch
-  #pragma omp parallel for
+  #pragma omp parallel for num_threads(num_threads)
   for (int b = 0; b < batch_count; ++b) {
     a_ptrs[b] = static_cast<const uint8_t *>(A) + b * src_stride;
     b_ptrs[b] = static_cast<const uint8_t *>(B) + b * weight_stride;

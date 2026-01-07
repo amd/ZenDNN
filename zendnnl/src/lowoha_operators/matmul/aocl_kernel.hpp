@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -204,7 +204,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                float beta,
                                void *C, int ldc, data_types &dtypes, int batch_count, char mem_format_a,
                                char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias);
+                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias, int num_threads);
 
 }
 }

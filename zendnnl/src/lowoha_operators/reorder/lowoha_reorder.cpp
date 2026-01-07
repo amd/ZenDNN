@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -32,7 +32,8 @@ using namespace zendnnl::profile;
 /**
  * @brief Extract scale value from quant_t (currently only f32 supported)
  */
-static inline float get_scale_value(const reorder_quant_params_t::quant_t &scale_param) {
+static inline float get_scale_value(const reorder_quant_params_t::quant_t
+                                    &scale_param) {
   if (scale_param.buff == nullptr) {
     return 1.0f;  // Default scale
   }
@@ -43,7 +44,8 @@ static inline float get_scale_value(const reorder_quant_params_t::quant_t &scale
 /**
  * @brief Extract zero_point value from quant_t (currently only s32 supported)
  */
-static inline int get_zero_point_value(const reorder_quant_params_t::quant_t &zp_param) {
+static inline int get_zero_point_value(const reorder_quant_params_t::quant_t
+                                       &zp_param) {
   if (zp_param.buff == nullptr) {
     return 0;  // Default zero_point
   }
@@ -55,58 +57,66 @@ static inline int get_zero_point_value(const reorder_quant_params_t::quant_t &zp
  * @brief Execute reorder kernel based on selected algorithm
  */
 static void execute_reorder_kernel(const void *src, void *dst, size_t nelems,
-                                    const lowoha_reorder_params_t &params,
-                                    reorder_algo_t algo) {
+                                   const lowoha_reorder_params_t &params,
+                                   reorder_algo_t algo) {
   const float scale = get_scale_value(params.quant_params.scale);
   const int zero_point = get_zero_point_value(params.quant_params.zero_point);
 
   // BF16 -> INT8 (Quantization)
-  if (params.dtypes.src == data_type_t::bf16 && params.dtypes.dst == data_type_t::s8) {
+  if (params.dtypes.src == data_type_t::bf16 &&
+      params.dtypes.dst == data_type_t::s8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     int8_t *dst_int8 = static_cast<int8_t *>(dst);
 
     if (algo == reorder_algo_t::native) {
       quantize_bf16_to_int8_avx512(src_bf16, dst_int8, nelems, scale, zero_point);
-    } else {
+    }
+    else {
       quantize_bf16_to_int8_ref(src_bf16, dst_int8, nelems, scale, zero_point);
     }
     return;
   }
 
   // INT8 -> BF16 (Dequantization)
-  if (params.dtypes.src == data_type_t::s8 && params.dtypes.dst == data_type_t::bf16) {
+  if (params.dtypes.src == data_type_t::s8 &&
+      params.dtypes.dst == data_type_t::bf16) {
     const int8_t *src_int8 = static_cast<const int8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
 
     if (algo == reorder_algo_t::native) {
       dequantize_int8_to_bf16_avx512(src_int8, dst_bf16, nelems, scale, zero_point);
-    } else {
+    }
+    else {
       dequantize_int8_to_bf16_ref(src_int8, dst_bf16, nelems, scale, zero_point);
     }
     return;
   }
 
   // BF16 -> UINT8 (Quantization)
-  if (params.dtypes.src == data_type_t::bf16 && params.dtypes.dst == data_type_t::u8) {
+  if (params.dtypes.src == data_type_t::bf16 &&
+      params.dtypes.dst == data_type_t::u8) {
     const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
     uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
 
     if (algo == reorder_algo_t::native) {
       quantize_bf16_to_uint8_avx512(src_bf16, dst_uint8, nelems, scale, zero_point);
-    } else {
+    }
+    else {
       quantize_bf16_to_uint8_ref(src_bf16, dst_uint8, nelems, scale, zero_point);
     }
     return;
   }
 
   // UINT8 -> BF16 (Dequantization)
-  if (params.dtypes.src == data_type_t::u8 && params.dtypes.dst == data_type_t::bf16) {
+  if (params.dtypes.src == data_type_t::u8 &&
+      params.dtypes.dst == data_type_t::bf16) {
     const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
     uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
 
     if (algo == reorder_algo_t::native) {
       dequantize_uint8_to_bf16_avx512(src_uint8, dst_bf16, nelems, scale, zero_point);
-    } else {
+    }
+    else {
       dequantize_uint8_to_bf16_ref(src_uint8, dst_bf16, nelems, scale, zero_point);
     }
     return;
@@ -117,25 +127,28 @@ static void execute_reorder_kernel(const void *src, void *dst, size_t nelems,
  * @brief Parallel reorder execution for large buffers
  */
 static void execute_reorder_parallel(const void *src, void *dst, size_t nelems,
-                                      const lowoha_reorder_params_t &params,
-                                      reorder_algo_t algo) {
+                                     const lowoha_reorder_params_t &params,
+                                     reorder_algo_t algo) {
   constexpr int64_t grain_size = 1024;  // Minimum elements per thread
 
-  const size_t src_elem_size = (params.dtypes.src == data_type_t::bf16) ? sizeof(uint16_t) : sizeof(uint8_t);
-  const size_t dst_elem_size = (params.dtypes.dst == data_type_t::bf16) ? sizeof(uint16_t) : sizeof(uint8_t);
+  const size_t src_elem_size = (params.dtypes.src == data_type_t::bf16) ? sizeof(
+                                 uint16_t) : sizeof(uint8_t);
+  const size_t dst_elem_size = (params.dtypes.dst == data_type_t::bf16) ? sizeof(
+                                 uint16_t) : sizeof(uint8_t);
 
   zendnnl_parallel_for(0, static_cast<int64_t>(nelems), grain_size,
-    [&](int64_t begin, int64_t end) {
-      const uint8_t *src_ptr = static_cast<const uint8_t *>(src) + begin * src_elem_size;
-      uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + begin * dst_elem_size;
-      size_t thread_nelems = static_cast<size_t>(end - begin);
+  [&](int64_t begin, int64_t end) {
+    const uint8_t *src_ptr = static_cast<const uint8_t *>(src) + begin *
+                             src_elem_size;
+    uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + begin * dst_elem_size;
+    size_t thread_nelems = static_cast<size_t>(end - begin);
 
-      execute_reorder_kernel(src_ptr, dst_ptr, thread_nelems, params, algo);
-    });
+    execute_reorder_kernel(src_ptr, dst_ptr, thread_nelems, params, algo);
+  });
 }
 
 status_t reorder_direct(const void *src, void *dst, size_t nelems,
-                         lowoha_reorder_params_t params) {
+                        lowoha_reorder_params_t params) {
   // Validate inputs
   if (validate_reorder_inputs(src, dst, nelems, params) != status_t::success) {
     return status_t::failure;
@@ -173,12 +186,18 @@ status_t reorder_direct(const void *src, void *dst, size_t nelems,
     profiler.tbp_start();
   }
 
+  const int num_threads = params.num_threads > 0 ? params.num_threads :
+                          omp_get_max_threads();
+
+  reorder_threadlimit thread_guard(num_threads);
+
   execute_reorder_parallel(src, dst, nelems, params, algo);
 
   // Stop profiling timer and log
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                       profiler.get_res_str());
   }
 
   return status_t::success;

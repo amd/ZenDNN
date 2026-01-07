@@ -29,6 +29,37 @@
 
 namespace zendnnl {
 namespace lowoha {
+
+
+/**
+ * @brief RAII helper to temporarily set OpenMP thread count.
+ *        Automatically restores original thread count on scope exit.
+ *
+ * @example
+ *   {
+ *       matmul_threadlimit guard(4);   // Set to 4 threads
+ *       // ... parallel work ...
+ *   }  // Restored to original
+ */
+struct matmul_threadlimit {
+  int old_num_threads;
+  bool is_modified;
+
+  matmul_threadlimit(int num_threads) : old_num_threads(0), is_modified(false) {
+    if (num_threads != omp_get_max_threads()) {
+      old_num_threads = omp_get_max_threads();
+      omp_set_num_threads(num_threads);
+      is_modified = true;
+    }
+  }
+
+  ~matmul_threadlimit() {
+    if (is_modified) {
+      omp_set_num_threads(old_num_threads);
+    }
+  }
+};
+
 /**
  * @brief Entry function for different backends supported by ZenDNNL
  */

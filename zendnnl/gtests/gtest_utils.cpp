@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -136,7 +136,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
   output_dtype = dtype_arr[rand() % dtype_size];
   weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
-                         quant_granularity_t::channel;
+                       quant_granularity_t::channel;
 }
 
 // EmbagType constructor
@@ -1033,6 +1033,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         lowoha_params params;
         params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
+        params.num_threads = 0; // Use default (omp_get_max_threads)
 
         // For WOQ: Extract quantization parameters from weight tensor
         if (is_woq) {
@@ -1523,7 +1524,8 @@ status_t embag_kernel_test(tensor_t &table_tensor,
         void *table_data = table_tensor.get_raw_handle_unsafe();
         void *indices_data = indices_tensor.get_raw_handle_unsafe();
         void *offsets_data = offsets_tensor.get_raw_handle_unsafe();
-        float *weights_data = is_weights ? (float*)weights_tensor.get_raw_handle_unsafe() : nullptr;
+        float *weights_data = is_weights ? (float *)
+                              weights_tensor.get_raw_handle_unsafe() : nullptr;
         void *output_data = output_tensor.get_raw_handle_unsafe();
 
         if (!table_data || !indices_data || !offsets_data || !output_data) {
@@ -1554,7 +1556,7 @@ status_t embag_kernel_test(tensor_t &table_tensor,
         params.include_last_offset = include_last_offset;
         params.padding_idx = padding_index;
         params.scatter_stride = scatter_stride;
-        params.num_threads = 0;  // Use default (omp_get_max_threads)
+        params.num_threads = 0; // Use default (omp_get_max_threads)
 
         log_info("LOWOHA embag: Calling embedding_bag_direct with "
                  "num_embeddings=", params.num_embeddings,
@@ -1564,12 +1566,12 @@ status_t embag_kernel_test(tensor_t &table_tensor,
 
         // Call LOWOHA embedding_bag_direct API
         status = embedding_bag_direct(
-            table_data,
-            indices_data,
-            offsets_data,
-            weights_data,
-            output_data,
-            params);
+                   table_data,
+                   indices_data,
+                   offsets_data,
+                   weights_data,
+                   output_data,
+                   params);
 
         if (status != status_t::success) {
           log_error("LOWOHA embedding_bag_direct execution failed.");
@@ -1594,15 +1596,15 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                                               .set_padding_index(padding_index)
                                               .set_include_last_offset(include_last_offset)
                                               .set_is_weights(is_weights);
-    if (table_tensor.get_data_type() == data_type_t::s8 ||
-        table_tensor.get_data_type() == data_type_t::s4 ||
-        table_tensor.get_data_type() == data_type_t::u4) {
-      embedding_bag_context.set_fp16_scale_bias(fp16_scale_bias);
-      embedding_bag_context.create();
-    }
-    else {
-      embedding_bag_context.create();
-    }
+      if (table_tensor.get_data_type() == data_type_t::s8 ||
+          table_tensor.get_data_type() == data_type_t::s4 ||
+          table_tensor.get_data_type() == data_type_t::u4) {
+        embedding_bag_context.set_fp16_scale_bias(fp16_scale_bias);
+        embedding_bag_context.create();
+      }
+      else {
+        embedding_bag_context.create();
+      }
 
       //define embedding bag operator
       embag_operator_t embedding_bag_operator = embag_operator_t()
@@ -1737,7 +1739,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
       // LOWOHA path - use embedding_direct API
       try {
         // Validate input tensors
-        if (!table_tensor.check() || !indices_tensor.check() || !output_tensor.check()) {
+        if (!table_tensor.check() || !indices_tensor.check() ||
+            !output_tensor.check()) {
           log_error("LOWOHA embedding: Invalid tensor state detected");
           return status_t::failure;
         }
@@ -1745,7 +1748,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
         // Get raw data pointers
         void *table_data = table_tensor.get_raw_handle_unsafe();
         void *indices_data = indices_tensor.get_raw_handle_unsafe();
-        float *weights_data = is_weights ? (float*)weights_tensor.get_raw_handle_unsafe() : nullptr;
+        float *weights_data = is_weights ? (float *)
+                              weights_tensor.get_raw_handle_unsafe() : nullptr;
         void *output_data = output_tensor.get_raw_handle_unsafe();
 
         if (!table_data || !indices_data || !output_data) {
@@ -1780,11 +1784,11 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
 
         // Call LOWOHA embedding_direct API
         status = embedding_direct(
-            table_data,
-            indices_data,
-            weights_data,
-            output_data,
-            params);
+                   table_data,
+                   indices_data,
+                   weights_data,
+                   output_data,
+                   params);
 
         if (status != status_t::success) {
           log_error("LOWOHA embedding_direct execution failed.");
@@ -1807,15 +1811,15 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
                                           .set_param("table", table_tensor)
                                           .set_padding_index(padding_index)
                                           .set_is_weights(is_weights);
-    if (table_tensor.get_data_type() == data_type_t::s8 ||
-        table_tensor.get_data_type() == data_type_t::s4 ||
-        table_tensor.get_data_type() == data_type_t::u4) {
-      embedding_context.set_fp16_scale_bias(fp16_scale_bias);
-      embedding_context.create();
-    }
-    else {
-      embedding_context.create();
-    }
+      if (table_tensor.get_data_type() == data_type_t::s8 ||
+          table_tensor.get_data_type() == data_type_t::s4 ||
+          table_tensor.get_data_type() == data_type_t::u4) {
+        embedding_context.set_fp16_scale_bias(fp16_scale_bias);
+        embedding_context.create();
+      }
+      else {
+        embedding_context.create();
+      }
       //define embedding operator
       embag_operator_t embedding_operator = embag_operator_t()
                                             .set_name("embedding_bag")
