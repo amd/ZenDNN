@@ -16,3 +16,4 @@
 add_subdirectory(matmul)
 add_subdirectory(embedding_bag)
 add_subdirectory(reorder)
+add_subdirectory(conv)
