@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/auto_tuner.hpp"
-#include "lowoha_operators/matmul/brgemm_matmul.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -41,9 +40,9 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const void *bias, bool is_weights_const, bool can_reorder) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
+    log_info("Using libxsmm kernel");
     if (run_libxsmm(transA, transB, M, N, K, beta, lda, ldb, ldc, A, B, C, dtypes,
                     lowoha_param, bias)) {
-      log_info("Using libxsmm kernel");
       return;
     }
   }
@@ -59,8 +58,8 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
 #endif
   log_info("Using AOCL DLP kernel");
   run_dlp(layout, transA, transB, M, N, K, alpha, beta,
-           lda, ldb, ldc, mem_format_a, mem_format_b,
-           A, B, C, dtypes, lowoha_param,bias, kernel, is_weights_const, can_reorder);
+          lda, ldb, ldc, mem_format_a, mem_format_b,
+          A, B, C, dtypes, lowoha_param,bias, kernel, is_weights_const, can_reorder);
   return;
 
   //   TODO: To implement native AVX512 BF16 kernel
@@ -95,11 +94,11 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
   size_t src_batch_stride_elems = (batch_params.batch_stride_src !=
                                    static_cast<size_t>(-1))
                                   ? batch_params.batch_stride_src
-                                  : (transA ? K * lda : M * lda);
+                                  : (transA ? K *lda : M * lda);
   size_t weight_batch_stride_elems = (batch_params.batch_stride_wei !=
                                       static_cast<size_t>(-1))
                                      ? batch_params.batch_stride_wei
-                                     : (transB ? N * ldb : K * ldb);
+                                     : (transB ? N *ldb : K * ldb);
   size_t dst_batch_stride_elems = (batch_params.batch_stride_dst !=
                                    static_cast<size_t>(-1))
                                   ? batch_params.batch_stride_dst
@@ -349,59 +348,147 @@ void matmul_execute(const char layout,
   }
 #endif
 
-  // LIBXSMM blocked execution with tiling
   if (kernel == matmul_algo_t::libxsmm_blocked) {
-    apilog_info("Executing matmul LOWOHA kernel with libxsmm tiling, algo: ",
-                static_cast<int>(kernel));
-#if ENABLE_BRGEMM_KERNEL
-    auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
-    int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
-    int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
-    int KC_BLOCK = 64;
+#if ENABLE_LIBXSMM_BRGEMM_KERNEL
+    if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
+                         beta, params.dtypes, params, kernel)) &&
+        params.dtypes.src == data_type_t::f32) {
+      apilog_info("Using LibXSMM BRGEMM kernel with KC blocking");
+      constexpr int KC_BLOCK = 64;
+      auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
+      const int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
+      const int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
 
-    const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
-    const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
-    uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
-
-    #pragma omp parallel for collapse(2)
-    for (int i = 0; i < M; i += M_BLOCK) {
-      for (int j = 0; j < N; j += N_BLOCK) {
-        int m_tile = std::min(M_BLOCK, M - i);
-        int n_tile = std::min(N_BLOCK, N - j);
-
-        // Prepare batch arrays
-        std::vector<const void *> A_batch;
-        std::vector<const void *> B_batch;
-        std::vector<int> K_sizes;
-
-        for (int k = 0; k < K; k += KC_BLOCK) {
-          int k_tile = std::min(KC_BLOCK, K - k);
-          const void *A_tile = get_matrix_block(src_ptr, i, k, lda, transA,
-                                                src_type_size);
-          const void *B_tile = get_matrix_block(weight_ptr, k, j, ldb, transB,
-                                                src_type_size);
-          A_batch.push_back(A_tile);
-          B_batch.push_back(B_tile);
-          K_sizes.push_back(k_tile);
+      size_t bias_element_size = 0;
+      const bool has_bias = (bias != nullptr);
+      if (has_bias) {
+        if (params.dtypes.bias == data_type_t::f32) {
+          bias_element_size = sizeof(float);
         }
-
-        void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
-
-        // Offset bias pointer for the current N tile
-        const void *tile_bias = nullptr;
-        if (bias != nullptr) {
-          size_t bias_element_size = size_of(params.dtypes.bias);
-          size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
-          tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
+        else if (params.dtypes.bias == data_type_t::bf16) {
+          bias_element_size = sizeof(uint16_t);
         }
-
-        brgemm_ref_kernel(transA, transB,
-                          m_tile, n_tile, K_sizes.data(),
-                          A_batch.data(), B_batch.data(),
-                          A_batch.size(),
-                          alpha, beta, C_tile, ldc,
-                          lda, ldb, params.dtypes, tile_bias);
+        else {
+          assert(false && "Unsupported bias dtype");
+        }
       }
+
+      const int K_main = (K / KC_BLOCK) * KC_BLOCK;
+      const int K_tail = K - K_main;
+      const int num_main_blocks_global = (K_main > 0) ? (K_main / KC_BLOCK) : 0;
+
+      const uint8_t *src_ptr    = static_cast<const uint8_t *>(src);
+      const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
+      uint8_t       *dst_ptr    = static_cast<uint8_t *>(dst);
+
+      #pragma omp parallel num_threads(num_threads)
+      {
+        std::vector<const void *> A_batch_main;
+        std::vector<const void *> B_batch_main;
+
+        if (num_main_blocks_global > 0) {
+          A_batch_main.resize(num_main_blocks_global);
+          B_batch_main.resize(num_main_blocks_global);
+        }
+
+        const void *A_batch_tail[1];
+        const void *B_batch_tail[1];
+
+        #pragma omp for collapse(2) schedule(static)
+        for (int i = 0; i < M; i += M_BLOCK) {
+          for (int j = 0; j < N; j += N_BLOCK) {
+
+            const int m_tile = std::min(M_BLOCK, M - i);
+            const int n_tile = std::min(N_BLOCK, N - j);
+
+            void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
+
+            const void *tile_bias = nullptr;
+            if (has_bias) {
+              tile_bias = static_cast<const uint8_t *>(bias)
+                          + static_cast<size_t>(j) * bias_element_size;
+            }
+
+            lowoha_params tile_params = params;
+            for (auto &po : tile_params.postop_) {
+              if ((po.po_type == post_op_type_t::binary_add ||
+                   po.po_type == post_op_type_t::binary_mul) &&
+                  po.buff != nullptr) {
+
+                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
+                                        uint16_t);
+                size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
+                                      (po.leading_dim) +
+                                      static_cast<size_t>(j);
+                size_t offset_bytes = offset_elems * element_size;
+
+                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + offset_bytes;
+              }
+            }
+
+            if (num_main_blocks_global > 0) {
+
+              for (int b = 0, k = 0; b < num_main_blocks_global; ++b, k += KC_BLOCK) {
+                A_batch_main[b] =
+                  get_matrix_block(src_ptr, i, k, lda, transA, src_type_size);
+                B_batch_main[b] =
+                  get_matrix_block(weight_ptr, k, j, ldb, transB, src_type_size);
+              }
+
+              run_libxsmm_brgemm(
+                trans_input, trans_weight,
+                m_tile, n_tile, KC_BLOCK,
+                num_main_blocks_global,
+                beta,
+                lda, ldb, ldc,
+                A_batch_main.data(),
+                B_batch_main.data(),
+                C_tile,
+                params.dtypes,
+                tile_params,
+                tile_bias,
+                (K_tail == 0)
+              );
+            }
+            const float tail_beta =
+              (K_main > 0) ? 1.0f : beta;
+
+            if (K_tail > 0) {
+
+              A_batch_tail[0] =
+                get_matrix_block(src_ptr, i, K_main, lda, transA, src_type_size);
+              B_batch_tail[0] =
+                get_matrix_block(weight_ptr, K_main, j, ldb, transB, src_type_size);
+
+              run_libxsmm_brgemm(
+                trans_input, trans_weight,
+                m_tile, n_tile, K_tail,
+                1,
+                tail_beta,
+                lda, ldb, ldc,
+                A_batch_tail,
+                B_batch_tail,
+                C_tile,
+                params.dtypes,
+                tile_params,
+                (K_main == 0 ? tile_bias : nullptr),
+                true         // apply post-ops
+              );
+            }
+          }
+        }
+      }
+    }
+    else {
+      apilog_info("LibXSMM BRGEMM is not supported for this combination, falling back to DLP");
+      matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                            M, N, K, alpha,
+                            src, lda,
+                            weight,
+                            ldb, beta, dst, ldc,
+                            params.dtypes, matmul_algo_t::aocl_dlp,
+                            params.mem_format_a, params.mem_format_b,
+                            params, batch_params, bias, is_weights_const);
     }
 #else
     if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
