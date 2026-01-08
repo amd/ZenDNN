@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -37,17 +37,19 @@ static void dispatch_avx512_kernel(
   void *dst,
   const embag_params_t &params) {
 
-  const int64_t embedding_dim = params.embedding_dim;
-  const int64_t num_indices = params.num_indices;
-  const int64_t num_bags = params.num_bags;
+  const uint64_t embedding_dim = params.embedding_dim;
+  const uint64_t num_indices = params.num_indices;
+  const uint64_t num_bags = params.num_bags;
   const int64_t padding_idx = params.padding_idx;
   const bool include_last_offset = params.include_last_offset;
+  const data_type_t table_dtype = params.dtypes.table;
+  const bool fp16_scale_bias = params.fp16_scale_bias;
 
   // Use algo directly since lowoha::embag_algo_t is aliased to ops::embag_algo_t
   const embag_algo_t algo = params.algo;
 
   const bool is_weights = params.is_weights;
-  const int64_t dst_stride = embedding_dim;
+  const int64_t dst_stride = params.dst_stride;
 
   // Dispatch based on indices/offsets types
   // For embedding lookup (algo == none), offsets is nullptr
@@ -95,6 +97,56 @@ static void dispatch_avx512_kernel(
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
     }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::f32) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t, float>
+      (
+        static_cast<const int8_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::bf16) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int64_t, int64_t, uint16_t>
+      (
+        static_cast<const int8_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::f32) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t, float>
+      (
+        static_cast<const uint8_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::bf16) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int64_t, int64_t, uint16_t>
+      (
+        static_cast<const uint8_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
     else {
       log_error("embedding_bag_direct: unsupported table and output data types");
     }
@@ -140,6 +192,56 @@ static void dispatch_avx512_kernel(
         static_cast<uint16_t *>(dst),
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
+    }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::f32) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, float>
+      (
+        static_cast<const int8_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if (params.dtypes.table == data_type_t::s8 &&
+             params.dtypes.output == data_type_t::bf16) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<false, int8_t, int32_t, int32_t, uint16_t>
+      (
+        static_cast<const int8_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::f32) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t, float>
+      (
+        static_cast<const uint8_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
+    }
+    else if ((params.dtypes.table == data_type_t::s4 ||
+              params.dtypes.table == data_type_t::u4) &&
+             params.dtypes.output == data_type_t::bf16) {
+      zendnnl::ops::embag_avx512_int8_int4_kernel<true, uint8_t, int32_t, int32_t, uint16_t>
+      (
+        static_cast<const uint8_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset,
+        table_dtype, fp16_scale_bias);
     }
     else {
       log_error("embedding_bag_direct: unsupported table and output data types");

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ TEST_P(TestEmbedding, F32_F32) {
                            data_type_t::f32);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
-                            weights_tensor, output_tensor, padding_index, is_weights, 
+                            weights_tensor, output_tensor, padding_index, is_weights,
                             fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor,
@@ -210,7 +210,7 @@ TEST_P(TestEmbedding, INT8_F32) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);
@@ -246,7 +246,7 @@ TEST_P(TestEmbedding, INT8_BF16) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);
@@ -282,7 +282,7 @@ TEST_P(TestEmbedding, S4_F32) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);
@@ -318,7 +318,7 @@ TEST_P(TestEmbedding, S4_BF16) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);
@@ -354,7 +354,7 @@ TEST_P(TestEmbedding, U4_F32) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);
@@ -390,7 +390,7 @@ TEST_P(TestEmbedding, U4_BF16) {
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
-                            fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embedding_forced_ref_kernel_test(table_tensor,
                             indices_tensor, weights_tensor, output_tensor_ref,
                             padding_index, is_weights, fp16_scale_bias);

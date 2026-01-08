@@ -162,8 +162,8 @@ EmbagType::EmbagType() {
   is_weights = std::rand() % 2;
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   offsets_dtype = indices_dtype;
-  scatter_stride = -1;
   fp16_scale_bias = std::rand() % 2;
+  strided = std::rand() % 2;
   use_LOWOHA = std::rand() % 2;
 }
 
@@ -195,13 +195,22 @@ bool is_binary_postop(post_op_type_t post_op) {
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
-                                       data_type dtype_, tensor_t scale, tensor_t zp) {
+                                       data_type dtype_, tensor_t scale, tensor_t zp,
+                                       bool strided) {
 
   auto ztensor = tensor_t()
                  .set_name("zero tensor")
                  .set_size(size_)
-                 .set_data_type(dtype_)
-                 .set_storage();
+                 .set_data_type(dtype_);
+  if (strided) {
+    uint64_t x = size_[1] + rand() % 50;
+    ztensor.set_stride({x, 1});
+    ztensor.set_aligned_size({size_[0], x});
+    ztensor.set_storage();
+  }
+  else {
+    ztensor.set_storage();
+  }
 
   if (scale.get_nelem() != 0) {
     ztensor.set_quant_scale(scale);
@@ -1568,7 +1577,6 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            int64_t padding_index,
                            bool include_last_offset,
                            bool is_weights,
-                           int64_t scatter_stride,
                            bool fp16_scale_bias,
                            bool use_LOWOHA) {
   try {
@@ -1619,8 +1627,9 @@ status_t embag_kernel_test(tensor_t &table_tensor,
         params.is_weights = is_weights;
         params.include_last_offset = include_last_offset;
         params.padding_idx = padding_index;
-        params.scatter_stride = scatter_stride;
-        params.num_threads = 0; // Use default (omp_get_max_threads)
+        params.num_threads = 0;  // Use default (omp_get_max_threads)
+        params.fp16_scale_bias = fp16_scale_bias;
+        params.dst_stride = output_tensor.get_stride()[0];
 
         log_info("LOWOHA embag: Calling embedding_bag_direct with "
                  "num_embeddings=", params.num_embeddings,
@@ -1721,7 +1730,6 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                       int64_t padding_index,
                                       bool include_last_offset,
                                       bool is_weights,
-                                      int64_t scatter_stride,
                                       bool fp16_scale_bias) {
   try {
     status_t status;
@@ -1838,8 +1846,8 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
         params.num_indices = indices_tensor.get_size(0);
         params.is_weights = is_weights;
         params.padding_idx = padding_index;
-        params.scatter_stride = 0;
         params.num_threads = 0;  // Use default (omp_get_max_threads)
+        params.fp16_scale_bias = fp16_scale_bias;
 
         log_info("LOWOHA embedding: Calling embedding_direct with "
                  "num_embeddings=", params.num_embeddings,

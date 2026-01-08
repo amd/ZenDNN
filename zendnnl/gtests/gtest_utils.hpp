@@ -92,8 +92,8 @@ struct EmbagType {
   bool is_weights;
   data_type_t indices_dtype;
   data_type_t offsets_dtype;
-  int64_t scatter_stride;
   bool fp16_scale_bias;
+  bool strided;
   bool use_LOWOHA;
   EmbagType();
 };
@@ -145,7 +145,8 @@ class tensor_factory_t {
 
   /** @brief zero tensor */
   tensor_t zero_tensor(const std::vector<index_type> size_, data_type dtype_,
-                       tensor_t scale = tensor_t(), tensor_t zp = tensor_t());
+                       tensor_t scale = tensor_t(), tensor_t zp = tensor_t(),
+                       bool strided = false);
 
   /** @brief uniformly distributed tensor */
 
@@ -336,7 +337,6 @@ status_t embag_kernel_test(tensor_t &table_tensor,
                            int64_t padding_index,
                            bool include_last_offset,
                            bool is_weights,
-                           int64_t scatter_stride,
                            bool fp16_scale_bias,
                            bool use_LOWOHA=false);
 
@@ -354,8 +354,7 @@ status_t embag_forced_ref_kernel_test(tensor_t &table_tensor,
                                       int64_t padding_index,
                                       bool include_last_offset,
                                       bool is_weights,
-                                      int64_t scatter_stride,
-                                      bool fp16_scale_bias = true);
+                                      bool fp16_scale_bias);
 
 /** @fn embedding_kernel_test
  *  @brief Test function for embedding kernel
@@ -382,7 +381,7 @@ status_t embedding_forced_ref_kernel_test(tensor_t &table_tensor,
     tensor_t &output_tensor,
     int64_t padding_index,
     bool is_weights,
-    bool fp16_scale_bias = true);
+    bool fp16_scale_bias);
 
 /** @fn compare_tensor_2D
  *  @brief Function to compare two 2D tensor

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -39,15 +39,15 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
     is_weights         = params.is_weights;
     indices_dtype      = params.indices_dtype;
     offsets_dtype      = params.offsets_dtype;
-    scatter_stride     = params.scatter_stride;
     fp16_scale_bias    = params.fp16_scale_bias;
+    strided            = params.strided;
     use_LOWOHA         = params.use_LOWOHA;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_bags: ", num_bags, " num_indices: ", num_indices,
              " algo: ", static_cast<int>(algo), " padding_index: ", padding_index,
              " include_last_offset: ", include_last_offset, " is_weights: ", is_weights,
-             " use_LOWOHA: ", use_LOWOHA);
+             " strided: ", strided, " use_LOWOHA: ", use_LOWOHA);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -58,8 +58,7 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
   int64_t padding_index;
   bool include_last_offset, is_weights, fp16_scale_bias;
   data_type_t indices_dtype, offsets_dtype;
-  int64_t scatter_stride;
-  bool use_LOWOHA;
+  bool use_LOWOHA, strided;
   tensor_factory_t tensor_factory{};
 };
 
@@ -80,19 +79,19 @@ TEST_P(TestEmbag, F32_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias, use_LOWOHA);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -120,19 +119,19 @@ TEST_P(TestEmbag, F32_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias, use_LOWOHA);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -160,19 +159,19 @@ TEST_P(TestEmbag, BF16_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias, use_LOWOHA);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -200,19 +199,19 @@ TEST_P(TestEmbag, BF16_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias, use_LOWOHA);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor_ref,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -240,18 +239,18 @@ TEST_P(TestEmbag, INT8_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -281,18 +280,18 @@ TEST_P(TestEmbag, INT8_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -322,18 +321,18 @@ TEST_P(TestEmbag, S4_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -363,18 +362,18 @@ TEST_P(TestEmbag, S4_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -404,18 +403,18 @@ TEST_P(TestEmbag, U4_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 
@@ -445,18 +444,18 @@ TEST_P(TestEmbag, U4_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), true);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_bags, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), true);
 
   status_t status         = embag_kernel_test(table_tensor, indices_tensor,
                             offsets_tensor, weights_tensor, output_tensor,
                             algo, padding_index, include_last_offset, is_weights,
-                            scatter_stride, fp16_scale_bias);
+                            fp16_scale_bias, use_LOWOHA);
   status_t ref_status     = embag_forced_ref_kernel_test(table_tensor,
                             indices_tensor, offsets_tensor, weights_tensor,
                             output_tensor_ref, algo, padding_index, include_last_offset,
-                            is_weights, scatter_stride, fp16_scale_bias);
+                            is_weights, fp16_scale_bias);
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
 

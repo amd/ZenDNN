@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -60,15 +60,16 @@ struct embag_data_types_t {
 struct embag_params_t {
   embag_data_types_t dtypes;     // Data types for operands
   embag_algo_t algo;             // Reduction algorithm (sum/mean/max/none)
-  int64_t num_embeddings;        // Number of rows in the embedding table
-  int64_t embedding_dim;         // Dimension of each embedding vector
+  uint64_t num_embeddings;        // Number of rows in the embedding table
+  uint64_t embedding_dim;         // Dimension of each embedding vector
   uint64_t num_threads;          // Number of threads
-  int64_t num_indices;           // Total number of indices
-  int64_t num_bags;              // Number of bags (output rows)
+  uint64_t num_indices;           // Total number of indices
+  uint64_t num_bags;              // Number of bags (output rows)
   bool is_weights;               // Whether weights are present
   bool include_last_offset;      // Whether offsets includes the last offset (num_indices)
   int64_t padding_idx;           // Index to ignore during lookup (-1 means no padding)
-  int64_t scatter_stride;        // Stride for scattered output
+  bool fp16_scale_bias;          // Whether data type of scale and bias is fp16
+  uint64_t dst_stride;           // Destination tensor stride value
 
   /**
    * @brief Default constructor for embag_params_t
@@ -76,7 +77,7 @@ struct embag_params_t {
   embag_params_t() : dtypes(), algo(embag_algo_t::sum),
     num_embeddings(0), embedding_dim(0), num_threads(0),
     num_indices(0), num_bags(0), is_weights(false), include_last_offset(false),
-    padding_idx(-1), scatter_stride(0) {}
+    padding_idx(-1), fp16_scale_bias(false) {}
 };
 
 /**
