@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -57,8 +57,8 @@ status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
       return status_t::failure;
     }
     float scale_val = *static_cast<const float *>(params.quant_params.scale.buff);
-    if (scale_val <= 0.0f || !std::isfinite(scale_val)) {
-      log_error("Invalid scale parameter: scale must be positive and finite. Got: ",
+    if (!std::isfinite(scale_val)) {
+      log_error("Invalid scale parameter: scale must be finite. Got: ",
                 scale_val);
       return status_t::failure;
     }
