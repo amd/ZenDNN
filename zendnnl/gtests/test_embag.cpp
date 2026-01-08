@@ -259,7 +259,9 @@ TEST_P(TestEmbag, INT8_F32) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -298,7 +300,9 @@ TEST_P(TestEmbag, INT8_BF16) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -337,7 +341,9 @@ TEST_P(TestEmbag, S4_F32) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -376,7 +382,9 @@ TEST_P(TestEmbag, S4_BF16) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -415,7 +423,9 @@ TEST_P(TestEmbag, U4_F32) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -454,7 +464,9 @@ TEST_P(TestEmbag, U4_BF16) {
     compare_tensor_2D(output_tensor, output_tensor_ref, num_bags, embedding_dim,
                       EMBAG_INT4_TOL, is_test_successful);
   }
-
+  //free this table pointer after use
+  free(table_tensor.get_raw_handle_unsafe());
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 

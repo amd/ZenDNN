@@ -313,7 +313,9 @@ int embedding_bag_u4_kernel_example() {
                     " operator execution failed.");
       return NOT_OK;
     }
-
+    //free this table pointer after use
+    free(table.get_raw_handle_unsafe());
+    table.reset();
   }
   catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
@@ -381,6 +383,9 @@ int embedding_bag_u4_ref_kernel_example() {
       return NOT_OK;
     }
 
+  //free this table pointer after use
+  free(table.get_raw_handle_unsafe());
+  table.reset();
   }
   catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;
