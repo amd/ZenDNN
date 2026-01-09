@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include "bmm_partitioner.hpp"
 #include "lowoha_operators/matmul/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
@@ -138,144 +139,61 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
 #endif
 
   if (num_threads > 1) {
-    /*
-     * Parallel partitioning strategy:
-     * The total number of available threads is divided across batches to compute `threads_per_batch`,
-     * ensuring that each batch gets a fair share of compute resources. Within each batch, the M dimension
-     * (rows of the output matrix) is further partitioned into blocks of size `M_block`, calculated to
-     * evenly distribute the workload among the threads assigned to that batch. The OpenMP `collapse(2)`
-     * directive enables parallelization over both batch and row-block loops, while `schedule(dynamic)`
-     * ensures better load balancing, especially when M is not divisible evenly or when thread workloads vary.
-     */
-    int threads_per_batch = std::max(1, num_threads / batch_count);
-    int M_block = std::max(1, (M + threads_per_batch - 1) / threads_per_batch);
+    // Setup partition configuration
+    bmm_partition_config_t part_config;
+    part_config.M = M;
+    part_config.N = N;
+    part_config.K = K;
+    part_config.batch_count = batch_count;
+    part_config.num_threads = num_threads;
+    part_config.kernel = kernel;
+    part_config.src_batch_stride_bytes = src_batch_stride_bytes;
+    part_config.weight_batch_stride_bytes = weight_batch_stride_bytes;
+    part_config.dst_batch_stride_bytes = dst_batch_stride_bytes;
 
-    // Optimize M_block based on batch count and M size
-    // TODO: Further refine the tuning based on heuristics
-    // involving batch_count, M, and num_threads.
-    if ((batch_count >= 1024 && M <= 2048) ||
-        (batch_count >= 512 && M <= 256) ||
-        (batch_count > 128 && batch_count < 192 && M <= 512)) {
-      if (kernel == matmul_algo_t::libxsmm) {
-        M_block = std::min(128, M);
-      }
-      else {
-        M_block = std::min(36, M);
-      }
-    }
-    else if ((batch_count == 64 && M >= 512) ||
-             (batch_count == 128 && M >= 512)) {
-      M_block = std::min(192, M);
-    }
-    else {
-      M_block = std::min(M_block, M); // Ensure M_block <= M
-    }
+    int M_block = calculate_optimal_m_block(part_config);
 
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
                           params.dtypes, params, kernel))) {
       kernel = matmul_algo_t::aocl_dlp;
+      part_config.kernel = kernel;
     }
 
-    apilog_info("Executing BMM LOWOHA kernel with parallel partitioning, algo: ",
-                static_cast<int>(kernel));
-    // Decide parallelization strategy based on MFLOPs:
-    // Use zendnn_parallel_for when M_FLOPs > 6.0 for better performance on larger workloads.
-    // Use omp_parallel_for when M_FLOPs <= 6.0 to avoid overhead on smaller tasks.
-    float flops = static_cast<float>(2LL * M * K * N) / 1000000.0f;
+    // Define the tile processing callback
+    auto process_tile = [&](int batch_idx, int m_start, int m_len,
+                            const uint8_t *src_ptr, const uint8_t *weight_ptr,
+                            uint8_t *dst_ptr) {
+      const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
+                                       src_type_size);
+      void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-    if (flops > M_FLOPS) {
-      apilog_info("Using zendnnl_parallel_for");
-      // Calculate total number of work items (batch_count * number of M blocks)
-      int total_m_blocks = (M + M_block - 1) / M_block;
-      int total_work_items = batch_count * total_m_blocks;
-
-
-      zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
-        for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
-          // Convert linear work index back to (batch, m_block) coordinates
-          int b = work_idx / total_m_blocks;
-          int m_block_idx = work_idx % total_m_blocks;
-          int m_start = m_block_idx * M_block;
-          int m_len = std::min(M_block, M - m_start);
-
-          const uint8_t *src_ptr    = static_cast<const uint8_t *>(src) +
-                                      get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
-          const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
-          uint8_t *dst_ptr          = static_cast<uint8_t *>(dst) + b *
-                                      dst_batch_stride_bytes;
-
-          const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
-                                           src_type_size);
-          void *C       = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
-
-          // Create a modified post_op with offset binary tensor buffers
-          lowoha_params thread_lowoha_params = params;
-          for (auto &po : thread_lowoha_params.postop_) {
-            if (po.po_type == post_op_type_t::binary_add ||
-                po.po_type == post_op_type_t::binary_mul) {
-              if (po.buff != nullptr) {
-                // Calculate offset based on m_start and data type
-                size_t element_size = size_of(po.dtype);
-                size_t row_offset = m_start * N * element_size;
-                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
-              }
-            }
+      // Create a modified post_op with offset binary tensor buffers
+      lowoha_params thread_lowoha_params = params;
+      for (auto &po : thread_lowoha_params.postop_) {
+        if (po.po_type == post_op_type_t::binary_add ||
+            po.po_type == post_op_type_t::binary_mul) {
+          if (po.buff != nullptr) {
+            // Calculate offset based on m_start and data type
+            size_t element_size = size_of(po.dtype);
+            size_t row_offset = m_start * N * element_size;
+            po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
           }
-
-          matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                                m_len, N, K, alpha,
-                                A, lda, weight_ptr, ldb,
-                                beta, C, ldc,
-                                params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, batch_params,
-                                bias, is_weights_const);
-        }
-      });
-    }
-    else {
-      apilog_info("Using OpenMP parallel for");
-
-      #pragma omp parallel for collapse(2) num_threads(num_threads)
-      for (int b = 0; b < batch_count; ++b) {
-        for (int m_start = 0; m_start < M; m_start += M_block) {
-          int m_len = std::min(M_block, M - m_start);
-
-          const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
-                                   get_batch_index(b, batch_params.Batch_A) * src_batch_stride_bytes;
-          const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                      get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
-          uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride_bytes;
-
-          const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
-                                           src_type_size);
-          void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
-
-          // Create a modified post_op with offset binary tensor buffers
-          lowoha_params thread_lowoha_params = params;
-          for (auto &po : thread_lowoha_params.postop_) {
-            if (po.po_type == post_op_type_t::binary_add ||
-                po.po_type == post_op_type_t::binary_mul) {
-              if (po.buff != nullptr) {
-                // Calculate offset based on m_start and data type
-                size_t element_size = size_of(po.dtype);
-                size_t row_offset = m_start * N * element_size;
-                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
-              }
-            }
-          }
-
-          matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                                m_len, N, K, alpha,
-                                A, lda, weight_ptr, ldb,
-                                beta, C, ldc,
-                                params.dtypes, kernel,
-                                params.mem_format_a, params.mem_format_b, thread_lowoha_params, batch_params,
-                                bias, is_weights_const);
         }
       }
-    }
+
+      matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                            m_len, N, K, alpha,
+                            A, lda, weight_ptr, ldb,
+                            beta, C, ldc,
+                            params.dtypes, kernel,
+                            params.mem_format_a, params.mem_format_b,
+                            thread_lowoha_params, batch_params,
+                            bias, is_weights_const);
+    };
+
+    // Execute partitioned BMM with automatic strategy selection
+    execute_partitioned_bmm(src, weight, dst, part_config, batch_params, process_tile);
   }
   else {
     // Single thread execution for batches

@@ -19,6 +19,7 @@
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
   lowoha_matmul_utils.cpp
+  bmm_partitioner.cpp
   aocl_kernel.cpp
   auto_tuner.cpp
   onednn_kernel.cpp)
@@ -27,6 +28,7 @@ set(lowoha_matmul_public_headers
   lowoha_common.hpp
   lowoha_matmul.hpp
   lowoha_matmul_utils.hpp
+  bmm_partitioner.hpp
   lru_cache.hpp
   zendnnl_key.hpp)
 
