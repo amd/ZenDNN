@@ -113,7 +113,6 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     apilog_info("Executing BMM LOWOHA kernel with batch SGEMM, algo: ",
                 static_cast<int>(kernel));
 
-
     matmul_batch_gemm_wrapper(layout, trans_input, trans_weight,
                               M, N, K, alpha,
                               src, lda, weight, ldb, beta, dst, ldc,
@@ -156,10 +155,15 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
                           params.dtypes, params, kernel))) {
-      kernel = matmul_algo_t::aocl_dlp;
-      part_config.kernel = kernel;
-    }
+      kernel = matmul_algo_t::onednn;
+      //TODO: Remove this once AOCL DLP has fix for parallel matmul
+      matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
+                            weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
+                            is_weights_const, src_batch_stride_elems, weight_batch_stride_elems,
+                            dst_batch_stride_elems);
 
+      return;
+    }
     // Define the tile processing callback
     auto process_tile = [&](int batch_idx, int m_start, int m_len,
                             const uint8_t *src_ptr, const uint8_t *weight_ptr,
@@ -212,7 +216,6 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
                                   get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride_bytes;
-
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr,
@@ -462,7 +465,6 @@ void matmul_execute(const char layout,
             size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
             tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
           }
-
           matmul_kernel_wrapper(layout, trans_input, trans_weight,
                                 m_tile, n_tile, K, tile_alpha,
                                 A_tile, lda,
@@ -475,8 +477,6 @@ void matmul_execute(const char layout,
       }
     }
     else {
-
-
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
                             src, lda,
@@ -499,8 +499,6 @@ void matmul_execute(const char layout,
 
   apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
               static_cast<int>(kernel));
-
-
   matmul_kernel_wrapper(layout, trans_input, trans_weight,
                         M, N, K, alpha,
                         src, lda, weight,
