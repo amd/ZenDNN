@@ -22,7 +22,7 @@
 
 namespace zendnnl {
 namespace lowoha {
-
+namespace embag {
 
 /**
  * @brief RAII helper to temporarily set OpenMP thread count.
@@ -118,6 +118,7 @@ zendnnl::common::status_t embedding_direct(
   void *dst,
   embag_params_t params);
 
+} // namespace embag
 } // namespace lowoha
 } // namespace zendnnl
 

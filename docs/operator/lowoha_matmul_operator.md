@@ -57,20 +57,20 @@ status_t matmul_direct(
   void *dst,                   // Output matrix C
   const int ldc,               // Leading dimension of C
   const bool is_weights_const, // Whether weights are constant (enables caching)
-  batch_params_t batch_params, // Batch parameters (batch sizes and strides)
-  lowoha_params params         // LowOHA parameters (dtypes, post-ops, quantization)
+  matmul_batch_params_t batch_params, // Batch parameters (batch sizes and strides)
+  matmul_params params         // LowOHA parameters (dtypes, post-ops, quantization)
 );
 ```
 
 
 ## Parameters Structure
 
-### `batch_params_t`
+### `matmul_batch_params_t`
 
 Structure for batch dimensions and strides:
 
 ```cpp
-struct batch_params_t {
+struct matmul_batch_params_t {
   int Batch_A;                    // Batch size for source tensor (default: 1)
   int Batch_B;                    // Batch size for weight tensor (default: 1)
   size_t batch_stride_src;        // Byte stride between batches for source (-1 = auto-calculate)
@@ -79,15 +79,15 @@ struct batch_params_t {
 };
 ```
 
-### `lowoha_params`
+### `matmul_params`
 
 The main configuration structure for LowOHA MatMul:
 
 ```cpp
-struct lowoha_params {
-  data_types dtypes;                       // Data types for tensors
-  std::vector<postop> postop_;             // Post-operations
-  lowoha_quantization_params_t quant_params; // Quantization parameters
+struct matmul_params {
+  matmul_data_types dtypes;                       // Data types for tensors
+  std::vector<matmul_post_op> postop_;             // Post-operations
+  matmul_quantization_params_t quant_params; // Quantization parameters
   char mem_format_a;                       // Memory format for A ('n'=non-reordered, 'r'=reordered)
   char mem_format_b;                       // Memory format for B ('n'=non-reordered, 'r'=reordered)
   matmul_algo_t lowoha_algo;               // Preferred backend algorithm
@@ -96,12 +96,12 @@ struct lowoha_params {
 ```
 
 
-### `data_types`
+### `matmul_data_types`
 
 Specifies the data types for each tensor:
 
 ```cpp
-struct data_types {
+struct matmul_data_types {
   data_type_t src;      // Input data type
   data_type_t wei;      // Weight data type
   data_type_t dst;      // Output data type
@@ -121,12 +121,12 @@ struct data_types {
 | S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 
 
-### `postop`
+### `matmul_post_op`
 
 Defines a single post-operation:
 
 ```cpp
-struct postop {
+struct matmul_post_op {
   post_op_type_t po_type;      // Type of post-operation
   void *buff;                  // Buffer for binary ops (nullptr for activations)
   data_type_t dtype;           // Data type of the buffer
@@ -150,12 +150,12 @@ struct postop {
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
 
-### `lowoha_quantization_params_t`
+### `matmul_quantization_params_t`
 
 Quantization scale and zero-point parameters for quantized operations (WOQ and INT8):
 
 ```cpp
-struct lowoha_quantization_params_t {
+struct matmul_quantization_params_t {
   /**
    * Individual quantization parameter (scale or zero-point)
    * 
@@ -164,18 +164,18 @@ struct lowoha_quantization_params_t {
    *   - Per-channel: dims = {1, N}        → one scale per output channel
    *   - Per-group:   dims = {G, N}        → G groups along K, where G = K/group_size
    */
-  struct quant_t {
+  struct matmul_quant_t {
     const void *buff;              // Pointer to scale/zero-point data
     data_type_t dt;                // Data type (f32/bf16 for scale, s8/u8/s32 for zero-point)
     std::vector<int64_t> dims;     // Dimensions of the quantization tensor
   };
   
-  quant_t src_scale;     // Source tensor scale (for INT8)
-  quant_t wei_scale;     // Weight tensor scale (required for WOQ and INT8)
-  quant_t dst_scale;     // Destination tensor scale (for INT8)
-  quant_t src_zp;        // Source tensor zero-point (for INT8 asymmetric quantization)
-  quant_t wei_zp;        // Weight tensor zero-point (for WOQ asymmetric or INT8)
-  quant_t dst_zp;        // Destination tensor zero-point (for INT8)
+  matmul_quant_t src_scale;     // Source tensor scale (for INT8)
+  matmul_quant_t wei_scale;     // Weight tensor scale (required for WOQ and INT8)
+  matmul_quant_t dst_scale;     // Destination tensor scale (for INT8)
+  matmul_quant_t src_zp;        // Source tensor zero-point (for INT8 asymmetric quantization)
+  matmul_quant_t wei_zp;        // Weight tensor zero-point (for WOQ asymmetric or INT8)
+  matmul_quant_t dst_zp;        // Destination tensor zero-point (for INT8)
 };
 ```
 
@@ -211,7 +211,7 @@ int lowoha_matmul_bf16_fused_ops_example() {
   std::vector<uint16_t> add_tensor(M * N);
   
   // Configure data types
-  data_types dtypes;
+  matmul_data_types dtypes;
   dtypes.src = data_type_t::bf16;
   dtypes.wei = data_type_t::bf16;
   dtypes.dst = data_type_t::bf16;
@@ -219,11 +219,11 @@ int lowoha_matmul_bf16_fused_ops_example() {
   dtypes.compute = data_type_t::f32;
   
   // Configure post-operations: GELU -> Binary Add
-  lowoha_params params;
+  matmul_params params;
   params.dtypes = dtypes;
   
   // Post-op 1: GELU
-  postop gelu_op;
+  matmul_post_op gelu_op;
   gelu_op.po_type = post_op_type_t::gelu_erf;
   gelu_op.buff = nullptr;
   gelu_op.dtype = data_type_t::none;
@@ -231,7 +231,7 @@ int lowoha_matmul_bf16_fused_ops_example() {
   params.postop_.push_back(gelu_op);
   
   // Post-op 2: Binary Add
-  postop add_op;
+  matmul_post_op add_op;
   add_op.po_type = post_op_type_t::binary_add;
   add_op.buff = add_tensor.data();
   add_op.dtype = data_type_t::bf16;
@@ -239,7 +239,7 @@ int lowoha_matmul_bf16_fused_ops_example() {
   params.postop_.push_back(add_op);
   
   // Configure batch parameters
-  batch_params_t batch_params;
+  matmul_batch_params_t batch_params;
   batch_params.Batch_A = 1;
   batch_params.Batch_B = 1;
   
@@ -279,18 +279,18 @@ int lowoha_batched_matmul_example() {
   std::vector<float> bias(N, 0.0f);
   
   // Configure data types
-  data_types dtypes;
+  matmul_data_types dtypes;
   dtypes.src = data_type_t::f32;
   dtypes.wei = data_type_t::f32;
   dtypes.dst = data_type_t::f32;
   dtypes.bias = data_type_t::f32;
   dtypes.compute = data_type_t::f32;
   
-  lowoha_params params;
+  matmul_params params;
   params.dtypes = dtypes;
   
   // Configure batch parameters
-  batch_params_t batch_params;
+  matmul_batch_params_t batch_params;
   batch_params.Batch_A = batch_size;  // Batched input
   batch_params.Batch_B = 1;           // Shared weights
   
@@ -357,14 +357,14 @@ int lowoha_woq_bf16s4_matmul_example() {
   std::vector<float> output(M * N, 0.0f);
   
   // Configure data types for WOQ
-  data_types dtypes;
+  matmul_data_types dtypes;
   dtypes.src = data_type_t::bf16;
   dtypes.wei = data_type_t::s4;
   dtypes.dst = data_type_t::f32;
   dtypes.bias = data_type_t::none;
   dtypes.compute = data_type_t::none;
   
-  lowoha_params params;
+  matmul_params params;
   params.dtypes = dtypes;
   
   // Setup per-group quantization parameters
@@ -377,7 +377,7 @@ int lowoha_woq_bf16s4_matmul_example() {
   params.quant_params.wei_zp.dims = {NUM_GROUPS, N};
   
   // Batch parameters
-  batch_params_t batch_params;
+  matmul_batch_params_t batch_params;
   batch_params.Batch_A = 1;
   batch_params.Batch_B = 1;
   
@@ -447,14 +447,14 @@ int lowoha_int8_matmul_example() {
   }
   
   // Configure data types for INT8
-  data_types dtypes;
+  matmul_data_types dtypes;
   dtypes.src = data_type_t::u8;   // Unsigned 8-bit activations
   dtypes.wei = data_type_t::s8;   // Signed 8-bit weights
   dtypes.dst = data_type_t::f32;  // Float32 output
   dtypes.bias = data_type_t::none;
   dtypes.compute = data_type_t::none;
   
-  lowoha_params params;
+  matmul_params params;
   params.dtypes = dtypes;
   
   // Set source scale (per-tensor)
@@ -481,14 +481,14 @@ int lowoha_int8_matmul_example() {
   // This results in 1D compensation which is cached
   
   // Add ReLU post-op
-  postop relu_op;
+  matmul_post_op relu_op;
   relu_op.po_type = post_op_type_t::relu;
   relu_op.buff = nullptr;
   relu_op.dtype = data_type_t::none;
   params.postop_.push_back(relu_op);
   
   // Batch parameters
-  batch_params_t batch_params;
+  matmul_batch_params_t batch_params;
   batch_params.Batch_A = 1;
   batch_params.Batch_B = 1;
   
@@ -562,10 +562,10 @@ For INT8 matmul with asymmetric quantization, LowOHA provides **automatic cachin
 
 LowOHA MatMul supports multiple backends. The backend can be selected:
 
-### 1. Via `lowoha_params`
+### 1. Via `matmul_params`
 
 ```cpp
-lowoha_params params;
+matmul_params params;
 params.lowoha_algo = matmul_algo_t::aocl_dlp;  
 ```
 

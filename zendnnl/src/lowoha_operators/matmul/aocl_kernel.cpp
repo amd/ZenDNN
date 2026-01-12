@@ -21,6 +21,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 // Helper function to compute number of elements from dimension vector
 // Returns 1 for empty dims (per-tensor case), or product of all dims
@@ -34,7 +35,7 @@ static inline size_t get_num_elements(const std::vector<int64_t>& dims) {
 // Helper function to setup post-ops (eltwise, binary_add, binary_mul)
 #if ZENDNNL_DEPENDS_AOCLDLP
 static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
-                              const std::vector<postop> &postops,
+                              const std::vector<matmul_post_op> &postops,
                               int &op_index, int &eltwise_index,
                               int &matrix_add_index, int &matrix_mul_index,
                               int eltwise_count, int matrix_add_count,
@@ -167,7 +168,7 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
 
 // Helper function to setup pre-ops for WOQ (Weight-Only Quantization)
 static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
-                              const lowoha_params &lowoha_param,
+                              const matmul_params &lowoha_param,
                               int64_t K, int64_t N) {
   dlp_metadata->pre_ops = static_cast<dlp_pre_op *>(malloc(sizeof(dlp_pre_op)));
   if (!dlp_metadata->pre_ops) {
@@ -224,8 +225,8 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 }
 
 // Helper function to create post_op structure for bias and post-ops
-dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N, int K,
+dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
+                                   const void *bias, const matmul_data_types &dtypes, int N, int K,
                                    int M, int32_t *zp_comp_acc, int zp_comp_ndim) {
   // Count total operations (bias + post-ops + zp_comp)
   int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
@@ -597,8 +598,8 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
   return dlp_metadata;
 }
 #else
-aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
-                                  const void *bias, const data_types &dtypes, int N, int K) {
+aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
+                                  const void *bias, const matmul_data_types &dtypes, int N, int K) {
   // Check if this is a WOQ case (S4/S8 weights with BF16 source)
   bool is_woq = dtypes.wei == data_type_t::s4 &&
                 dtypes.src == data_type_t::bf16;
@@ -920,7 +921,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
 // Cleanup functions for post-op structures
 #if ZENDNNL_DEPENDS_AOCLDLP
 void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
-                         const lowoha_params &lowoha_param) {
+                         const matmul_params &lowoha_param) {
   if (aocl_po) {
     // Count operations from seq_vector for proper cleanup
     // This is more accurate than counting from lowoha_param.postop_ because
@@ -1037,7 +1038,7 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po,
 }
 #else
 void cleanup_blis_post_op(aocl_post_op *aocl_po,
-                          const lowoha_params &lowoha_param) {
+                          const matmul_params &lowoha_param) {
   if (aocl_po) {
     // Clean up eltwise operations
     if (aocl_po->eltwise) {
@@ -1178,8 +1179,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
               int K,
               float alpha, float beta, int lda, int ldb, int ldc,
               char mem_format_a, char mem_format_b, const void *A,
-              const void *B, void *C, const data_types &dtypes,
-              const lowoha_params &lowoha_param, const void *bias,
+              const void *B, void *C, const matmul_data_types &dtypes,
+              const matmul_params &lowoha_param, const void *bias,
               zendnnl::ops::matmul_algo_t kernel,
               bool is_weights_const, bool can_reorder) {
 
@@ -1427,9 +1428,9 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
-                               float beta, void *C, int ldc, data_types &dtypes, int batch_count,
+                               float beta, void *C, int ldc, matmul_data_types &dtypes, int batch_count,
                                char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias, int num_threads) {
+                               size_t dst_stride, const matmul_params &lowoha_param, const void *bias, int num_threads) {
 
 #if ZENDNNL_DEPENDS_AOCLDLP
   dlp_metadata_t *metadata_array = create_dlp_post_op(lowoha_param, bias, dtypes,
@@ -1524,5 +1525,6 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 #endif
 }
 
-} //lowoha namespace
-} //zendnnl namespace
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl

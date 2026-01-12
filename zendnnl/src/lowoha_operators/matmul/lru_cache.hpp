@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include "operators/matmul/matmul_config.hpp"
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 template <typename KEY_T, typename VALUE_T>
 class lru_cache_t {
@@ -183,12 +184,13 @@ lru_cache_t<KEY_T, VALUE_T>::get(
   }
   throw std::runtime_error("Key not found in cache.");
 }
-}
-}
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl
 
 namespace interface {
 template<typename KEY_T, typename VALUE_T>
-using lru_cache_t = zendnnl::lowoha::lru_cache_t<KEY_T, VALUE_T>;
+using lru_cache_t = zendnnl::lowoha::matmul::lru_cache_t<KEY_T, VALUE_T>;
 } //export
 
 #endif // ZENDNN_LRU_CACHE_HPP

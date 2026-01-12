@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 /**
  * @brief Get cached or compute zero-point compensation
@@ -204,6 +205,7 @@ inline int32_t* cache_or_compute_zp_compensation(
   return zp_comp_acc;
 }
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 

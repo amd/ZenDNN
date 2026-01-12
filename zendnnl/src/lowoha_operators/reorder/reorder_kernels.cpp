@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace reorder {
 
 /**
  * @brief Convert 16 BF16 values to 16 float32 values using AVX512.
@@ -343,6 +344,7 @@ void dequantize_uint8_to_bf16_ref(const uint8_t *input, uint16_t *output,
   }
 }
 
+} // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
 

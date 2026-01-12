@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 /**
  * @brief Number of initial warmup iterations before algorithm evaluation begins.
@@ -111,9 +112,9 @@ namespace lowoha {
 matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
                                      int M,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
-                                     float beta, void *C, int ldc, data_types &dtypes,
+                                     float beta, void *C, int ldc, matmul_data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                                      const void *bias, bool is_weights_const);
 
 /**
@@ -167,10 +168,11 @@ matmul_algo_t auto_compute_matmul_v1(char layout, char transA, char transB,
 matmul_algo_t auto_compute_matmul_v2(char layout, char transA, char transB,
                                      int M,
                                      int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
-                                     float beta, void *C, int ldc, data_types &dtypes,
+                                     float beta, void *C, int ldc, matmul_data_types &dtypes,
                                      zendnnl::ops::matmul_algo_t kernel, char mem_format_a, char mem_format_b,
-                                     lowoha_params &lowoha_param, batch_params_t &batch_params,
+                                     matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                                      const void *bias, bool is_weights_const);
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 

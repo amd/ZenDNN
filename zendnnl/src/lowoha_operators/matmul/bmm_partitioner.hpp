@@ -114,7 +114,7 @@ void execute_parallel_zendnnl(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     int M_block,
     const tile_callback_t &callback);
 
@@ -138,7 +138,7 @@ void execute_parallel_omp(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     int M_block,
     const tile_callback_t &callback);
 
@@ -162,7 +162,7 @@ void execute_partitioned_bmm(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     const tile_callback_t &callback);
 
 } // namespace lowoha

@@ -22,6 +22,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace embag {
 
 /**
  * @brief Dispatch to optimized AVX512 embedding bag kernel
@@ -252,6 +253,7 @@ static void dispatch_avx512_kernel(
   }
 }
 
+} // namespace embag
 } // namespace lowoha
 } // namespace zendnnl
 

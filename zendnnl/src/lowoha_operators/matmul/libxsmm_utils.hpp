@@ -1,4 +1,4 @@
-/*******************************************************************************
+/********************************************************************************
 # * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +26,7 @@
 
 namespace zendnnl {
 namespace lowoha {
-
+namespace matmul {
 
 /**
  * @brief Check if LibXSMM can be used for the given matrix multiplication parameters
@@ -43,7 +43,7 @@ namespace lowoha {
  */
 static inline bool can_use_libxsmm(char transA, char transB, int M,
                                    int N, int K, float alpha, float beta,
-                                   const data_types &dtypes, const lowoha_params &lowoha_param,
+                                   const matmul_data_types &dtypes, const matmul_params &lowoha_param,
                                    const matmul_algo_t &kernel_name) {
 
 #if ZENDNNL_DEPENDS_LIBXSMM
@@ -103,11 +103,11 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
  * @param N Number of columns in the output matrix.
  * @param ldc Leading dimension of the output matrix.
  * @param output Pointer to the output matrix where the post-operation will be applied.
- * @param po A `postop` object containing the type of post-operation and any additional buffers required.
+ * @param po A `matmul_post_op` object containing the type of post-operation and any additional buffers required.
  */
 template<typename T>
 inline static void libxsmm_postop(const int M, const int N, const int ldc,
-                                  void *output, const postop &po) {
+                                  void *output, const matmul_post_op &po) {
   constexpr libxsmm_datatype IN_TYPE =
     std::is_same<T, float>::value ? LIBXSMM_DATATYPE_F32 : LIBXSMM_DATATYPE_BF16;
   constexpr libxsmm_datatype OUT_TYPE = IN_TYPE;
@@ -249,6 +249,7 @@ inline static void libxsmm_bias(const int M, const int N, const int ldc,
   }
 }
 #endif
-}
-}
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl
 #endif

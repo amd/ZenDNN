@@ -21,6 +21,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace reorder {
 
 using namespace zendnnl::error_handling;
 
@@ -162,6 +163,7 @@ bool is_reorder_supported(data_type_t src_dtype, data_type_t dst_dtype) {
          (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::bf16);
 }
 
+} // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
 

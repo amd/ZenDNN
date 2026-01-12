@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 #if ZENDNNL_DEPENDS_ONEDNN
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                           void *C, int ldc, lowoha_params &lowoha_params, batch_params_t &batch_params,
+                           void *C, int ldc, matmul_params &lowoha_params, matmul_batch_params_t &batch_params,
                            const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const,
                            size_t src_batch_stride, size_t weight_batch_stride, size_t dst_batch_stride) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -421,5 +422,6 @@ bool reorderAndCacheWeights(Key_matmul key,
 
 #endif
 
-} // lowoha namespace
-} // zendnnl namespace
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl

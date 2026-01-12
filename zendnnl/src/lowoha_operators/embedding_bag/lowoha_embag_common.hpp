@@ -24,6 +24,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace embag {
 
 using namespace zendnnl::memory;
 
@@ -167,6 +168,7 @@ inline static const char *dtype_to_string(data_type_t dtype) {
   }
 }
 
+} // namespace embag
 } // namespace lowoha
 } // namespace zendnnl
 

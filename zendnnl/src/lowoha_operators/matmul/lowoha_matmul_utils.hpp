@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 /**
  * @brief Get global mutex for thread-safe lowoha operations
@@ -110,7 +111,7 @@ inline int get_batch_index(int b, int batch_size) {
 * @param K Number of columns in matrix A and rows in matrix B
 * @param Batch_A Number of batches for matrix A
 * @param Batch_B Number of batches for matrix B
-* @param params Const reference to lowoha_params containing operation configuration
+* @param params Const reference to matmul_params containing operation configuration
 * @param is_weights_const Boolean indicating if weights are constant
 * @return status_t::success if all validations pass, status_t::failure otherwise
 */
@@ -118,19 +119,19 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       lowoha_params &params,
+                                       matmul_params &params,
                                        const bool is_weights_const);
 
 /**
  * @brief Convert post-op names to a comma-separated string.
  *
- * This function takes a lowoha_params structure and converts all post-op types
+ * This function takes a matmul_params structure and converts all post-op types
  * to a comma-separated string representation.
  *
- * @param params The lowoha_params structure containing post-op information.
+ * @param params The matmul_params structure containing post-op information.
  * @return A string containing comma-separated post-op names, or "none" if no post-ops.
  */
-std::string post_op_names_to_string(const lowoha_params &params);
+std::string post_op_names_to_string(const matmul_params &params);
 
 /**
  * @brief Convert matmul_algo_t enum to string representation.
@@ -158,10 +159,10 @@ const char *data_type_to_string(data_type_t dtype);
  * This function extracts data types from post-ops that are binary_add or binary_mul
  * and returns them as a comma-separated string.
  *
- * @param params The lowoha_params structure containing post-op information.
+ * @param params The matmul_params structure containing post-op information.
  * @return A string containing comma-separated data types, or empty string if none.
  */
-std::string post_op_data_types_to_string(const lowoha_params &params);
+std::string post_op_data_types_to_string(const matmul_params &params);
 
 inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
                                      int num_threads, data_type_t dtype);
@@ -179,7 +180,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 * factors such as matrix dimensions, batch sizes, data types, available hardware features,
 * and library dependencies.
 *
-* @param params Reference to lowoha_params containing matrix multiplication configuration
+* @param params Reference to matmul_params containing matrix multiplication configuration
 * @param Batch_A Number of batches for matrix A (input tensor)
 * @param Batch_B Number of batches for matrix B (weight tensor)
 * @param batch_count Total number of batch operations to perform
@@ -191,7 +192,7 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 * @param is_weights_const Indicates if the weights are constant
 * @return matmul_algo_t The selected kernel algorithm (e.g., AOCL DLP, OneDNN, LibXSMM)
 */
-matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
+matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const);
 
@@ -211,6 +212,7 @@ std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads);
  */
 unsigned int get_auto_tuner_ver();
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 

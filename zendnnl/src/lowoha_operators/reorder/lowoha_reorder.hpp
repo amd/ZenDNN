@@ -24,6 +24,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace reorder {
 
 using zendnnl::memory::status_t;
 using zendnnl::memory::data_type_t;
@@ -145,6 +146,7 @@ struct reorder_threadlimit {
 };
 
 
+} // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
 

@@ -27,6 +27,7 @@
 #endif
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 using get_reorder_buff_size_func_ptr = long unsigned int (*)(const char,
                                        const char, const char, const md_t, const md_t
 #if ZENDNNL_DEPENDS_AOCLDLP
@@ -90,8 +91,8 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
  * @param zp_comp_ndim Dimensionality of ZP compensation: 0=none, 1=bias(N), 2=matrix(M*N)
  * @return Pointer to the created dlp_metadata_t object
  */
-dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
-                                   const void *bias, const data_types &dtypes, int N, int K,
+dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
+                                   const void *bias, const matmul_data_types &dtypes, int N, int K,
                                    int M = 0, int32_t *zp_comp_acc = nullptr, int zp_comp_ndim = 0);
 
 /**
@@ -103,7 +104,7 @@ dlp_metadata_t *create_dlp_post_op(const lowoha_params &lowoha_param,
 * @param aocl_po Pointer to the `dlp_metadata_t` object to be cleaned up.
 * @param post_op The parameters for the post-operation.
 */
-void cleanup_dlp_post_op(dlp_metadata_t *aocl_po, const lowoha_params &post_op);
+void cleanup_dlp_post_op(dlp_metadata_t *aocl_po, const matmul_params &post_op);
 
 #else
 /**
@@ -118,8 +119,8 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po, const lowoha_params &post_op);
 * @param N The number of columns in the output matrix.
 * @return Pointer to the created `aocl_post_op` object.
 */
-aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
-                                  const void *bias, const data_types &dtypes, int N);
+aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
+                                  const void *bias, const matmul_data_types &dtypes, int N);
 
 /**
 * @brief Cleans up BLIS (Basic Linear Algebra Subprograms) post-op metadata.
@@ -130,7 +131,7 @@ aocl_post_op *create_blis_post_op(const lowoha_params &lowoha_param,
 * @param aocl_po Pointer to the `aocl_post_op` object to be cleaned up.
 * @param post_op The parameters for the post-operation.
 */
-void cleanup_blis_post_op(aocl_post_op *aocl_po, const lowoha_params &post_op);
+void cleanup_blis_post_op(aocl_post_op *aocl_po, const matmul_params &post_op);
 #endif
 
 /**
@@ -167,8 +168,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
               int K,
               float alpha, float beta, int lda, int ldb, int ldc,
               char mem_format_a, char mem_format_b, const void *A,
-              const void *B, void *C, const data_types &dtypes,
-              const lowoha_params &lowoha_param, const void *bias,
+              const void *B, void *C, const matmul_data_types &dtypes,
+              const matmul_params &lowoha_param, const void *bias,
               zendnnl::ops::matmul_algo_t kernel,
               bool is_weights_const, bool can_reorder = false);
 
@@ -202,11 +203,12 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                float beta,
-                               void *C, int ldc, data_types &dtypes, int batch_count, char mem_format_a,
+                               void *C, int ldc, matmul_data_types &dtypes, int batch_count, char mem_format_a,
                                char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride, const lowoha_params &lowoha_param, const void *bias, int num_threads);
+                               size_t dst_stride, const matmul_params &lowoha_param, const void *bias, int num_threads);
 
-}
-}
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl
 
 #endif //_AOCL_KERNEL_HPP

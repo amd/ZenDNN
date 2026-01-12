@@ -1045,7 +1045,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         data_type_t wei_data_type = weight_tensor.get_data_type();
         data_type_t out_data_type = output_tensor.get_data_type();
         data_type_t bias_data_type = bias_tensor.get_data_type();
-        data_types matmul_dtypes;
+        matmul_data_types matmul_dtypes;
         matmul_dtypes.src = src_data_type;
         matmul_dtypes.wei = wei_data_type;
         matmul_dtypes.dst = out_data_type;
@@ -1098,7 +1098,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
 
         // Create lowoha_post_op structure
-        lowoha_params params;
+        matmul_params params;
         params.lowoha_algo = algo;
         params.dtypes = matmul_dtypes;
         params.num_threads = 0; // Use default (omp_get_max_threads)
@@ -1207,16 +1207,16 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
 
         // Create batch_params structure
-        batch_params_t batch_params;
+        matmul_batch_params_t batch_params;
         batch_params.Batch_A = batchA;
         batch_params.Batch_B = batchB;
         batch_params.batch_stride_src = batch_stride_src;
         batch_params.batch_stride_wei = batch_stride_wei;
         batch_params.batch_stride_dst = batch_stride_dst;
 
-        // Add post-ops based on post_op_type_t enum
+        // Add post-ops based on po_type
         if (po_type != post_op_type_t::none) {
-          postop postop_item;
+          matmul_post_op postop_item;
           postop_item.po_type = po_type;
 
           // For binary operations, set the buffer to binary_tensor

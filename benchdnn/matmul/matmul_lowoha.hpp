@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@
 
 #include "benchdnn.hpp"
 
-using zendnnl::lowoha::data_types;
-using zendnnl::lowoha::lowoha_params;
-using zendnnl::lowoha::batch_params_t;
-using zendnnl::lowoha::matmul_direct;
+using zendnnl::lowoha::matmul::matmul_data_types;
+using zendnnl::lowoha::matmul::matmul_params;
+using zendnnl::lowoha::matmul::matmul_batch_params_t;
+using zendnnl::lowoha::matmul::matmul_direct;
 
 namespace zendnnl {
 namespace benchdnn {

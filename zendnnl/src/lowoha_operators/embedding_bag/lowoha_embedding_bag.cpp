@@ -21,6 +21,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace embag {
 
 using namespace zendnnl::common;
 using namespace zendnnl::profile;
@@ -88,5 +89,6 @@ status_t embedding_direct(
   return embedding_bag_direct(table, indices, nullptr, weights, dst, params);
 }
 
+} // namespace embag
 } // namespace lowoha
 } // namespace zendnnl

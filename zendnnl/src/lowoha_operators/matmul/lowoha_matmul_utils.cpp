@@ -27,6 +27,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 // Global mutex for thread-safe lowoha operations (cache, auto-tuner map, etc.)
 std::mutex& get_lowoha_mutex() {
@@ -38,7 +39,7 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,
                                        const int Batch_A, const int Batch_B,
-                                       lowoha_params &params,
+                                       matmul_params &params,
                                        const bool is_weights_const) {
   // Check for null pointers
   if (!src || !weight || !dst) {
@@ -166,7 +167,7 @@ inline const char *post_op_type_to_string(post_op_type_t type) {
   }
 }
 
-std::string post_op_names_to_string(const lowoha_params &params) {
+std::string post_op_names_to_string(const matmul_params &params) {
   std::ostringstream post_op_names;
   if (params.postop_.empty()) {
     post_op_names << "none";
@@ -237,7 +238,7 @@ const char *data_type_to_string(data_type_t dtype) {
   }
 }
 
-std::string post_op_data_types_to_string(const lowoha_params &params) {
+std::string post_op_data_types_to_string(const matmul_params &params) {
   std::ostringstream post_op_dtypes;
   bool first = true;
   for (const auto &po : params.postop_) {
@@ -418,7 +419,7 @@ unsigned int get_auto_tuner_ver() {
   return 2;
 }
 
-matmul_algo_t kernel_select(lowoha_params &params, int Batch_A, int Batch_B,
+matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -522,5 +523,6 @@ std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads) {
   return {128, 64};
 }
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

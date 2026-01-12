@@ -23,6 +23,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::size_of;
@@ -34,10 +35,10 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const void *B, int ldb,
                            float beta,
                            void *C, int ldc,
-                           data_types &dtypes,
+                           matmul_data_types &dtypes,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b,
-                           lowoha_params &lowoha_param, batch_params_t &batch_params,
+                           matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                            const void *bias, bool is_weights_const, bool can_reorder) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
@@ -82,10 +83,10 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                  const void *bias, const float beta,
                  void *dst, const int ldc,
                  const bool is_weights_const,
-                 batch_params_t &batch_params,
+                 matmul_batch_params_t &batch_params,
                  const size_t src_type_size, const size_t out_type_size,
                  const int num_threads,
-                 matmul_algo_t kernel, lowoha_params &params) {
+                 matmul_algo_t kernel, matmul_params &params) {
 
   const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
   const char trans_input  = transA ? 't' : 'n';
@@ -172,19 +173,19 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                                        src_type_size);
       void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-      // Create a modified post_op with offset binary tensor buffers
-      lowoha_params thread_lowoha_params = params;
-      for (auto &po : thread_lowoha_params.postop_) {
-        if (po.po_type == post_op_type_t::binary_add ||
-            po.po_type == post_op_type_t::binary_mul) {
-          if (po.buff != nullptr) {
-            // Calculate offset based on m_start and data type
-            size_t element_size = size_of(po.dtype);
-            size_t row_offset = m_start * N * element_size;
-            po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
+          // Create a modified post_op with offset binary tensor buffers
+          matmul_params thread_lowoha_params = params;
+          for (auto &po : thread_lowoha_params.postop_) {
+            if (po.po_type == post_op_type_t::binary_add ||
+                po.po_type == post_op_type_t::binary_mul) {
+              if (po.buff != nullptr) {
+                // Calculate offset based on m_start and data type
+                size_t element_size = size_of(po.dtype);
+                size_t row_offset = m_start * N * element_size;
+                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
+              }
+            }
           }
-        }
-      }
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             m_len, N, K, alpha,
@@ -237,8 +238,8 @@ void matmul_execute(const char layout,
                     const bool is_weights_const,
                     const size_t src_type_size, const size_t out_type_size,
                     const int num_threads,
-                    matmul_algo_t kernel, lowoha_params &params,
-                    batch_params_t &batch_params,
+                    matmul_algo_t kernel, matmul_params &params,
+                    matmul_batch_params_t &batch_params,
                     unsigned int auto_version) {
 
   const char trans_input  = transA ? 't' : 'n';
@@ -444,7 +445,7 @@ void matmul_execute(const char layout,
           float tile_alpha = alpha;
           float tile_beta = beta;
 
-          lowoha_params tile_params = params;
+          matmul_params tile_params = params;
           for (auto &po : tile_params.postop_) {
             if ((po.po_type == post_op_type_t::binary_add ||
                  po.po_type == post_op_type_t::binary_mul) &&
@@ -512,7 +513,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       batch_params_t batch_params, lowoha_params params) {
+                       matmul_batch_params_t batch_params, matmul_params params) {
   // Create profiler instance for timing
   profiler_t profiler;
   bool is_profile = is_profile_enabled();
@@ -599,5 +600,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   return status_t::success;
 }
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

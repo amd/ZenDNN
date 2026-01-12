@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -41,28 +41,28 @@ int run_lowoha_matmul_fp32_test() {
     std::vector<float> C(M * N, 0); // Output matrix 2x3
     std::vector<float> bias = {1, 1, 1}; // Bias for each output column
 
-    data_types matmul_dtype;
+    matmul_data_types matmul_dtype;
     matmul_dtype.src = data_type_t::f32;
     matmul_dtype.wei = data_type_t::f32;
     matmul_dtype.dst = data_type_t::f32;
     matmul_dtype.bias = data_type_t::none;
     matmul_dtype.compute = data_type_t::none;
 
-    lowoha_params params;
+    matmul_params params;
     params.dtypes = matmul_dtype;
 
-    batch_params_t batch_params;
+    matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;
     batch_params.Batch_B = 1;
 
-    zendnnl::lowoha::postop op1;
+    zendnnl::lowoha::matmul::matmul_post_op op1;
     op1.po_type = post_op_type_t::none;
     op1.buff = nullptr;
     op1.dtype = data_type_t::none;
     op1.dims = {M, N};
     params.postop_.push_back(op1);
 
-    zendnnl::lowoha::postop op2;
+    zendnnl::lowoha::matmul::matmul_post_op op2;
     op2.po_type = post_op_type_t::relu;
     op2.buff = nullptr;
     op2.dtype = data_type_t::none;
@@ -136,14 +136,14 @@ int run_lowoha_matmul_woq_bf16s4_test() {
     std::vector<float> output(M * N, 0.0f);
 
     // ========== Setup LOWOHA Parameters for WOQ ==========
-    data_types matmul_dtype;
+    matmul_data_types matmul_dtype;
     matmul_dtype.src = data_type_t::bf16;
     matmul_dtype.wei = data_type_t::s4;
     matmul_dtype.dst = data_type_t::f32;
     matmul_dtype.bias = data_type_t::none;
     matmul_dtype.compute = data_type_t::none;
 
-    lowoha_params params;
+    matmul_params params;
     params.dtypes = matmul_dtype;
 
     // Setup per-group quantization parameters
@@ -155,7 +155,7 @@ int run_lowoha_matmul_woq_bf16s4_test() {
     params.quant_params.wei_zp.dt = data_type_t::s8;
     params.quant_params.wei_zp.dims = {NUM_GROUPS, N};
 
-    batch_params_t batch_params;
+    matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;
     batch_params.Batch_B = 1;
 
@@ -263,14 +263,14 @@ int run_lowoha_matmul_int8_caching_test() {
     log_info("");
 
     // ========== Setup LOWOHA Parameters ==========
-    data_types matmul_dtype;
+    matmul_data_types matmul_dtype;
     matmul_dtype.src = data_type_t::u8;   // Unsigned 8-bit activations
     matmul_dtype.wei = data_type_t::s8;   // Signed 8-bit weights
     matmul_dtype.dst = data_type_t::f32;  // Float32 output
     matmul_dtype.bias = data_type_t::none;
     matmul_dtype.compute = data_type_t::none;
 
-    lowoha_params params;
+    matmul_params params;
     params.dtypes = matmul_dtype;
 
     // Set source scale
@@ -295,12 +295,12 @@ int run_lowoha_matmul_int8_caching_test() {
 
     // Weight zero-point is 0 (symmetric) - no need to set
 
-    batch_params_t batch_params;
+    matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;
     batch_params.Batch_B = 1;
 
     // Add ReLU post-op
-    zendnnl::lowoha::postop relu_op;
+    zendnnl::lowoha::matmul::matmul_post_op relu_op;
     relu_op.po_type = post_op_type_t::relu;
     relu_op.buff = nullptr;
     relu_op.dtype = data_type_t::none;

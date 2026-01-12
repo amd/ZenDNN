@@ -1,5 +1,5 @@
 /*******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 using namespace zendnnl::ops;
 
@@ -32,7 +33,7 @@ void brgemm_ref_kernel(bool transA, bool transB,
                        float alpha, float beta,
                        void *C_tile, int ldc,
                        int lda, int ldb,
-                       data_types &dtypes,
+                       matmul_data_types &dtypes,
                        const void *bias) {
 
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
@@ -80,6 +81,7 @@ void brgemm_ref_kernel(bool transA, bool transB,
   apilog_info("Executing matmul LOWOHA with brgemm ref kernel");
 }
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 

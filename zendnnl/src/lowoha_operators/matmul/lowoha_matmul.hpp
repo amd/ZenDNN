@@ -29,7 +29,7 @@
 
 namespace zendnnl {
 namespace lowoha {
-
+namespace matmul {
 
 /**
  * @brief RAII helper to temporarily set OpenMP thread count.
@@ -70,10 +70,10 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            const void *B, int ldb,
                            float beta,
                            void *C, int ldc,
-                           data_types &dtypes,
+                           matmul_data_types &dtypes,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b,
-                           lowoha_params &lowoha_param, batch_params_t &batch_params,
+                           matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                            const void *bias, bool is_weights_const,
                            bool can_reorder = false);
 
@@ -89,9 +89,9 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                  const int M, const int N, const int K, const float alpha,
                  const void *src, const int lda, const void *weight, const int ldb,
                  const void *bias, const float beta, void *dst, const int ldc,
-                 const bool is_weights_const, batch_params_t &batch_params,
+                 const bool is_weights_const, matmul_batch_params_t &batch_params,
                  const size_t src_type_size, const size_t out_type_size, const int num_threads,
-                 matmul_algo_t kernel, lowoha_params &params);
+                 matmul_algo_t kernel, matmul_params &params);
 
 /**
  * @brief Execute single Matrix Multiplication (Matmul) for batch_count == 1
@@ -108,7 +108,7 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
                     const void *bias, const float beta, void *dst, const int ldc,
                     const bool is_weights_const, const size_t src_type_size,
                     const size_t out_type_size, const int num_threads, matmul_algo_t kernel,
-                    lowoha_params &params, batch_params_t &batch_params, unsigned int auto_version);
+                    matmul_params &params, matmul_batch_params_t &batch_params, unsigned int auto_version);
 
 /**
  * @brief Execute matrix multiplication with automatic kernel selection and optimization
@@ -140,8 +140,9 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int M, const int N, const int K, const float alpha, const void *src,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
-                       batch_params_t batch_params, lowoha_params params);
+                       matmul_batch_params_t batch_params, matmul_params params);
 
+} // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 

@@ -102,17 +102,17 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
-      data_types matmul_dtypes;
+      matmul_data_types matmul_dtypes;
       matmul_dtypes.src = cfg.dt[0];
       matmul_dtypes.wei = cfg.dt[1];
       matmul_dtypes.dst = cfg.dt[2];
       matmul_dtypes.bias = cfg.bias_dt;
       matmul_dtypes.compute = data_type_t::none;
 
-      lowoha_params params;
+      matmul_params params;
       params.dtypes = matmul_dtypes;
 
-      batch_params_t batch_params;
+      matmul_batch_params_t batch_params;
       batch_params.Batch_A = batchA;
       batch_params.Batch_B = batchB;
 
@@ -140,7 +140,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       for (auto k = 0; k < cfg.n_values.size(); k++) {
         const auto &binary_post_op = binary_post_ops_tensors[k];
         for (auto j = 0; j < cfg.post_ops.size(); j++) {
-          zendnnl::lowoha::postop postop_item;
+          zendnnl::lowoha::matmul::matmul_post_op postop_item;
           postop_item.po_type = cfg.post_ops[j];
           for (auto i = 0; i < binary_post_op.size(); i++) {
             if (j == cfg.binary_post_ops_pos[i]) {

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace reorder {
 
 using namespace zendnnl::memory;
 
@@ -103,6 +104,7 @@ struct lowoha_reorder_params_t {
       : dtypes(), quant_params(), algo(reorder_algo_t::DT), num_threads(0) {}
 };
 
+} // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
 

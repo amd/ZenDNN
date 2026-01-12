@@ -25,9 +25,11 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace reorder {
 
 using namespace zendnnl::error_handling;
 using namespace zendnnl::profile;
+using zendnnl::lowoha::matmul::zendnnl_parallel_for;
 
 /**
  * @brief Extract scale value from quant_t (currently only f32 supported)
@@ -203,6 +205,7 @@ status_t reorder_direct(const void *src, void *dst, size_t nelems,
   return status_t::success;
 }
 
+} // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl
 

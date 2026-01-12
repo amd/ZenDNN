@@ -1,4 +1,4 @@
-/*******************************************************************************
+/********************************************************************************
 # * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,6 +22,7 @@
 
 namespace zendnnl {
 namespace lowoha {
+namespace matmul {
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 /**
@@ -32,7 +33,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
                  float beta, int lda, int ldb, int ldc,
                  char transA, char transB, libxsmm_datatype a_type, libxsmm_datatype b_type,
                  libxsmm_datatype c_type, libxsmm_datatype comp_type,
-                 const  lowoha_params &lowoha_param, const void *bias,
+                 const matmul_params &lowoha_param, const void *bias,
                  const data_type_t &bias_type) {
   libxsmm_bitfield l_flags = 0;
   if (transA == 'T' || transA == 't') {
@@ -101,7 +102,7 @@ int libxsmm_brgemm(const TA **A_ptrs, const TB **B_ptrs, TC *C,
                    char transA, char transB,
                    libxsmm_datatype a_type, libxsmm_datatype b_type,
                    libxsmm_datatype c_type, libxsmm_datatype comp_type,
-                   const lowoha_params &lowoha_param, const void *bias,
+                   const matmul_params &lowoha_param, const void *bias,
                    const data_type_t &bias_type, bool apply_postops = true) {
 
   libxsmm_bitfield l_flags = 0;
@@ -170,8 +171,8 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
                                      int M, int N, int K, int batch,
                                      float beta, int lda, int ldb, int ldc,
                                      const void **A_ptrs, const void **B_ptrs, void *C,
-                                     const data_types &dtypes,
-                                     const lowoha_params &lowoha_para,
+                                     const matmul_data_types &dtypes,
+                                     const matmul_params &lowoha_para,
                                      const void *bias, bool apply_postops) {
   int kernel_status = 0;
 
@@ -197,7 +198,7 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
 static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                               float beta, int lda, int ldb, int ldc,
                               const void *A, const void *B, void *C,
-                              const data_types &dtypes, const lowoha_params &lowoha_para, const void *bias) {
+                              const matmul_data_types &dtypes, const matmul_params &lowoha_para, const void *bias) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<float,float,float>(
@@ -230,7 +231,8 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
   return kernel_status;
 }
 #endif
-}
-}
+} // namespace matmul
+} // namespace lowoha
+} // namespace zendnnl
 
 #endif

@@ -72,17 +72,17 @@ void execute_parallel_zendnnl(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     int M_block,
     const tile_callback_t &callback) {
 
-  apilog_info("Using zendnnl_parallel_for");
+  interface::apilog_info("Using zendnnl_parallel_for");
 
   // Calculate total number of work items (batch_count * number of M blocks)
   int total_m_blocks = (config.M + M_block - 1) / M_block;
   int total_work_items = config.batch_count * total_m_blocks;
 
-  zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
+  matmul::zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
     for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
       // Convert linear work index back to (batch, m_block) coordinates
       int b = work_idx / total_m_blocks;
@@ -91,10 +91,10 @@ void execute_parallel_zendnnl(
       int m_len = std::min(M_block, config.M - m_start);
 
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
-                               get_batch_index(b, batch_params.Batch_A) *
+                               matmul::get_batch_index(b, batch_params.Batch_A) *
                                config.src_batch_stride_bytes;
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                  get_batch_index(b, batch_params.Batch_B) *
+                                  matmul::get_batch_index(b, batch_params.Batch_B) *
                                   config.weight_batch_stride_bytes;
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst) +
                          b * config.dst_batch_stride_bytes;
@@ -109,11 +109,11 @@ void execute_parallel_omp(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     int M_block,
     const tile_callback_t &callback) {
 
-  apilog_info("Using OpenMP parallel for");
+  interface::apilog_info("Using OpenMP parallel for");
 
   #pragma omp parallel for collapse(2)
   for (int b = 0; b < config.batch_count; ++b) {
@@ -121,10 +121,10 @@ void execute_parallel_omp(
       int m_len = std::min(M_block, config.M - m_start);
 
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) +
-                               get_batch_index(b, batch_params.Batch_A) *
+                               matmul::get_batch_index(b, batch_params.Batch_A) *
                                config.src_batch_stride_bytes;
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
-                                  get_batch_index(b, batch_params.Batch_B) *
+                                  matmul::get_batch_index(b, batch_params.Batch_B) *
                                   config.weight_batch_stride_bytes;
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst) +
                          b * config.dst_batch_stride_bytes;
@@ -139,12 +139,12 @@ void execute_partitioned_bmm(
     const void *weight,
     void *dst,
     const bmm_partition_config_t &config,
-    const batch_params_t &batch_params,
+    const matmul::matmul_batch_params_t &batch_params,
     const tile_callback_t &callback) {
 
   int M_block = calculate_optimal_m_block(config);
 
-  apilog_info("Executing BMM LOWOHA kernel with parallel partitioning, algo: ",
+  interface::apilog_info("Executing BMM LOWOHA kernel with parallel partitioning, algo: ",
               static_cast<int>(config.kernel));
 
   if (should_use_zendnnl_parallel(config.M, config.N, config.K)) {

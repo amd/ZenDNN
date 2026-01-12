@@ -30,6 +30,7 @@
 #include "operators/embag/embag_context.hpp"
 #include "operators/embag/embag_operator.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul.hpp"
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 
 #define MATMUL_SIZE_START 1
@@ -44,7 +45,9 @@ using namespace zendnnl::memory;
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
 using namespace zendnnl::ops;
-using namespace zendnnl::lowoha;
+using namespace zendnnl::lowoha::matmul;
+using namespace zendnnl::lowoha::reorder;
+using namespace zendnnl::lowoha::embag;
 
 using StorageParam = std::variant<std::pair<size_t, void *>, tensor_t>;
 
