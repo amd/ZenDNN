@@ -137,6 +137,88 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
 
+      // Check if this is INT8 quantization
+      bool is_int8 = (cfg.dt[0] == data_type_t::u8 ||
+                      cfg.dt[0] == data_type_t::s8) &&
+                     cfg.dt[1] == data_type_t::s8;
+
+      // For INT8: Extract quantization parameters from all tensors
+      if (is_int8) {
+        // Extract source scale
+        if (input_tensor.is_quantized()) {
+          const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
+          if (src_scale_buff) {
+            params.quant_params.src_scale.buff = src_scale_buff;
+            params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
+            auto src_scale_size = input_tensor.get_quant_scale_size();
+            params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
+                src_scale_size.end());
+            log_info("LOWOHA INT8: Source scale extracted");
+          }
+          // Extract source zero point (for asymmetric quantization)
+          if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
+            const void *src_zp_buff = input_tensor.get_quant_zero_raw_handle_const();
+            if (src_zp_buff) {
+              params.quant_params.src_zp.buff = src_zp_buff;
+              params.quant_params.src_zp.dt = input_tensor.get_quant_zero_data_type();
+              auto src_zp_size = input_tensor.get_quant_zero_size();
+              params.quant_params.src_zp.dims.assign(src_zp_size.begin(), src_zp_size.end());
+              log_info("LOWOHA INT8: Source zero-point extracted");
+            }
+          }
+        }
+
+        // Extract weight scale
+        if (weight_tensor[0].is_quantized()) {
+          const void *wei_scale_buff =
+            weight_tensor[0].get_quant_scale_raw_handle_const();
+          if (wei_scale_buff) {
+            params.quant_params.wei_scale.buff = wei_scale_buff;
+            params.quant_params.wei_scale.dt = weight_tensor[0].get_quant_scale_data_type();
+            auto wei_scale_size = weight_tensor[0].get_quant_scale_size();
+            params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
+                wei_scale_size.end());
+            log_info("LOWOHA INT8: Weight scale extracted");
+          }
+          // Extract weight zero point (for asymmetric quantization)
+          if (weight_tensor[0].get_quant_subtype() == quant_subtype_t::asymmetric) {
+            const void *wei_zp_buff = weight_tensor[0].get_quant_zero_raw_handle_const();
+            if (wei_zp_buff) {
+              params.quant_params.wei_zp.buff = wei_zp_buff;
+              params.quant_params.wei_zp.dt = weight_tensor[0].get_quant_zero_data_type();
+              auto wei_zp_size = weight_tensor[0].get_quant_zero_size();
+              params.quant_params.wei_zp.dims.assign(wei_zp_size.begin(), wei_zp_size.end());
+              log_info("LOWOHA INT8: Weight zero-point extracted");
+            }
+          }
+        }
+
+        // Extract destination scale and zero-point
+        if (output_tensor[0].is_quantized()) {
+          const void *dst_scale_buff =
+            output_tensor[0].get_quant_scale_raw_handle_const();
+          if (dst_scale_buff) {
+            params.quant_params.dst_scale.buff = dst_scale_buff;
+            params.quant_params.dst_scale.dt = output_tensor[0].get_quant_scale_data_type();
+            auto dst_scale_size = output_tensor[0].get_quant_scale_size();
+            params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
+                dst_scale_size.end());
+            log_info("LOWOHA INT8: Destination scale extracted");
+          }
+          // Extract destination zero point (for asymmetric quantization)
+          if (output_tensor[0].get_quant_subtype() == quant_subtype_t::asymmetric) {
+            const void *dst_zp_buff = output_tensor[0].get_quant_zero_raw_handle_const();
+            if (dst_zp_buff) {
+              params.quant_params.dst_zp.buff = dst_zp_buff;
+              params.quant_params.dst_zp.dt = output_tensor[0].get_quant_zero_data_type();
+              auto dst_zp_size = output_tensor[0].get_quant_zero_size();
+              params.quant_params.dst_zp.dims.assign(dst_zp_size.begin(), dst_zp_size.end());
+              log_info("LOWOHA INT8: Destination zero-point extracted");
+            }
+          }
+        }
+      }
+
       for (auto k = 0; k < cfg.n_values.size(); k++) {
         const auto &binary_post_op = binary_post_ops_tensors[k];
         for (auto j = 0; j < cfg.post_ops.size(); j++) {
