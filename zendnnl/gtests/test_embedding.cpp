@@ -36,12 +36,13 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
     is_weights         = params.is_weights;
     indices_dtype      = params.indices_dtype;
     fp16_scale_bias    = params.fp16_scale_bias;
+    strided            = params.strided;
     use_LOWOHA         = params.use_LOWOHA;
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_indices: ", num_indices, " padding_index: ", padding_index,
              " is_weights: ", is_weights, " fp16_scale_bias: ", fp16_scale_bias,
-             " use_LOWOHA: ", use_LOWOHA);
+             " strided: ", strided, " use_LOWOHA: ", use_LOWOHA);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -51,7 +52,7 @@ class TestEmbedding : public ::testing::TestWithParam<EmbeddingType> {
   int64_t padding_index;
   bool is_weights, fp16_scale_bias;
   data_type_t indices_dtype;
-  bool use_LOWOHA;
+  bool use_LOWOHA, strided;
   tensor_factory_t tensor_factory{};
 };
 
@@ -69,9 +70,9 @@ TEST_P(TestEmbedding, F32_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -103,9 +104,9 @@ TEST_P(TestEmbedding, F32_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor,
@@ -136,9 +137,9 @@ TEST_P(TestEmbedding, BF16_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor,
@@ -170,9 +171,9 @@ TEST_P(TestEmbedding, BF16_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -204,9 +205,9 @@ TEST_P(TestEmbedding, INT8_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -223,7 +224,7 @@ TEST_P(TestEmbedding, INT8_F32) {
   }
   //free this table pointer after use
   free(table_tensor.get_raw_handle_unsafe());
-  table_tensor.reset(); 
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -240,9 +241,9 @@ TEST_P(TestEmbedding, INT8_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -276,9 +277,9 @@ TEST_P(TestEmbedding, S4_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -295,7 +296,7 @@ TEST_P(TestEmbedding, S4_F32) {
   }
   //free this table pointer after use
   free(table_tensor.get_raw_handle_unsafe());
-  table_tensor.reset(); 
+  table_tensor.reset();
   EXPECT_TRUE(is_test_successful);
 }
 
@@ -312,9 +313,9 @@ TEST_P(TestEmbedding, S4_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -348,9 +349,9 @@ TEST_P(TestEmbedding, U4_F32) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::f32);
+                           data_type_t::f32, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,
@@ -384,9 +385,9 @@ TEST_P(TestEmbedding, U4_BF16) {
   auto weights_tensor    = is_weights ? tensor_factory.uniform_dist_tensor({num_indices},
                            data_type_t::f32, 2.0f) : tensor_t();
   auto output_tensor     = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
   auto output_tensor_ref = tensor_factory.zero_tensor({num_indices, embedding_dim},
-                           data_type_t::bf16);
+                           data_type_t::bf16, tensor_t(), tensor_t(), strided);
 
   status_t status         = embedding_kernel_test(table_tensor, indices_tensor,
                             weights_tensor, output_tensor, padding_index, is_weights,

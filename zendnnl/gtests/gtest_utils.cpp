@@ -176,6 +176,7 @@ EmbeddingType::EmbeddingType() {
   is_weights = std::rand() % 2;
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   fp16_scale_bias = std::rand() % 2;
+  strided = std::rand() % 2;
   use_LOWOHA = std::rand() % 2;
 }
 
@@ -1848,6 +1849,7 @@ status_t embedding_kernel_test(tensor_t &table_tensor,
         params.padding_idx = padding_index;
         params.num_threads = 0;  // Use default (omp_get_max_threads)
         params.fp16_scale_bias = fp16_scale_bias;
+        params.dst_stride = output_tensor.get_stride()[0];
 
         log_info("LOWOHA embedding: Calling embedding_direct with "
                  "num_embeddings=", params.num_embeddings,

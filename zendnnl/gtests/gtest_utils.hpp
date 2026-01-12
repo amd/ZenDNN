@@ -110,6 +110,7 @@ struct EmbeddingType {
   bool is_weights;
   data_type_t indices_dtype;
   bool fp16_scale_bias;
+  bool strided;
   bool use_LOWOHA;
   EmbeddingType();
 };
