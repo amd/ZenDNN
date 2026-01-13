@@ -27,6 +27,17 @@ void pooling_kernel_wrapper(
     void *output,
     pool_params &params
 ) {
+    // Auto-select algorithm if not explicitly set
+    if (params.algo == pooling_algo_t::none) {
+#if ZENDNNL_DEPENDS_ONEDNN
+        params.algo = pooling_algo_t::onednn;
+        log_info("Pooling: Auto-selected OneDNN backend");
+#else
+        params.algo = pooling_algo_t::reference;
+        log_info("Pooling: Auto-selected reference backend");
+#endif
+    }
+
 #if ZENDNNL_DEPENDS_ONEDNN
     if (params.algo == pooling_algo_t::onednn) {
         log_info("Using OneDNN kernel for Pooling");

@@ -170,7 +170,7 @@ status_t pooling_onednn_wrapper(
 status_t pooling_onednn_wrapper(
     const void *input,
     void *output,
-    const pool_params &params
+    pool_params &params
 ) {
     log_error("Pooling OneDNN: OneDNN support not enabled");
     return status_t::failure;
