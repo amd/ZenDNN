@@ -49,7 +49,7 @@ inline int8_t extract_int4(int8_t byte, bool high, data_type_t table_dtype) {
 
 // Dequantizes a quantized value using scale and zero-point.
 inline float dequantize(int8_t val, float scale, float zp) {
-  return scale * (static_cast<int32_t>(val) - static_cast<int32_t>(zp));
+  return ((scale * static_cast<int32_t>(val)) + zp);
 }
 
 // Convert float16 (stored as uint16_t) to float32
@@ -192,7 +192,7 @@ void embag_avx512_int8_int4_kernel(
         std::memcpy(&scale_fp16, row + quantized_size, sizeof(uint16_t));
         std::memcpy(&zp_fp16, row + quantized_size + 2, sizeof(uint16_t));
         scale = half_to_float(scale_fp16);
-        zp = std::round(half_to_float(zp_fp16));
+        zp = (half_to_float(zp_fp16));
       }
       else {
         std::memcpy(&scale, row + quantized_size, sizeof(float));
@@ -205,10 +205,10 @@ void embag_avx512_int8_int4_kernel(
           __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>
                                              (row + b * simd_width));
           __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
-          __m512 val_f32 = _mm512_mul_ps(
-                             _mm512_sub_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(zp)),
-                             _mm512_set1_ps(scale)
-                           );
+          __m512 val_f32 = _mm512_add_ps(
+                           _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
+                           _mm512_set1_ps(zp));
+
           val_f32 = _mm512_mul_ps(val_f32, wt_vec);
 
           if (is_embedding) {
@@ -234,10 +234,10 @@ void embag_avx512_int8_int4_kernel(
           std::memcpy(tmp, row + full_blocks * simd_width, tail);
           __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(tmp));
           __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
-          __m512 val_f32 = _mm512_mul_ps(
-                             _mm512_sub_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(zp)),
-                             _mm512_set1_ps(scale)
-                           );
+          __m512 val_f32 = _mm512_add_ps(
+                           _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
+                           _mm512_set1_ps(zp));
+
           val_f32 = _mm512_mul_ps(val_f32, wt_vec);
           if (is_embedding) {
             acc[full_blocks] = val_f32;
