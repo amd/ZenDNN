@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -63,7 +63,8 @@ endif()
    batchmatmul_example.cpp
    compare_op_example.cpp
    reorder_example.cpp
-   embedding_bag_example.cpp)
+   embedding_bag_example.cpp
+   sdpa_example.cpp)
 
  set(example_headers
    example_utils.hpp
@@ -75,7 +76,8 @@ endif()
    batchmatmul_example.hpp
    compare_op_example.hpp
    reorder_example.hpp
-   embedding_bag_example.hpp)
+   embedding_bag_example.hpp
+   sdpa_example.hpp)
 
 add_executable(examples ${examples_sources})
 # target_link_libraries(examples

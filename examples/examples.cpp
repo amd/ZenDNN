@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 #include "lowoha_matmul_example.hpp"
 #include "lowoha_reorder_example.hpp"
 #include <iostream>
-
+#include "sdpa_example.hpp"
 
 #define  OK          (0)
 #define  NOT_OK      (1)
@@ -120,6 +120,11 @@ int main() {
      */
     sample_f32_kernel_example();
     sample_bf16_kernel_example();
+    
+    /** SDPA encoder functionality examples.
+     *  Demonstrates SDPA encoder operator usage for transformer attention.
+     */
+    sdpa_example();
 
     return OK;
   }
