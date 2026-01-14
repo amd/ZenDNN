@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -271,6 +271,12 @@ class AITensorFactory {
   static tensor_t create_boundary_tensor(const std::vector<uint64_t> &dims,
                                          data_type_t dtype,
                                          const std::string &name = "");
+
+  static tensor_t create_quantized_embedding_tensor(
+    const std::vector<uint64_t> &dims,
+    data_type_t dtype,
+    const std::string &name = "",
+    bool fp16_scale_bias = true);
 };
 
 /** @brief Comprehensive test parameter generator */

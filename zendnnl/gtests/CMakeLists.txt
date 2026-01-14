@@ -45,10 +45,13 @@ if(ZENDNNL_BUILD_GTEST)
       ai_gtests/gtest_utils_ai.cpp
       ai_gtests/test_matmul_ai.cpp
       ai_gtests/gtest_utils_batchmatmul_ai.cpp
-      ai_gtests/test_batchmatmul_ai.cpp)
+      ai_gtests/test_batchmatmul_ai.cpp
+      ai_gtests/gtest_utils_embag_ai.cpp
+      ai_gtests/test_embag_ai.cpp)
     list(APPEND gtests_headers
       ai_gtests/gtest_utils_ai.hpp
-      ai_gtests/gtest_utils_batchmatmul_ai.hpp)
+      ai_gtests/gtest_utils_batchmatmul_ai.hpp
+      ai_gtests/gtest_utils_embag_ai.hpp)
   else()
     message(STATUS "AI gtests disabled...")
   endif()

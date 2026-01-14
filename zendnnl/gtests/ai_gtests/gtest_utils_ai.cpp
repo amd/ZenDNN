@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -306,6 +306,155 @@ tensor_t AITensorFactory::create_boundary_tensor(const std::vector<uint64_t>
     fill_boundary_data(ptr, nelem, dtype);
   }
   return tensor;
+}
+
+// -----------------------------------------------------------------------------
+// create_quantized_embedding_tensor
+//
+// Creates a quantized embedding tensor (U4 or S8) with proper scale/bias handling.
+// Each row contains: [quantized_data | scale | bias]
+// For U4: 2 values packed per byte (nibble packing)
+// For S8: 1 value per byte
+// Scale/bias can be fp16 (2 bytes each) or fp32 (4 bytes each)
+//
+// Parameters:
+//   dims - tensor dimensions [num_embeddings, embedding_dim]
+//   dtype - data type (u4 or s8)
+//   name - optional tensor name
+//   fp16_scale_bias - if true, use fp16 for scale/bias; else fp32
+// Returns:
+//   tensor_t object with quantized data and scale/bias
+// -----------------------------------------------------------------------------
+tensor_t AITensorFactory::create_quantized_embedding_tensor(
+  const std::vector<uint64_t> &dims,
+  data_type_t dtype,
+  const std::string &name,
+  bool fp16_scale_bias) {
+  
+  if (dims.size() != 2) {
+    throw std::invalid_argument("Quantized embedding tensor must be 2D");
+  }
+  if (dtype != data_type_t::u4 && dtype != data_type_t::s8 && dtype != data_type_t::s4) {
+    throw std::invalid_argument("Only U4, S4, and S8 dtypes supported for quantized embeddings");
+  }
+
+  std::string tensor_name = name.empty() ?
+                            "ai_quant_emb_" + std::to_string(tensor_counter.fetch_add(1)) : name;
+
+  const uint64_t num_embeddings = dims[0];
+  const uint64_t embedding_dim = dims[1];
+  const uint64_t quantized_size = (dtype == data_type_t::s4 || dtype == data_type_t::u4) ?
+                                  (embedding_dim + 1) / 2 : embedding_dim;
+  const uint64_t row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
+
+  uint64_t num_bytes = num_embeddings * row_size * sizeof(uint8_t);
+
+  void *raw_buffer = std::malloc(num_bytes);
+  if (!raw_buffer) {
+    throw std::runtime_error("Failed to allocate memory for quantized embedding tensor");
+  }
+  std::memset(raw_buffer, 0, num_bytes);
+
+  std::vector<tensor_t::index_type> size_vec = {
+    static_cast<tensor_t::index_type>(num_embeddings),
+    static_cast<tensor_t::index_type>(embedding_dim)
+  };
+
+  auto qtensor = tensor_t()
+                 .set_name(tensor_name)
+                 .set_size(size_vec)
+                 .set_data_type(dtype)
+                 .set_storage(raw_buffer, num_bytes - (fp16_scale_bias ? 4 : 8))
+                 .create();
+
+  if (!qtensor.check()) {
+    std::free(raw_buffer);
+    throw std::runtime_error("Failed to create quantized embedding tensor: " + tensor_name);
+  }
+
+  // Fill with random quantized values and scale/bias
+  int8_t *input = static_cast<int8_t *>(raw_buffer);
+  std::uniform_int_distribution<int> dist_s4(-8, 7);
+  std::uniform_int_distribution<int> dist_u4(0, 15);
+  std::uniform_int_distribution<int> dist_s8(-128, 127);
+  std::uniform_real_distribution<float> scale_dist(0.10f, 0.19f);
+  std::uniform_int_distribution<int> zp_dist(0, 7);
+
+  // Helper to convert float to fp16
+  auto float_to_half = [](float f) -> uint16_t {
+    uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    uint32_t sign = (x >> 31) & 0x1;
+    int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = (x >> 13) & 0x3FF;
+    if (exponent <= 0) {
+      if (exponent < -10) {
+        return static_cast<uint16_t>(sign << 15);
+      }
+      mantissa = (x & 0x7FFFFF) | 0x800000;
+      mantissa >>= (1 - exponent + 13);
+      return static_cast<uint16_t>((sign << 15) | mantissa);
+    }
+    else if (exponent >= 31) {
+      return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+    }
+    return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
+  };
+
+  for (uint64_t i = 0; i < num_embeddings; ++i) {
+    const size_t row_base = i * row_size;
+    float scale = scale_dist(rng);
+    float zp = static_cast<float>(zp_dist(rng));
+
+    if (dtype == data_type_t::s4) {
+      std::memset(input + row_base, 0, quantized_size);
+      for (uint64_t j = 0; j < embedding_dim; ++j) {
+        int8_t qval = static_cast<int8_t>(dist_s4(rng));
+        int byte_idx = j / 2;
+        if (j % 2 == 0) {
+          input[row_base + byte_idx] = (qval & 0x0F);
+        }
+        else {
+          input[row_base + byte_idx] &= 0x0F;
+          input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+        }
+      }
+    }
+    else if (dtype == data_type_t::u4) {
+      std::memset(input + row_base, 0, quantized_size);
+      for (uint64_t j = 0; j < embedding_dim; ++j) {
+        uint8_t qval = static_cast<uint8_t>(dist_u4(rng));
+        int byte_idx = j / 2;
+        if (j % 2 == 0) {
+          input[row_base + byte_idx] = (qval & 0x0F);
+        }
+        else {
+          input[row_base + byte_idx] &= 0x0F;
+          input[row_base + byte_idx] |= (qval & 0x0F) << 4;
+        }
+      }
+    }
+    else if (dtype == data_type_t::s8) {
+      for (uint64_t j = 0; j < embedding_dim; ++j) {
+        int8_t qval = static_cast<int8_t>(dist_s8(rng));
+        input[row_base + j] = qval;
+      }
+    }
+
+    // Append scale and zp
+    if (fp16_scale_bias) {
+      uint16_t scale_fp16 = float_to_half(scale);
+      uint16_t zp_fp16 = float_to_half(zp);
+      std::memcpy(&input[row_base + quantized_size], &scale_fp16, sizeof(uint16_t));
+      std::memcpy(&input[row_base + quantized_size + 2], &zp_fp16, sizeof(uint16_t));
+    }
+    else {
+      std::memcpy(&input[row_base + quantized_size], &scale, sizeof(float));
+      std::memcpy(&input[row_base + quantized_size + 4], &zp, sizeof(float));
+    }
+  }
+
+  return qtensor;
 }
 
 
