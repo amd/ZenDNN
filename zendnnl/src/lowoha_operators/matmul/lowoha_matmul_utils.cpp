@@ -486,11 +486,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
                  matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
 
+  // Default to AOCL DLP blocked kernel
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
-                         ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_dlp
-                          : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
+                         matmul_algo_t::aocl_dlp_blocked : static_cast<matmul_algo_t>(algo);
   bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                 (params.dtypes.wei == data_type_t::s4);
+
   // TODO: Fallback to reference/supported kernel
   if (kernel == matmul_algo_t::auto_tuner && (Batch_A != 1 || Batch_B != 1 ||
       !is_weights_const)) {
