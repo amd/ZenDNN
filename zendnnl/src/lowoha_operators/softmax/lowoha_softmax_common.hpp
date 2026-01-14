@@ -37,6 +37,11 @@ enum class softmax_algo_t {
 };
 
 /**
+ * @brief Maximum supported tensor dimensions
+ */
+constexpr int SOFTMAX_MAX_NDIMS = 5;
+
+/**
  * @brief Parameter structure for LOWOHA softmax operations
  *
  * This structure contains all parameters specific to softmax
@@ -46,24 +51,31 @@ enum class softmax_algo_t {
 struct softmax_params {
     uint64_t batch;                 ///< Batch size (outer dimensions product)
     uint64_t axis_dim;              ///< Dimension size along softmax axis
-    uint64_t inner_size;            ///< Inner dimensions product (stride)
     int axis;                       ///< Axis along which to compute softmax (-1 for last axis)
-    bool log_softmax;               ///< If true, compute log(softmax(x)) instead of softmax(x) 
+    bool log_softmax;               ///< If true, compute log(softmax(x)) instead of softmax(x)
     data_type_t src_dt;             ///< Source/input data type
     data_type_t dst_dt;             ///< Destination/output data type
     softmax_algo_t algorithm;       ///< Selected algorithm
     uint64_t num_threads;           ///< Number of threads
-    
+
+    // Original tensor shape information (for OneDNN backend)
+    uint64_t shape[SOFTMAX_MAX_NDIMS];  ///< Original tensor dimensions
+    int ndims;                          ///< Number of dimensions in original tensor
+
     /**
      * @brief Default constructor
      */
     softmax_params() : batch(1), axis_dim(0),
-                       inner_size(1), axis(-1),
+                       axis(-1),
                        log_softmax(false),
                        src_dt(data_type_t::none),
                        dst_dt(data_type_t::none),
                        algorithm(softmax_algo_t::none),
-                       num_threads(0) {}
+                       num_threads(0), ndims(0) {
+        for (int i = 0; i < SOFTMAX_MAX_NDIMS; ++i) {
+            shape[i] = 0;
+        }
+    }
 };
 
 } // namespace softmax

@@ -34,41 +34,38 @@ void softmax_reference_fp32_impl(
     const softmax_params &params,
     int num_threads
 ) {
-    const uint64_t outer_size = params.batch;
     const uint64_t axis_size = params.axis_dim;
-    const uint64_t inner_size = params.inner_size;
+    const uint64_t outer_size = params.batch;
 
-    #pragma omp parallel for collapse(2) num_threads(num_threads)
+    #pragma omp parallel for num_threads(num_threads)
     for (uint64_t outer = 0; outer < outer_size; ++outer) {
-        for (uint64_t inner = 0; inner < inner_size; ++inner) {
-            // Find max for numerical stability
-            float max_val = -std::numeric_limits<float>::infinity();
-            for (uint64_t i = 0; i < axis_size; ++i) {
-                uint64_t idx = outer * axis_size * inner_size + i * inner_size + inner;
-                max_val = std::max(max_val, input[idx]);
-            }
+        // Find max for numerical stability
+        float max_val = -std::numeric_limits<float>::infinity();
+        for (uint64_t inner = 0; inner < axis_size; ++inner) {
+            uint64_t idx = outer * axis_size + inner;
+            max_val = std::max(max_val, input[idx]);
+        }
 
-            // Compute exp and sum
-            std::vector<float> exp_vals(axis_size);
-            float sum_exp = 0.0f;
-            for (uint64_t i = 0; i < axis_size; ++i) {
-                uint64_t idx = outer * axis_size * inner_size + i * inner_size + inner;
-                exp_vals[i] = std::exp(input[idx] - max_val);
-                sum_exp += exp_vals[i];
-            }
+        // Compute exp and sum
+        std::vector<float> exp_vals(axis_size);
+        float sum_exp = 0.0f;
+        for (uint64_t i = 0; i < axis_size; ++i) {
+            uint64_t idx = outer * axis_size + i;
+            exp_vals[i] = std::exp(input[idx] - max_val);
+            sum_exp += exp_vals[i];
+        }
 
-            // Normalize
-            if (params.log_softmax) {
-                float log_sum_exp = std::log(sum_exp);
-                for (uint64_t i = 0; i < axis_size; ++i) {
-                    uint64_t idx = outer * axis_size * inner_size + i * inner_size + inner;
-                    output[idx] = input[idx] - max_val - log_sum_exp;
-                }
-            } else {
-                for (uint64_t i = 0; i < axis_size; ++i) {
-                    uint64_t idx = outer * axis_size * inner_size + i * inner_size + inner;
-                    output[idx] = exp_vals[i] / sum_exp;
-                }
+        // Normalize
+        if (params.log_softmax) {
+            float log_sum_exp = std::log(sum_exp);
+            for (uint64_t i = 0; i < axis_size; ++i) {
+                uint64_t idx = outer * axis_size + i;
+                output[idx] = input[idx] - max_val - log_sum_exp;
+            }
+        } else {
+            for (uint64_t i = 0; i < axis_size; ++i) {
+                uint64_t idx = outer * axis_size + i;
+                output[idx] = exp_vals[i] / sum_exp;
             }
         }
     }
@@ -87,7 +84,7 @@ void softmax_reference_bf16_impl(
     const softmax_params &params,
     int num_threads
 ) {
-    const uint64_t total_size = params.batch * params.axis_dim * params.inner_size;
+    const uint64_t total_size = params.batch * params.axis_dim;
 
     // Step 1: Convert BF16 input to FP32 for numerical stability
     std::vector<float> fp32_input(total_size);
@@ -115,6 +112,27 @@ status_t softmax_reference_wrapper(
     void *output,
     softmax_params &params
 ) {
+    // Calculate flattened parameters from shape
+    if (params.ndims <= 0 || params.ndims > SOFTMAX_MAX_NDIMS) {
+        log_error("Softmax Reference: Invalid ndims: ", params.ndims,
+                  " (must be 1-", SOFTMAX_MAX_NDIMS, "). Use setup_softmax_shape() to populate params.");
+        return status_t::failure;
+    }
+
+    int normalized_axis = params.axis >= 0 ? params.axis : params.ndims + params.axis;
+
+    // Calculate batch as product of all dimensions except axis_dim
+    params.batch = 1;
+    for (int i = 0; i < params.ndims; ++i) {
+        if (i != normalized_axis) {
+            params.batch *= params.shape[i];
+        }
+    }
+    params.axis_dim = params.shape[normalized_axis];
+
+    log_info("Softmax Reference: ", params.ndims, "D tensor, flattened to batch=",
+             params.batch, ", axis_dim=", params.axis_dim);
+
     const int num_threads = params.num_threads > 0 ? params.num_threads :
                             omp_get_max_threads();
 

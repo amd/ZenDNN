@@ -31,61 +31,74 @@ status_t validate_softmax_inputs(
         log_error("Softmax: Input pointer is null");
         return status_t::failure;
     }
-    
+
     if (output == nullptr) {
         log_error("Softmax: Output pointer is null");
         return status_t::failure;
     }
-    
+
     // Validate dimensions
     if (params.axis_dim == 0) {
         log_error("Softmax: Axis dimension cannot be zero");
         return status_t::failure;
     }
-    
+
     if (params.batch == 0) {
         log_error("Softmax: Batch size cannot be zero");
         return status_t::failure;
     }
-    
+
     return status_t::success;
 }
 
-status_t calculate_softmax_dims(
-    const int64_t *tensor_shape,
+status_t setup_softmax_shape(
+    softmax_params &params,
+    const uint64_t *shape,
     int ndims,
-    softmax_params &params
+    int axis
 ) {
-    if (tensor_shape == nullptr || ndims <= 0) {
-        log_error("Softmax: Invalid tensor shape");
+    // Validate inputs
+    if (shape == nullptr) {
+        log_error("Softmax: Shape pointer is null");
         return status_t::failure;
     }
 
-    // Normalize axis to positive index
-    int normalized_axis = params.axis;
-    if (params.axis < 0) {
-        normalized_axis = ndims + params.axis;
+    if (ndims <= 0 || ndims > SOFTMAX_MAX_NDIMS) {
+        log_error("Softmax: Invalid number of dimensions: ", ndims,
+                  " (must be between 1 and ", SOFTMAX_MAX_NDIMS, " for 5D support)");
+        return status_t::failure;
     }
 
+    // Normalize axis to positive value
+    int normalized_axis = axis >= 0 ? axis : ndims + axis;
     if (normalized_axis < 0 || normalized_axis >= ndims) {
-        log_error("Softmax: Axis out of range");
+        log_error("Softmax: Invalid axis: ", axis, " for ", ndims, "D tensor");
         return status_t::failure;
     }
 
-    // Calculate outer dimensions (batch)
-    params.batch = 1;
-    for (int i = 0; i < normalized_axis; ++i) {
-        params.batch *= tensor_shape[i];
+    // Store original shape information
+    params.ndims = ndims;
+    params.axis = normalized_axis;
+    for (int i = 0; i < ndims; ++i) {
+        if (shape[i] == 0) {
+            log_error("Softmax: Dimension ", i, " has zero size");
+            return status_t::failure;
+        }
+        params.shape[i] = shape[i];
     }
 
-    // Axis dimension
-    params.axis_dim = tensor_shape[normalized_axis];
+    // Fill batch, axis_dim with original shape values (not flattened)
+    // These will be recalculated by backends that need flattened representation
+    params.batch = (normalized_axis > 0) ? shape[0] : 1;
+    params.axis_dim = shape[normalized_axis];
 
-    // Calculate inner dimensions
-    params.inner_size = 1;
-    for (int i = normalized_axis + 1; i < ndims; ++i) {
-        params.inner_size *= tensor_shape[i];
+    log_info("Softmax: Setup ", ndims, "D tensor with shape=[", shape[0]);
+    for (int i = 1; i < ndims; ++i) {
+        log_info(",", shape[i]);
     }
+    log_info("], axis=", normalized_axis,
+             " -> batch=", params.batch,
+             ", axis_dim=", params.axis_dim);
 
     return status_t::success;
 }

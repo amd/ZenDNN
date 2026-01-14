@@ -72,7 +72,6 @@ status_t softmax_direct(
     if (apilog_info_enabled() || is_profile) {
         ss << "LOWOHA softmax_direct: batch=" << params.batch
            << ", axis_dim=" << params.axis_dim
-           << ", inner_size=" << params.inner_size
            << ", axis=" << params.axis
            << ", log_softmax=" << (params.log_softmax ? "true" : "false")
            << ", src_dt=" << static_cast<int>(params.src_dt)

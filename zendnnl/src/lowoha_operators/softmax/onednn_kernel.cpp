@@ -50,34 +50,49 @@ status_t softmax_onednn_wrapper(
             return status_t::failure;
         }
 
-        // Define memory dimensions
-        // Reshape to [batch * inner_size, axis_dim] for softmax along axis
-        // OneDNN softmax operates on the last dimension
-        dnnl::memory::dims src_dims;
-        if (params.inner_size == 1) {
-            // Simple case: softmax along last dimension
-            src_dims = {
-                static_cast<dnnl::memory::dim>(params.batch),
-                static_cast<dnnl::memory::dim>(params.axis_dim)
-            };
-        } else {
-            // Need to handle inner dimensions
-            src_dims = {
-                static_cast<dnnl::memory::dim>(params.batch * params.inner_size),
-                static_cast<dnnl::memory::dim>(params.axis_dim)
-            };
+        // Validate that shape information is provided
+        if (params.ndims <= 0 || params.ndims > SOFTMAX_MAX_NDIMS) {
+            log_error("Softmax OneDNN: Invalid ndims: ", params.ndims,
+                      " (must be 1-", SOFTMAX_MAX_NDIMS, ").");
+            return status_t::failure;
         }
 
-        // Create memory descriptors
-        auto src_md = dnnl::memory::desc(src_dims, dtype, dnnl::memory::format_tag::ab);
-        auto dst_md = dnnl::memory::desc(src_dims, dtype, dnnl::memory::format_tag::ab);
+        // Build OneDNN memory dimensions from original N-D shape
+        dnnl::memory::dims src_dims;
+        src_dims.reserve(params.ndims);
+        for (int i = 0; i < params.ndims; ++i) {
+            src_dims.push_back(static_cast<dnnl::memory::dim>(params.shape[i]));
+        }
 
-        // Determine softmax axis (last axis in reshaped tensor)
-        int softmax_axis = src_dims.size() - 1;
+        // Normalize axis to positive value
+        int softmax_axis = params.axis >= 0 ? params.axis : params.ndims + params.axis;
+
+        // Get appropriate format tag for this dimensionality
+        dnnl::memory::format_tag format;
+        switch (params.ndims) {
+            case 1: format = dnnl::memory::format_tag::a; break;
+            case 2: format = dnnl::memory::format_tag::ab; break;
+            case 3: format = dnnl::memory::format_tag::abc; break;
+            case 4: format = dnnl::memory::format_tag::abcd; break;
+            case 5: format = dnnl::memory::format_tag::abcde; break;
+            default:
+                log_error("Softmax OneDNN: Unsupported number of dimensions: ", params.ndims);
+                return status_t::failure;
+        }
+
+        log_info("Softmax OneDNN: ", params.ndims, "D tensor (shape=[", params.shape[0]);
+        for (int i = 1; i < params.ndims; ++i) {
+            log_info(",", params.shape[i]);
+        }
+        log_info("]), softmax on axis ", softmax_axis);
+
+        // Create memory descriptors
+        auto src_md = dnnl::memory::desc(src_dims, dtype, format);
+        auto dst_md = dnnl::memory::desc(src_dims, dtype, format);
 
         // Create softmax primitive descriptor
         dnnl::softmax_forward::primitive_desc softmax_pd;
-        
+
         if (params.log_softmax) {
             softmax_pd = dnnl::softmax_forward::primitive_desc(
                 eng,

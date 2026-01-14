@@ -44,19 +44,24 @@ status_t validate_softmax_inputs(
 );
 
 /**
- * @brief Calculate softmax dimensions from tensor shape
+ * @brief Initialize softmax_params with N-dimensional tensor shape
  *
- * @param tensor_shape   Full tensor shape [d0, d1, ..., dn]
- * @param ndims          Number of dimensions
- * @param axis           Axis along which to compute softmax
- * @param dims           Output softmax dimensions (modified)
+ * This function populates both the original shape information (shape[], ndims)
+ * and the flattened parameters (batch, axis_dim) from an N-dimensional
+ * tensor shape. This allows the OneDNN backend to use the full shape while the
+ * reference implementation can still use the flattened representation.
+ *
+ * @param params       Softmax parameters to populate
+ * @param shape        Array of tensor dimensions (e.g., [N, C, H, W, D] for 5D)
+ * @param ndims        Number of dimensions
+ * @param axis         Axis along which to compute softmax (-1 for last axis)
  * @return status_t::success if valid, status_t::failure otherwise
  */
- status_t calculate_softmax_dims(
-    const int64_t *tensor_shape,
+status_t setup_softmax_shape(
+    softmax_params &params,
+    const uint64_t *shape,
     int ndims,
-    int axis,
-    softmax_params &params
+    int axis
 );
 
 } // namespace softmax
