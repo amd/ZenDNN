@@ -20,6 +20,28 @@
 #include "lowoha_embag_common.hpp"
 #include "operators/embag/native_kernels/embag_avx512_kernels.hpp"
 
+// Forward declarations for AVX2 kernel template instantiations
+// These are defined in embag_avx2_kernels.cpp and already compiled
+namespace zendnnl {
+  namespace ops {
+    template <typename InType, typename IndexType, typename OffsetType, typename OutType>
+    void embag_avx2_kernel(
+      const InType *input,
+      const float *weights,
+      const IndexType *indices,
+      const OffsetType *offsets,
+      OutType *dst,
+      int64_t width,
+      int64_t indsz,
+      int64_t offsz,
+      int64_t padidx,
+      bool is_weights,
+      embag_algo_t algo,
+      int64_t dst_stride,
+      bool include_last_offset);
+  } // namespace ops
+  } // namespace zendnnl
+
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
@@ -70,6 +92,7 @@ static void dispatch_avx512_kernel(
     }
     else if (params.dtypes.table == data_type_t::bf16 &&
              params.dtypes.output == data_type_t::bf16) {
+#if __GNUC__ >= 12
       zendnnl::ops::embag_avx512_kernel<uint16_t, int64_t, int64_t, uint16_t>(
         static_cast<const uint16_t *>(table), weights,
         static_cast<const int64_t *>(indices),
@@ -77,9 +100,19 @@ static void dispatch_avx512_kernel(
         static_cast<uint16_t *>(dst),
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
+#else
+      zendnnl::ops::embag_avx2_kernel<uint16_t, int64_t, int64_t, uint16_t>(
+        static_cast<const uint16_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset);
+#endif
     }
     else if (params.dtypes.table == data_type_t::bf16 &&
              params.dtypes.output == data_type_t::f32) {
+#if __GNUC__ >= 12
       zendnnl::ops::embag_avx512_kernel<uint16_t, int64_t, int64_t, float>(
         static_cast<const uint16_t *>(table), weights,
         static_cast<const int64_t *>(indices),
@@ -87,6 +120,15 @@ static void dispatch_avx512_kernel(
         static_cast<float *>(dst),
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
+#else
+      zendnnl::ops::embag_avx2_kernel<uint16_t, int64_t, int64_t, float>(
+        static_cast<const uint16_t *>(table), weights,
+        static_cast<const int64_t *>(indices),
+        static_cast<const int64_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset);
+#endif
     }
     else if (params.dtypes.table == data_type_t::f32 &&
              params.dtypes.output == data_type_t::bf16) {
@@ -166,6 +208,7 @@ static void dispatch_avx512_kernel(
     }
     else if (params.dtypes.table == data_type_t::bf16 &&
              params.dtypes.output == data_type_t::bf16) {
+#if __GNUC__ >= 12
       zendnnl::ops::embag_avx512_kernel<uint16_t, int32_t, int32_t, uint16_t>(
         static_cast<const uint16_t *>(table), weights,
         static_cast<const int32_t *>(indices),
@@ -173,9 +216,19 @@ static void dispatch_avx512_kernel(
         static_cast<uint16_t *>(dst),
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
+#else
+      zendnnl::ops::embag_avx2_kernel<uint16_t, int32_t, int32_t, uint16_t>(
+        static_cast<const uint16_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<uint16_t *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset);
+#endif
     }
     else if (params.dtypes.table == data_type_t::bf16 &&
              params.dtypes.output == data_type_t::f32) {
+#if __GNUC__ >= 12
       zendnnl::ops::embag_avx512_kernel<uint16_t, int32_t, int32_t, float>(
         static_cast<const uint16_t *>(table), weights,
         static_cast<const int32_t *>(indices),
@@ -183,6 +236,15 @@ static void dispatch_avx512_kernel(
         static_cast<float *>(dst),
         embedding_dim, num_indices, num_bags, padding_idx,
         is_weights, algo, dst_stride, include_last_offset);
+#else
+      zendnnl::ops::embag_avx2_kernel<uint16_t, int32_t, int32_t, float>(
+        static_cast<const uint16_t *>(table), weights,
+        static_cast<const int32_t *>(indices),
+        static_cast<const int32_t *>(offsets),
+        static_cast<float *>(dst),
+        embedding_dim, num_indices, num_bags, padding_idx,
+        is_weights, algo, dst_stride, include_last_offset);
+#endif
     }
     else if (params.dtypes.table == data_type_t::f32 &&
              params.dtypes.output == data_type_t::bf16) {
