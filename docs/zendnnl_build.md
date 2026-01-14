@@ -1,7 +1,7 @@
 
 (Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
-# The ZenDNN* Build System
+# The ZenDNN Build System
 
 ## Table of Contents
 - [Overview](#1-overview)
@@ -11,24 +11,24 @@
 
 ## 1. Overview
 
-ZenDNN* as an inference acceleration library, depends on multiple BLAS and other backends, builds multiple components including its dependencies, components like GTest, examples and benchmarking infrastructure. It can be built as a stand-alone library for development, test and benchmarking puposes, or it can be built as a part of a larger inference framework stack. It also needs to support both Debug and Release configurations. ZenDNN* build system takes care of these needs.
+ZenDNN as an inference acceleration library, depends on multiple BLAS and other backends, builds multiple components including its dependencies, components like GTest, examples and benchmarking infrastructure. It can be built as a stand-alone library for development, test and benchmarking puposes, or it can be built as a part of a larger inference framework stack. It also needs to support both Debug and Release configurations. ZenDNN build system takes care of these needs.
 
 ### 1.1 Dependencies
 
-ZenDNN* depends on the following third party libraries (TPL), referred in ths document as dependencies,
+ZenDNN depends on the following third party libraries (TPL), referred in ths document as dependencies,
 
 | Dependency | Description | Mandatory |
 |------------|-------------|-----------|
 | nlohmann-json | To read and write json files | Mandatory |
 | aocl-utils | To detect runtime system information | Mandatory |
 | amd-blis or aocl-dlp | As default BLAS backend. Any one of these two need to be present | Mandatory |
-| onednn | In an unlikely situation of onednn kernels doing better than ZenDNN* | Optional |
+| onednn | In an unlikely situation of onednn kernels doing better than ZenDNN | Optional |
 | libxsmm         | Optimized small matrix multiplication library | Optional |
 | parlooper       | Parallel loop abstraction library             | Optional |
 
 ### 1.2 Components
 
-ZenDNN* builds the following components
+ZenDNN builds the following components
 
 | Component | Description | Mandatory |
 |-----------|-------------|-----------|
@@ -36,12 +36,12 @@ ZenDNN* builds the following components
 | zendnnl-lib-archive and zendnnl-lib-shared | Archive (static) or shared library. At least one of these two needs to be built. | Mandatory |
 | zendnnl-gtests | GTests for the library. | Optional |
 | zendnnl-examples | Examples illustrating the libray API usage. | Optional |
-| zendnnl-benchdnn | A benchmarking framework for ZenDNN*. | Optional |
-| zendnnl-doxygen-docs | ZenDNN* doxygen documentation. | Optional |
+| zendnnl-benchdnn | A benchmarking framework for ZenDNN. | Optional |
+| zendnnl-doxygen-docs | ZenDNN doxygen documentation. | Optional |
 
 ### 1.3 Build Modes
 
-In order to assist development and also integration with an inference  framework ZenDNN* build supports the following modes
+In order to assist development and also integration with an inference  framework ZenDNN build supports the following modes
 
 #### 1.3.1. Standalone Build
 
@@ -51,7 +51,7 @@ Standalone build is primarily used for library developnemt, and independent test
 
 #### 1.3.2 Framework Integration Build
 
-Framework integration build assumes that ZenDNN* is part of an embedding inference framework (for example PyTorch or TensorFlow). In this kind of build, ZenDNN* assumes that the framework may also be buliding few of its dependencies, and can provide these dependencies binary and include files to ZenDNN*, and ZenDNN* need not build them.
+Framework integration build assumes that ZenDNN is part of an embedding inference framework (for example PyTorch or TensorFlow). In this kind of build, ZenDNN assumes that the framework may also be buliding few of its dependencies, and can provide these dependencies binary and include files to ZenDNN, and ZenDNN need not build them.
 
 ## 2. Required Toolchains
 
@@ -66,7 +66,7 @@ In order to configure the build according to dependencies, components, and stand
 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
-| ZENDNNL_SOURCE_DIR | Path to ZenDNN* source | PATH | ${CMAKE_SOURCE_DIR} |
+| ZENDNNL_SOURCE_DIR | Path to ZenDNN source | PATH | ${CMAKE_SOURCE_DIR} |
 | ZENDNNL_INSTALL_PREFIX | Library install prefix | PATH |${ZENDNNL_SOURCE_DIR}/build/install |
 | ZENDNNL_BUILD_TYPE | Library build type (Release/Debug)| STRING | Release |
 | ZENDNNL_MESSAGE_LOG_LEVEL | CMake log level | STRING | Debug |
@@ -88,8 +88,8 @@ In order to configure the build according to dependencies, components, and stand
 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
-| ZENDNNL_FWK_BUILD | Build ZenDNN* as a part of framework build. This option need to be ON if the library is being built as a part of a framework. If this option is OFF the library will be built as a standalone package. | BOOL | OFF |
-| ZENDNNL_AMDBLIS_FWK_DIR | If the framework is building a ZenDNN* dependency (for example AMDBLIS in this case), it can inform the library where this dependency is installed, by populating this variable. If populated, ZenDNN* assumes that the dependency is already built before library build starts, the binaries of the dependency are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/lib, and the include files are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/include. The framework build will have to ascertain by creating proper CMake dependency tree that this dependency is built before the library starts building. ZenDNN* provides a CMake include file (fwk/ZenDNNLFwkIntergate.cmake) to enable it. If this variable is not populated, then ZenDNN* assumes that the dependency is not being provided by the framework, and builds it the way it does for standalone build. | PATH | NO DEFAULT |
+| ZENDNNL_FWK_BUILD | Build ZenDNN as a part of framework build. This option need to be ON if the library is being built as a part of a framework. If this option is OFF the library will be built as a standalone package. | BOOL | OFF |
+| ZENDNNL_AMDBLIS_FWK_DIR | If the framework is building a ZenDNN dependency (for example AMDBLIS in this case), it can inform the library where this dependency is installed, by populating this variable. If populated, ZenDNN assumes that the dependency is already built before library build starts, the binaries of the dependency are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/lib, and the include files are kept in ${ZENDNNL_AMDBLIS_FWK_DIR}/include. The framework build will have to ascertain by creating proper CMake dependency tree that this dependency is built before the library starts building. ZenDNN provides a CMake include file (fwk/ZenDNNLFwkIntergate.cmake) to enable it. If this variable is not populated, then ZenDNN assumes that the dependency is not being provided by the framework, and builds it the way it does for standalone build. | PATH | NO DEFAULT |
 | ZENDNNL_AOCLDLP_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for AOCLDLP dependency | PATH | NO DEFAULT |
 | ZENDNNL_ONEDNN_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for ONEDNN dependency | PATH | NO DEFAULT |
 | ZENDNNL_LIBXSMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for LIBXSMM dependency | PATH | NO DEFAULT |
@@ -99,10 +99,10 @@ In order to configure the build according to dependencies, components, and stand
 
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
-| ZENDNNL_DEPENDS_AOCLDLP | aocl-dlp is default BLAS backend for ZenDNN*. If this option is OFF, then amd-blis becomes default BLAS backend of ZenDNN* | BOOL | ON |
-| ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN* | BOOL | ON |
-| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN* | BOOL | ON |
-| ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN* | BOOL | OFF |
+| ZENDNNL_DEPENDS_AOCLDLP | aocl-dlp is default BLAS backend for ZenDNN. If this option is OFF, then amd-blis becomes default BLAS backend of ZenDNN | BOOL | ON |
+| ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN | BOOL | ON |
+| ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
+| ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publically available, or a varsion still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
@@ -113,7 +113,7 @@ In order to configure the build according to dependencies, components, and stand
 
 ### 4.1 General Build Process
 
-ZenDNN* follows CMake super-build structure, where all the dependencies, the library, and various other components (examples, documentation and benchdnn benchmarking tool) are built as independent external projects, and the top level CMake orchestrates these independent external builds. In general build process is as follows
+ZenDNN follows CMake super-build structure, where all the dependencies, the library, and various other components (examples, documentation and benchdnn benchmarking tool) are built as independent external projects, and the top level CMake orchestrates these independent external builds. In general build process is as follows
 
 - A dependency (for example amdblis or aoclutils) is downloaded from its public repository to ${ZENDNNL_SOURCE_DIR}/dependencies/ (or provided by the developer in the same folder in case of a local/unreleased/beta dependency source code to be used). This dependency is then source built using cmake external project, and installed. All dependencies get installed in ${ZENDNNL_INSTALL_PREFIX}/deps/<dependency name> directory.
 
@@ -138,18 +138,18 @@ The CMake build exposes the following component targets
 | Component         | CMake Target     | Depends On   |
 |-------------------|------------------|--------------|
 | Dependencies(TPL) | zendnnl-deps     | None         |
-| ZenDNN* Library   | zendnnl          | zendnnl-deps |
+| ZenDNN Library   | zendnnl          | zendnnl-deps |
 | Examples          | zendnnl-examples | zendnnl      |
 | BenchDNN          | zendnnl-benchdnn | zendnnl      |
 | Doxygen Docs      | zendnnl-doxygen  | None         |
 
 ### 4.2 Standalone Build
 
-This mode is used primarily for library development, test and benchmarking its operators. In this mode, any optional dependencies and components can be enabled/disabled as given in [Build Options](#3-build-options). By default, the ZenDNN* build will download and source build all the dependencies before trying to build the library.
+This mode is used primarily for library development, test and benchmarking its operators. In this mode, any optional dependencies and components can be enabled/disabled as given in [Build Options](#3-build-options). By default, the ZenDNN build will download and source build all the dependencies before trying to build the library.
 
 #### 4.2.1 Providing Local Dependencies
 
-In the general build process of ZenDNN*, it downloads all dependencies source code from their public repositories, and source builds them. However there may be occasions, when the library need to be built with unreleased dependency source code. In such a case the following is needed to be done
+In the general build process of ZenDNN, it downloads all dependencies source code from their public repositories, and source builds them. However there may be occasions, when the library need to be built with unreleased dependency source code. In such a case the following is needed to be done
 
 - Enable build option ZENDNNL_LOCAL_[DEPENDENCY] (for example ZENDNNL_LOCAL_AMDBLIS).
 - Copy (or create soft link of) the local dependency directory to ${ZENDNNL_SOURCE_DIR}/dependencies.
@@ -166,11 +166,11 @@ The standalone build can be done using command line CMake configuration and buil
 
 ### 4.3 Framework Integration Build
 
-ZenDNN* can be informed that it is being built as a part of an inference framework by enabling ZENDNNL_FWK_BUILD option.
+ZenDNN can be informed that it is being built as a part of an inference framework by enabling ZENDNNL_FWK_BUILD option.
 
 #### 4.3.1 Providing Dependencies Pre-installed by the Framework
 
-It is possible that few of the ZenDNN* dependencies are being built by the framework, and rebuilding them again as a part of ZenDNN* may result in bloated binaries, or symbol name clashes. ZenDNN* provides a way to inject these dependencies being built by the framework into the build process of ZenDNN*. The build system provides a uniform way to inject and dependency to ZenDNN* build as follows
+It is possible that few of the ZenDNN dependencies are being built by the framework, and rebuilding them again as a part of ZenDNN may result in bloated binaries, or symbol name clashes. ZenDNN provides a way to inject these dependencies being built by the framework into the build process of ZenDNN. The build system provides a uniform way to inject and dependency to ZenDNN build as follows
 - It assumes that the dependency is preinstalled by the framework, with the following kind of directory configuration
 ```
 dependency_install_directory
@@ -181,42 +181,42 @@ dependency_install_directory
 |
 ```
 - If the dependency provides cmake configuration files in lib/cmake, it uses config mode of CMake find_package tool to discover the dependency. If lib/cmake is not present, it has a Find\<dependency\>.cmake to find the dependency using module mode of CMake find_package tool.
-- The cmake variable ZENDNNL_\<DEPENDENCY\>_FWK_DIR (eg. ZENDNNL_AMDBLIS_FWK_DIR) need to be pointed to the dependency_install_directory as shown above, and making ZenDNN* build dependent on the dependency target.
+- The cmake variable ZENDNNL_\<DEPENDENCY\>_FWK_DIR (eg. ZENDNNL_AMDBLIS_FWK_DIR) need to be pointed to the dependency_install_directory as shown above, and making ZenDNN build dependent on the dependency target.
 
-#### 4.3.1 Integrating ZenDNN* Build to Framework Build
+#### 4.3.1 Integrating ZenDNN Build to Framework Build
 
-In order to assist ZenDNN* build integration to a framework, it provides CMake files for including it as an external project in a framework build. These files, kept in ${ZENDNL_SOURCE_DIR}/fwk/, are as follows
+In order to assist ZenDNN build integration to a framework, it provides CMake files for including it as an external project in a framework build. These files, kept in ${ZENDNL_SOURCE_DIR}/fwk/, are as follows
 
 - ZenDnnlFwkMacros.cmake : This file defines few CMake macros needed by ZendnnlFwkIntegrate.cmake
-- ZenDnnlFwkIntegrate.cmake : This file provides CMake code to include ZenDNN* as an external project in framework CMake build.
+- ZenDnnlFwkIntegrate.cmake : This file provides CMake code to include ZenDNN as an external project in framework CMake build.
 
-ZenDNN* build can be integrated to the framework build using these files as follows
+ZenDNN build can be integrated to the framework build using these files as follows
 
 - Put these files in CMAKE_MODULE_PATH of the framework build.
-- ZenDnnlFwkIntegrate.cmake uses a macro called *zendnnl_add_option* to set ZenDNN* build options. Edit this file to set the ZenDNN* options as needed. In particular the following options are to be provided
+- ZenDnnlFwkIntegrate.cmake uses a macro called *zendnnl_add_option* to set ZenDNN build options. Edit this file to set the ZenDNN options as needed. In particular the following options are to be provided
 
   | Option | Description |
   |--------|-------------|
-  | ZENDNN_SOURCE_DIR | ZenDNN* source code. |
-  | ZENDNNL_BINARY_DIR | Where ZenDNN* will be built in the build tree. if unsure set ${CMAKE_CURRENT_BINARY_DIR}/zendnnl. |
-  | ZENDNNL_INSTALL_DIR | Where ZenDNN* will be built in the build tree. if unsure set ${CMAKE_INSTALL_PREFIX}/zendnnl. |
-  | ZENDNNL_AMDBLIS_FWK_DIR | Install path of amd-blis if framework is building it and wants to inject it to ZenDNN* build. |
-  | ZENDNNL_AOCLDLP_FWK_DIR | Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN* build. |
-  | ZENDNNL_ONEDNN_FWK_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN* build. |
-  | ZENDNNL_LIBXSMM_FWK_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN* build. |
-  | ZENDNNL_PARLOOPER_FWK_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN* build. |
+  | ZENDNN_SOURCE_DIR | ZenDNN source code. |
+  | ZENDNNL_BINARY_DIR | Where ZenDNN will be built in the build tree. if unsure set ${CMAKE_CURRENT_BINARY_DIR}/zendnnl. |
+  | ZENDNNL_INSTALL_DIR | Where ZenDNN will be built in the build tree. if unsure set ${CMAKE_INSTALL_PREFIX}/zendnnl. |
+  | ZENDNNL_AMDBLIS_FWK_DIR | Install path of amd-blis if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_AOCLDLP_FWK_DIR | Install path of aocl-dlp if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_ONEDNN_FWK_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_LIBXSMM_FWK_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_PARLOOPER_FWK_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |
 
 - Make *fwk_zendnnl* target dependent on injected dependencies by editing its "add_dependencies(fwk_zendnnl...)" command.
-- Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN* is to be built.
-- Make any other targets that depend on ZenDNN* dependent on *fwk_zendnnl* target.
+- Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN is to be built.
+- Make any other targets that depend on ZenDNN dependent on *fwk_zendnnl* target.
 
 **ManyLinux Docker Hack:**
 
-ManyLinux Docker toolchain builds aocl-utils (a ZenDNN* dependency) library binaries in ${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib64, instead of ${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib. This causes build to fail in ManyLinux Docker. ZenDnnlFwkIntegrate.cmake provides a hack, in the form of checking an environment variable ZENDNNL_MANYLINUX_BUILD. If this variable is set it uses aocl-utils library path suitable for ManyLinux Docker. ManyLinux Dockerfile need to set this environment variable.
+ManyLinux Docker toolchain builds aocl-utils (a ZenDNN dependency) library binaries in ${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib64, instead of ${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils/lib. This causes build to fail in ManyLinux Docker. ZenDnnlFwkIntegrate.cmake provides a hack, in the form of checking an environment variable ZENDNNL_MANYLINUX_BUILD. If this variable is set it uses aocl-utils library path suitable for ManyLinux Docker. ManyLinux Dockerfile need to set this environment variable.
 
-### 4.4 ZenDNN* Installation
+### 4.4 ZenDNN Installation
 
-ZenDNN* install folder can be configured by providing CMAKE_INSTALL_PREFIX at the command line. The default installation folder is `CMAKE_BINARY_DIR/install`. If the folder is `ZenDNN/build`, the install folder will be `ZenDNN/build/install`. All dependencies, libraries, examples, tests, and documentation will be installed in this folder with the following folder structure:
+ZenDNN install folder can be configured by providing CMAKE_INSTALL_PREFIX at the command line. The default installation folder is `CMAKE_BINARY_DIR/install`. If the folder is `ZenDNN/build`, the install folder will be `ZenDNN/build/install`. All dependencies, libraries, examples, tests, and documentation will be installed in this folder with the following folder structure:
 
 ```
 ZenDNN
@@ -237,3 +237,5 @@ ZenDNN
 
 This installation also includes CMake packaging information in `install/zendnnl/lib/cmake`. Downstream
 packages can use this to find zendnnl using CMake find_package tool.
+
+Note that testing has not been performed on including ZenDNN by other methods such as add_subdirectory() or Fetch_Content().

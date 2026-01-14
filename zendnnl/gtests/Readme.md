@@ -1,21 +1,21 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
-# ZenDNN* Google Test Infrastructure
+# ZenDNN Google Test Infrastructure
 
 ## **Overview of GTest**
-Google Test (GTest) is a unit testing framework for C++ that provides a robust and flexible way to write and execute tests. In this project, GTest is used to validate the functionality and performance of ZenDNN* operations. It supports parameterized tests, filtering, and detailed reporting, making it ideal for testing complex numerical computations.
+Google Test (GTest) is a unit testing framework for C++ that provides a robust and flexible way to write and execute tests. In this project, GTest is used to validate the functionality and performance of ZenDNN operations. It supports parameterized tests, filtering, and detailed reporting, making it ideal for testing complex numerical computations.
 
 ## **Purpose and Audience**
-The ZenDNN* GTest infrastructure is designed for:
-- **Developers**: To verify the correctness of ZenDNN* operations during development.
+The ZenDNN GTest infrastructure is designed for:
+- **Developers**: To verify the correctness of ZenDNN operations during development.
 - **Test Engineers**: To run automated tests and validate functionality across different configurations.
 - **Researchers**: To experiment with numerical precision and post-operations in deep learning workloads.
 
-This infrastructure ensures that ZenDNN* operations meet expected accuracy standards under various conditions.
+This infrastructure ensures that ZenDNN operations meet expected accuracy standards under various conditions.
 
 ## **Flexible Configuration**
-ZenDNN* GTest provides flexibility in configuring tests through command-line arguments and code-level parameters. Users can:
+ZenDNN GTest provides flexibility in configuring tests through command-line arguments and code-level parameters. Users can:
 - **Filter Tests**: Run specific test suites or cases using `--gtest_filter`.
 - **Set Random Seed**: Provide a seed value for reproducible random test data generation.
 - **Specify Post-Operations**: Apply post-operations like `relu`, `gelu_tanh`, etc., during matrix multiplication tests.
@@ -29,7 +29,7 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 
 ## **Accuracy Validation**
 
-ZenDNN* GTest validates numerical accuracy by comparing optimized implementations against reference results using dynamic tolerance algorithms that adapt to matrix dimensions and data types.
+ZenDNN GTest validates numerical accuracy by comparing optimized implementations against reference results using dynamic tolerance algorithms that adapt to matrix dimensions and data types.
 
 ### **Tolerance Calculation**
 
@@ -103,7 +103,7 @@ gtests/
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
 ```
 
-## **Configure and build GTest with ZenDNN***
+## **Configure and build GTest with ZenDNN**
 - Configure:
 ```bash
 cmake -DZENDNNL_BUILD_GTEST=ON ..
@@ -308,5 +308,3 @@ cmake --build .
 ## **Future Enhancements**
 - Add dynamic tolerance values based on tensor dimensions, data type, and value range.
 - Implement a command-line parser to avoid hardcoding parameters.
-
->ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

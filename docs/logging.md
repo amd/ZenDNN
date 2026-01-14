@@ -1,15 +1,15 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Logging Support and Control
 
 ## Overview
 
-The logging system in ZenDNN* provides a flexible mechanism to monitor and debug application execution. It categorizes logs by modules and log levels, and its behavior can be controlled via environment variables. This document explains the available log modules and levels, along with how to use environment variables to control log output.
+The logging system in ZenDNN provides a flexible mechanism to monitor and debug application execution. It categorizes logs by modules and log levels, and its behavior can be controlled via environment variables. This document explains the available log modules and levels, along with how to use environment variables to control log output.
 
 ## Log Modules
 
-Log modules represent different areas or components within ZenDNN*. Each module can have its own logging configuration. Some common log modules include:
+Log modules represent different areas or components within ZenDNN. Each module can have its own logging configuration. Some common log modules include:
 
 - **common**: General logging for common operations.
 - **api**: Logging related to API calls and interfaces.
@@ -31,7 +31,7 @@ The levels are typically numeric, where a higher number corresponds to increased
 
 ## Environment Variables for Log Control
 
-ZenDNN* supports several environment variables to control logging behavior. These variables override default settings, allowing you to adjust verbosity at runtime without recompiling the code.
+ZenDNN supports several environment variables to control logging behavior. These variables override default settings, allowing you to adjust verbosity at runtime without recompiling the code.
 
 - **ZENDNNL_<log_module>_LOG_LEVEL**:
   Sets the default log level for a specific module. For example, the following command sets the log level of a module (Example: API, PROFILE) to verbose (4):
@@ -54,7 +54,7 @@ These settings enable runtime control of logging behavior, which is essential in
 
 ### API Logs
 
-ZenDNN* provides API-level logs to monitor interactions with the library's interfaces. These logs are enabled by setting the `ZENDNNL_API_LOG_LEVEL` environment variable.
+ZenDNN provides API-level logs to monitor interactions with the library's interfaces. These logs are enabled by setting the `ZENDNNL_API_LOG_LEVEL` environment variable.
 
 #### Enabling API Logs
 To enable API logs, set the log level for the `API` module to verbose (4):
@@ -63,7 +63,7 @@ export ZENDNNL_API_LOG_LEVEL=4
 ```
 
 #### API Log Details
-When API logs are enabled, ZenDNN* outputs detailed information about API calls, including:
+When API logs are enabled, ZenDNN outputs detailed information about API calls, including:
 - Function names and parameters.
 - Execution status (success or failure).
 - Any warnings or errors encountered during API calls.
@@ -78,7 +78,7 @@ When API logs are enabled, ZenDNN* outputs detailed information about API calls,
 
 ### Test Logs
 
-ZenDNN* provides test-level logs to monitor the execution of test cases and validation processes. These logs are enabled by setting the `ZENDNNL_TEST_LOG_LEVEL` environment variable.
+ZenDNN provides test-level logs to monitor the execution of test cases and validation processes. These logs are enabled by setting the `ZENDNNL_TEST_LOG_LEVEL` environment variable.
 
 #### Enabling Test Logs
 To enable test logs, set the log level for the `TEST` module to verbose (4):
@@ -87,7 +87,7 @@ export ZENDNNL_TEST_LOG_LEVEL=4
 ```
 
 #### Test Log Details
-When test logs are enabled, ZenDNN* outputs detailed information about test execution, including:
+When test logs are enabled, ZenDNN outputs detailed information about test execution, including:
 - Test case names and descriptions.
 - Validation results (Example: successful or failed).
 - Any warnings or errors encountered during testing.
@@ -99,7 +99,7 @@ When test logs are enabled, ZenDNN* outputs detailed information about test exec
 
 ## Profile Logs
 
-ZenDNN* provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` and `ZENDNNL_ENABLE_PROFILER` environment variable.
+ZenDNN provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` and `ZENDNNL_ENABLE_PROFILER` environment variable.
 
 ### Enabling Profile Logs
 To enable profiling logs, set the log level for the `PROFILE` module to verbose (4):
@@ -109,7 +109,7 @@ export ZENDNNL_PROFILE_LOG_LEVEL=4
 ```
 
 ### Profiling Log Details
-When profiling logs are enabled, ZenDNN* outputs detailed information about context creation and operator execution, including:
+When profiling logs are enabled, ZenDNN outputs detailed information about context creation and operator execution, including:
 - Operator name and type.
 - Operator context details.
 - Input and output tensor details (dimensions, data types, and layouts).
@@ -124,7 +124,7 @@ When profiling logs are enabled, ZenDNN* outputs detailed information about cont
 
 ## Debug Logs
 
-ZenDNN* provides detailed debug logs to output comprehensive information about internal operations, including intermediate states and execution flow. These logs are enabled by setting the `ZENDNNL_DEBUG_LOG_LEVEL` environment variable **and are only available when the library is built in debug mode**.
+ZenDNN provides detailed debug logs to output comprehensive information about internal operations, including intermediate states and execution flow. These logs are enabled by setting the `ZENDNNL_DEBUG_LOG_LEVEL` environment variable **and are only available when the library is built in debug mode**.
 
 ### Debug Mode Requirement
 Debug logs are only available when the library is built in debug mode. To build the library in debug mode, complete the following steps:
@@ -174,6 +174,4 @@ int main() {
 }
 ```
 
-By using the environment variable settings outlined in this document, you can achieve fine-grained control over the logging behavior in ZenDNN*, making it easier to troubleshoot and optimize your application.
-
->ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.
+By using the environment variable settings outlined in this document, you can achieve fine-grained control over the logging behavior in ZenDNN, making it easier to troubleshoot and optimize your application.
