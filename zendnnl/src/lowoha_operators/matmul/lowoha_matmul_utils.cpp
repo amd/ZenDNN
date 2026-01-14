@@ -30,7 +30,7 @@ namespace lowoha {
 namespace matmul {
 
 // Global mutex for thread-safe lowoha operations (cache, auto-tuner map, etc.)
-std::mutex& get_lowoha_mutex() {
+std::mutex &get_lowoha_mutex() {
   static std::mutex lowoha_mutex;
   return lowoha_mutex;
 }
@@ -66,27 +66,29 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   // Only weight scale and weight zero point are allowed for WOQ
   const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                       (params.dtypes.wei == data_type_t::s4);
-  
+
   // INT8 quantization: u8/s8 src with s8 weights
-  const bool is_int8 = (params.dtypes.src == data_type_t::u8 || 
+  const bool is_int8 = (params.dtypes.src == data_type_t::u8 ||
                         params.dtypes.src == data_type_t::s8) &&
                        (params.dtypes.wei == data_type_t::s8);
-  
+
   // WOQ and INT8 require constant weights for weight reordering/caching
   if (is_woq && !is_weights_const) {
     log_error("WOQ requires constant weights (is_weights_const=true)");
     return status_t::failure;
   }
-  
+
   // Source and destination quantization params are only supported for INT8
   if ((params.quant_params.src_scale.buff || params.quant_params.dst_scale.buff ||
-       params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) && !is_int8) {
+       params.quant_params.src_zp.buff || params.quant_params.dst_zp.buff) &&
+      !is_int8) {
     log_error("Source/destination quantization params are only supported for INT8 (u8/s8 src + s8 weights)");
     return status_t::failure;
   }
-  
+
   // Weight quantization params only allowed for WOQ or INT8
-  if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) && !is_woq && !is_int8) {
+  if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) &&
+      !is_woq && !is_int8) {
     log_error("Weight quantization params are only supported for WOQ (BF16 src + S4 weights) or INT8");
     return status_t::failure;
   }
@@ -255,7 +257,7 @@ std::string post_op_data_types_to_string(const matmul_params &params) {
 }
 
 inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
-                                     int num_threads, data_type_t dtype) {
+                                    int num_threads, data_type_t dtype) {
 
   // Set thresholds based on thread count and data type (powers of 2 only)
   int M_threshold = 0, N_threshold = 0, work_threshold = 0;
@@ -291,6 +293,49 @@ inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
            N >= N_threshold &&
            work_per_thread >= work_threshold)
           || small_batch_override);
+}
+
+// TODO: Further tune the heuristics based on num_threads and other params
+inline matmul_algo_t select_algo_by_heuristics_woq_int4_mm(int M, int N, int K,
+    int num_threads) {
+  // For Higher thread count(i.e >128) AOCL S4 Kernels gives optimal performance
+  if (num_threads > 128) {
+    return matmul_algo_t::aocl_dlp_blocked;
+  }
+  else {
+    // If M <= 16 AOCL S4 Kernel gives Optimal Performance.
+    // If M >= 128, N and K >=1024 AOCL BLIS kernels with Zen weights conversion
+    // gives optimal performance.
+    // This is based on heuristic with different models and difference BS
+    if (M <= 16) {
+      // AOCL S4 Kernel
+      return matmul_algo_t::aocl_dlp_blocked;
+    }
+    else if (M >= 128 && N >= 1024 && K >= 1024) {
+      // AOCL BF16 Kernel with Zen Weights Conversion
+      return matmul_algo_t::aocl_dlp;
+    }
+    else if (M == 32) {
+      if (N <= K) {
+        // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion
+        return matmul_algo_t::aocl_dlp;
+      }
+      else {
+        // AOCL S4 Kernel
+        return matmul_algo_t::aocl_dlp_blocked;
+      }
+    }
+    else {
+      if (N <= K) {
+        // AOCL BF16 Kernel with Zen Weights Conversion
+        return matmul_algo_t::aocl_dlp;
+      }
+      else {
+        // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion
+        return matmul_algo_t::aocl_dlp;
+      }
+    }
+  }
 }
 
 // TODO: Further tune the heuristics based on num_threads and other params
@@ -343,65 +388,80 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
    Optimized via grid search on stratified train-test split.*/
 inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
   if (M <= 493) {
-      if (K <= 352) {
-          if (K <= 124) {
-              return matmul_algo_t::onednn_blocked;
-          } else {
-              return matmul_algo_t::aocl_dlp_blocked;
-          }
-      } else {
-          if (M <= 352) {
-              if (K <= 1344) {
-                  return matmul_algo_t::onednn_blocked;
-              } else {
-                  if (N <= 2548) {
-                      return matmul_algo_t::aocl_dlp_blocked;
-                  } else {
-                      return matmul_algo_t::onednn_blocked;
-                  }
-              }
-          } else {
-              return matmul_algo_t::onednn_blocked;
-          }
+    if (K <= 352) {
+      if (K <= 124) {
+        return matmul_algo_t::onednn_blocked;
       }
-  } else {
-      if (M <= 187680) {
-          if (K <= 896) {
-              if (K <= 248) {
-                  if (N <= 2560) {
-                      if (N <= 136) {
-                          if (N <= 40) {
-                              return matmul_algo_t::onednn_blocked;
-                          } else {
-                              return matmul_algo_t::aocl_dlp_blocked;
-                          }
-                      } else {
-                          return matmul_algo_t::onednn_blocked;
-                      }
-                  } else {
-                      return matmul_algo_t::aocl_dlp_blocked;
-                  }
-              } else {
-                  if (N <= 96) {
-                      return matmul_algo_t::aocl_dlp_blocked;
-                  } else {
-                      if (N <= 248) {
-                          return matmul_algo_t::onednn_blocked;
-                      } else {
-                          if (K <= 448) {
-                              return matmul_algo_t::aocl_dlp_blocked;
-                          } else {
-                              return matmul_algo_t::onednn_blocked;
-                          }
-                      }
-                  }
-              }
-          } else {
-              return matmul_algo_t::aocl_dlp_blocked;
-          }
-      } else {
-          return matmul_algo_t::aocl_dlp_blocked;
+      else {
+        return matmul_algo_t::aocl_dlp_blocked;
       }
+    }
+    else {
+      if (M <= 352) {
+        if (K <= 1344) {
+          return matmul_algo_t::onednn_blocked;
+        }
+        else {
+          if (N <= 2548) {
+            return matmul_algo_t::aocl_dlp_blocked;
+          }
+          else {
+            return matmul_algo_t::onednn_blocked;
+          }
+        }
+      }
+      else {
+        return matmul_algo_t::onednn_blocked;
+      }
+    }
+  }
+  else {
+    if (M <= 187680) {
+      if (K <= 896) {
+        if (K <= 248) {
+          if (N <= 2560) {
+            if (N <= 136) {
+              if (N <= 40) {
+                return matmul_algo_t::onednn_blocked;
+              }
+              else {
+                return matmul_algo_t::aocl_dlp_blocked;
+              }
+            }
+            else {
+              return matmul_algo_t::onednn_blocked;
+            }
+          }
+          else {
+            return matmul_algo_t::aocl_dlp_blocked;
+          }
+        }
+        else {
+          if (N <= 96) {
+            return matmul_algo_t::aocl_dlp_blocked;
+          }
+          else {
+            if (N <= 248) {
+              return matmul_algo_t::onednn_blocked;
+            }
+            else {
+              if (K <= 448) {
+                return matmul_algo_t::aocl_dlp_blocked;
+              }
+              else {
+                return matmul_algo_t::onednn_blocked;
+              }
+            }
+          }
+        }
+      }
+      else {
+        return matmul_algo_t::aocl_dlp_blocked;
+      }
+    }
+    else {
+      return matmul_algo_t::aocl_dlp_blocked;
+    }
   }
 }
 
@@ -429,7 +489,8 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?
                          ((batch_count == 1 && is_weights_const) ? matmul_algo_t::aocl_dlp
                           : matmul_algo_t::dynamic_dispatch) : static_cast<matmul_algo_t>(algo);
-
+  bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
+                (params.dtypes.wei == data_type_t::s4);
   // TODO: Fallback to reference/supported kernel
   if (kernel == matmul_algo_t::auto_tuner && (Batch_A != 1 || Batch_B != 1 ||
       !is_weights_const)) {
@@ -444,7 +505,15 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
 
   if (kernel==matmul_algo_t::dynamic_dispatch) {
     if (batch_count > 1) {
-      kernel = select_algo_by_heuristics_bf16_bmm(batch_count, M, N, K, num_threads);
+      if (params.dtypes.wei == data_type_t::bf16) {
+        kernel = select_algo_by_heuristics_bf16_bmm(batch_count, M, N, K, num_threads);
+      }
+      else {
+        kernel = matmul_algo_t::aocl_dlp;
+      }
+    }
+    else if (is_woq) {
+      kernel = select_algo_by_heuristics_woq_int4_mm(M, N, K, num_threads);
     }
     else {
       if (is_weights_const == false && M >= 4096 && M <= 8192 && K == 1024 &&
@@ -452,7 +521,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
         kernel = matmul_algo_t::libxsmm_blocked;
       }
       else {
-        kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
+        if (params.dtypes.wei == data_type_t::bf16) {
+          kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
+        }
+        else {
+          kernel = matmul_algo_t::aocl_dlp_blocked;
+        }
       }
     }
   }
@@ -464,11 +538,9 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp;
   }
 
-  // Force aocl_dlp for WOQ (Weight-Only Quantization) cases
-  // WOQ uses specialized AOCL kernels that don't support blocked format
-  const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
-                      (params.dtypes.wei == data_type_t::s4);
-  if (is_woq) {
+  // Force aocl_dlp or aocl_dlp_blocked for WOQ (Weight-Only Quantization) cases
+  if (is_woq && (kernel != matmul_algo_t::aocl_dlp &&
+                 kernel != matmul_algo_t::aocl_dlp_blocked)) {
     log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }

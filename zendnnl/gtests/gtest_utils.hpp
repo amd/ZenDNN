@@ -133,6 +133,8 @@ extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;
 extern const float rtol_bf16;
+extern const float epsilon_woq;
+extern const float rtol_woq;
 extern std::vector<MatmulType> matmul_test;
 extern std::vector<BatchMatmulType> batchmatmul_test;
 extern std::vector<ReorderType> reorder_test;
@@ -412,7 +414,8 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               tensor_t &output_tensor_ref, uint64_t m,
                               uint64_t n, uint64_t k, const float rtol,
                               const float epsilon, bool &flag,
-                              bool enable_f32_relaxation = false);
+                              bool enable_f32_relaxation = false,
+                              bool is_woq = false);
 
 /** @fn compare_tensor_3D_matrix
  *  @brief Function to compare two matrix result after batch-matrix matmul

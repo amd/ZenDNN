@@ -2033,7 +2033,8 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               const float rtol,
                               const float epsilon,
                               bool &is_comparison_successful,
-                              bool enable_f32_relaxation) {
+                              bool enable_f32_relaxation,
+                              bool is_woq) {
   constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
   constexpr int P = 15; // Post-op accumulation margin
@@ -2047,7 +2048,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
   // Accumulation-based absolute bound
   // abs_bound = (C*k+P)*epsilon
   const float abs_bound =
-    (output_tensor.get_data_type() == data_type_t::bf16)
+    (output_tensor.get_data_type() == data_type_t::bf16) || is_woq
     ? (k * epsilon)
     : (((C + log2(k) / scale_factor) * k + P) * epsilon);
 

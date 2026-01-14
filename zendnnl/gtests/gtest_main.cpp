@@ -36,6 +36,8 @@ const float epsilon_f32     = 1.19e-7;
 const float rtol_f32        = 1e-5;
 const float epsilon_bf16    = 9.76e-4;
 const float rtol_bf16       = 1e-2;
+const float epsilon_woq     = 1.19e-5;
+const float rtol_woq        = 1e-4;
 
 // Test tolerance constants
 const float EMBAG_F32_TOL  = 0.001;

@@ -89,11 +89,13 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
  * @param M The number of rows in the output matrix (used for INT8 zero-point compensation)
  * @param zp_comp_acc Pointer to zero-point compensation buffer (nullptr if no ZP compensation)
  * @param zp_comp_ndim Dimensionality of ZP compensation: 0=none, 1=bias(N), 2=matrix(M*N)
+ * @param kernel Algorithm selection for GEMM execution
  * @return Pointer to the created dlp_metadata_t object
  */
 dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                                    const void *bias, const matmul_data_types &dtypes, int N, int K,
-                                   int M = 0, int32_t *zp_comp_acc = nullptr, int zp_comp_ndim = 0);
+                                   int M = 0, int32_t *zp_comp_acc = nullptr, int zp_comp_ndim = 0,
+                                   zendnnl::ops::matmul_algo_t kernel = zendnnl::ops::matmul_algo_t::aocl_dlp);
 
 /**
 * @brief Cleans up DLP (Deep Learning Primitives) metadata.
@@ -117,10 +119,14 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po, const matmul_params &post_op);
 * @param bias Pointer to the bias data.
 * @param dtypes Data types for the source, weight, and destination tensors.
 * @param N The number of columns in the output matrix.
+* @param K The number of columns in the input matrix / rows in weight matrix
+* @param kernel Algorithm selection for GEMM execution
 * @return Pointer to the created `aocl_post_op` object.
 */
 aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
-                                  const void *bias, const matmul_data_types &dtypes, int N);
+                                  const void *bias, const matmul_data_types &dtypes, int N,
+                                  int K, zendnnl::ops::matmul_algo_t kernel=
+                                    zendnnl::ops::matmul_algo_t::aocl_dlp);
 
 /**
 * @brief Cleans up BLIS (Basic Linear Algebra Subprograms) post-op metadata.
@@ -165,13 +171,13 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const matmul_params &post_op);
  * @param can_reorder Flag indicating if weight reordering is allowed (default: false)
  */
 void run_dlp(char layout, char transA, char transB, int M, int N,
-              int K,
-              float alpha, float beta, int lda, int ldb, int ldc,
-              char mem_format_a, char mem_format_b, const void *A,
-              const void *B, void *C, const matmul_data_types &dtypes,
-              const matmul_params &lowoha_param, const void *bias,
-              zendnnl::ops::matmul_algo_t kernel,
-              bool is_weights_const, bool can_reorder = false);
+             int K,
+             float alpha, float beta, int lda, int ldb, int ldc,
+             char mem_format_a, char mem_format_b, const void *A,
+             const void *B, void *C, const matmul_data_types &dtypes,
+             const matmul_params &lowoha_param, const void *bias,
+             zendnnl::ops::matmul_algo_t kernel,
+             bool is_weights_const, bool can_reorder = false);
 
 /**
  * @brief Execute batched matrix multiplication using AOCL backend
@@ -205,7 +211,8 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                float beta,
                                void *C, int ldc, matmul_data_types &dtypes, int batch_count, char mem_format_a,
                                char mem_format_b, size_t src_stride, size_t weight_stride,
-                               size_t dst_stride, const matmul_params &lowoha_param, const void *bias, int num_threads);
+                               size_t dst_stride, const matmul_params &lowoha_param, const void *bias,
+                               int num_threads);
 
 } // namespace matmul
 } // namespace lowoha

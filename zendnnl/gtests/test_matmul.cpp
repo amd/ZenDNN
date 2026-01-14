@@ -114,7 +114,7 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
   // Test WOQ with different scale/zp granularity combinations:
   // Combination 0: scale=per-tensor,  zp=per-tensor  -> {1,1}, {1,1}
   // Combination 1: scale=per-channel, zp=per-tensor  -> {1,n}, {1,1}
-  // Combination 2: scale=per-group,   zp=per-tensor  -> {G,n}, {1,1}
+  // Combination 2: scale=per-tensor,   zp=per-channel  -> {1,1}, {1,n}
   // Combination 3: scale=per-group,   zp=per-group   -> {G,n}, {G,n}
 
   int quant_combo = rand() % 4;
@@ -237,8 +237,10 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
     (status == status_t::success && ref_status == status_t::success);
 
   if (is_test_successful) {
-    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_bf16,
-                             epsilon_bf16, is_test_successful);
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k,
+                             output_dtype == data_type_t::bf16 ? rtol_bf16 : rtol_woq,
+                             output_dtype == data_type_t::bf16 ? epsilon_bf16 : epsilon_woq,
+                             is_test_successful, false, true);
   }
 
   EXPECT_TRUE(is_test_successful);
