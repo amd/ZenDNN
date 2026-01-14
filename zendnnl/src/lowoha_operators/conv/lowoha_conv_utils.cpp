@@ -60,19 +60,30 @@ status_t validate_conv_inputs(
     }
 
     // Validate output dimensions match expected values
+    // Formula: output_size = floor((input_size + pad_before + pad_after - effective_filter_size) / stride) + 1
+    // where effective_filter_size = dilation * (filter_size - 1) + 1
+    uint64_t effective_filter_height = params.dilation_h * (dims.filter_height - 1) + 1;
+    uint64_t effective_filter_width = params.dilation_w * (dims.filter_width - 1) + 1;
+
     uint64_t expected_out_height = (dims.in_height + params.pad_top + params.pad_bottom -
-                                    params.dilation_h * (dims.filter_height - 1) - 1) /
-                                   params.stride_h + 1;
+                                    effective_filter_height + params.stride_h) /
+                                   params.stride_h;
     uint64_t expected_out_width = (dims.in_width + params.pad_left + params.pad_right -
-                                   params.dilation_w * (dims.filter_width - 1) - 1) /
-                                  params.stride_w + 1;
+                                   effective_filter_width + params.stride_w) /
+                                  params.stride_w;
 
     if (dims.out_height != expected_out_height ||
         dims.out_width != expected_out_width) {
         log_error("Conv validation failed: output dimensions mismatch. ",
                   "Expected: [", expected_out_height, ", ",
                   expected_out_width, "], Got: [", dims.out_height, ", ",
-                  dims.out_width, "]");
+                  dims.out_width, "]. ",
+                  "Input: [", dims.in_height, ", ", dims.in_width, "], ",
+                  "Filter: [", dims.filter_height, ", ", dims.filter_width, "], ",
+                  "Stride: [", params.stride_h, ", ", params.stride_w, "], ",
+                  "Padding: [", params.pad_top, ", ", params.pad_bottom, ", ",
+                  params.pad_left, ", ", params.pad_right, "], ",
+                  "Dilation: [", params.dilation_h, ", ", params.dilation_w, "]");
         return status_t::failure;
     }
 

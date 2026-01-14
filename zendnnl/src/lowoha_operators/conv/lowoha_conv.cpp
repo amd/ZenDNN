@@ -21,7 +21,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace conv {
 
-void conv_kernel_wrapper(
+status_t conv_kernel_wrapper(
     const void *input,
     const void *filter,
     const void *bias,
@@ -32,14 +32,17 @@ void conv_kernel_wrapper(
     if (params.algo == conv_algo_t::onednn ||
         params.algo == conv_algo_t::onednn_blocked) {
         log_info("Using OneDNN kernel for Conv");
-        conv_onednn_wrapper(input, filter, bias, output,
-                             params);
-        return;
+        status_t status = conv_onednn_wrapper(input, filter, bias, output, params);
+        if (status != status_t::success) {
+            log_error("Conv: OneDNN kernel execution failed");
+        }
+        return status;
     }
 #endif
 
     // Fallback to reference implementation (TODO)
     log_error("Conv: No suitable backend available");
+    return status_t::failure;
 }
 
 status_t conv_direct(
@@ -94,14 +97,14 @@ status_t conv_direct(
     }
 
     // Execute convolution
-    conv_kernel_wrapper(input, filter, bias, output, params);
+    status_t exec_status = conv_kernel_wrapper(input, filter, bias, output, params);
 
     if (is_profile) {
         profiler.tbp_stop();
         profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
     }
 
-    return status_t::success;
+    return exec_status;
 }
 
 } // namespace conv

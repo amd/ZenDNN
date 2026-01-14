@@ -54,8 +54,9 @@ status_t conv_direct(
  * @param bias             Bias tensor data (optional)
  * @param output           Output tensor data
  * @param params           Convolution parameters
+ * @return status_t::success or status_t::failure
  */
-void conv_kernel_wrapper(
+status_t conv_kernel_wrapper(
     const void *input,
     const void *filter,
     const void *bias,
