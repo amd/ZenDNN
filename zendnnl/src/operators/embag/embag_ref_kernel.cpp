@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -230,17 +230,17 @@ void embag_int8_int4_ref_kernel(
       int quantized_size = IsInt4 ? (width + 1) / 2 : width;
       const auto *row = input + idx * (quantized_size + (fp16_scale_bias ? 4 : 8));
 
-      float scale, zp;
+      float scale, bias;
       if (fp16_scale_bias) {
-        uint16_t scale_fp16, zp_fp16;
+        uint16_t scale_fp16, bias_fp16;
         std::memcpy(&scale_fp16, row + quantized_size, sizeof(uint16_t));
-        std::memcpy(&zp_fp16, row + quantized_size + 2, sizeof(uint16_t));
+        std::memcpy(&bias_fp16, row + quantized_size + 2, sizeof(uint16_t));
         scale = half_to_float(scale_fp16);
-        zp = std::round(half_to_float(zp_fp16));
+        bias = half_to_float(bias_fp16);
       }
       else {
         std::memcpy(&scale, row + quantized_size, sizeof(float));
-        std::memcpy(&zp, row + quantized_size + 4, sizeof(float));
+        std::memcpy(&bias, row + quantized_size + 4, sizeof(float));
       }
 
       for (int j = 0; j < width; ++j) {
@@ -252,7 +252,7 @@ void embag_int8_int4_ref_kernel(
         else {
           qval = row[j];
         }
-        float val = dequantize(qval, scale, zp) * wt;
+        float val = dequantize(qval, scale, bias) * wt;
 
         if (is_embedding) {
           output_row[j] = val;

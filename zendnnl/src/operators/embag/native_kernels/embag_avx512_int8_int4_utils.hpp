@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -48,8 +48,8 @@ inline int8_t extract_int4(int8_t byte, bool high, data_type_t table_dtype) {
 }
 
 // Dequantizes a quantized value using scale and zero-point.
-inline float dequantize(int8_t val, float scale, float zp) {
-  return ((scale * static_cast<int32_t>(val)) + zp);
+inline float dequantize(int8_t val, float scale, float bias) {
+  return ((scale * static_cast<int32_t>(val)) + bias);
 }
 
 // Convert float16 (stored as uint16_t) to float32
@@ -186,17 +186,17 @@ void embag_avx512_int8_int4_kernel(
 
       int quantized_size = IsInt4 ? (width + 1) / 2 : width;
       const auto *row = input + idx * (quantized_size + (fp16_scale_bias ? 4 : 8));
-      float scale, zp;
+      float scale, bias;
       if (fp16_scale_bias) {
-        uint16_t scale_fp16, zp_fp16;
+        uint16_t scale_fp16, bias_fp16;
         std::memcpy(&scale_fp16, row + quantized_size, sizeof(uint16_t));
-        std::memcpy(&zp_fp16, row + quantized_size + 2, sizeof(uint16_t));
+        std::memcpy(&bias_fp16, row + quantized_size + 2, sizeof(uint16_t));
         scale = half_to_float(scale_fp16);
-        zp = (half_to_float(zp_fp16));
+        bias = half_to_float(bias_fp16);
       }
       else {
         std::memcpy(&scale, row + quantized_size, sizeof(float));
-        std::memcpy(&zp, row + quantized_size + 4, sizeof(float));
+        std::memcpy(&bias, row + quantized_size + 4, sizeof(float));
       }
       __m512 wt_vec = _mm512_set1_ps(wt);
 
@@ -206,8 +206,8 @@ void embag_avx512_int8_int4_kernel(
                                              (row + b * simd_width));
           __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
           __m512 val_f32 = _mm512_add_ps(
-                           _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
-                           _mm512_set1_ps(zp));
+                             _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
+                             _mm512_set1_ps(bias));
 
           val_f32 = _mm512_mul_ps(val_f32, wt_vec);
 
@@ -235,8 +235,8 @@ void embag_avx512_int8_int4_kernel(
           __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(tmp));
           __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
           __m512 val_f32 = _mm512_add_ps(
-                           _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
-                           _mm512_set1_ps(zp));
+                             _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
+                             _mm512_set1_ps(bias));
 
           val_f32 = _mm512_mul_ps(val_f32, wt_vec);
           if (is_embedding) {
@@ -262,7 +262,7 @@ void embag_avx512_int8_int4_kernel(
         for (int j = 0; j < width; ++j) {
           int8_t packed = row[j / 2];
           int8_t qval = extract_int4(packed, j % 2, table_dtype);
-          float val = dequantize(qval, scale, zp) * wt;
+          float val = dequantize(qval, scale, bias) * wt;
           if (is_embedding) {
             reinterpret_cast<float *>(&acc[0])[j] = val;
           }

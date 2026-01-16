@@ -644,8 +644,8 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
   bool fp16_scale_bias,
   float scale_min,
   float scale_max,
-  int8_t zp_min,
-  int8_t zp_max) {
+  float bias_min,
+  float bias_max) {
 
   const int num_embeddings = size_[0];
   const int embedding_dim = size_[1];
@@ -685,12 +685,12 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
     std::uniform_int_distribution<int> dist_u4(0, 15);
     std::uniform_int_distribution<int> dist_s8(-128, 127);
     std::uniform_real_distribution<float> scale_dist(scale_min, scale_max);
-    std::uniform_int_distribution<int8_t> zp_dist(zp_min, zp_max);
+    std::uniform_real_distribution<float> bias_dist(bias_min, bias_max);
 
     for (int i = 0; i < num_embeddings; ++i) {
       const size_t row_base = i * row_size;
       float scale = scale_dist(gen);
-      float zp = static_cast<float>(zp_dist(gen));
+      float bias = bias_dist(gen);
 
       if (dtype_ == data_type_t::s4) {
         std::memset(input + row_base, 0, quantized_size);
@@ -727,18 +727,18 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
         }
       }
 
-      // Append scale and zp
+      // Append scale and bias
       if (fp16_scale_bias) {
         uint16_t scale_fp16 = float_to_half(scale);
-        uint16_t zp_fp16 = float_to_half(zp);
+        uint16_t bias_fp16 = float_to_half(bias);
         std::memcpy(&input[row_base + quantized_size], &scale_fp16,
                     sizeof(uint16_t));
-        std::memcpy(&input[row_base + quantized_size + 2], &zp_fp16,
+        std::memcpy(&input[row_base + quantized_size + 2], &bias_fp16,
                     sizeof(uint16_t));
       }
       else {
         std::memcpy(&input[row_base + quantized_size], &scale, sizeof(float));
-        std::memcpy(&input[row_base + quantized_size + 4], &zp, sizeof(float));
+        std::memcpy(&input[row_base + quantized_size + 4], &bias, sizeof(float));
       }
     }
   }

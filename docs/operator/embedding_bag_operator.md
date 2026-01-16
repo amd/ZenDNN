@@ -1,5 +1,5 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # EmbeddingBag Operator
 
@@ -411,7 +411,7 @@ int embedding_bag_u4_kernel_example() {
     auto table = tensor_factory.quantized_embedding_tensor_random({R, D},
                  data_type_t::u4, "table", true);
 
-    // Create embedding bag context with sum aggregation, scale and zp as fp16
+    // Create embedding bag context with sum aggregation, scale and bias as fp16
     auto embedding_bag_context = embag_context_t()
                                  .set_param("table", table)
                                  .set_algo(embag_algo_t::sum)
