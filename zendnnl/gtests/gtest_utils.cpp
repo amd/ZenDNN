@@ -145,6 +145,32 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
                        quant_granularity_t::channel;
 }
 
+MatmulType::MatmulType(const MatmulType &in) {
+  matmul_m = in.matmul_m;
+  matmul_k = in.matmul_k;
+  matmul_n = in.matmul_n;
+  po_type = in.po_type;
+  transA = in.transA;
+  transB = in.transB;
+  alpha = in.alpha;
+  beta = in.beta;
+  algo = in.algo;
+  if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked)
+  {
+    use_LOWOHA = true;
+  }
+  else if (!cmd_lowoha.empty()) {
+    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  }
+  else {
+    use_LOWOHA = rand() % 2;
+  }
+  source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+  output_dtype = dtype_arr[rand() % dtype_size];
+  weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
+                       quant_granularity_t::channel;
+}
+
 // EmbagType constructor
 EmbagType::EmbagType() {
   static std::random_device rd;
@@ -185,6 +211,11 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   mat = MatmulType(test_index, total_tests);
 }
 
+BatchMatmulType::BatchMatmulType(const BatchMatmulType &in) {
+  batch_size = in.batch_size;
+  mat = MatmulType(in.mat);
+}
+
 ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
   inplace_reorder = rand() % 2;
   mat = MatmulType(test_index, total_tests);
@@ -193,6 +224,11 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 bool is_binary_postop(post_op_type_t post_op) {
   return post_op == post_op_type_t::binary_add ||
          post_op == post_op_type_t::binary_mul;
+}
+
+ReorderType::ReorderType(const ReorderType &in) {
+  inplace_reorder = in.inplace_reorder;
+  mat = MatmulType(in.mat);
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
@@ -769,7 +805,8 @@ tensor_t tensor_factory_t::inverse_tensor(const tensor_t &input_tensor) {
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
-                        uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha) {
+                        uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha,
+                        std::string &input_file, std::string &op, uint32_t &ndims) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -782,6 +819,9 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("postop", po);
   read_from_umap("backend", backend);
   read_from_umap("lowoha", lowoha);
+  read_from_umap("input_file", input_file);
+  read_from_umap("op", op);
+  read_from_umap("ndims", ndims);
   return;
 }
 
@@ -944,6 +984,300 @@ std::string postOpsToStr(post_op_type_t post_op) {
   default:
     return "none";
   }
+}
+
+void trim(std::string &str) {
+  str.erase(std::remove_if(str.begin(), str.end(), ::isspace), str.end());
+}
+std::vector<std::string> split(const std::string &str, char delimiter) {
+  std::vector<std::string> tokens;
+  size_t start = 0, end;
+
+  while ((end = str.find(delimiter, start)) != std::string::npos) {
+    std::string token = str.substr(start, end - start);
+    trim(token);
+    tokens.emplace_back(token);  // include empty token
+    start = end + 1;
+  }
+
+  std:: string token = str.substr(start);
+  trim(token);
+  tokens.emplace_back(token);  // last token (even if empty)
+  return tokens;
+}
+
+std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
+    uint32_t ndims) {
+  std::vector<BatchMatmulType> inputs;
+  std::ifstream infile(file);
+  if (infile.is_open()) {
+    std::string line;
+    // Parse each line of the input file
+    while (std::getline(infile, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      // Split the line into fields and validate
+      auto fields = split(line, ',');
+
+      int fields_size = fields.size();
+      // input fields after M,K,N: postOp, kernel name, transA, transB, alpha, beta
+      const int NUM_MATMUL_CONFIG_FIELDS = 6;
+      int expected_fields_cnt = ndims + 1 + NUM_MATMUL_CONFIG_FIELDS;
+      if (fields_size != expected_fields_cnt) {
+        commonlog_error(
+          "Invalid line (expected ", expected_fields_cnt, " fields): [",
+          (ndims > 2) ? "bs, " : "",
+          "m, k, n, postOp, ",
+          "kernel name, isTransA, isTransB, alpha, beta]");
+        continue;
+      }
+
+      BatchMatmulType cfg;
+      try {
+        int id = 0;
+        std::mt19937 gen(rand());
+
+        // Parse batch_size for 3D case, default to 1 for 2D case
+        if (ndims == 3) {
+          if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+            cfg.batch_size = BATCH_START + rand() % BATCH_END;
+          }
+          else {
+            cfg.batch_size = std::stoi(fields[id]);
+          }
+          id++;
+        }
+        else {
+          cfg.batch_size = 1; // Default for 2D matmul
+        }
+
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          cfg.mat.matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_m = std::stoi(fields[id]);
+        }
+        id++;
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          cfg.mat.matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_k = std::stoi(fields[id]);
+        }
+        id++;
+        if (fields[id].empty()) {
+          cfg.mat.matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_n = std::stoi(fields[id]);
+        }
+        id++;
+
+        if (fields[id].empty()) {
+          cfg.mat.po_type = post_op_arr[rand() % (po_size + 1)];
+        }
+        else {
+          cfg.mat.po_type = strToPostOps(fields[id]);
+        }
+        id++;
+
+        if (fields[id].empty()) {
+          matmul_config_t &matmul_config = matmul_config_t::instance();
+          int32_t algo_ = matmul_config.get_algo();
+          cfg.mat.algo = static_cast<matmul_algo_t>(algo_);
+          if (cfg.mat.algo == matmul_algo_t::none) {
+            // Random algorithm selection
+            int algo_range_max = 6; // 6 algorithms in total
+            std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
+            cfg.mat.algo = static_cast<matmul_algo_t>(algo_dist(gen));
+            if (!ZENDNNL_DEPENDS_ONEDNN && (cfg.mat.algo == matmul_algo_t::onednn ||
+                                            cfg.mat.algo == matmul_algo_t::onednn_blocked)) {
+              cfg.mat.algo = matmul_algo_t::aocl_dlp;
+            }
+          }
+        }
+        else {
+          cfg.mat.algo = strToAlgo(fields[id]);
+        }
+        id++;
+
+        std::string transA_flag = fields[id];
+        if (transA_flag.empty()) {
+          cfg.mat.transA = rand() % 2;
+        }
+        else {
+          std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
+                         ::tolower);
+          if (transA_flag == "true" || transA_flag == "1") {
+            cfg.mat.transA = true;
+          }
+          else {
+            cfg.mat.transA = false;
+          }
+        }
+        id++;
+
+        std::string transB_flag = fields[id];
+        if (transB_flag.empty()) {
+          cfg.mat.transB = rand() % 2;
+        }
+        else {
+          std::transform(transB_flag.begin(), transB_flag.end(), transB_flag.begin(),
+                         ::tolower);
+          if (transB_flag == "true" || transB_flag == "1") {
+            cfg.mat.transB = true;
+          }
+          else {
+            cfg.mat.transB = false;
+          }
+        }
+        id++;
+        std::uniform_real_distribution<float> dist(0.0, 10.0);
+        cfg.mat.alpha = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
+        id++;
+        cfg.mat.beta = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
+
+        inputs.push_back(cfg);
+      }
+      catch (const std::exception &e) {
+        commonlog_error(e.what());
+        continue;
+      }
+    }
+  }
+  else {
+    testlog_error("Error: Cannot open file ", file);
+  }
+  return inputs;
+}
+
+std::vector<ReorderType> read_reorder_inputs(const std::string &file) {
+  std::vector<ReorderType> inputs;
+  std::ifstream infile(file);
+  if (infile.is_open()) {
+    std::string line;
+    // Parse each line of the input file
+    while (std::getline(infile, line)) {
+      if (line.empty()) {
+        continue;
+      }
+      // Split the line into fields and validate
+      auto fields = split(line, ',');
+      ReorderType cfg;
+      try {
+        int id = 0;
+        std::mt19937 gen(rand());
+
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          cfg.mat.matmul_m = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_m = std::stoi(fields[id]);
+        }
+        id++;
+        if (fields[id].empty() || std::stoi(fields[id]) <= 0) {
+          cfg.mat.matmul_k = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_k = std::stoi(fields[id]);
+        }
+        id++;
+        if (fields[id].empty()) {
+          cfg.mat.matmul_n = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
+        }
+        else {
+          cfg.mat.matmul_n = std::stoi(fields[id]);
+        }
+        id++;
+
+        // Parse post-op: search for the string in po_arr and assign its index
+        if (fields[id].empty()) {
+          cfg.mat.po_type = post_op_arr[rand() % (po_size + 1)];
+        }
+        else {
+          cfg.mat.po_type = strToPostOps(fields[id]);
+        }
+        id++;
+
+        // Parse kernel name (default to 'aocl_dlp' if empty)
+        if (fields[id].empty()) {
+          matmul_config_t &matmul_config = matmul_config_t::instance();
+          int32_t algo_ = matmul_config.get_algo();
+          cfg.mat.algo = static_cast<matmul_algo_t>(algo_);
+          if (cfg.mat.algo == matmul_algo_t::none) {
+            // Random algorithm selection
+            int algo_range_max = 6; // 6 algorithms in total
+            std::uniform_int_distribution<int> algo_dist(1, algo_range_max);
+            cfg.mat.algo = static_cast<matmul_algo_t>(algo_dist(gen));
+            if (!ZENDNNL_DEPENDS_ONEDNN && (cfg.mat.algo == matmul_algo_t::onednn ||
+                                            cfg.mat.algo == matmul_algo_t::onednn_blocked)) {
+              cfg.mat.algo = matmul_algo_t::aocl_dlp;
+            }
+          }
+        }
+        else {
+          cfg.mat.algo = strToAlgo(fields[id]);
+        }
+        id++;
+
+        std::string transA_flag = fields[id];
+        if (transA_flag.empty()) {
+          cfg.mat.transA = rand() % 2;
+        }
+        else {
+          std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
+                         ::tolower);
+          if (transA_flag == "true" || transA_flag == "1") {
+            cfg.mat.transA = true;
+          }
+          else {
+            cfg.mat.transA = false;
+          }
+        }
+        id++;
+
+        std::string transB_flag = fields[id];
+        if (transB_flag.empty()) {
+          cfg.mat.transB = rand() % 2;
+        }
+        else {
+          std::transform(transB_flag.begin(), transB_flag.end(), transB_flag.begin(),
+                         ::tolower);
+          if (transB_flag == "true" || transB_flag == "1") {
+            cfg.mat.transB = true;
+          }
+          else {
+            cfg.mat.transB = false;
+          }
+        }
+        id++;
+        if (fields[id].empty()) {
+          cfg.inplace_reorder = rand() % 2;
+        }
+        else {
+          std::string inplace_flag = fields[id];
+          std::transform(inplace_flag.begin(), inplace_flag.end(), inplace_flag.begin(),
+                         ::tolower);
+          if (inplace_flag == "true" || inplace_flag == "1") {
+            cfg.inplace_reorder = true;
+          }
+          else {
+            cfg.inplace_reorder = false;
+          }
+        }
+        inputs.push_back(cfg);
+      }
+      catch (const std::exception &e) {
+        commonlog_error(e.what());
+        continue;
+      }
+    }
+  }
+  else {
+    testlog_error("Error: Cannot open file ", file);
+  }
+  return inputs;
 }
 
 status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,

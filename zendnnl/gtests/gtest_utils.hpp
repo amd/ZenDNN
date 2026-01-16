@@ -68,6 +68,7 @@ struct MatmulType {
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  MatmulType(const MatmulType &in);
 };
 
 /** @brief BatchMatmul Op Parameters Structure */
@@ -75,12 +76,14 @@ struct BatchMatmulType {
   uint64_t batch_size;
   MatmulType mat{};
   BatchMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  BatchMatmulType(const BatchMatmulType &in);
 };
 
 struct ReorderType {
   bool inplace_reorder;
   MatmulType mat{};
   ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  ReorderType(const ReorderType &in);
 };
 
 /** @brief Embag Op Parameters Structure */
@@ -222,7 +225,8 @@ class Parser {
   void operator()(const int &argc,
                   char *argv[],
                   int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
-                  std::string &lowoha);
+                  std::string &lowoha, std::string &input_file,
+                  std::string &op, uint32_t &ndims);
 };
 
 bool is_binary_postop(post_op_type_t post_op);
@@ -286,6 +290,58 @@ post_op_type_t strToPostOps(const std::string &str);
  * @return std::string The string representation of the post operation.
  */
 std::string postOpsToStr(post_op_type_t post_op);
+/** @fn read_matmul_inputs
+ *  @brief Read and parse matmul test configurations from a file
+ *
+ *  This function reads a file containing matmul test parameters and returns
+ *  a vector of BatchMatmulType configurations. It handles both 2D matmul (ndims=2)
+ *  and 3D batch matmul (ndims=3) test cases from the same function.
+ *
+ *  For 2D matmul (ndims=2), input format: M,K,N,postOp,kernel,transA,transB,alpha,beta (9 fields)
+ *  For 3D matmul (ndims=3), input format: BS,M,K,N,postOp,kernel,transA,transB,alpha,beta (10 fields)
+ *
+ *  @param file Path to the input file
+ *  @param ndims Dimension of matmul operation (2 for matmul, 3 for batch matmul). Default is 2.
+ *  @return std::vector<BatchMatmulType> Vector of parsed matmul configurations
+ */
+std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
+    uint32_t ndims = 2);
+
+/** @fn read_reorder_inputs
+ *  @brief Read and parse reorder test configurations from a file
+ *
+ *  This function reads a file containing reorder test parameters and returns
+ *  a vector of ReorderType configurations. Reorder operations transform tensor
+ *  layouts for optimized memory access patterns.
+ *
+ *  Input format: M,K,N,postOp,kernel,transA,transB,inplace_reorder (8 fields)
+ *
+ *  @param file Path to the input file
+ *  @return std::vector<ReorderType> Vector of parsed reorder configurations
+ */
+std::vector<ReorderType> read_reorder_inputs(const std::string &file);
+
+/** @fn trim
+ *  @brief Remove leading and trailing whitespace from a string
+ *
+ *  This helper function removes all leading and trailing whitespace characters
+ *  from the input string. The string is modified in-place.
+ *
+ *  @param str Reference to the string to be trimmed (modified in-place)
+ */
+void trim(std::string &str);
+
+/** @fn split
+ *  @brief Split a string into tokens based on a delimiter
+ *
+ *  This helper function splits a string into multiple substrings using the
+ *  specified delimiter character. Empty tokens are preserved in the result.
+ *
+ *  @param s The input string to split
+ *  @param delimiter The character to use as delimiter (typically ',')
+ *  @return std::vector<std::string> Vector of tokenized substrings
+ */
+std::vector<std::string> split(const std::string &s, char delimiter);
 
 /** @fn matmul_kernel_test
  *  @brief Compute Matmul Operation using AOCL kernel.

@@ -50,6 +50,9 @@ int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
 std::string cmd_backend {};
 std::string cmd_lowoha {};
+std::string cmd_input_file {};
+std::string cmd_operator {};
+uint32_t ndims = 2;
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -71,24 +74,52 @@ int main(int argc, char **argv) {
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;
-    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, cmd_lowoha);
+    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, cmd_lowoha,
+          cmd_input_file, cmd_operator, ndims);
     srand(static_cast<unsigned int>(seed));
-    std::cout<<"Value "<<seed<<" is used as seed. \n";
+    std::cout << "Value " << seed << " is used as seed. \n";
 
-    // Creating Random parameters for Matmul
-    matmul_test.resize(test_num);
-    for (uint32_t i = 0; i < test_num; ++i) {
-      matmul_test[i] = MatmulType(i, test_num);
+    if (!cmd_input_file.empty() && cmd_operator == "matmul" && ndims == 2) {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto matmul_inputs = read_matmul_inputs(cmd_input_file, ndims);
+      for (const auto &input : matmul_inputs) {
+        matmul_test.push_back(MatmulType(input.mat));
+      }
     }
-    // Creating Random parameters for BatchMatmul
-    batchmatmul_test.resize(test_num);
-    for (uint32_t i = 0; i < test_num; ++i) {
-      batchmatmul_test[i] = BatchMatmulType(i, test_num);
+    else {
+      // Creating Random parameters for Matmul
+      matmul_test.resize(test_num);
+      for (uint32_t i = 0; i < test_num; ++i) {
+        matmul_test[i] = MatmulType(i, test_num);
+      }
     }
-    // Creating Random parameters for Reorder
-    reorder_test.resize(test_num);
-    for (uint32_t i = 0; i < test_num; ++i) {
-      reorder_test[i] = ReorderType(i, test_num);
+    if (!cmd_input_file.empty() && cmd_operator == "matmul" && ndims == 3) {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto batchmatmul_inputs = read_matmul_inputs(cmd_input_file, ndims);
+      for (const auto &input : batchmatmul_inputs) {
+        batchmatmul_test.push_back(BatchMatmulType(input));
+      }
+    }
+    else {
+      // Creating Random parameters for BatchMatmul
+      batchmatmul_test.resize(test_num);
+      for (uint32_t i = 0; i < test_num; ++i) {
+        batchmatmul_test[i] = BatchMatmulType(i, test_num);
+      }
+    }
+    if (!cmd_input_file.empty() && cmd_operator == "reorder") {
+      std::cout << "Using input file: " << cmd_input_file << std::endl;
+      auto reorder_inputs = read_reorder_inputs(cmd_input_file);
+      for (const auto &input : reorder_inputs) {
+        reorder_test.push_back(input);
+      }
+    }
+    else {
+      // Creating Random parameters for Reorder
+      reorder_test.resize(test_num);
+      for (uint32_t i = 0; i < test_num; ++i) {
+        reorder_test[i] = ReorderType(i, test_num);
+      }
     }
     // Creating Random parameters for Embedding Bag
     embag_test.resize(test_num);

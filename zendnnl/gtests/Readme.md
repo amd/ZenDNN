@@ -20,6 +20,8 @@ ZenDNN GTest provides flexibility in configuring tests through command-line argu
 - **Set Random Seed**: Provide a seed value for reproducible random test data generation.
 - **Specify Post-Operations**: Apply post-operations like `relu`, `gelu_tanh`, etc., during matrix multiplication tests.
 - **Backend Selection**: Choose specific computational backends using `--backend` parameter to control algorithm selection (e.g., `aocl_dlp`, `onednn`, `libxsmm`).
+- **LOWOHA**: Enable or disable Low Overhead API using `--lowoha` parameter.
+- **Input File Support**: Use `--input_file` with `--op` and optionally `--ndims` parameters to read test configurations from a file instead of random generation.
 
 ## **Configurable Parameters**
 You can modify the following parameters in the source code (`gtest_main.cpp`):
@@ -116,7 +118,12 @@ cmake --build .
 
 ### **General Command Structure**
 ```bash
-./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend>
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend> --lowoha <true/false>
+```
+
+### **Command Structure with Input File**
+```bash
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --input_file <InputFile> --op <Operator> --ndims <Dimensions> --lowoha <true/false>
 ```
 
 ## **Parameters**
@@ -149,12 +156,101 @@ cmake --build .
    - *Example*:
      - `aocl_dlp`: Uses AOCL DLP backend for computations
 
+6. **`--lowoha <true/false>`** (Optional):
+   - Specifies whether to use LOWOHA (Low Overhead API) mode for matrix multiplication operations.
+   - *Example*:
+     - `true`: Use Low Overhead API
+     - `false`: Use Regular API
+   - **Default behavior**: 
+     - If not specified, tests are automatically partitioned into thirds:
+       - First third: LOWOHA off
+       - Second third: LOWOHA on
+       - Last third: LOWOHA on with LIBXSMM backend
+     - For LIBXSMM backends, LOWOHA is always enabled by default
+
+7. **`--input_file <InputFile>`** (Optional):
+   - Specifies an input file containing test configurations for operators.
+   - When provided, test inputs will be read from the file instead of random generation.
+   - Must be used in conjunction with `--op` parameter.
+   - *Example*:
+     - `input.txt`: Reads test configurations from input.txt file
+
+8. **`--op <Operator>`** (Optional):
+   - Specifies the operator type when using input file mode.
+   - Required when `--input_file` is provided to determine how to parse the file.
+   - *Supported operators*:
+     - `matmul`: Matrix multiplication operator
+     - `reorder`: Reorder operator
+   - *Example*:
+     - `matmul`: Process matmul test configurations from input file
+
+9. **`--ndims <Dimensions>`** (Optional):
+   - Specifies the number of dimensions for the operator.
+   - Required when `--input_file` is provided to distinguish between operation types.
+   - **Required for batch matmul** (3D matmul) operations.
+   - *Supported values*:
+     - `2`: 2D matmul (standard matrix multiplication)
+     - `3`: 3D matmul (batch matrix multiplication) - **required for batch matmul**
+   - *Example*:
+     - `2`: Process 2D matmul test configurations
+     - `3`: Process batch matmul test configurations
+
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
  - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
+ - If **`<lowoha>`** parameter is not provided, tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios.
+ - If **`<InputFile>`**, **`<Operator>`**, or **`<Dimensions>`** are not provided, tests will use randomly generated parameters instead of reading from a file.
  - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops and backends.
+
+## **Input File Format**
+
+When using `--input_file` parameter, the input file must follow specific formats based on the operator type:
+
+### **Matmul (2D) Input File Format**
+Each line should contain comma-separated values in the following order:
+```
+M,K,N,postOp,kernel,transA,transB,alpha,beta
+```
+**Example:**
+```
+128,256,512,relu,aocl_dlp,false,false,1.0,0.0
+64,128,256,gelu_tanh,onednn,false,true,1.0,0.0
+```
+
+### **Batch Matmul (3D) Input File Format**
+Each line should contain comma-separated values in the following order:
+```
+BS,M,K,N,postOp,kernel,transA,transB,alpha,beta
+```
+**Where BS is the batch size.**
+
+**Example:**
+```
+32,128,256,512,relu,aocl_dlp,false,false,1.0,0.0
+16,64,128,256,,libxsmm,false,true,1.0,0.0
+```
+
+### **Reorder Input File Format**
+Each line should contain comma-separated values in the following order:
+```
+M,K,N,postOp,kernel,transA,transB,inplace_reorder
+```
+**Example:**
+```
+128,256,512,relu,aocl_dlp,false,false,false
+64,128,256,gelu_tanh,onednn,false,true,true
+```
+
+**Field Descriptions:**
+- **M, K, N**: Matrix dimensions
+- **BS**: Batch size (for batch matmul only)
+- **postOp**: Post-operation (relu, gelu_tanh, gelu_erf, sigmoid, swish, tanh, binary_add, binary_mul, or none)
+- **kernel**: Backend algorithm (aocl_dlp, aocl_dlp_blocked, onednn, onednn_blocked, libxsmm, libxsmm_blocked)
+- **transA, transB**: Transpose flags (0 or 1)
+- **alpha, beta**: Scaling factors for matmul operations
+- **inplace_reorder**: Reorder mode flag (0 or 1)
 
 ## **Examples**
 ### Reorder Tests (Reorder + Matmul)
@@ -293,6 +389,22 @@ cmake --build .
 3. Run the BF16 Input, BF16 Output matmul test for 10 randomly generated valid tests with random seed and random postop selection:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --test 10
+```
+4. Run F32 matmul tests with AOCL DLP backend:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --backend aocl_dlp
+```
+5. Run matmul tests with oneDNN backend and LOWOHA enabled:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --backend onednn --lowoha true
+```
+6. Run matmul tests using input file configurations for 2D matmul:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/* --input_file test.txt --op matmul --ndims 2
+```
+7. Run batch matmul tests using input file configurations for 3D matmul:
+``` bash
+./install/gtests/gtests --gtest_filter=BatchMatmul/* --input_file batch_tests.txt --op matmul --ndims 3
 ```
 
 ### Run All testcases of a TestSuite
