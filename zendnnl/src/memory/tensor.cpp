@@ -134,6 +134,16 @@ tensor_t::index_type tensor_t::get_stride(uint32_t index_) const {
   return option.stride.at(index_);
 }
 
+bool tensor_t::is_transposed() const {
+  const auto &strides = option.stride;
+  if (strides.size() < 2) {
+    return false;
+  }
+  // Compare second-to-last and last stride
+  // Transposed if row stride < column stride (for row-major base)
+  return strides[strides.size() - 2] < strides[strides.size() - 1];
+}
+
 tensor_t  &tensor_t::set_quant_scale(const tensor_t &quant_scale_) {
   //return if tensor is created
   if (status == status_t::success) {
@@ -658,7 +668,7 @@ tensor_t &tensor_t::create() {
   float multiplier = option.data_type == data_type_t::s4 ||
                      option.data_type == data_type_t::u4 ? 2.0f : 1.0f;
   uint64_t buffer_size = std::ceil(1.0 * option.aligned_nelem * size_of(
-                                         option.data_type) / multiplier);
+                                     option.data_type) / multiplier);
 
   if (allocate) {
     // allocate new storage

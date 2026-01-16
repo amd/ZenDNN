@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -46,7 +46,8 @@ inline void read_quant_params(const tensor_t &tensor,
 
 // Extract nibble from packed S4 byte (low nibble if is_low_nibble=true, else high nibble)
 inline int8_t extract_s4_nibble(int8_t packed_byte, bool is_low_nibble) {
-  int8_t s4_value = is_low_nibble ? (packed_byte & 0x0F) : ((packed_byte >> 4) & 0x0F);
+  int8_t s4_value = is_low_nibble ? (packed_byte & 0x0F) : ((
+                      packed_byte >> 4) & 0x0F);
   // Sign extend from bit 3
   if (s4_value & 0x08) {
     s4_value |= 0xF0;
@@ -146,7 +147,8 @@ void matmul_ref_kernel_t::compute_zero_point_compensation(int M, int N, int K,
   }
 }
 
-void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *accum_buff_f32,
+void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
+                                       float *accum_buff_f32,
                                        void *output, data_type_t output_dtype) {
   LOG_DEBUG_INFO("Storing matmul_ref_kernel_t output");
 
@@ -162,7 +164,8 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *acc
         for (int j = 0; j < N; ++j) {
           float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
           val = (val < 0.0f) ? 0.0f : ((val > (float)UINT8_MAX) ? (float)UINT8_MAX : val);
-          out_u8[bs * output_batch_stride + i * ldc + j] = static_cast<uint8_t>(std::nearbyint(val));
+          out_u8[bs * output_batch_stride + i * ldc + j] = static_cast<uint8_t>
+              (std::nearbyint(val));
         }
       }
     }
@@ -174,8 +177,10 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *acc
       for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
           float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
-          val = (val < (float)INT8_MIN) ? (float)INT8_MIN : ((val > (float)INT8_MAX) ? (float)INT8_MAX : val);
-          out_s8[bs * output_batch_stride + i * ldc + j] = static_cast<int8_t>(std::nearbyint(val));
+          val = (val < (float)INT8_MIN) ? (float)INT8_MIN : ((val > (float)INT8_MAX) ?
+                (float)INT8_MAX : val);
+          out_s8[bs * output_batch_stride + i * ldc + j] = static_cast<int8_t>
+              (std::nearbyint(val));
         }
       }
     }
@@ -187,8 +192,10 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *acc
       for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
           float val = accum_buff_f32[bs * accum_batch_stride + i * N + j];
-          val = (val < (float)INT32_MIN) ? (float)INT32_MIN : ((val > (float)INT32_MAX) ? (float)INT32_MAX : val);
-          out_s32[bs * output_batch_stride + i * ldc + j] = static_cast<int32_t>(std::nearbyint(val));
+          val = (val < (float)INT32_MIN) ? (float)INT32_MIN : ((val >
+                (float)INT32_MAX) ? (float)INT32_MAX : val);
+          out_s32[bs * output_batch_stride + i * ldc + j] = static_cast<int32_t>
+              (std::nearbyint(val));
         }
       }
     }
@@ -199,7 +206,8 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *acc
     for (int bs = 0; bs < BS; ++bs) {
       for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-          out_bf16[bs * output_batch_stride + i * ldc + j] = bfloat16_t(accum_buff_f32[bs * accum_batch_stride + i * N + j]);
+          out_bf16[bs * output_batch_stride + i * ldc + j] = bfloat16_t(
+                accum_buff_f32[bs * accum_batch_stride + i * N + j]);
         }
       }
     }
@@ -219,7 +227,8 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc, float *acc
       for (int bs = 0; bs < BS; ++bs) {
         for (int i = 0; i < M; ++i) {
           for (int j = 0; j < N; ++j) {
-            out_f32[bs * output_batch_stride + i * ldc + j] = accum_buff_f32[bs * accum_batch_stride + i * N + j];
+            out_f32[bs * output_batch_stride + i * ldc + j] = accum_buff_f32[bs *
+                accum_batch_stride + i * N + j];
           }
         }
       }
@@ -265,10 +274,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
   auto weight_dtype            = weight_tensor.get_data_type();
   auto output_dtype            = output_tensor.get_data_type();
 
-  bool is_transpose_src        = (input_dim == 2)  ? (input_tensor.get_order() ==
-                                 "ba") : (input_tensor.get_order() == "acb");
-  bool is_transpose_weights    = (weight_dim == 2) ? (weight_tensor.get_order() ==
-                                 "ba") : (weight_tensor.get_order() == "acb");
+  bool is_transpose_src        = input_tensor.is_transposed();
+  bool is_transpose_weights    = weight_tensor.is_transposed();
 
   const int batch_size         = (output_dim==3) ? output_tensor.get_size(
                                    output_dim-3) : 1;
@@ -350,7 +357,8 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                   .set_data_type(data_type_t::bf16)
                                   .set_storage()
                                   .create();
-    bfloat16_t *bf16_weights = static_cast<bfloat16_t *>(bf16_weight_tensor.get_raw_handle_unsafe());
+    bfloat16_t *bf16_weights = static_cast<bfloat16_t *>
+                               (bf16_weight_tensor.get_raw_handle_unsafe());
     if (bf16_weights == nullptr) {
       log_error("Failed to allocate BF16 weight buffer for WOQ dequantization");
       return status_t::unimplemented;
@@ -362,7 +370,7 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
     const int8_t *packed_weights = (const int8_t *)weights;
     auto wei_scale_size = quant_param.wei_scale.size;
     bool has_zp = (quant_param.wei_zp.buff != nullptr);
-    
+
     // Determine quantization granularity:
     // - Per-tensor:  wei_scale_size == 1
     // - Per-channel: wei_scale_size == N
@@ -401,9 +409,11 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
           size_t scale_idx;
           if (wei_scale_size == 1) {
             scale_idx = 0;  // Per-tensor
-          } else if (wei_scale_size == static_cast<size_t>(N)) {
+          }
+          else if (wei_scale_size == static_cast<size_t>(N)) {
             scale_idx = n;  // Per-channel
-          } else {
+          }
+          else {
             // Per-group: scale[group_idx, n]
             int group_idx = k / group_size;
             scale_idx = group_idx * N + n;
@@ -419,9 +429,11 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
             auto zp_size = quant_param.wei_zp.size;
             if (zp_size == 1) {
               zp_idx = 0;  // Per-tensor
-            } else if (zp_size == static_cast<size_t>(N)) {
+            }
+            else if (zp_size == static_cast<size_t>(N)) {
               zp_idx = n;  // Per-channel
-            } else {
+            }
+            else {
               // Per-group: zp[group_idx, n]
               int group_idx = k / group_size;
               zp_idx = group_idx * N + n;

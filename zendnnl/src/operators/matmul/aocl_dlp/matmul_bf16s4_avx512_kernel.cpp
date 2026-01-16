@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -40,12 +40,11 @@ status_t matmul_bf16s4_avx512_kernel_t::execute(const context_type &context_,
   auto weight_dim             = weight_tensor.get_dim();
   auto output_dim             = output_tensor.get_dim();
 
-  bool is_transpose_src       = (input_dim == 2)  ? (input_tensor.get_order() ==
-                                "ba") : (input_tensor.get_order() == "acb");
-  bool is_transpose_weights   = (weight_dim == 2) ? (weight_tensor.get_order() ==
-                                "ba") : (weight_tensor.get_order() == "acb");
+  bool is_transpose_src       = input_tensor.is_transposed();
+  bool is_transpose_weights   = weight_tensor.is_transposed();
 
-  bool is_blocked = weight_tensor.get_layout() & uint8_t(tensor_layout_t::blocked);
+  bool is_blocked = weight_tensor.get_layout() & uint8_t(
+                      tensor_layout_t::blocked);
 
   auto reorder_weights        = (int8_t *)
                                 context_.get_aocl_dlp_reordered_weights_ptr_unsafe();
@@ -87,27 +86,27 @@ status_t matmul_bf16s4_avx512_kernel_t::execute(const context_type &context_,
   if (output_tensor.get_data_type() == data_type_t::f32) {
     for (auto bs=0; bs<batch_size; ++bs) {
       aocl_gemm_bf16s4f32of32(order, trans_input, trans_weight,
-                                m,n,k,
-                                alpha,
-                                input_raw_handle + bs * offset_src, lda, input_format,
-                                (is_reordered_weights && weight_dim==2) ?
-                                reorder_weights : weights_raw_handle + bs * offset_wei,
-                                ldb, weight_format, beta,
-                                (float *)output_raw_handle + bs * offset_out, ldc,
-                                aocl_dlp_po_ptr);
+                              m,n,k,
+                              alpha,
+                              input_raw_handle + bs * offset_src, lda, input_format,
+                              (is_reordered_weights && weight_dim==2) ?
+                              reorder_weights : weights_raw_handle + bs * offset_wei,
+                              ldb, weight_format, beta,
+                              (float *)output_raw_handle + bs * offset_out, ldc,
+                              aocl_dlp_po_ptr);
     }
   }
   else if (output_tensor.get_data_type() == data_type_t::bf16) {
     for (auto bs=0; bs<batch_size; ++bs) {
       aocl_gemm_bf16s4f32obf16(order, trans_input, trans_weight,
-                                 m,n,k,
-                                 alpha,
-                                 input_raw_handle + bs * offset_src, lda, input_format,
-                                 (is_reordered_weights && weight_dim==2) ?
-                                 reorder_weights : weights_raw_handle + bs * offset_wei,
-                                 ldb, weight_format, beta,
-                                 (int16_t *)output_raw_handle + bs * offset_out,
-                                 ldc, aocl_dlp_po_ptr);
+                               m,n,k,
+                               alpha,
+                               input_raw_handle + bs * offset_src, lda, input_format,
+                               (is_reordered_weights && weight_dim==2) ?
+                               reorder_weights : weights_raw_handle + bs * offset_wei,
+                               ldb, weight_format, beta,
+                               (int16_t *)output_raw_handle + bs * offset_out,
+                               ldc, aocl_dlp_po_ptr);
     }
   }
   return status_t::success;

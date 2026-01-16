@@ -510,11 +510,6 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
  */
 TEST_P(TestMatmul, INT8) {
-  // TODO: OneDNN is disabled for u8 src and u8 output.
-  if ((algo == matmul_algo_t::onednn || algo == matmul_algo_t::onednn_blocked) &&
-      (source_dtype == data_type_t::u8 || output_dtype == data_type_t::u8)) {
-    GTEST_SKIP() << "OneDNN is disabled for u8 src and u8 output.";
-  }
   // TODO: Extend support for test cases with a wider range of values.
   std::vector<uint64_t> wei_scale_size = (weight_granularity ==
                                           quant_granularity_t::tensor) ?
@@ -533,15 +528,13 @@ TEST_P(TestMatmul, INT8) {
 
   auto src_zp             = (source_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::u8, 16) : tensor_t();
-  auto wei_zp             = (weight_granularity == quant_granularity_t::tensor) &&
-                            (algo != matmul_algo_t::onednn &&
-                             algo != matmul_algo_t::onednn_blocked) ?
+                                data_type_t::s32, 16) : tensor_t();
+  auto wei_zp             = (weight_granularity == quant_granularity_t::tensor) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s8, 16) : tensor_t();
+                                data_type_t::s32, 16) : tensor_t();
   auto dst_zp             = (output_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::u8, 53) : tensor_t();
+                                data_type_t::s32, 53) : tensor_t();
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::s8, 25.0, transB, wei_scale, wei_zp);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},

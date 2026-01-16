@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -59,8 +59,6 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
   params.dst.buffer            = output_tensor.get_raw_handle_unsafe();
   params.weights.buffer        = weight_tensor.get_raw_handle_unsafe();
 
-  auto input_dim               = input_tensor.get_dim();
-  auto weight_dim              = weight_tensor.get_dim();
   auto dst_dim                 = output_tensor.get_dim();
 
   params.src.dtype             = input_tensor.get_data_type();
@@ -71,10 +69,8 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
   params.weights.format_tag    = weight_tensor.get_order();
   params.dst.format_tag        = output_tensor.get_order();
 
-  params.src.is_transposed     = (input_dim == 2)  ? (input_tensor.get_order() ==
-                                 "ba") : (input_tensor.get_order() == "acb");
-  params.weights.is_transposed = (weight_dim == 2) ? (weight_tensor.get_order() ==
-                                 "ba") : (weight_tensor.get_order() == "acb");
+  params.src.is_transposed     = input_tensor.is_transposed();
+  params.weights.is_transposed = weight_tensor.is_transposed();
 
   auto src_dims                = input_tensor.get_size();
   auto weights_dims            = weight_tensor.get_size();
@@ -106,15 +102,18 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.src_quant.scales = input_tensor.get_quant_scale_raw_handle_const();
     params.src_quant.scale_dtype = input_tensor.get_quant_scale_data_type();
     auto src_scale_size = input_tensor.get_quant_scale_size();
-    params.src_quant.scale_size.assign(src_scale_size.begin(), src_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_SRC, src_scale_size.back() == 1 ? 0 : 1 << 1);
+    params.src_quant.scale_size.assign(src_scale_size.begin(),
+                                       src_scale_size.end());
+    matmul_attr.set_scales_mask(DNNL_ARG_SRC,
+                                src_scale_size.back() == 1 ? 0 : 1 << 1);
 
     if (input_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
       params.src_quant.zero_points = input_tensor.get_quant_zero_raw_handle_const();
       params.src_quant.zero_dtype = input_tensor.get_quant_zero_data_type();
       auto src_zero_size = input_tensor.get_quant_zero_size();
       params.src_quant.zero_size.assign(src_zero_size.begin(), src_zero_size.end());
-      matmul_attr.set_zero_points_mask(DNNL_ARG_SRC, src_zero_size.back() == 1 ? 0 : 1 << 1);
+      matmul_attr.set_zero_points_mask(DNNL_ARG_SRC,
+                                       src_zero_size.back() == 1 ? 0 : 1 << 1);
     }
   }
 
@@ -122,15 +121,20 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.weights_quant.scales = weight_tensor.get_quant_scale_raw_handle_const();
     params.weights_quant.scale_dtype = weight_tensor.get_quant_scale_data_type();
     auto wei_scale_size = weight_tensor.get_quant_scale_size();
-    params.weights_quant.scale_size.assign(wei_scale_size.begin(), wei_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_scale_size.back() == 1 ? 0 : 1 << 1);
+    params.weights_quant.scale_size.assign(wei_scale_size.begin(),
+                                           wei_scale_size.end());
+    matmul_attr.set_scales_mask(DNNL_ARG_WEIGHTS,
+                                wei_scale_size.back() == 1 ? 0 : 1 << 1);
 
     if (weight_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
-      params.weights_quant.zero_points = weight_tensor.get_quant_zero_raw_handle_const();
+      params.weights_quant.zero_points =
+        weight_tensor.get_quant_zero_raw_handle_const();
       params.weights_quant.zero_dtype = weight_tensor.get_quant_zero_data_type();
       auto wei_zero_size = weight_tensor.get_quant_zero_size();
-      params.weights_quant.zero_size.assign(wei_zero_size.begin(), wei_zero_size.end());
-      matmul_attr.set_zero_points_mask(DNNL_ARG_WEIGHTS, wei_zero_size.back() == 1 ? 0 : 1 << 1);
+      params.weights_quant.zero_size.assign(wei_zero_size.begin(),
+                                            wei_zero_size.end());
+      matmul_attr.set_zero_points_mask(DNNL_ARG_WEIGHTS,
+                                       wei_zero_size.back() == 1 ? 0 : 1 << 1);
     }
   }
 
@@ -138,15 +142,18 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
     params.dst_quant.scales = output_tensor.get_quant_scale_raw_handle_const();
     params.dst_quant.scale_dtype = output_tensor.get_quant_scale_data_type();
     auto dst_scale_size = output_tensor.get_quant_scale_size();
-    params.dst_quant.scale_size.assign(dst_scale_size.begin(), dst_scale_size.end());
-    matmul_attr.set_scales_mask(DNNL_ARG_DST, dst_scale_size.back() == 1 ? 0 : 1 << 1);
+    params.dst_quant.scale_size.assign(dst_scale_size.begin(),
+                                       dst_scale_size.end());
+    matmul_attr.set_scales_mask(DNNL_ARG_DST,
+                                dst_scale_size.back() == 1 ? 0 : 1 << 1);
 
     if (output_tensor.get_quant_subtype() == quant_subtype_t::asymmetric) {
       params.dst_quant.zero_points = output_tensor.get_quant_zero_raw_handle_const();
       params.dst_quant.zero_dtype = output_tensor.get_quant_zero_data_type();
       auto dst_zero_size = output_tensor.get_quant_zero_size();
       params.dst_quant.zero_size.assign(dst_zero_size.begin(), dst_zero_size.end());
-      matmul_attr.set_zero_points_mask(DNNL_ARG_DST, dst_zero_size.back() == 1 ? 0 : 1 << 1);
+      matmul_attr.set_zero_points_mask(DNNL_ARG_DST,
+                                       dst_zero_size.back() == 1 ? 0 : 1 << 1);
     }
   }
 

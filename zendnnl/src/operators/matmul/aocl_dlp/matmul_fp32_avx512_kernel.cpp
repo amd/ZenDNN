@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -54,10 +54,8 @@ status_t matmul_f32_avx512_kernel_t::execute(const context_type &context_,
   const auto weight_dim       = weight_tensor.get_dim();
   const auto output_dim       = output_tensor.get_dim();
 
-  bool is_transpose_src       = (input_dim == 2)  ? (input_tensor.get_order() ==
-                                "ba") : (input_tensor.get_order() == "acb");
-  bool is_transpose_weights   = (weight_dim == 2) ? (weight_tensor.get_order() ==
-                                "ba") : (weight_tensor.get_order() == "acb");
+  bool is_transpose_src       = input_tensor.is_transposed();
+  bool is_transpose_weights   = weight_tensor.is_transposed();
   bool is_blocked             = weight_tensor.get_layout()
                                 & uint16_t(tensor_layout_t::blocked);
 

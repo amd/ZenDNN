@@ -91,7 +91,7 @@ using namespace zendnnl::error_handling;
  */
 
 class tensor_t final : public hash_object_t {
-public:
+ public:
   /** @brief Parent type */
   using   parent_type       = hash_object_t;
 
@@ -111,16 +111,16 @@ public:
   tensor_t();
 
   /** @brief Copy constuctor */
-  tensor_t(const tensor_t& tensor_)            = default;
+  tensor_t(const tensor_t &tensor_)            = default;
 
   /** @brief Copy assignment */
-  tensor_t& operator=(const tensor_t& tensor_) = default;
+  tensor_t &operator=(const tensor_t &tensor_) = default;
 
   /** @brief Move constructor */
-  tensor_t(tensor_t&& other_);
+  tensor_t(tensor_t &&other_);
 
   /** @brief Move assignment */
-  tensor_t& operator=(tensor_t&& other_);
+  tensor_t &operator=(tensor_t &&other_);
   /**@}*/
 
   /** @name Tensor Dimensions
@@ -133,7 +133,7 @@ public:
    * @return A reference to self.
    */
 
-  tensor_t& set_size(index_vec_type size_);
+  tensor_t &set_size(index_vec_type size_);
 
   /** @brief Get tensor size.
    * @return Size vector.
@@ -168,7 +168,7 @@ public:
    * @param  aligned_size_ : a vector of aligned sizes.
    * @return A reference to self.
    */
-  tensor_t& set_aligned_size(index_vec_type aligned_size_);
+  tensor_t &set_aligned_size(index_vec_type aligned_size_);
 
   /** @brief Get aligned size of the tensor.
    * @return Aligned size vector.
@@ -194,7 +194,7 @@ public:
    * @param base_ : base index.
    * @return A reference to self.
    */
-  tensor_t& set_base_index(index_vec_type base_);
+  tensor_t &set_base_index(index_vec_type base_);
 
   /** @brief Get tensor base index.
    *
@@ -209,7 +209,7 @@ public:
    *  broadcast along any axis. For example a tensor of size (5,4,3), and stride
    *  (0,3,1) is broadcasting a 4x3 tensor along depth.
    */
-  tensor_t& set_stride(index_vec_type stride_);
+  tensor_t &set_stride(index_vec_type stride_);
 
   /** @brief Get stride vector.
    *
@@ -230,6 +230,17 @@ public:
    */
   index_type get_stride(uint32_t index_) const;
 
+  /** @brief Check if tensor is transposed based on strides.
+   *
+   *  A tensor is considered transposed if the second-to-last stride is less than
+   *  the last stride, indicating column-major or transposed memory layout.
+   *  For a 2D tensor with strides [s0, s1], transposed means s0 < s1.
+   *  For a 3D tensor with strides [s0, s1, s2], checks s1 < s2.
+   *
+   *  @return true if the tensor layout is transposed, false otherwise.
+   */
+  bool is_transposed() const;
+
   /**@}*/
 
   /** @name Tensor Quantization
@@ -237,10 +248,10 @@ public:
   /**@{*/
 
   /** @brief set tensor scale */
-  tensor_t& set_quant_scale(const tensor_t& quant_scale_);
+  tensor_t &set_quant_scale(const tensor_t &quant_scale_);
 
   /** @brief set tensor zero */
-  tensor_t& set_quant_zero_point(const tensor_t& quant_zero_);
+  tensor_t &set_quant_zero_point(const tensor_t &quant_zero_);
 
   /** @brief check if it is a quantized tensor */
   bool is_quantized() const;
@@ -261,16 +272,17 @@ public:
   index_vec_type get_quant_scale_block_size() const;
 
   /** @brief compute scale offset */
-  uint64_t compute_quant_scale_offset(const index_vec_type& index_) const;
+  uint64_t compute_quant_scale_offset(const index_vec_type &index_) const;
 
   /** @brief get quant scale data type */
   data_type_t get_quant_scale_data_type() const;
 
   /** @brief get quant scale raw handle */
-  const void* get_quant_scale_raw_handle_const() const;
+  const void *get_quant_scale_raw_handle_const() const;
 
   /** @brief get quant scale raw handle */
-  const void* get_quant_scale_raw_handle_const(const index_vec_type& index_) const;
+  const void *get_quant_scale_raw_handle_const(const index_vec_type &index_)
+  const;
 
   /** @brief get quant scale size */
   index_vec_type get_quant_zero_size() const;
@@ -282,16 +294,16 @@ public:
   index_vec_type get_quant_zero_block_size() const;
 
   /** @brief compute quant zero offset */
-  uint64_t compute_quant_zero_offset(const index_vec_type& index_) const;
+  uint64_t compute_quant_zero_offset(const index_vec_type &index_) const;
 
   /** @brief get quant zero data type */
   data_type_t get_quant_zero_data_type() const;
 
   /** @brief get quant scale data type */
-  const void* get_quant_zero_raw_handle_const() const;
+  const void *get_quant_zero_raw_handle_const() const;
 
   /** @brief get quant scale data type */
-  const void* get_quant_zero_raw_handle_const(const index_vec_type& index_) const;
+  const void *get_quant_zero_raw_handle_const(const index_vec_type &index_) const;
 
   /**@}*/
 
@@ -306,7 +318,7 @@ public:
    * @param data_type_ : data type.
    * @return A reference to self.
    */
-  tensor_t& set_data_type(data_type_t data_type_);
+  tensor_t &set_data_type(data_type_t data_type_);
 
   /** @brief Get tensor data type.
    *
@@ -323,7 +335,7 @@ public:
    * @param layout_: tensor layout.
    * @return A reference to self.
    */
-  tensor_t& set_layout(tensor_layout_t layout_);
+  tensor_t &set_layout(tensor_layout_t layout_);
 
   /** @brief Get tensor layout.
    * @sa @c tensor_layout_t enum for suppported layouts.
@@ -347,7 +359,7 @@ public:
    * @param order_: tensor channel order.
    * @return A reference to self.
    */
-  tensor_t& set_order(std::string order_);
+  tensor_t &set_order(std::string order_);
 
   /** @brief Get tensor order.
    * @return Tensor order.
@@ -358,12 +370,12 @@ public:
    * @param tensor_option_ : tensor option to set.
    * @return A reference to self.
    */
-  tensor_t& set_tensor_option(const tensor_option_t& option_);
+  tensor_t &set_tensor_option(const tensor_option_t &option_);
 
   /** @brief Get tensor options
    * @return Tensor option.
    */
-  tensor_option_t& get_tensor_option();
+  tensor_option_t &get_tensor_option();
 
   /** @brief Set tensor to be const.
    *
@@ -373,7 +385,7 @@ public:
    * @param constness_: tensor constness.
    * @return A reference to self.
    */
-  tensor_t& set_const(bool constness_);
+  tensor_t &set_const(bool constness_);
 
   /** @brief Get tensor constness.
    * @return Tensor constness.
@@ -397,7 +409,7 @@ public:
    * @param name_ : The tensor name.
    * @return A reference to self. This function can be chained to create a tensor.
    */
-  tensor_t& set_name(std::string name_);
+  tensor_t &set_name(std::string name_);
 
   /** @brief Get tensor name
    * @return The tensor name.
@@ -412,7 +424,7 @@ public:
    * @param index_ : an index for which offset is required.
    * @return offset of the index.
    */
-  uint64_t compute_offset(const index_vec_type& index_) const;
+  uint64_t compute_offset(const index_vec_type &index_) const;
 
   /** @brief Get tensor element.
    *
@@ -421,7 +433,7 @@ public:
    * @param index_ : element index.
    * @return Dequantized or float converted element.
    */
-  float at(const index_vec_type& index_) const;
+  float at(const index_vec_type &index_) const;
 
 
   /**@}*/
@@ -470,7 +482,7 @@ public:
    *
    * @return Raw pointer to the memory buffer.
    */
-  void* get_raw_handle_unsafe() const;
+  void *get_raw_handle_unsafe() const;
 
   /** @brief Get the raw hande to tensor memory buffer.
    *
@@ -482,7 +494,7 @@ public:
    *
    * @return Raw pointer to the memory buffer.
    */
-  void* get_raw_handle_unsafe(const index_vec_type& index_) const;
+  void *get_raw_handle_unsafe(const index_vec_type &index_) const;
 
   /** @brief Get a const raw handle to tensor memory buffer.
    *
@@ -491,7 +503,7 @@ public:
    *
    * @return Const raw pointer to the memory buffer.
    */
-  const void* get_raw_handle_const() const;
+  const void *get_raw_handle_const() const;
 
   /** @brief Get a const raw handle to tensor memory buffer.
    *
@@ -500,7 +512,7 @@ public:
    *
    * @return Const raw pointer to the memory buffer.
    */
-  const void* get_raw_handle_const(const index_vec_type& index_) const;
+  const void *get_raw_handle_const(const index_vec_type &index_) const;
 
   /** @brief Allocate unaligned storage to the tensor.
    *
@@ -512,7 +524,7 @@ public:
    * @sa get_buffer_sz_byte() for further description on how buffer size is calculated.
    * @return A reference to self.
    */
-  tensor_t& set_storage();
+  tensor_t &set_storage();
 
   /** @brief Allocate aligned storage to the tensor.
    *
@@ -526,8 +538,8 @@ public:
    * @param aligned_to_ : memory boundary the buffer need to be aligned to.
    * @return A reference to self.
    */
-  tensor_t& set_storage(uint32_t aligned_to_);
-  tensor_t& set_storage(uint32_t aligned_to_, uint64_t nelem_);
+  tensor_t &set_storage(uint32_t aligned_to_);
+  tensor_t &set_storage(uint32_t aligned_to_, uint64_t nelem_);
   /** @brief Borrow memory buffer from another raw pointer.
    *
    * Needed to borrow tensor buffer from a deep learning framework.
@@ -535,14 +547,14 @@ public:
    * @param sz_bytes_ : buffer size in bytes.
    * @return A reference to self.
    */
-  tensor_t& set_storage(void* raw_ptr_, uint64_t sz_bytes_);
+  tensor_t &set_storage(void *raw_ptr_, uint64_t sz_bytes_);
 
   /** @brief Share tensor storage from another tensor.
    *
    * @param other_ : Tensor to share storage from.
    * @return A reference to self.
    */
-  tensor_t& set_storage(const tensor_t& other_);
+  tensor_t &set_storage(const tensor_t &other_);
   /**@}**/
 
   /** @name Create, Reset and Hash
@@ -582,7 +594,7 @@ public:
    *
    * @return A reference to self.
    */
-  tensor_t& create();
+  tensor_t &create();
 
   /** @brief Reset the tensor.
    *
@@ -614,7 +626,7 @@ public:
    */
   std::string tensor_info();
 
-protected:
+ protected:
   /** @brief Sanity check on size
    *
    */
@@ -663,13 +675,13 @@ protected:
    *
    * @return success if the index is within bounds, failure otherwise.
    */
-  status_t index_sanity_check(const index_vec_type& index_) const;
+  status_t index_sanity_check(const index_vec_type &index_) const;
 
   /** @brief Check if the given index is within the bounds of the tensor size.
    *
    * @return success if the index is within bounds, failure otherwise.
    */
-  index_vec_type permute_axes_order(const index_vec_type& in_vec_,
+  index_vec_type permute_axes_order(const index_vec_type &in_vec_,
                                     bool order_to_default) ;
 
   /** @brief Validate meta data is consistent and sufficient to create object.
@@ -682,13 +694,13 @@ protected:
    *
    * @return  quant block size for given size
    */
-  index_vec_type compute_quant_block_size(const index_vec_type& size_);
+  index_vec_type compute_quant_block_size(const index_vec_type &size_);
 
   /** @brief Compute quant stride
    *
    * @return  quant stride for given size
    */
-  index_vec_type compute_quant_stride(const index_vec_type& size_);
+  index_vec_type compute_quant_stride(const index_vec_type &size_);
 
   /** @brief Validate quant scale.
    *
@@ -708,16 +720,20 @@ protected:
    */
   status_t validate_quant_info();
 
-private:
-  tensor_option_t                option; /**< Tensor meta data. See @c tensor_option_t
+ private:
+  tensor_option_t
+  option; /**< Tensor meta data. See @c tensor_option_t
                                             for further description. */
-  std::optional<tensor_quant_t>  quant; /**< Tensor quantization data. See @c tensor_quant_t
+  std::optional<tensor_quant_t>
+  quant; /**< Tensor quantization data. See @c tensor_quant_t
                                            for further description */
-  storage_sptr_type              storage; /**< A shared pointer to tensor storage. See
+  storage_sptr_type
+  storage; /**< A shared pointer to tensor storage. See
                                              @c tensor_storage_t for further description */
 
   bool                           allocate; /**< Allocate strorage to tensor */
-  std::string                    name; /**< Tensor name. This is relevant only for profiling
+  std::string
+  name; /**< Tensor name. This is relevant only for profiling
                                           and diagnostic purposes. */
 };
 
