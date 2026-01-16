@@ -30,7 +30,7 @@ namespace matmul {
  * @brief Get global mutex for thread-safe lowoha operations
  * @return Reference to the lowoha mutex
  */
-std::mutex& get_lowoha_mutex();
+std::mutex &get_lowoha_mutex();
 
 inline int64_t divup(int64_t x, int64_t y) {
   return (x + y - 1) / y;
@@ -165,7 +165,7 @@ const char *data_type_to_string(data_type_t dtype);
 std::string post_op_data_types_to_string(const matmul_params &params);
 
 inline bool may_i_use_dlp_partition(int batch_count, int M, int N,
-                                     int num_threads, data_type_t dtype);
+                                    int num_threads, data_type_t dtype);
 
 inline matmul_algo_t select_algo_by_heuristics_bf16_bmm(int BS, int M, int N,
     int K, int num_threads);
@@ -195,13 +195,6 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K);
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const);
-
-// Helper function to get tile size from environment variable
-int get_tile_size_from_env(const char *env_var, int default_value);
-
-// Tile selection based on matrix dimensions and cache size
-std::tuple<int, int> selectTileBF16(int M, int N, int K, int num_threads);
-
 /**
  * @brief Get the auto-tuner version number
  *

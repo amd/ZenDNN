@@ -16,6 +16,7 @@
 
 #include "lowoha_matmul_utils.hpp"
 #include "bmm_partitioner.hpp"
+#include "matmul_partitioner.hpp"
 #include "lowoha_operators/matmul/libxsmm_kernel.hpp"
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
@@ -168,24 +169,24 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     // Define the tile processing callback
     auto process_tile = [&](int batch_idx, int m_start, int m_len,
                             const uint8_t *src_ptr, const uint8_t *weight_ptr,
-                            uint8_t *dst_ptr) {
+    uint8_t *dst_ptr) {
       const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
                                        src_type_size);
       void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
-          // Create a modified post_op with offset binary tensor buffers
-          matmul_params thread_lowoha_params = params;
-          for (auto &po : thread_lowoha_params.postop_) {
-            if (po.po_type == post_op_type_t::binary_add ||
-                po.po_type == post_op_type_t::binary_mul) {
-              if (po.buff != nullptr) {
-                // Calculate offset based on m_start and data type
-                size_t element_size = size_of(po.dtype);
-                size_t row_offset = m_start * N * element_size;
-                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
-              }
-            }
+      // Create a modified post_op with offset binary tensor buffers
+      matmul_params thread_lowoha_params = params;
+      for (auto &po : thread_lowoha_params.postop_) {
+        if (po.po_type == post_op_type_t::binary_add ||
+            po.po_type == post_op_type_t::binary_mul) {
+          if (po.buff != nullptr) {
+            // Calculate offset based on m_start and data type
+            size_t element_size = size_of(po.dtype);
+            size_t row_offset = m_start * N * element_size;
+            po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
           }
+        }
+      }
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             m_len, N, K, alpha,
@@ -198,7 +199,8 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     };
 
     // Execute partitioned BMM with automatic strategy selection
-    execute_partitioned_bmm(src, weight, dst, part_config, batch_params, process_tile);
+    execute_partitioned_bmm(src, weight, dst, part_config, batch_params,
+                            process_tile);
   }
   else {
     // Single thread execution for batches
@@ -270,7 +272,6 @@ void matmul_execute(const char layout,
     apilog_info("Executing matmul LOWOHA kernel with oneDNN, algo: ",
                 static_cast<int>(kernel));
 
-
     matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
                           weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
                           is_weights_const);
@@ -278,220 +279,164 @@ void matmul_execute(const char layout,
   }
 #endif
 
+  // Partitioned execution for libxsmm_blocked
   if (kernel == matmul_algo_t::libxsmm_blocked) {
+    if (can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
+                        beta, params.dtypes, params, kernel)) {
+
+      apilog_info("Using matmul partitioner with libxsmm_blocked, algo: ",
+                  static_cast<int>(kernel));
+
+      // Setup partition configuration
+      matmul_partition_config_t part_config;
+      part_config.M = M;
+      part_config.N = N;
+      part_config.K = K;
+      part_config.num_threads = num_threads;
+      part_config.kernel = kernel;
+      part_config.src_type_size = src_type_size;
+      part_config.out_type_size = out_type_size;
+      part_config.lda = lda;
+      part_config.ldb = ldb;
+      part_config.ldc = ldc;
+      part_config.transA = transA;
+      part_config.transB = transB;
+      part_config.dtypes = params.dtypes;
+
+      auto brgemm_invoker = [&](
+                              int m_start, int m_len,
+                              int n_start, int n_len,
+                              const void **A_batch_main,
+                              const void **B_batch_main,
+                              const void *A_batch_tail,
+                              const void *B_batch_tail,
+                              void *C_tile,
+                              const void *tile_bias,
+                              int num_main_blocks,
+                              int KC_BLOCK,
+                              int K_tail
+      ) {
 #if ENABLE_LIBXSMM_BRGEMM_KERNEL
-    if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
-                         beta, params.dtypes, params, kernel)) &&
-        params.dtypes.src == data_type_t::f32) {
-      apilog_info("Using LibXSMM BRGEMM kernel with KC blocking");
-      constexpr int KC_BLOCK = 64;
-      auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
-      const int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
-      const int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
-      size_t bias_element_size = 0;
-      const bool has_bias = (bias != nullptr);
-      if (has_bias) {
-        if (params.dtypes.bias == data_type_t::f32) {
-          bias_element_size = sizeof(float);
-        }
-        else if (params.dtypes.bias == data_type_t::bf16) {
-          bias_element_size = sizeof(uint16_t);
-        }
-        else {
-          assert(false && "Unsupported bias dtype");
-        }
-      }
+        // Adjust post-op buffers for this tile
+        matmul_params tile_params = params;
+        for (auto &po : tile_params.postop_) {
+          if ((po.po_type == post_op_type_t::binary_add ||
+               po.po_type == post_op_type_t::binary_mul) &&
+              po.buff != nullptr) {
 
-      const int K_main = (K / KC_BLOCK) * KC_BLOCK;
-      const int K_tail = K - K_main;
-      const int num_main_blocks_global = (K_main > 0) ? (K_main / KC_BLOCK) : 0;
-
-      const uint8_t *src_ptr    = static_cast<const uint8_t *>(src);
-      const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
-      uint8_t       *dst_ptr    = static_cast<uint8_t *>(dst);
-
-      #pragma omp parallel num_threads(num_threads)
-      {
-        std::vector<const void *> A_batch_main;
-        std::vector<const void *> B_batch_main;
-
-        if (num_main_blocks_global > 0) {
-          A_batch_main.resize(num_main_blocks_global);
-          B_batch_main.resize(num_main_blocks_global);
-        }
-
-        const void *A_batch_tail[1];
-        const void *B_batch_tail[1];
-
-        #pragma omp for collapse(2) schedule(static)
-        for (int i = 0; i < M; i += M_BLOCK) {
-          for (int j = 0; j < N; j += N_BLOCK) {
-
-            const int m_tile = std::min(M_BLOCK, M - i);
-            const int n_tile = std::min(N_BLOCK, N - j);
-
-            void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
-
-            const void *tile_bias = nullptr;
-            if (has_bias) {
-              tile_bias = static_cast<const uint8_t *>(bias)
-                          + static_cast<size_t>(j) * bias_element_size;
-            }
-
-            lowoha_params tile_params = params;
-            for (auto &po : tile_params.postop_) {
-              if ((po.po_type == post_op_type_t::binary_add ||
-                   po.po_type == post_op_type_t::binary_mul) &&
-                  po.buff != nullptr) {
-
-                size_t element_size = (po.dtype == data_type_t::f32) ? sizeof(float) : sizeof(
-                                        uint16_t);
-                size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
-                                      (po.leading_dim) +
-                                      static_cast<size_t>(j);
-                size_t offset_bytes = offset_elems * element_size;
-
-                po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + offset_bytes;
-              }
-            }
-
-            if (num_main_blocks_global > 0) {
-
-              for (int b = 0, k = 0; b < num_main_blocks_global; ++b, k += KC_BLOCK) {
-                A_batch_main[b] =
-                  get_matrix_block(src_ptr, i, k, lda, transA, src_type_size);
-                B_batch_main[b] =
-                  get_matrix_block(weight_ptr, k, j, ldb, transB, src_type_size);
-              }
-
-              run_libxsmm_brgemm(
-                trans_input, trans_weight,
-                m_tile, n_tile, KC_BLOCK,
-                num_main_blocks_global,
-                beta,
-                lda, ldb, ldc,
-                A_batch_main.data(),
-                B_batch_main.data(),
-                C_tile,
-                params.dtypes,
-                tile_params,
-                tile_bias,
-                (K_tail == 0)
-              );
-            }
-            const float tail_beta =
-              (K_main > 0) ? 1.0f : beta;
-
-            if (K_tail > 0) {
-
-              A_batch_tail[0] =
-                get_matrix_block(src_ptr, i, K_main, lda, transA, src_type_size);
-              B_batch_tail[0] =
-                get_matrix_block(weight_ptr, K_main, j, ldb, transB, src_type_size);
-
-              run_libxsmm_brgemm(
-                trans_input, trans_weight,
-                m_tile, n_tile, K_tail,
-                1,
-                tail_beta,
-                lda, ldb, ldc,
-                A_batch_tail,
-                B_batch_tail,
-                C_tile,
-                params.dtypes,
-                tile_params,
-                (K_main == 0 ? tile_bias : nullptr),
-                true         // apply post-ops
-              );
-            }
+            size_t offset = compute_postop_offset(
+                              m_start, n_start, po.leading_dim, po.dtype
+                            );
+            po.buff = apply_offset(const_cast<void *>(po.buff), offset);
           }
         }
-      }
-    }
-    else {
-      apilog_info("LibXSMM BRGEMM is not supported for this combination, falling back to DLP");
-      matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                            M, N, K, alpha,
-                            src, lda,
-                            weight,
-                            ldb, beta, dst, ldc,
-                            params.dtypes, matmul_algo_t::aocl_dlp,
-                            params.mem_format_a, params.mem_format_b,
-                            params, batch_params, bias, is_weights_const);
-    }
-#else
-    if ((can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha,
-                         beta, params.dtypes, params, kernel))) {
-      auto [tileM, tileN] = selectTileBF16(M, N, K, num_threads);
-      int M_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_M_TILE", tileM);
-      int N_BLOCK = get_tile_size_from_env("ZENDNN_MATMUL_N_TILE", tileN);
-      const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
-      const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
-      uint8_t *dst_ptr = static_cast<uint8_t *>(dst);
-      matmul_algo_t tile_kernel = matmul_algo_t::libxsmm;
 
-      #pragma omp parallel for collapse(2) num_threads(num_threads)
-      for (int i = 0; i < M; i += M_BLOCK) {
-        for (int j = 0; j < N; j += N_BLOCK) {
-          int m_tile = std::min(M_BLOCK, M - i);
-          int n_tile = std::min(N_BLOCK, N - j);
-
-          const void *A_tile = get_matrix_block(src_ptr, i, 0, lda, transA,
-                                                src_type_size);
-          const void *B_tile = get_matrix_block(weight_ptr, 0, j, ldb, transB,
-                                                src_type_size);
-          void *C_tile = get_output_block(dst_ptr, i, j, ldc, out_type_size);
-
-          float tile_alpha = alpha;
-          float tile_beta = beta;
-
-          matmul_params tile_params = params;
-          for (auto &po : tile_params.postop_) {
-            if ((po.po_type == post_op_type_t::binary_add ||
-                 po.po_type == post_op_type_t::binary_mul) &&
-                po.buff != nullptr) {
-
-              size_t element_size = size_of(po.dtype);
-              size_t offset_elems = static_cast<size_t>(i) * static_cast<size_t>
-                                    (po.leading_dim) + static_cast<size_t>(j);
-
-              size_t offset_bytes = offset_elems * element_size;
-
-              po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + offset_bytes;
-            }
-          }
-          const void *tile_bias = nullptr;
-          if (bias != nullptr) {
-            size_t bias_element_size = size_of(params.dtypes.bias);
-            size_t bias_offset_bytes = static_cast<size_t>(j) * bias_element_size;
-            tile_bias = static_cast<const uint8_t *>(bias) + bias_offset_bytes;
-          }
-          matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                                m_tile, n_tile, K, tile_alpha,
-                                A_tile, lda,
-                                B_tile,
-                                ldb, tile_beta, C_tile, ldc,
-                                tile_params.dtypes, tile_kernel,
-                                tile_params.mem_format_a, tile_params.mem_format_b,
-                                tile_params, batch_params, tile_bias, is_weights_const);
+        // Process main K blocks
+        if (num_main_blocks > 0) {
+          run_libxsmm_brgemm(
+            trans_input, trans_weight,
+            m_len, n_len, KC_BLOCK,
+            num_main_blocks,
+            beta,
+            lda, ldb, ldc,
+            A_batch_main,
+            B_batch_main,
+            C_tile,
+            params.dtypes,
+            tile_params,
+            tile_bias,
+            (K_tail == 0)  // apply_postops if no tail
+          );
         }
-      }
-    }
-    else {
-      matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                            M, N, K, alpha,
-                            src, lda,
-                            weight,
-                            ldb, beta, dst, ldc,
-                            params.dtypes,  matmul_algo_t::aocl_dlp,
-                            params.mem_format_a, params.mem_format_b,
-                            params, batch_params, bias, is_weights_const);
-    }
+
+        // Process tail K block
+        if (K_tail > 0) {
+          const void *A_tail_array[1] = {A_batch_tail};
+          const void *B_tail_array[1] = {B_batch_tail};
+
+          float tail_beta = (num_main_blocks > 0) ? 1.0f : beta;
+
+          run_libxsmm_brgemm(
+            trans_input, trans_weight,
+            m_len, n_len, K_tail,
+            1,  // single tail block
+            tail_beta,
+            lda, ldb, ldc,
+            A_tail_array,
+            B_tail_array,
+            C_tile,
+            params.dtypes,
+            tile_params,
+            (num_main_blocks == 0 ? tile_bias : nullptr),
+            true  // apply_postops
+          );
+        }
 #endif
-    return;
+      };
+
+      auto tile_invoker = [&](
+                            int m_start, int m_len,
+                            int n_start, int n_len,
+                            const void *A_tile,
+                            const void *B_tile,
+                            void *C_tile,
+                            const void *tile_bias
+      ) {
+        // Adjust post-op buffers for this tile
+        matmul_params tile_params = params;
+        for (auto &po : tile_params.postop_) {
+          if ((po.po_type == post_op_type_t::binary_add ||
+               po.po_type == post_op_type_t::binary_mul) &&
+              po.buff != nullptr) {
+
+            size_t offset = compute_postop_offset(
+                              m_start, n_start, po.leading_dim, po.dtype
+                            );
+            po.buff = apply_offset(const_cast<void *>(po.buff), offset);
+          }
+        }
+
+        // Call standard kernel wrapper
+        matmul_kernel_wrapper(
+          layout, trans_input, trans_weight,
+          m_len, n_len, K, alpha,
+          A_tile, lda,
+          B_tile, ldb,
+          beta, C_tile, ldc,
+          tile_params.dtypes, matmul_algo_t::libxsmm,
+          tile_params.mem_format_a, tile_params.mem_format_b,
+          tile_params, batch_params, tile_bias, is_weights_const
+        );
+      };
+
+      execute_partitioned_matmul(
+        src, weight, dst, bias,
+        part_config, params,
+        brgemm_invoker,
+        tile_invoker
+      );
+
+      return;
+    }
+    else {
+      // Fallback to DLP if libxsmm can't be used
+      kernel = matmul_algo_t::aocl_dlp;
+      apilog_info("Executing matmul LOWOHA kernel with DLP fallback, algo: ",
+                  static_cast<int>(kernel));
+
+      matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                            M, N, K, alpha,
+                            src, lda, weight, ldb,
+                            beta, dst, ldc,
+                            params.dtypes, kernel,
+                            params.mem_format_a, params.mem_format_b,
+                            params, batch_params,
+                            bias, is_weights_const, true);
+      return;
+    }
   }
 
-  // Standard single matmul execution
+  // Standard single matmul execution (no partitioning)
   if (kernel == matmul_algo_t::libxsmm &&
       !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
                         params.dtypes, params, kernel))) {

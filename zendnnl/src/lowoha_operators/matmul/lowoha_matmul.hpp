@@ -108,7 +108,8 @@ void matmul_execute(const char layout, const bool transA, const bool transB,
                     const void *bias, const float beta, void *dst, const int ldc,
                     const bool is_weights_const, const size_t src_type_size,
                     const size_t out_type_size, const int num_threads, matmul_algo_t kernel,
-                    matmul_params &params, matmul_batch_params_t &batch_params, unsigned int auto_version);
+                    matmul_params &params, matmul_batch_params_t &batch_params,
+                    unsigned int auto_version);
 
 /**
  * @brief Execute matrix multiplication with automatic kernel selection and optimization
