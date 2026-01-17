@@ -545,12 +545,6 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
-
-  // AOCL blocked kernel is not supported for batched matmul
-  if ((Batch_A > 1 || Batch_B > 1) &&
-      kernel == matmul_algo_t::aocl_dlp_blocked) {
-    kernel = matmul_algo_t::aocl_dlp;
-  }
   // TODO: Update the conditon once prepack supports other formats
   // Current prepack supports only AOCL blocked kernel
   if (params.mem_format_b == 'r') {
@@ -559,7 +553,7 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
 
   // TODO: Remove this once AOCL DLP has fix for parallel matmul
   // Currently diverting the call to LibXSMM for Batch MatMul.
-  if ((Batch_A > 1 || Batch_B > 1) && kernel == matmul_algo_t::aocl_dlp) {
+  if ((Batch_A > 1 || Batch_B > 1) && (kernel == matmul_algo_t::aocl_dlp || kernel == matmul_algo_t::aocl_dlp_blocked)) {
     kernel = matmul_algo_t::libxsmm;
   }
 

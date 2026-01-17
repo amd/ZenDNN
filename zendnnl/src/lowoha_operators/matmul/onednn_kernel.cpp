@@ -330,8 +330,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     matmul_attr.set_post_ops(matmul_pops);
   }
 
-  bool is_blocked = dnnl_params.weights.dims.size() == 2 &&
-                    dnnl_params.algo == matmul_algo_t::onednn_blocked &&
+  bool is_blocked = dnnl_params.algo == matmul_algo_t::onednn_blocked &&
                     is_weights_const;
   if (is_blocked) {
     // TODO: Update Key with thread information and use hash for input matrix.

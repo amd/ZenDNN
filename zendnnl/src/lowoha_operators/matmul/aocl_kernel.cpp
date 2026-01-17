@@ -1378,14 +1378,13 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 }
 
 void run_dlp(char layout, char transA, char transB, int M, int N,
-             int K,
-             float alpha, float beta, int lda, int ldb, int ldc,
-             char mem_format_a, char mem_format_b, const void *A,
-             const void *B, void *C, const matmul_data_types &dtypes,
-             const matmul_params &lowoha_param, const void *bias,
-             zendnnl::ops::matmul_algo_t kernel,
-             bool is_weights_const, bool can_reorder) {
-
+              int K,
+              float alpha, float beta, int lda, int ldb, int ldc,
+              char mem_format_a, char mem_format_b, const void *A,
+              const void *B, void *C, const matmul_data_types &dtypes,
+              const matmul_params &lowoha_param, const void *bias,
+              zendnnl::ops::matmul_algo_t kernel,
+              bool is_weights_const) {
 
   bool is_weight_blocked = false;
   void *reordered_mem = nullptr;
@@ -1399,7 +1398,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked &&
-      can_reorder && is_weights_const) {
+      is_weights_const) {
     //call reorder and cache function
     bool blocked_flag = false;
     if (lowoha_param.dtypes.wei == data_type_t::f32) {
@@ -1626,7 +1625,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   bool weight_cache_disabled = (weight_cache_type == 0 &&
                                 reordered_mem != nullptr &&
                                 lowoha_param.mem_format_b != 'r'
-                                && kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked && can_reorder);
+                                && kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked);
   if (weight_cache_disabled || simulated_woq_free_buff)  {
     free(reordered_mem);
     reordered_mem = nullptr;

@@ -40,7 +40,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            zendnnl::ops::matmul_algo_t kernel,
                            char mem_format_a, char mem_format_b,
                            matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
-                           const void *bias, bool is_weights_const, bool can_reorder) {
+                           const void *bias, bool is_weights_const) {
 #if ZENDNNL_DEPENDS_LIBXSMM
   if (kernel == matmul_algo_t::libxsmm) {
     log_info("Using libxsmm kernel");
@@ -62,7 +62,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
   log_info("Using AOCL DLP kernel");
   run_dlp(layout, transA, transB, M, N, K, alpha, beta,
           lda, ldb, ldc, mem_format_a, mem_format_b,
-          A, B, C, dtypes, lowoha_param,bias, kernel, is_weights_const, can_reorder);
+          A, B, C, dtypes, lowoha_param, bias, kernel, is_weights_const);
   return;
 
   //   TODO: To implement native AVX512 BF16 kernel
@@ -225,7 +225,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                             ldb, beta, dst_ptr, ldc,
                             params.dtypes, kernel,
                             params.mem_format_a, params.mem_format_b, params, batch_params,
-                            bias, is_weights_const, false);
+                            bias, is_weights_const);
     }
   }
 }
@@ -431,7 +431,7 @@ void matmul_execute(const char layout,
                             params.dtypes, kernel,
                             params.mem_format_a, params.mem_format_b,
                             params, batch_params,
-                            bias, is_weights_const, true);
+                            bias, is_weights_const);
       return;
     }
   }
@@ -451,7 +451,7 @@ void matmul_execute(const char layout,
                         ldb, beta, dst, ldc,
                         params.dtypes, kernel,
                         params.mem_format_a, params.mem_format_b, params,
-                        batch_params, bias, is_weights_const, true);
+                        batch_params, bias, is_weights_const);
 }
 
 status_t matmul_direct(const char layout, const bool transA, const bool transB,
@@ -465,7 +465,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   if (is_profile) {
     profiler.tbp_start();
   }
-
   if (validate_matmul_direct_inputs(src, weight, dst, M, N, K,
                                     batch_params.Batch_A, batch_params.Batch_B,
                                     params, is_weights_const) != status_t::success) {
@@ -482,7 +481,6 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
                                        batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const);
-
   static unsigned int auto_version = get_auto_tuner_ver();
 
   [[maybe_unused]] std::ostringstream ss;
