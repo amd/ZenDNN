@@ -145,32 +145,6 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
                        quant_granularity_t::channel;
 }
 
-MatmulType::MatmulType(const MatmulType &in) {
-  matmul_m = in.matmul_m;
-  matmul_k = in.matmul_k;
-  matmul_n = in.matmul_n;
-  po_type = in.po_type;
-  transA = in.transA;
-  transB = in.transB;
-  alpha = in.alpha;
-  beta = in.beta;
-  algo = in.algo;
-  if (algo == matmul_algo_t::libxsmm || algo == matmul_algo_t::libxsmm_blocked)
-  {
-    use_LOWOHA = true;
-  }
-  else if (!cmd_lowoha.empty()) {
-    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
-  }
-  else {
-    use_LOWOHA = rand() % 2;
-  }
-  source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
-  output_dtype = dtype_arr[rand() % dtype_size];
-  weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
-                       quant_granularity_t::channel;
-}
-
 // EmbagType constructor
 EmbagType::EmbagType() {
   static std::random_device rd;
@@ -211,11 +185,6 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   mat = MatmulType(test_index, total_tests);
 }
 
-BatchMatmulType::BatchMatmulType(const BatchMatmulType &in) {
-  batch_size = in.batch_size;
-  mat = MatmulType(in.mat);
-}
-
 ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
   inplace_reorder = rand() % 2;
   mat = MatmulType(test_index, total_tests);
@@ -224,11 +193,6 @@ ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 bool is_binary_postop(post_op_type_t post_op) {
   return post_op == post_op_type_t::binary_add ||
          post_op == post_op_type_t::binary_mul;
-}
-
-ReorderType::ReorderType(const ReorderType &in) {
-  inplace_reorder = in.inplace_reorder;
-  mat = MatmulType(in.mat);
 }
 
 tensor_t tensor_factory_t::zero_tensor(const std::vector<index_type> size_,
@@ -1137,6 +1101,21 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
         cfg.mat.alpha = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
         id++;
         cfg.mat.beta = fields[id].empty() ? dist(gen) : std::stof(fields[id]);
+
+        if (cfg.mat.algo == matmul_algo_t::libxsmm ||
+            cfg.mat.algo == matmul_algo_t::libxsmm_blocked) {
+          cfg.mat.use_LOWOHA = true;
+        }
+        else if (!cmd_lowoha.empty()) {
+          cfg.mat.use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+        }
+        else {
+          cfg.mat.use_LOWOHA = rand() % 2;
+        }
+        cfg.mat.source_dtype = rand() % 2 == 0 ? data_type_t::s8 : data_type_t::u8;
+        cfg.mat.output_dtype = dtype_arr[rand() % dtype_size];
+        cfg.mat.weight_granularity = rand() % 2 == 0 ? quant_granularity_t::tensor :
+                                     quant_granularity_t::channel;
 
         inputs.push_back(cfg);
       }

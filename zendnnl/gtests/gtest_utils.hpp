@@ -68,7 +68,6 @@ struct MatmulType {
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
-  MatmulType(const MatmulType &in);
 };
 
 /** @brief BatchMatmul Op Parameters Structure */
@@ -76,14 +75,12 @@ struct BatchMatmulType {
   uint64_t batch_size;
   MatmulType mat{};
   BatchMatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
-  BatchMatmulType(const BatchMatmulType &in);
 };
 
 struct ReorderType {
   bool inplace_reorder;
   MatmulType mat{};
   ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
-  ReorderType(const ReorderType &in);
 };
 
 /** @brief Embag Op Parameters Structure */
