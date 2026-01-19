@@ -1483,11 +1483,13 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                       transA == 't', transB == 't',
                       lda, ldb,
                       dtypes.src,
+                      is_weights_const,
                       zp_comp_ndim);
 
       if (zp_comp_acc) {
+        bool is_cacheable = (wei_zp == 0 && is_weights_const && matmul_config.get_zp_comp_cache());
         log_info("INT8 ZP compensation: src_zp=", src_zp, ", wei_zp=", wei_zp,
-                 ", ndim=", zp_comp_ndim, ", cached=", (wei_zp == 0 ? "yes" : "no"));
+                 ", ndim=", zp_comp_ndim, ", cached=", (is_cacheable ? "yes" : "no"));
       }
     }
   }

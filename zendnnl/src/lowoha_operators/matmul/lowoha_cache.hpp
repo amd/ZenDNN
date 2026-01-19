@@ -46,6 +46,7 @@ namespace matmul {
  * @param lda Leading dimension of source
  * @param ldb Leading dimension of weights
  * @param src_dtype Source data type (u8 or s8)
+ * @param is_weights_const Whether weights are constant across inferences
  * @param zp_comp_ndim [out] Dimensionality of compensation (0=none, 1=1D, 2=2D)
  * @return Pointer to compensation buffer (owned by cache or caller based on config)
  */
@@ -57,6 +58,7 @@ inline int32_t* cache_or_compute_zp_compensation(
     bool transA, bool transB,
     int lda, int ldb,
     data_type_t src_dtype,
+    bool is_weights_const,
     int& zp_comp_ndim) {
   
   // No compensation needed if both zero-points are zero
@@ -67,7 +69,7 @@ inline int32_t* cache_or_compute_zp_compensation(
   
   // Only cache 1D compensation (src_zp only case) since it depends only on weights
   // 2D compensation depends on source data which changes per inference
-  const bool can_cache = (wei_zp == 0 && src_zp != 0) && 
+  const bool can_cache = (wei_zp == 0 && src_zp != 0) && is_weights_const &&
                          ops::matmul_config_t::instance().get_zp_comp_cache();
   
   // Static LRU cache for 1D zero-point compensation

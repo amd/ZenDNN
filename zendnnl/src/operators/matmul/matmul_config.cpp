@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ void matmul_config_t::set_default_config() {
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
   set_weight_cache(0);
-  set_zp_comp_cache(false);  // Disable ZP compensation caching by default
+  set_zp_comp_cache(true);  // Disable ZP compensation caching by default
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {
@@ -36,7 +36,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 0;
-  bool zp_comp_cache_enabled = false;  // Default disabled
+  bool zp_comp_cache_enabled = true;  // Default enabled
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
@@ -139,7 +139,7 @@ void matmul_config_t::set_env_config() {
 
   // Read ZP compensation cache setting from environment
   char *zp_comp_cache_env = std::getenv("ZENDNNL_ZP_COMP_CACHE");
-  bool zp_comp_cache_enabled = false;  // Default disabled
+  bool zp_comp_cache_enabled = true;  // Default enabled
   if (zp_comp_cache_env) {
     zp_comp_cache_enabled = (std::stoi(zp_comp_cache_env) != 0);
   }
