@@ -25,6 +25,7 @@ ZenDNN depends on the following third party libraries (TPL), referred in ths doc
 | onednn | In an unlikely situation of onednn kernels doing better than ZenDNN | Optional |
 | libxsmm         | Optimized small matrix multiplication library | Optional |
 | parlooper       | Parallel loop abstraction library             | Optional |
+| fbgemm          | A low-precision, high-performance matrix multiplication and embedding bag library | Optional |
 
 ### 1.2 Components
 
@@ -94,6 +95,7 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_ONEDNN_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for ONEDNN dependency | PATH | NO DEFAULT |
 | ZENDNNL_LIBXSMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for LIBXSMM dependency | PATH | NO DEFAULT |
 | ZENDNNL_PARLOOPER_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for PARLOOPER dependency | PATH | NO DEFAULT |
+| ZENDNNL_FBGEMM_FWK_DIR | Its usage is same as that of ZENDNNL_AMDBLIS_FWK_DIR except it is for FBGEMM dependency | PATH | NO DEFAULT |
 
 ### 3.4 Dependencies Options
 
@@ -103,11 +105,13 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_DEPENDS_ONEDNN | ONEDNN is a backend of ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
+| ZENDNNL_DEPENDS_FBGEMM | FBGEMM is a backend for embedding_bag in ZenDNN | BOOL | ON |
 | ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publically available, or a varsion still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
 | ZENDNNL_LOCAL_LIBXSMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for LIBXSMM | BOOL | OFF |
 | ZENDNNL_LOCAL_PARLOOPER | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for PARLOOPER | BOOL | OFF |
+| ZENDNNL_LOCAL_FBGEMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for FBGEMM | BOOL | OFF |
 
 ## 4. The Build Process
 
@@ -205,6 +209,7 @@ ZenDNN build can be integrated to the framework build using these files as follo
   | ZENDNNL_ONEDNN_FWK_DIR | Install path of onednn if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_LIBXSMM_FWK_DIR | Install path of libxsmm if framework is building it and wants to inject it to ZenDNN build. |
   | ZENDNNL_PARLOOPER_FWK_DIR | Install path of parlooper if framework is building it and wants to inject it to ZenDNN build. |
+  | ZENDNNL_FBGEMM_FWK_DIR | Install path of fbgemm if framework is building it and wants to inject it to ZenDNN build. |
 
 - Make *fwk_zendnnl* target dependent on injected dependencies by editing its "add_dependencies(fwk_zendnnl...)" command.
 - Include the edited ZenDnnlFwkIntegrate.cmake in the framework build flow, where ZenDNN is to be built.

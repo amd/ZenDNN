@@ -75,6 +75,7 @@ Apart from this ZenDNN uses BLAS backends for matrix computations. It depends on
 ZenDNN can also use the following other optional backends
  - OneDNN (https://github.com/uxlfoundation/oneDNN)
  - LibXSMM (https://github.com/libxsmm/libxsmm)
+ - FBGEMM (https://github.com/pytorch/FBGEMM)
 
 ZenDNN downloads and builds these dependencies as a part of its build process. These dependencies are also forwarded to any downstream package using ZenDNN in its build. Thus a downstream package does not need to figure out ZenDNN dependencies and build them.
 

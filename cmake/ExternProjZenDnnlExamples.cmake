@@ -1,5 +1,5 @@
 #  *******************************************************************************
-#  * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+#  * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 #  *
 #  * Licensed under the Apache License, Version 2.0 (the "License");
 #  * you may not use this file except in compliance with the License.
@@ -41,6 +41,7 @@ if(ZENDNNL_BUILD_EXAMPLES)
   list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_DEPENDS_PARLOOPER=${ZENDNNL_DEPENDS_PARLOOPER}")
   list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_DEPENDS_AOCLDLP=${ZENDNNL_DEPENDS_AOCLDLP}")
   list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_DEPENDS_AMDBLIS=${ZENDNNL_DEPENDS_AMDBLIS}")
+  list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_DEPENDS_FBGEMM=${ZENDNNL_DEPENDS_FBGEMM}")
 
   # other options
   list(APPEND ZLE_CMAKE_ARGS "-DZENDNNL_CODE_COVERAGE=${ZENDNNL_CODE_COVERAGE}")

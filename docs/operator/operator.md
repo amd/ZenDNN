@@ -55,9 +55,9 @@ The **Profiler** is an integral component that monitors kernel performance durin
 The foundation of the kernel factory are **low-level computational libraries** that provide highly optimized routines for matrix operations and other primitives.
 
 - **AOCL (AMD Optimized CPU Libraries)**: Offers high-performance math routines for AMD CPUs.
-- **FBGEMM (Facebook GEMM)**: Specializes in quantized matrix multiplication, widely used in inference workloads. **Coming Soon**
-- **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications. **Coming Soon**
-- **LibXSMM**: Optimized for small matrix multiplications, often used in deep learning and HPC applications. **Coming Soon**
+- **FBGEMM**: A low-precision, high-performance matrix multiplication and embedding bag library.
+- **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications.
+- **LibXSMM**: Optimized for small matrix multiplications, often used in deep learning and HPC applications. 
 
 These libraries are abstracted by the kernel factory, allowing ZenDNN* to remain hardware-agnostic while still benefiting from platform-specific optimizations.
 
@@ -89,9 +89,9 @@ This is the **central orchestration unit** responsible for managing kernel selec
 - **Native Kernels**: These are handcrafted, performance-tuned kernels developed specifically for ZenDNN*. They are optimized for various CPU architectures and support advanced features like fused operations and quantization-aware execution.
 - **Third-Party Libraries**: When native kernels are unavailable or suboptimal for a given configuration, ZenDNN* can delegate execution to trusted external libraries, including:
   - **AOCL** – AMD Optimized CPU Libraries for high-performance math routines.
-  - **FBGEMM** – Facebook’s library for quantized matrix operations, ideal for inference. **Coming Soon:**
-  - **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications. **Coming Soon:**
-  - **LibXSMM** – Specialized in small matrix multiplications, often used in HPC and ML workloads. **Coming Soon:**
+  - **FBGEMM** – A low-precision, high-performance matrix multiplication and embedding bag library.
+  - **OneDNN** – oneAPI Deep Neural Network Library provides highly optimized building blocks for deep learning applications.
+  - **LibXSMM** – Specialized in small matrix multiplications, often used in HPC and ML workloads.
   
 
 #### 2. Tensor Conversion Layer

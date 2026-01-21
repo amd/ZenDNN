@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -146,6 +146,13 @@ zendnnl_add_option(NAME ZENDNNL_DEPENDS_PARLOOPER
   CACHE_STRING "zendnnl parlooper dependency"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+# set if zendnnl depends on fbgemm, default is OFF.
+zendnnl_add_option(NAME ZENDNNL_DEPENDS_FBGEMM
+  VALUE OFF
+  TYPE BOOL
+  CACHE_STRING "zendnnl fbgemm dependency"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
+
 # set path of amdblis if amdblis is injected. if the framework
 # does not inject it, set it to "" (empty string).
 zendnnl_add_option(NAME ZENDNNL_AMDBLIS_FWK_DIR
@@ -186,6 +193,13 @@ zendnnl_add_option(NAME ZENDNNL_PARLOOPER_FWK_DIR
   CACHE_STRING "zendnnl parlooper framework path"
   COMMAND_LIST ZNL_CMAKE_ARGS)
 
+# set path of fbgemm if fbgemm is injected. if the framework
+# does not inject it, set it to "" (empty string).
+zendnnl_add_option(NAME ZENDNNL_FBGEMM_FWK_DIR
+  VALUE <fbgemm install path>
+  TYPE PATH
+  CACHE_STRING "zendnnl fbgemm framework path"
+  COMMAND_LIST ZNL_CMAKE_ARGS)
 
 # try to find pre-built package
 set(zendnnl_ROOT "${ZENDNNL_INSTALL_PREFIX}/zendnnl")
@@ -330,6 +344,16 @@ else()
       target_link_libraries(zendnnl_library INTERFACE parlooper::parlooper_archive)
   endif()
 
+  # fbgemm dependency
+  if (ZENDNNL_DEPENDS_FBGEMM)
+      zendnnl_add_dependency(NAME fbgemm
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/fbgemm"
+        ARCHIVE_FILE "libfbgemm.a"
+        ALIAS "fbgemm::fbgemm_archive")
+
+      target_link_libraries(zendnnl_library INTERFACE fbgemm::fbgemm_archive)
+  endif()
+
   message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
   message(STATUS "(ZENDNNL) ZNL_CMAKE_ARGS=${ZNL_CMAKE_ARGS}")
 
@@ -380,6 +404,10 @@ else()
 
   if(ZENDNNL_DEPENDS_PARLOOPER)
     add_dependencies(zendnnl_parlooper_deps fwk_zendnnl)
+  endif()
+
+  if(ZENDNNL_DEPENDS_FBGEMM)
+    add_dependencies(zendnnl_fbgemm_deps fwk_zendnnl)
   endif()
 
 endif()

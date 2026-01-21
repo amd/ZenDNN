@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -126,6 +126,19 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_PARLOOPER=0)
   endif()
 
+  if(ZENDNNL_DEPENDS_FBGEMM)
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
+    if(ZENDNNL_FBGEMM_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PRIVATE "$<COMPILE_ONLY:fbgemm::fbgemm_archive>")
+    else()
+      target_link_libraries(zendnnl_archive
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_FBGEMM=0)
+  endif()
+
 endif()
 
 # build shared lib
@@ -232,6 +245,19 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_PARLOOPER=0)
   endif()
 
+  if(ZENDNNL_DEPENDS_FBGEMM)
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=1)
+    if(ZENDNNL_FBGEMM_INJECTED)
+      target_link_libraries(zendnnl
+        PUBLIC fbgemm::fbgemm_archive)
+    else()
+      target_link_libraries(zendnnl
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,fbgemm::fbgemm_archive>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_FBGEMM=0)
+  endif()
+
 endif()
 
 # create top level include file
@@ -265,6 +291,12 @@ if(ZENDNNL_DEPENDS_PARLOOPER)
   deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_PARLOOPER" "1")
 else()
   deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_PARLOOPER" "0")
+endif()
+
+if(ZENDNNL_DEPENDS_FBGEMM)
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_FBGEMM" "1")
+else()
+  deps_flag_header_file(${zendnnl_inc_file} "ZENDNNL_DEPENDS_FBGEMM" "0")
 endif()
 
 add_subdirectory(common)
@@ -324,6 +356,8 @@ install(FILES "${CMAKE_MODULE_PATH}/FindAOCLDLP.cmake"
 install(FILES "${CMAKE_MODULE_PATH}/FindLIBXSMM.cmake"
   DESTINATION zendnnl/lib/cmake)
 install(FILES "${CMAKE_MODULE_PATH}/FindPARLOOPER.cmake"
+  DESTINATION zendnnl/lib/cmake)
+install(FILES "${CMAKE_MODULE_PATH}/FindFBGEMM.cmake"
   DESTINATION zendnnl/lib/cmake)
 
 install(EXPORT zendnnl_targets

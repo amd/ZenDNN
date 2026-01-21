@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ if(ZENDNNL_BUILD_DEPS)
   include(ExternProjONEDNN)
   include(ExternProjLIBXSMM)
   include(ExternProjPARLOOPER)
+  include(ExternProjFBGEMM)
   include(ExternProjGTEST)
 else()
   message(STATUS

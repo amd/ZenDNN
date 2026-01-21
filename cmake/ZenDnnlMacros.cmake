@@ -115,6 +115,13 @@ macro(find_build_dependencies  _install_prefix)
     find_package(PARLOOPER REQUIRED GLOBAL)
   endif()
 
+  # find fbgemm
+  if(ZENDNNL_DEPENDS_FBGEMM)
+    message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presencce...")
+    set(FBGEMM_INSTALL_DIR "${_install_prefix}/deps/fbgemm")
+    find_package(FBGEMM REQUIRED GLOBAL)
+  endif()
+
 endmacro()
 
 # dependencies
@@ -219,6 +226,16 @@ macro(find_install_dependencies  _install_prefix)
     endif()
   endif()
 
+  if(ZENDNNL_DEPENDS_FBGEMM)
+    if(NOT ZENDNNL_FBGEMM_INJECTED)
+      message(STATUS "${ZENDNNL_MSG_PREFIX}Checking FBGEMM presencce...")
+      set(FBGEMM_INSTALL_DIR "${_install_prefix}/deps/fbgemm")
+      find_package(FBGEMM REQUIRED GLOBAL)
+    else()
+      message(STATUS "${ZENDNNL_MSG_PREFIX}FBGEMM seems injected, will not check its presence...")
+    endif()
+  endif()
+  
 endmacro()
 
 # dependency injection

@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ set(ZENDNNL_AOCLDLP_INJECTED OFF CACHE BOOL "amdblis injected")
 set(ZENDNNL_ONEDNN_INJECTED  OFF CACHE BOOL "onednn injected")
 set(ZENDNNL_LIBXSMM_INJECTED  OFF CACHE BOOL "libxsmm injected")
 set(ZENDNNL_PARLOOPER_INJECTED  OFF CACHE BOOL "parlooper injected")
+set(ZENDNNL_FBGEMM_INJECTED  OFF CACHE BOOL "fbgemm injected")
 
 # cmake variables
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "verbose makefile")

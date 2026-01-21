@@ -177,7 +177,7 @@ Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact
 ## 4. Low-Level Libraries
 ZenDNN* leverages several low-level libraries to provide foundational building blocks for performance-critical operations:
 - **AOCL (AMD Optimized CPU Libraries)**: Optimized BLAS, FFT, and RNG for AMD CPUs.
-- **FBGEMM**: Efficient low-precision (INT8, BF16) matrix multiplication.
+- **FBGEMM**: A low-precision, high-performance matrix multiplication and embedding bag library.
 - **OneDNN**: Intel’s deep learning primitives for x86 CPUs.
 - **LibXSMM**: Specialized in small matrix multiplications (Example: 64x64 or smaller).
 

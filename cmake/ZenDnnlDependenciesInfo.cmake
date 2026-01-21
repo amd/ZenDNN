@@ -83,3 +83,10 @@ set(PARLOOPER_ROOT_DIR "${ZENDNNL_DEPS_DIR}/parlooper"
 set(PARLOOPER_GIT_REPO "https://github.com/libxsmm/parlooper.git")
 set(PARLOOPER_GIT_TAG "630b6396369c2dab1fd96372c054cd1f34c35e7e")
 option(PARLOOPER_GIT_PROGRESS ON)
+
+# fbgemm repo information
+set(FBGEMM_ROOT_DIR "${ZENDNNL_DEPS_DIR}/fbgemm"
+  CACHE PATH "FBGEMM root dir")
+set(FBGEMM_GIT_REPO "https://github.com/pytorch/FBGEMM.git")
+set(FBGEMM_GIT_TAG "v1.2.0")
+option(FBGEMM_GIT_PROGRESS ON)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -59,16 +59,16 @@ function parse_args() {
                 ZENDNNL_NODEPS=1
                 shift
 		;;
-	    --enable-onednn )
-                ZENDNNL_DEPENDS_ONEDNN=1
-                shift
-		;;
             --enable-libxsmm )
                 ZENDNNL_DEPENDS_LIBXSMM=1
                 shift
 		;;
             --enable-parlooper )
                 ZENDNNL_DEPENDS_PARLOOPER=1
+                shift
+		;;
+            --enable-fbgemm )
+                ZENDNNL_DEPENDS_FBGEMM=1
                 shift
 		;;
 	    --enable-amdblis )
@@ -103,6 +103,10 @@ function parse_args() {
                 ZENDNNL_LOCAL_PARLOOPER=1
                 shift
 		;;
+            --local-fbgemm )
+                ZENDNNL_LOCAL_FBGEMM=1
+                shift
+		;;
             --nproc )
                 ZENDNNL_NPROC=$2
                 shift
@@ -121,9 +125,9 @@ function parse_args() {
                 echo " --benchdnn         : build and install benchdnn."
                 echo " --doxygen          : build and install doxygen docs."
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
-                echo " --enable-onednn    : enable onednn."
                 echo " --enable-libxsmm   : enable libxsmm."
                 echo " --enable-parlooper : enable parlooper."
+                echo " --enable-fbgemm    : enable fbgemm."
                 echo " --enable-amdblis   : enable amdblis (and disable aocldlp which is default)."
                 echo " --local-amdblis    : use local amdblis."
                 echo " --local-aocldlp    : use local aocldlp."
@@ -132,6 +136,7 @@ function parse_args() {
                 echo " --local-onednn     : use local onednn."
                 echo " --local-libxsmm    : use local libxsmm."
                 echo " --local-parlooper  : use local parlooper."
+                echo " --local-fbgemm     : use local fbgemm."
                 echo " --nproc            : number of processes for parallel build."
                 echo
                 echo " examples :"
@@ -161,9 +166,9 @@ ZENDNNL_EXAMPLES=0
 ZENDNNL_BENCHDNN=0
 ZENDNNL_DOXYGEN=0
 ZENDNNL_NODEPS=0
-ZENDNNL_DEPENDS_ONEDNN=0
 ZENDNNL_DEPENDS_LIBXSMM=0
 ZENDNNL_DEPENDS_PARLOOPER=0
+ZENDNNL_DEPENDS_FBGEMM=0
 ZENDNNL_DEPENDS_AMDBLIS=0
 ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLDLP=0
@@ -171,7 +176,8 @@ ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
 ZENDNNL_LOCAL_ONEDNN=0
 ZENDNNL_LOCAL_LIBXSMM=0
-ZENDNNL_LOCAL_PARLOOPER=0
+ZENDNNL_LOCAL_PARLOOPER=0   
+ZENDNNL_LOCAL_FBGEMM=0
 ZENDNNL_DEBUG_BUILD=0
 ZENDNNL_NPROC=1
 
@@ -236,12 +242,6 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
     fi
 
-    if [ ${ZENDNNL_DEPENDS_ONEDNN} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=ON"
-    else
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_ONEDNN=OFF"
-    fi
-
     if [ ${ZENDNNL_DEPENDS_LIBXSMM} -eq 1 ];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=ON"
     else
@@ -252,6 +252,12 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=OFF"
+    fi
+
+    if [ ${ZENDNNL_DEPENDS_FBGEMM} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=OFF"
     fi
 
     if [ ${ZENDNNL_DEPENDS_AMDBLIS} -eq 1 ];then
@@ -299,6 +305,12 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_PARLOOPER=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_PARLOOPER=OFF"
+    fi
+
+    if [ ${ZENDNNL_LOCAL_FBGEMM} -eq 1 ];then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_FBGEMM=ON"
+    else
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_FBGEMM=OFF"
     fi
 
     if [ ${ZENDNNL_ALL} -eq 1 ];then

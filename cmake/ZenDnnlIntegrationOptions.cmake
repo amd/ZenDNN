@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -40,6 +40,4 @@ enable_dependency_injection(AOCLDLP ZENDNNL_FWK_BUILD)
 enable_dependency_injection(ONEDNN  ZENDNNL_FWK_BUILD)
 enable_dependency_injection(LIBXSMM  ZENDNNL_FWK_BUILD)
 enable_dependency_injection(PARLOOPER  ZENDNNL_FWK_BUILD)
-
-
-
+enable_dependency_injection(FBGEMM ZENDNNL_FWK_BUILD)
