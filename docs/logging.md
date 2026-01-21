@@ -11,11 +11,11 @@ The logging system in ZenDNN provides a flexible mechanism to monitor and debug 
 
 Log modules represent different areas or components within ZenDNN. Each module can have its own logging configuration. Some common log modules include:
 
-- **common**: General logging for common operations.
-- **api**: Logging related to API calls and interfaces.
-- **test**: Logs for testing and validation processes.
-- **profile**: Metrics and performance-related logs.
-- **debug**: Detailed debugging information.
+- **COMMON**: General logging for common operations.
+- **API**: Logging related to API calls and interfaces.
+- **TEST**: Logs for testing and validation processes.
+- **PROFILE**: Metrics and performance-related logs.
+- **DEBUG**: Detailed debugging information.
 
 ## Log Levels
 
@@ -51,6 +51,29 @@ ZenDNN supports several environment variables to control logging behavior. These
   will all be output. Adjusting this variable helps in getting more detailed logs for debugging or reducing output during normal execution.
 
 These settings enable runtime control of logging behavior, which is essential in different environments such as development, testing, and production.
+
+### COMMON Logs
+
+ZenDNN provides common-level logs to monitor common operations and basic information. These logs are enabled by setting the `ZENDNNL_COMMON_LOG_LEVEL` environment variable.
+
+#### Enabling COMMON Logs
+To enable COMMON logs, set the log level for the `COMMON` module to verbose (4):
+```bash
+export ZENDNNL_COMMON_LOG_LEVEL=4
+```
+
+#### COMMON Log Details
+When COMMON logs are enabled, ZenDNN outputs detailed information about common operations, including:
+- Function names and parameters.
+- Execution logs.
+- Any warnings or errors encountered during common operations.
+
+**Sample COMMON Log Entry**
+```
+[COMMON ][info   ][0.207536]:m: 761 k: 1 n: 2791 TransA: 1 TransB: 1 postop: sigmoid algo: 1 num_threads: 24
+[COMMON ][info   ][0.289535]:Executing matmul_ref kernel
+[COMMON ][info   ][0.178951]:Reordering f32 weights
+```
 
 ### API Logs
 
@@ -99,7 +122,7 @@ When test logs are enabled, ZenDNN outputs detailed information about test execu
 
 ## Profile Logs
 
-ZenDNN provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` and `ZENDNNL_ENABLE_PROFILER` environment variable.
+ZenDNN provides detailed profiling logs to monitor context creation time, kernel execution time, and operator performance. These logs are enabled by setting the `ZENDNNL_PROFILE_LOG_LEVEL` and `ZENDNNL_ENABLE_PROFILER` environment variables.
 
 ### Enabling Profile Logs
 To enable profiling logs, set the log level for the `PROFILE` module to verbose (4):

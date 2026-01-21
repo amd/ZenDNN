@@ -20,7 +20,7 @@ Run the embag benchmark using the following input methods:
 Provide a file with one configuration per line. Each line should contain:
 - `num_embeddings` (Size of the dictionary of embeddings)
 - `embedding_dims` (Size of each embedding vector)
-- `num_bags` (Number of bags used in embagbag operation)
+- `num_bags` (Number of bags used in embedding bag operation)
 - `num_indices` (Number of indices across all bags)
 - `algo` (Algorithm used for embag computation (e.g., "sum", "mean", "max"))
 - `iters` (Number of iterations)
@@ -29,7 +29,7 @@ Provide a file with one configuration per line. Each line should contain:
 - `padding_index` (Index used for padding)
 - `include_last_offset` (Flag indicating whether to include the last offset in the offsets array)
 - `is_weights` (Flag indicating if weights are used for each index in the embag)
-- `scatter_stride` (Scatter Stride used when scattering embeddings in memory )
+- `scatter_stride` (Scatter Stride used when scattering embeddings in memory)
 - `warmup_iters` (optional)
 
 **Example usage:**

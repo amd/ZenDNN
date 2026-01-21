@@ -32,6 +32,8 @@ Provide a file with one configuration per line. Each line should contain:
 - `kernel` (Kernel backend)
 - `isTransA` (Transpose flag for src)
 - `isTransB` (Transpose flag for weights)
+- `alpha` (Alpha parameter for the matmul operation)
+- `beta` (Beta parameter for the matmul operation)
 - `warmup_iters` (optional)
 
 **Example usage:**
@@ -43,17 +45,17 @@ Provide a file with one configuration per line. Each line should contain:
 
 - Single-layer matmul:
   ```
-  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 30
-  128, 9216, 4096, 100, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 30
+  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 1.0, 0.0, 30
+  128, 9216, 4096, 100, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 2.0, 1.0, 30
   ```
 - Multi-layer (pipeline) matmul:
   ```
-  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 30
-  4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 30
+  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 1.0, 0.0, 30
+  4096, 768, 256:3072:512, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 1.5, 0.0, 30
   ```
 - Batched matmul (BMM):
   ```
-  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_dlp, false, false, 20
+  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_dlp, false, false, 1.0, 0.0, 20
   ```
   > **Note:** For BMM, ensure you specify `--ndims=3` on the command line and provide `bs` in the input file.
 

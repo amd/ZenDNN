@@ -11,11 +11,11 @@
 
 ## 1. Overview
 
-ZenDNN as an inference acceleration library, depends on multiple BLAS and other backends, builds multiple components including its dependencies, components like GTest, examples and benchmarking infrastructure. It can be built as a stand-alone library for development, test and benchmarking puposes, or it can be built as a part of a larger inference framework stack. It also needs to support both Debug and Release configurations. ZenDNN build system takes care of these needs.
+ZenDNN as an inference acceleration library, depends on multiple BLAS and other backends, builds multiple components including its dependencies, components like GTest, examples and benchmarking infrastructure. It can be built as a stand-alone library for development, test and benchmarking purposes, or it can be built as a part of a larger inference framework stack. It also needs to support both Debug and Release configurations. ZenDNN build system takes care of these needs.
 
 ### 1.1 Dependencies
 
-ZenDNN depends on the following third party libraries (TPL), referred in ths document as dependencies,
+ZenDNN depends on the following third party libraries (TPL), referred in this document as dependencies,
 
 | Dependency | Description | Mandatory |
 |------------|-------------|-----------|
@@ -36,23 +36,23 @@ ZenDNN builds the following components
 | zendnnl-deps | All dependencies listed above. If these are not built at least once (or provided by embedding inference framework) the library build will fail. | Mandatory |
 | zendnnl-lib-archive and zendnnl-lib-shared | Archive (static) or shared library. At least one of these two needs to be built. | Mandatory |
 | zendnnl-gtests | GTests for the library. | Optional |
-| zendnnl-examples | Examples illustrating the libray API usage. | Optional |
+| zendnnl-examples | Examples illustrating the library API usage. | Optional |
 | zendnnl-benchdnn | A benchmarking framework for ZenDNN. | Optional |
 | zendnnl-doxygen-docs | ZenDNN doxygen documentation. | Optional |
 
 ### 1.3 Build Modes
 
-In order to assist development and also integration with an inference  framework ZenDNN build supports the following modes
+In order to assist development and also integration with an inference framework ZenDNN build supports the following modes
 
 #### 1.3.1. Standalone Build
 
-Standalone build is primarily used for library developnemt, and independent test and benchmarking purposes. In this build, the  build system discovers all its dependencies before building the library. The dependencies are discovered as follows
+Standalone build is primarily used for library development, and independent test and benchmarking purposes. In this build, the  build system discovers all its dependencies before building the library. The dependencies are discovered as follows
   - As a part of the build, they are downloaded and built before the library, or
   - The developer provides a local build of a dependency. This feature is useful if a developer need to experiment with unreleased/beta version of the dependency.
 
 #### 1.3.2 Framework Integration Build
 
-Framework integration build assumes that ZenDNN is part of an embedding inference framework (for example PyTorch or TensorFlow). In this kind of build, ZenDNN assumes that the framework may also be buliding few of its dependencies, and can provide these dependencies binary and include files to ZenDNN, and ZenDNN need not build them.
+Framework integration build assumes that ZenDNN is part of an embedding inference framework (for example PyTorch or TensorFlow). In this kind of build, ZenDNN assumes that the framework may also be building few of its dependencies, and can provide these dependencies binary and include files to ZenDNN, and ZenDNN need not build them.
 
 ## 2. Required Toolchains
 
@@ -79,8 +79,8 @@ In order to configure the build according to dependencies, components, and stand
 |--------|-------------|------|---------|
 | ZENDNNL_BUILD_DEPS | Download and build the dependencies. This is generally used during development to avoid repeated download and build the dependencies. If dependencies are not built at least once before this option is turned off, the build will fail.| BOOL |ON |
 | ZENDNNL_BUILD_EXAMPLES | Build zendnnl examples. These examples illustrate API and library usage in different contexts. | BOOL | ON |
-| ZENDNNL_BUILD_GTESTS | Build zendnnl gtests. This is a comprehensive test suit to test all operators and features functionality of the library. | BOOL | ON |
-| ZENDNNL_BUILD_DOXYGEN | Build doxygen documantation. | BOOL |OFF |
+| ZENDNNL_BUILD_GTESTS | Build zendnnl gtests. This is a comprehensive test suite to test all operators and features functionality of the library. | BOOL | ON |
+| ZENDNNL_BUILD_DOXYGEN | Build doxygen documentation. | BOOL |OFF |
 | ZENDNNL_BUILD_BENCHDNN | Build benchdnn benchmarking tool. This tool is used to benchmark individual operators for different workloads. | BOOL |ON |
 | ZENDNNL_LIB_BUILD_ARCHIVE | Build zendnnl archive (static) library | BOOL |ON |
 | ZENDNNL_LIB_BUILD_SHARED | Build zendnnl shared library. Build should be configure to build at least one of the archive or shared library.| BOOL |OFF |
@@ -106,7 +106,7 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_DEPENDS_LIBXSMM | LIBXSMM is a backend for optimized small matrix multiplication in ZenDNN | BOOL | ON |
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
 | ZENDNNL_DEPENDS_FBGEMM | FBGEMM is a backend for embedding_bag in ZenDNN | BOOL | ON |
-| ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publically available, or a varsion still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
+| ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publicly available, or a version still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
 | ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
 | ZENDNNL_LOCAL_LIBXSMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for LIBXSMM | BOOL | OFF |
@@ -130,7 +130,7 @@ ZenDNN follows CMake super-build structure, where all the dependencies, the libr
 - For each dependency (eg. amd-blis), the build adds a compiler option ZENDNNL_DEPENDS_[DEPENDENCY] (eg. ZENDNNL_DEPENDS_AMDBLIS). If the dependency is enabled, this is set to one, else set to zero. This compiler option can be used in c++  code to enable dependency specific code
 
 ```
-#if ZENDNL_DEPENDS_AMDBLIS
+#if ZENDNNL_DEPENDS_AMDBLIS
  <amd-blis dependent code>
 #else
  <alternative amd-blis independent code>
@@ -162,7 +162,7 @@ If a local dependency is provided, the build will not try to download dependency
 
 #### 4.2.2 Command Line Build
 
-The standalone build can be done using command line CMake configuration and build, giving command line CMake options as given in [Build Options](#3-build-options). However to assist the build process a bash script **ZenDNN/scripts/zendnnl_build.sh** is provided. In order to use ths script
+The standalone build can be done using command line CMake configuration and build, giving command line CMake options as given in [Build Options](#3-build-options). However to assist the build process a bash script **ZenDNN/scripts/zendnnl_build.sh** is provided. In order to use this script
 
 - Go to the `ZenDNN/scripts/` directory,
 - Invoke `source zendnnl_build.sh --help` to list down all the build options.

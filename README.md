@@ -30,7 +30,7 @@ ZenDNN is a redesigned, re-architected, and refactored deep learning library, ev
 In addition to features offered by ZenDNN_legacy, ZenDNN is intended to support the following additional features:
 
 1. Support to plug-and-play other primitive libraries like OneDNN, LibXSMM, or other low level backends like BLAS libraries. For example, if a primitive is unimpemented in ZenDNN, or more performant in OneDNN, the OneDNN primitive can be executed using OneDNN APIs, without getting into OneDNN code.
-2. Provide integrated profiling and performance analysis tools, which will help in both development and deployment.For example, these tools could be used for instrumented profiling of a primitive, analysing performance issues, and to optimize the primitive. These tools could also be used in deployment; for example, to analyse scaling behaviour of primitives in a multi-instance deployment.
+2. Provide integrated profiling and performance analysis tools, which will help in both development and deployment. For example, these tools could be used for instrumented profiling of a primitive, analysing performance issues, and to optimize the primitive. These tools could also be used in deployment; for example, to analyse scaling behaviour of primitives in a multi-instance deployment.
 
 ## 1.2. Code Structure
 
@@ -57,7 +57,7 @@ ZenDNN
 |   |   |   |- sample_operator : demonstrates how to create an operator.
 |   |   |   |- matmul_operator : implements matrix multiplication with optional post-op.
 |   |   |   |- reorder_operator : copies data between different memory formats.
-|   |   |   |- compare_operator : perform element-wise comparision of tensors.
+|   |   |   |- compare_operator : perform element-wise comparison of tensors.
 |   |   |   |- embag_operator : implements embedding bag and embedding operators.
 ```
 
