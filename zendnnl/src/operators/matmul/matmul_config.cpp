@@ -23,7 +23,7 @@ void matmul_config_t::set_default_config() {
   // Set default configuration for matmul
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
-  set_weight_cache(0);
+  set_weight_cache(1);
   set_zp_comp_cache(true);  // Disable ZP compensation caching by default
 }
 
@@ -35,7 +35,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   }
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
-  int32_t matmul_weight_cache = 0;
+  int32_t matmul_weight_cache = 1;
   bool zp_comp_cache_enabled = true;  // Default enabled
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   auto matmul_json = runtime_variables_json["matmul"];
@@ -48,13 +48,6 @@ status_t matmul_config_t::set_user_config(json config_json) {
       }
     }
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
-    if ((static_cast<matmul_algo_t>(matmul_algo) ==
-         matmul_algo_t::aocl_dlp_blocked) ||
-        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
-        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch) ||
-        (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
-      matmul_weight_cache = 1;
-    }
     if (! matmul_weight_cache_json.empty()) {
       auto matmul_weight_cache_str = matmul_weight_cache_json.template
                                      get<std::string>();
@@ -121,14 +114,7 @@ void matmul_config_t::set_env_config() {
   }
   set_algo(matmul_algo);
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
-  [[maybe_unused]] int32_t matmul_weight_cache = 0;
-  if ((static_cast<matmul_algo_t>(matmul_algo) ==
-       matmul_algo_t::aocl_dlp_blocked) ||
-      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::onednn_blocked) ||
-      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::dynamic_dispatch)||
-      (static_cast<matmul_algo_t>(matmul_algo) == matmul_algo_t::auto_tuner)) {
-    matmul_weight_cache = 1;
-  }
+  [[maybe_unused]] int32_t matmul_weight_cache = 1;
   if (weight_cache_env) {
     int32_t weight_cache = std::stoi(weight_cache_env);
     if (weight_cache == 0 || weight_cache == 1) {

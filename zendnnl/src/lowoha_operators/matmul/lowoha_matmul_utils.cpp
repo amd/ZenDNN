@@ -551,12 +551,6 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 
-  // TODO: Remove this once AOCL DLP has fix for parallel matmul
-  // Currently diverting the call to LibXSMM for Batch MatMul.
-  if ((Batch_A > 1 || Batch_B > 1) && (kernel == matmul_algo_t::aocl_dlp || kernel == matmul_algo_t::aocl_dlp_blocked)) {
-    kernel = matmul_algo_t::libxsmm;
-  }
-
   params.lowoha_algo = kernel;
   return kernel;
 }

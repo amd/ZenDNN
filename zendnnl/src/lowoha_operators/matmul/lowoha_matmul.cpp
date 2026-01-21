@@ -157,14 +157,10 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
                           params.dtypes, params, kernel))) {
-      kernel = matmul_algo_t::onednn;
-      //TODO: Remove this once AOCL DLP has fix for parallel matmul
-      matmul_onednn_wrapper(trans_input, trans_weight, M, N, K, alpha, src, lda,
-                            weight, ldb, beta, dst, ldc, params, batch_params, bias, kernel,
-                            is_weights_const, src_batch_stride_elems, weight_batch_stride_elems,
-                            dst_batch_stride_elems);
-
-      return;
+      // Fallback to AOCL DLP kernel when libxsmm is not supported
+      apilog_info("Using AOCL DLP kernel as fallback for libxsmm, algo: ",
+                  static_cast<int>(kernel));
+      kernel = matmul_algo_t::aocl_dlp;
     }
     // Define the tile processing callback
     auto process_tile = [&](int batch_idx, int m_start, int m_len,
@@ -199,6 +195,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     };
 
     // Execute partitioned BMM with automatic strategy selection
+    matmul_active_levels active_levels_guard(1);
     execute_partitioned_bmm(src, weight, dst, part_config, batch_params,
                             process_tile);
   }

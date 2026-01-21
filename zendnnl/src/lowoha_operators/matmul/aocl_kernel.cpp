@@ -636,6 +636,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->bias[bias_index].bias = zp_comp_acc;
     dlp_metadata->bias[bias_index].stor_type = DLP_S32;
     dlp_metadata->bias[bias_index].sf = nullptr;
+    dlp_metadata->bias[bias_index].zp = nullptr;
     bias_index++;
   }
   else if (zp_comp_ndim == 2 && zp_comp_acc) {
