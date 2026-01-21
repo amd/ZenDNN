@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -187,6 +187,8 @@ status_t matmul_impl_t::validate() {
   bool is_broadcast_bmm_sizes = ((input_size.size() == 3 &&
                                   weights_size.size() == 2) || (input_size.size() == 2 &&
                                       weights_size.size() == 3)) && (output_size.size() == 3);
+  bool is_onednn_kernel = (forced_kernel == "onednn" ||
+                           forced_kernel == "onednn_blocked");
 
   if (!is_mm_sizes && !is_bmm_sizes && !is_broadcast_bmm_sizes) {
     apilog_error("input, weight or output size is not valid");
@@ -244,14 +246,12 @@ status_t matmul_impl_t::validate() {
   // Input and Output Size Check
   // OneDNN doesn't support broadcasted inputs or weights
   // TODO: Fallback to reference/supported kernel
-  if (is_broadcast_bmm_sizes && (forced_kernel == "onednn" ||
-                                 forced_kernel == "onednn_blocked")) {
+  if (is_broadcast_bmm_sizes && is_onednn_kernel) {
     apilog_error("Input, weight or output size is not valid for onednn");
     return status_t::failure;
   }
 
-  if (input_size.size() == 3 && (forced_kernel == "onednn" ||
-                                 forced_kernel == "onednn_blocked") &&
+  if (input_size.size() == 3 && is_onednn_kernel &&
       (input_size.at(0) != 1 && weights_size.at(0) != 1 &&
        input_size.at(0) != weights_size.at(0))) {
     apilog_error("Broadcast incompatible with onednn for batchmatmul. Input size= ",
@@ -261,33 +261,43 @@ status_t matmul_impl_t::validate() {
 
   if (input->is_quantized()) {
     unsigned long scale_nelems = compute_product(input->get_quant_scale_size());
-    if (!(scale_nelems == input_size.at(input_size.size()-1) ||
-          scale_nelems == 1)) {
-      apilog_error("Input quant scale supports per tensor or per channel quantization");
+    // TODO: Expand this support for different granularities
+    if (scale_nelems != 1) {
+      apilog_error("Source quant scale supports only per-tensor");
       return status_t::failure;
     }
+
     if (input->get_quant_subtype() == quant_subtype_t::asymmetric) {
       auto zero_nelems = compute_product(input->get_quant_zero_size());
+      // TODO: Expand this support for different granularities
       if (zero_nelems != 1) {
-        apilog_error("Input quant zero supports per tensor quantization");
+        apilog_error("Source quant zero supports only per-tensor");
         return status_t::failure;
       }
     }
   }
+
   if (output->is_quantized()) {
     unsigned long scale_nelems = compute_product(output->get_quant_scale_size());
-    if (!(scale_nelems == output_size.at(output_size.size()-1) ||
-          scale_nelems == 1)) {
-      apilog_error("Output quant scale supports per tensor or per channel quantization");
+    // TODO: Expand this support for different granularities
+    if (scale_nelems != 1) {
+      apilog_error("Output quant scale supports only per-tensor");
       return status_t::failure;
     }
+
     if (output->get_quant_subtype() == quant_subtype_t::asymmetric) {
       auto zero_nelems = compute_product(output->get_quant_zero_size());
+      // TODO: Expand this support for different granularities
       if (zero_nelems != 1) {
-        apilog_error("Output quant zero supports per tensor quantization");
+        apilog_error("Output quant zero supports only per-tensor");
         return status_t::failure;
       }
     }
+  }
+
+  if (weights && weights->get_data_type() == data_type_t::s4) {
+    apilog_info("Weight tensor is S4, forcing aocl_dlp_blocked kernel");
+    forced_kernel = "aocl_dlp_blocked";
   }
 
   if (bias) {
@@ -397,11 +407,7 @@ status_t matmul_impl_t::validate_forced_kernel() {
 }
 
 status_t matmul_impl_t::preprocess() {
-  // For WOQ (S4 weights), always use blocked kernel for better performance
   auto weight_tensor = context.get_param("weights");
-  if (weight_tensor && weight_tensor->get_data_type() == data_type_t::s4) {
-    forced_kernel = "aocl_dlp_blocked";
-  }
 
   if (forced_kernel.empty() || forced_kernel == "aocl_dlp" ||
       forced_kernel == "aocl_dlp_blocked") {

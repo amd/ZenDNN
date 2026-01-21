@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -203,7 +203,7 @@ int matmul_silu_add_int8_kernel_example() {
       return NOT_OK;
     }
 
-    auto src_scale  = tensor_factory.uniform_tensor({1,MATMUL_K},
+    auto src_scale  = tensor_factory.uniform_tensor({1,1},
                       data_type_t::f32,
                       0.25, "src_scale_tensor");
     auto src_zero_points  = tensor_factory.uniform_tensor({1,1},

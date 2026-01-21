@@ -199,9 +199,6 @@ class tensor_factory_t {
       data_type dtype_, std::string tensor_name_="quant random",
       bool fp16_scale_bias = true, float scale_min = 0.10,
       float scale_max = 0.19, float bias_min = 0, float bias_max = 7);
-
-  /** @brief Generate inverse tensor for existing buffers */
-  tensor_t inverse_tensor(const tensor_t &input_tensor);
 };
 
 /**

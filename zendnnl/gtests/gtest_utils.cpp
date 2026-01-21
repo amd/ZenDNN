@@ -775,29 +775,6 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
   return qtensor;
 }
 
-tensor_t tensor_factory_t::inverse_tensor(const tensor_t &input_tensor) {
-  auto inv_tensor = tensor_t()
-                    .set_size(input_tensor.get_size())
-                    .set_data_type(input_tensor.get_data_type())
-                    .set_storage()
-                    .create();
-
-  float *inv_scale_ptr = static_cast<float *>(inv_tensor.get_raw_handle_unsafe());
-
-  uint64_t num_rows = input_tensor.get_size()[0];
-  uint64_t num_cols = input_tensor.get_size()[1];
-
-  for (uint64_t i = 0; i < num_rows; ++i) {
-    for (uint64_t j = 0; j < num_cols; ++j) {
-      float scale_value = input_tensor.at({i, j});
-      uint64_t idx = i * num_cols + j;
-      inv_scale_ptr[idx] = 1.0f / scale_value;
-    }
-  }
-
-  return inv_tensor;
-}
-
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
                         uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha,
                         uint32_t &num_threads, std::string &input_file, std::string &op,

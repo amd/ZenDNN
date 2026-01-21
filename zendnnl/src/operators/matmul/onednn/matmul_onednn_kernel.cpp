@@ -353,17 +353,21 @@ void matmul_onednn_kernel_t::execute_matmul(const
       params.bias.buffer);
 
   if (params.src_quant.scale_size.size()) {
+    auto src_scale_format = (params.src_quant.scale_size.size() == 1) ?
+                            dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
     dnnl::memory::desc src_scale_desc(params.src_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.src_quant.scale_dtype),
-                                      dnnl::memory::format_tag::ab);
+                                      src_scale_format);
     dnnl::memory src_scale_mem = dnnl::memory(src_scale_desc, eng,
                                  const_cast<void *>(params.src_quant.scales));
     matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scale_mem});
 
     if (params.src_quant.zero_size.size()) {
+      auto src_zp_format = (params.src_quant.zero_size.size() == 1) ?
+                           dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
       dnnl::memory::desc src_zero_desc(params.src_quant.zero_size,
                                        onednn_utils_t::to_dnnl_datatype(params.src_quant.zero_dtype),
-                                       dnnl::memory::format_tag::ab);
+                                       src_zp_format);
       dnnl::memory src_zero_mem = dnnl::memory(src_zero_desc, eng,
                                   const_cast<void *>(params.src_quant.zero_points));
       matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_mem});
@@ -371,35 +375,51 @@ void matmul_onednn_kernel_t::execute_matmul(const
   }
 
   if (params.weights_quant.scale_size.size()) {
+    auto wei_scale_format = (params.weights_quant.scale_size.size() == 1) ?
+                            dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
     dnnl::memory::desc wei_scale_desc(params.weights_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.weights_quant.scale_dtype),
-                                      dnnl::memory::format_tag::ab);
+                                      wei_scale_format);
     dnnl::memory wei_scale_mem = dnnl::memory(wei_scale_desc, eng,
                                  const_cast<void *>(params.weights_quant.scales));
     matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scale_mem});
 
     if (params.weights_quant.zero_size.size()) {
+      auto wei_zp_format = (params.weights_quant.zero_size.size() == 1) ?
+                           dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
       dnnl::memory::desc wei_zero_desc(params.weights_quant.zero_size,
                                        onednn_utils_t::to_dnnl_datatype(params.weights_quant.zero_dtype),
-                                       dnnl::memory::format_tag::ab);
+                                       wei_zp_format);
       dnnl::memory wei_zero_mem = dnnl::memory(wei_zero_desc, eng,
                                   const_cast<void *>(params.weights_quant.zero_points));
       matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, wei_zero_mem});
     }
   }
 
+  // Inverse dst scale for per-tensor quantization (single value).
+  // TODO: Replace with std::vector<float> when per-channel/per-group granularities are supported.
+  std::optional<float> dst_inv_scale;
+
   if (params.dst_quant.scale_size.size()) {
+    auto dst_scale_format = (params.dst_quant.scale_size.size() == 1) ?
+                            dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
     dnnl::memory::desc dst_scale_desc(params.dst_quant.scale_size,
                                       onednn_utils_t::to_dnnl_datatype(params.dst_quant.scale_dtype),
-                                      dnnl::memory::format_tag::ab);
-    dnnl::memory dst_scale_mem = dnnl::memory(dst_scale_desc, eng,
-                                 const_cast<void *>(params.dst_quant.scales));
+                                      dst_scale_format);
+    float scale_val = (params.dst_quant.scale_dtype == data_type_t::bf16)
+                      ? static_cast<float>(*static_cast<const bfloat16_t *>(params.dst_quant.scales))
+                      : *static_cast<const float *>(params.dst_quant.scales);
+    dst_inv_scale = 1.0f / scale_val;
+    dnnl::memory dst_scale_mem = dnnl::memory(dst_scale_desc, eng, &dst_inv_scale);
+
     matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem});
 
     if (params.dst_quant.zero_size.size()) {
+      auto dst_zp_format = (params.dst_quant.zero_size.size() == 1) ?
+                           dnnl::memory::format_tag::a : dnnl::memory::format_tag::ab;
       dnnl::memory::desc dst_zero_desc(params.dst_quant.zero_size,
                                        onednn_utils_t::to_dnnl_datatype(params.dst_quant.zero_dtype),
-                                       dnnl::memory::format_tag::ab);
+                                       dst_zp_format);
       dnnl::memory dst_zero_mem = dnnl::memory(dst_zero_desc, eng,
                                   const_cast<void *>(params.dst_quant.zero_points));
       matmul_args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zero_mem});

@@ -86,6 +86,34 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return status_t::failure;
   }
 
+  // TODO: Expand support for different granularities
+  // Helper to validate per-tensor granularity for quant params
+  auto validate_per_tensor = [](const void *buff,
+  const std::vector<int64_t> &dims, const char *param_name) -> bool {
+    if (!buff) {
+      return true;
+    }
+
+    int64_t nelems = std::accumulate(dims.begin(), dims.end(), int64_t{1}, std::multiplies<int64_t>());
+
+    if (nelems != 1) {
+      log_error(param_name, " supports only per-tensor");
+      return false;
+    }
+    return true;
+  };
+
+  if (!validate_per_tensor(params.quant_params.src_scale.buff,
+                           params.quant_params.src_scale.dims, "Source quant scale") ||
+      !validate_per_tensor(params.quant_params.src_zp.buff,
+                           params.quant_params.src_zp.dims, "Source quant zero") ||
+      !validate_per_tensor(params.quant_params.dst_scale.buff,
+                           params.quant_params.dst_scale.dims, "Destination quant scale") ||
+      !validate_per_tensor(params.quant_params.dst_zp.buff,
+                           params.quant_params.dst_zp.dims, "Destination quant zero")) {
+    return status_t::failure;
+  }
+
   // Weight quantization params only allowed for WOQ or INT8
   if ((params.quant_params.wei_scale.buff || params.quant_params.wei_zp.buff) &&
       !is_woq && !is_int8) {

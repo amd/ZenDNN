@@ -526,9 +526,6 @@ TEST_P(TestMatmul, INT8) {
   auto dst_scale          = !(output_dtype == data_type_t::f32 ||
                               output_dtype == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
                                   data_type_t::f32, 2) : tensor_t();
-  auto dst_inv_scale      = !(output_dtype == data_type_t::f32 ||
-                              output_dtype == data_type_t::bf16) ? tensor_factory.inverse_tensor(dst_scale)
-                            : tensor_t();
 
   auto src_zp             = (source_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
@@ -549,9 +546,7 @@ TEST_P(TestMatmul, INT8) {
                             tensor_factory.uniform_dist_tensor({m, n},
                                 data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
-                            output_dtype, 2.0, false,
-                            (algo == matmul_algo_t::onednn ||
-                             algo == matmul_algo_t::onednn_blocked) ? dst_inv_scale : dst_scale, dst_zp);
+                            output_dtype, 2.0, false, dst_scale, dst_zp);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0, false, dst_scale, dst_zp);
   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
