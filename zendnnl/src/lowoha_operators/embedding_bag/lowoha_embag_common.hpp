@@ -18,9 +18,11 @@
 #define _LOWOHA_EMBAG_COMMON_HPP
 
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include "memory/memory_utils.hpp"
 #include "operators/embag/embag_context.hpp"
+#include "operators/embag/embag_config.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -28,8 +30,9 @@ namespace embag {
 
 using namespace zendnnl::memory;
 
-// Use the same embag_algo_t from ops namespace
+// Use the same embag_algo_t and embag_kernel_t from ops namespace
 using embag_algo_t = zendnnl::ops::embag_algo_t;
+using embag_kernel_t = zendnnl::ops::embag_kernel_t;
 
 /**
  * @brief Structure to hold data types for embedding bag operands
@@ -61,25 +64,61 @@ struct embag_data_types_t {
 struct embag_params_t {
   embag_data_types_t dtypes;     // Data types for operands
   embag_algo_t algo;             // Reduction algorithm (sum/mean/max/none)
-  uint64_t num_embeddings;        // Number of rows in the embedding table
-  uint64_t embedding_dim;         // Dimension of each embedding vector
+  uint64_t num_embeddings;       // Number of rows in the embedding table
+  uint64_t embedding_dim;        // Dimension of each embedding vector
   uint64_t num_threads;          // Number of threads
-  uint64_t num_indices;           // Total number of indices
-  uint64_t num_bags;              // Number of bags (output rows)
+  uint64_t num_indices;          // Total number of indices
+  uint64_t num_bags;             // Number of bags (output rows)
   bool is_weights;               // Whether weights are present
   bool include_last_offset;      // Whether offsets includes the last offset (num_indices)
   int64_t padding_idx;           // Index to ignore during lookup (-1 means no padding)
   bool fp16_scale_bias;          // Whether data type of scale and bias is fp16
   uint64_t dst_stride;           // Destination tensor stride value
-
+  embag_kernel_t kernel;         // Embag kernel
   /**
    * @brief Default constructor for embag_params_t
    */
   embag_params_t() : dtypes(), algo(embag_algo_t::sum),
     num_embeddings(0), embedding_dim(0), num_threads(0),
     num_indices(0), num_bags(0), is_weights(false), include_last_offset(false),
-    padding_idx(-1), fp16_scale_bias(false) {}
+    padding_idx(-1), fp16_scale_bias(false), dst_stride(0),
+    kernel(embag_kernel_t::fbgemm) {}
 };
+
+/**
+ * @brief Select embedding bag kernel based on parameters and environment variable
+ *
+ * This function selects the appropriate kernel for embedding bag operation based on:
+ * 1. The kernel specified in params (if not none)
+ * 2. The ZENDNNL_EMBAG_ALGO environment variable
+ *
+ * @param params The embedding bag parameters
+ * @return embag_kernel_t The selected kernel
+ */
+inline static embag_kernel_t kernel_select(embag_params_t &params) {
+  using namespace zendnnl::ops;
+
+  // Get config instance and initialize from environment
+  embag_config_t &embag_config = embag_config_t::instance();
+  embag_config.set_env_config();
+
+  // Check if kernel is already specified in params
+  int32_t algo = params.kernel == embag_kernel_t::none ?
+                 embag_config.get_kernel() : static_cast<int32_t>(params.kernel);
+
+  // Default to native kernel if none specified
+  embag_kernel_t kernel = (algo == static_cast<int32_t>(embag_kernel_t::none)) ?
+                          embag_kernel_t::native : static_cast<embag_kernel_t>(algo);
+
+  // TODO: Add auto_tuner kernel selection
+  if (kernel == embag_kernel_t::auto_tuner) {
+    kernel = embag_kernel_t::native;
+  }
+
+  // Update params with selected kernel
+  params.kernel = kernel;
+  return kernel;
+}
 
 /**
  * @brief Validate embedding bag input parameters
@@ -150,6 +189,7 @@ inline static const char *algo_to_string(embag_algo_t algo) {
     return "unknown";
   }
 }
+
 /**
  * @brief Convert data_type_t to string for logging
  */
@@ -161,8 +201,35 @@ inline static const char *dtype_to_string(data_type_t dtype) {
     return "f32";
   case data_type_t::bf16:
     return "bf16";
+  case data_type_t::s8:
+    return "s8";
   case data_type_t::s4:
     return "s4";
+  case data_type_t::u4:
+    return "u4";
+  default:
+    return "unknown";
+  }
+}
+
+/**
+ * @brief Convert embag_kernel_t to string for logging
+ *
+ * @param kernel The kernel enum value
+ * @return const char* string representation
+ */
+inline static const char *kernel_to_string(embag_kernel_t kernel) {
+  switch (kernel) {
+  case embag_kernel_t::none:
+    return "none";
+  case embag_kernel_t::auto_tuner:
+    return "auto_tuner";
+  case embag_kernel_t::native:
+    return "native";
+  case embag_kernel_t::fbgemm:
+    return "fbgemm";
+  case embag_kernel_t::reference:
+    return "reference";
   default:
     return "unknown";
   }

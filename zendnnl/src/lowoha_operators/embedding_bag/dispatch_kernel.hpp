@@ -19,40 +19,43 @@
 
 #include "lowoha_embag_common.hpp"
 #include "operators/embag/native_kernels/embag_avx512_kernels.hpp"
+#if ZENDNNL_DEPENDS_FBGEMM
+  #include "fbgemm_kernel.hpp"
+#endif
 
 // Forward declarations for AVX2 kernel template instantiations
 // These are defined in embag_avx2_kernels.cpp and already compiled
 namespace zendnnl {
-  namespace ops {
-    template <typename InType, typename IndexType, typename OffsetType, typename OutType>
-    void embag_avx2_kernel(
-      const InType *input,
-      const float *weights,
-      const IndexType *indices,
-      const OffsetType *offsets,
-      OutType *dst,
-      int64_t width,
-      int64_t indsz,
-      int64_t offsz,
-      int64_t padidx,
-      bool is_weights,
-      embag_algo_t algo,
-      int64_t dst_stride,
-      bool include_last_offset);
-  } // namespace ops
-  } // namespace zendnnl
+namespace ops {
+template <typename InType, typename IndexType, typename OffsetType, typename OutType>
+void embag_avx2_kernel(
+  const InType *input,
+  const float *weights,
+  const IndexType *indices,
+  const OffsetType *offsets,
+  OutType *dst,
+  int64_t width,
+  int64_t indsz,
+  int64_t offsz,
+  int64_t padidx,
+  bool is_weights,
+  embag_algo_t algo,
+  int64_t dst_stride,
+  bool include_last_offset);
+} // namespace ops
+} // namespace zendnnl
 
 namespace zendnnl {
 namespace lowoha {
 namespace embag {
 
 /**
- * @brief Dispatch to optimized AVX512 embedding bag kernel
+ * @brief Dispatch to native AVX512 embedding bag kernel
  *
- * Dispatches to the appropriate AVX512 kernel instantiation based on
+ * Dispatches to the appropriate native AVX512 kernel instantiation based on
  * indices, offsets, table, and output data types.
  */
-static void dispatch_avx512_kernel(
+static void embag_native_kernel(
   const void *table,
   const void *indices,
   const void *offsets,
@@ -313,6 +316,145 @@ static void dispatch_avx512_kernel(
   else {
     log_error("embedding_bag_direct: unsupported indices/offsets data types");
   }
+}
+
+#if ZENDNNL_DEPENDS_FBGEMM
+/**
+ * @brief Dispatch to FBGEMM embedding bag kernel
+ *
+ * Dispatches to the appropriate FBGEMM kernel instantiation based on
+ * indices, offsets, table, and output data types.
+ */
+static void embag_fbgemm_kernel(
+  const void *table,
+  const void *indices,
+  const void *offsets,
+  const float *weights,
+  void *dst,
+  const embag_params_t &params) {
+
+  const data_type_t table_dtype = params.dtypes.table;
+  const data_type_t output_dtype = params.dtypes.output;
+
+  // Dispatch based on indices/offsets types (s64 or s32)
+  if (params.dtypes.indices == data_type_t::s64 &&
+      params.dtypes.offsets == data_type_t::s64) {
+    if (table_dtype == data_type_t::f32 && output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<false, float, int64_t, int64_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
+    }
+    else if (table_dtype == data_type_t::bf16 &&
+             output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/true);
+    }
+    else if (table_dtype == data_type_t::bf16 && output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<false, uint16_t, int64_t, int64_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/false);
+    }
+    else if (table_dtype == data_type_t::f32 && output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<false, float, int64_t, int64_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
+    // For now, we use the native kernel for S4 data type.
+    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+             output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
+    }
+    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
+    // For now, we use the native kernel for S4 data type.
+    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+             output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<true, uint8_t, int64_t, int64_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    else {
+      log_error("embedding_bag_direct: unsupported table/output data types for FBGEMM backend");
+    }
+  }
+  else if (params.dtypes.indices == data_type_t::s32 &&
+           params.dtypes.offsets == data_type_t::s32) {
+    if (table_dtype == data_type_t::f32 && output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<false, float, int32_t, int32_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
+    }
+    else if (table_dtype == data_type_t::bf16 &&
+             output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/true);
+    }
+    else if (table_dtype == data_type_t::bf16 && output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<false, uint16_t, int32_t, int32_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/true, /*is_bf16_out=*/false);
+    }
+    else if (table_dtype == data_type_t::f32 && output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<false, float, int32_t, int32_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/0, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
+    // For now, we use the native kernel for S4 data type.
+    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+             output_dtype == data_type_t::f32) {
+      invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, float>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/false);
+    }
+    // TODO: Explore the feasibility of using FBGEMM for S4 data type.
+    // For now, we use the native kernel for S4 data type.
+    else if ((table_dtype == data_type_t::s4 || table_dtype == data_type_t::u4) &&
+             output_dtype == data_type_t::bf16) {
+      invoke_fbgemm_kernel<true, uint8_t, int32_t, int32_t, uint16_t>(
+        table, indices, offsets, weights, dst, params,
+        /*bit_rate=*/4, /*is_bf16_in=*/false, /*is_bf16_out=*/true);
+    }
+    else {
+      log_error("embedding_bag_direct: unsupported table/output data types for FBGEMM backend");
+    }
+  }
+  else {
+    log_error("embedding_bag_direct: unsupported indices/offsets data types for FBGEMM backend");
+  }
+}
+#endif
+
+/**
+ * @brief Dispatch to optimized AVX512 embedding bag kernel
+ *
+ * Dispatches to the appropriate AVX512 kernel instantiation based on
+ * indices, offsets, table, and output data types.
+ */
+static void dispatch_avx512_kernel(
+  const void *table,
+  const void *indices,
+  const void *offsets,
+  const float *weights,
+  void *dst,
+  embag_params_t &params) {
+
+  kernel_select(params);
+#if ZENDNNL_DEPENDS_FBGEMM
+  if (params.kernel == embag_kernel_t::fbgemm && can_use_fbgemm(params)) {
+    log_info("Using FBGEMM kernel");
+    embag_fbgemm_kernel(table, indices, offsets, weights, dst, params);
+    return;
+  }
+#endif
+
+  log_info("Using ZenDNN kernel");
+  embag_native_kernel(table, indices, offsets, weights, dst, params);
+  return;
 }
 
 } // namespace embag

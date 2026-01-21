@@ -23,8 +23,8 @@ namespace zendnnl {
 namespace lowoha {
 namespace embag {
 
-using namespace zendnnl::common;
-using namespace zendnnl::profile;
+using namespace ::zendnnl::common;
+using namespace ::zendnnl::profile;
 
 status_t embedding_bag_direct(
   const void *table,
@@ -68,6 +68,8 @@ status_t embedding_bag_direct(
        << ", num_threads=" << num_threads;
     apilog_info(ss.str());
   }
+
+  // Dispatch to the appropriate kernel
   dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
 
   if (is_profile) {

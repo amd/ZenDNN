@@ -20,6 +20,7 @@ set(lowoha_embag_sources
 set(lowoha_embag_public_headers
   lowoha_embag_common.hpp
   lowoha_embedding_bag.hpp
+  fbgemm_kernel.hpp
   dispatch_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
