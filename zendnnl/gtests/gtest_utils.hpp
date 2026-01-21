@@ -67,6 +67,7 @@ struct MatmulType {
   data_type_t source_dtype;
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
+  uint32_t num_threads;
   MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
@@ -98,6 +99,7 @@ struct EmbagType {
   bool fp16_scale_bias;
   bool strided;
   bool use_LOWOHA;
+  uint32_t num_threads;
   EmbagType();
 };
 
@@ -112,6 +114,7 @@ struct EmbeddingType {
   bool fp16_scale_bias;
   bool strided;
   bool use_LOWOHA;
+  uint32_t num_threads;
   EmbeddingType();
 };
 
@@ -123,6 +126,7 @@ extern int64_t seed;
 extern std::string cmd_post_op;
 extern std::string cmd_backend;
 extern std::string cmd_lowoha;
+extern uint32_t cmd_num_threads;
 extern const float MATMUL_F32_TOL;
 extern const float MATMUL_BF16_TOL;
 extern const float REORDER_TOL;
@@ -222,7 +226,7 @@ class Parser {
   void operator()(const int &argc,
                   char *argv[],
                   int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
-                  std::string &lowoha, std::string &input_file,
+                  std::string &lowoha, uint32_t &num_threads, std::string &input_file,
                   std::string &op, uint32_t &ndims);
 };
 

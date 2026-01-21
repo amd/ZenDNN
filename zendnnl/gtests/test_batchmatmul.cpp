@@ -44,9 +44,11 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     if (algo == matmul_algo_t::aocl_dlp_blocked) {
       algo = matmul_algo_t::aocl_dlp;
     }
+    num_threads = params.mat.num_threads;
+    omp_set_num_threads(num_threads);
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
              transA, " TransB: ", transB, " po_type: ", postOpsToStr(po_type), " algo: ",
-             static_cast<int>(algo));
+             static_cast<int>(algo), " num_threads: ", num_threads);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -59,6 +61,7 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
   float alpha, beta;
   bool use_LOWOHA;
   matmul_algo_t algo;
+  uint32_t num_threads;
 };
 
 /** @fn TEST_P

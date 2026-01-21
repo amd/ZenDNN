@@ -40,9 +40,11 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
     inplace_reorder = params.inplace_reorder;
     use_LOWOHA = 0; // TODO: Enable LOWOHA support
     source_dtype = params.mat.source_dtype;
+    num_threads = params.mat.num_threads;
+    omp_set_num_threads(num_threads);
     log_info("m: ",m, " k: ",k, " n: ",n," postop: ", postOpsToStr(po_type),
              " reorder: ",
-             inplace_reorder ? "In Place" : "Out of Place");
+             inplace_reorder ? "In Place" : "Out of Place", " num_threads: ", num_threads);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -54,6 +56,7 @@ class TestReorder : public ::testing::TestWithParam<ReorderType> {
   data_type_t source_dtype;
   bool use_LOWOHA;
   matmul_algo_t algo;
+  uint32_t num_threads;
   tensor_factory_t tensor_factory{};
 };
 

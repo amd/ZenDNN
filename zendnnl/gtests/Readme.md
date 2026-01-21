@@ -21,6 +21,7 @@ ZenDNN GTest provides flexibility in configuring tests through command-line argu
 - **Specify Post-Operations**: Apply post-operations like `relu`, `gelu_tanh`, etc., during matrix multiplication tests.
 - **Backend Selection**: Choose specific computational backends using `--backend` parameter to control algorithm selection (e.g., `aocl_dlp`, `onednn`, `libxsmm`).
 - **LOWOHA**: Enable or disable Low Overhead API using `--lowoha` parameter.
+- **Thread Control**: Specify the number of threads for parallel execution using `--num_threads` parameter.
 - **Input File Support**: Use `--input_file` with `--op` and optionally `--ndims` parameters to read test configurations from a file instead of random generation.
 
 ## **Configurable Parameters**
@@ -118,12 +119,12 @@ cmake --build .
 
 ### **General Command Structure**
 ```bash
-./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend> --lowoha <true/false>
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --seed <Seed>  --postop <PostOp> --test <num_of_tests> --backend <Backend> --lowoha <true/false> --num_threads <num_threads>
 ```
 
 ### **Command Structure with Input File**
 ```bash
-./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --input_file <InputFile> --op <Operator> --ndims <Dimensions> --lowoha <true/false>
+./install/gtests/gtests --gtest_filter=<TestSuite>/<TestCase>[/<Index>] --input_file <InputFile> --op <Operator> --ndims <Dimensions> --lowoha <true/false> --num_threads <num_threads>
 ```
 
 ## **Parameters**
@@ -195,12 +196,19 @@ cmake --build .
      - `2`: Process 2D matmul test configurations
      - `3`: Process batch matmul test configurations
 
+10. **`--num_threads <num_threads>`** (Optional):
+   - Specifies the number of threads to use for parallel execution.
+   - *Example*:
+     - `8`: Uses 8 threads for execution
+   - *Default*: Random value is selected from available thread count
+
 **Note:**
  - If **`<PostOp>`** parameter is not provided, gtest will pick postop randomly from supported post-ops.
  - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
  - If **`<lowoha>`** parameter is not provided, tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios.
+ - If **`<num_threads>`** parameter is not provided, a random value is selected from available thread count.
  - If **`<InputFile>`**, **`<Operator>`**, or **`<Dimensions>`** are not provided, tests will use randomly generated parameters instead of reading from a file.
  - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops and backends.
 
@@ -405,6 +413,10 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 7. Run batch matmul tests using input file configurations for 3D matmul:
 ``` bash
 ./install/gtests/gtests --gtest_filter=BatchMatmul/* --input_file batch_tests.txt --op matmul --ndims 3
+```
+8. Run matmul tests with 16 threads:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32/* --num_threads 16
 ```
 
 ### Run All testcases of a TestSuite

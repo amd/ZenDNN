@@ -43,9 +43,12 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     po_type = params.po_type;
     use_LOWOHA = params.use_LOWOHA;
     algo = params.algo;
+    num_threads = params.num_threads;
+    omp_set_num_threads(num_threads);
     log_info("m: ", m, " k: ", k, " n: ", n, " TransA: ", transA, " TransB: ",
              transB,
-             " postop: ", postOpsToStr(po_type), " algo: ", static_cast<int>(algo));
+             " postop: ", postOpsToStr(po_type), " algo: ", static_cast<int>(algo),
+             " num_threads: ", num_threads);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -59,6 +62,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
   data_type_t source_dtype, output_dtype;
   quant_granularity_t weight_granularity;
   matmul_algo_t algo;
+  uint32_t num_threads;
 };
 
 /** @fn TEST_P

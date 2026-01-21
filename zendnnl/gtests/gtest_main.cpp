@@ -50,6 +50,7 @@ int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
 std::string cmd_post_op {};
 std::string cmd_backend {};
 std::string cmd_lowoha {};
+uint32_t cmd_num_threads = 0;
 std::string cmd_input_file {};
 std::string cmd_operator {};
 uint32_t ndims = 2;
@@ -75,7 +76,7 @@ int main(int argc, char **argv) {
     // Command line argument parser
     Parser parse;
     parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, cmd_lowoha,
-          cmd_input_file, cmd_operator, ndims);
+          cmd_num_threads, cmd_input_file, cmd_operator, ndims);
     srand(static_cast<unsigned int>(seed));
     std::cout << "Value " << seed << " is used as seed. \n";
 

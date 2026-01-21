@@ -36,6 +36,15 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
   alpha    = dist(gen);
   beta     = dist(gen);
 
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
+
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
@@ -66,7 +75,12 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
         }
       }
       else {
-        use_LOWOHA = rand() % 2;
+        if (!cmd_lowoha.empty()) {
+          use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+        }
+        else {
+          use_LOWOHA = rand() % 2;
+        }
       }
     }
     else {
@@ -165,8 +179,15 @@ EmbagType::EmbagType() {
   fp16_scale_bias = std::rand() % 2;
   strided = std::rand() % 2;
   use_LOWOHA = std::rand() % 2;
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
 }
-
 // EmbeddingType constructor
 EmbeddingType::EmbeddingType() {
   num_embeddings = 128 + std::rand() % 2048;
@@ -178,6 +199,15 @@ EmbeddingType::EmbeddingType() {
   fp16_scale_bias = std::rand() % 2;
   strided = std::rand() % 2;
   use_LOWOHA = std::rand() % 2;
+  if (cmd_num_threads) {
+    num_threads = cmd_num_threads;
+  }
+  else {
+    int max_threads = omp_get_max_threads();
+    static std::mt19937 gen(rand());
+    std::uniform_int_distribution<int> thread_dist(1, max_threads);
+    num_threads = thread_dist(gen);
+  }
 }
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
@@ -770,7 +800,8 @@ tensor_t tensor_factory_t::inverse_tensor(const tensor_t &input_tensor) {
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
                         uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha,
-                        std::string &input_file, std::string &op, uint32_t &ndims) {
+                        uint32_t &num_threads, std::string &input_file, std::string &op,
+                        uint32_t &ndims) {
   for (int i=1; i<argc; ++i) {
     std::string arg = argv[i];
     if (arg.rfind("--",0)==0 && arg.find("gtest")==std::string::npos && i+1<argc) {
@@ -783,6 +814,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("postop", po);
   read_from_umap("backend", backend);
   read_from_umap("lowoha", lowoha);
+  read_from_umap("num_threads", cmd_num_threads);
   read_from_umap("input_file", input_file);
   read_from_umap("op", op);
   read_from_umap("ndims", ndims);

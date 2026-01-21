@@ -42,12 +42,15 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
     fp16_scale_bias    = params.fp16_scale_bias;
     strided            = params.strided;
     use_LOWOHA         = params.use_LOWOHA;
+    num_threads        = params.num_threads;
+    omp_set_num_threads(num_threads);
 
     log_info("num_embeddings: ", num_embeddings, " embedding_dim: ", embedding_dim,
              " num_bags: ", num_bags, " num_indices: ", num_indices,
              " algo: ", static_cast<int>(algo), " padding_index: ", padding_index,
              " include_last_offset: ", include_last_offset, " is_weights: ", is_weights,
-             " strided: ", strided, " use_LOWOHA: ", use_LOWOHA);
+             " strided: ", strided, " use_LOWOHA: ", use_LOWOHA,
+             " num_threads: ", num_threads);
   }
 
   /** @brief TearDown is used to free resource used in test */
@@ -59,6 +62,7 @@ class TestEmbag : public ::testing::TestWithParam<EmbagType> {
   bool include_last_offset, is_weights, fp16_scale_bias;
   data_type_t indices_dtype, offsets_dtype;
   bool use_LOWOHA, strided;
+  uint32_t num_threads;
   tensor_factory_t tensor_factory{};
 };
 
