@@ -30,89 +30,50 @@ using zendnnl::memory::status_t;
 using zendnnl::memory::data_type_t;
 
 /**
- * @brief Execute data type conversion (reorder) between buffers
+ * @brief Execute data type conversion (reorder) with quantization support
  *
- * This function performs element-wise data type conversion from source buffer
- * to destination buffer. Currently supports:
- * - BF16 to INT8 (quantization)
- * - INT8 to BF16 (dequantization)
- * - BF16 to UINT8 (quantization)
- * - UINT8 to BF16 (dequantization)
+ * Performs element-wise data type conversion from source to destination buffer.
  *
- * For quantization (bf16 -> int8):
- *   int8_val = clamp(round(bf16_val / scale) + zero_point, -128, 127)
+ * Supported conversions:
+ * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
  *
- * For quantization (bf16 -> uint8):
- *   uint8_val = clamp(round(bf16_val / scale) + zero_point, 0, 255)
+ * Quantization formulas:
+ * - Quantize:   int_val = clamp(round(bf16_val / scale) + zero_point, min, max)
+ * - Dequantize: bf16_val = (int_val - zero_point) * scale
  *
- * For dequantization (int8/uint8 -> bf16):
- *   bf16_val = (int8_val - zero_point) * scale
+ * Shape: [nelems] for 1D, [M, N] for 2D, [batch, M, N] for 3D (mandatory)
+ * Strides: Optional for non-contiguous source memory
+ * Granularity: Per-tensor, per-channel, or per-group (inferred from scale/zp dims)
  *
- * @param src       Pointer to source data buffer
- * @param dst       Pointer to destination data buffer
- * @param nelems    Number of elements to convert
- * @param params    Reorder parameters including data types and quantization params
+ * @param src    Source data buffer
+ * @param dst    Destination data buffer (always contiguous output)
+ * @param params Reorder parameters (data types, shape, quantization params, strides)
  *
- * @return status_t::success on successful execution, status_t::failure otherwise
+ * @return status_t::success on success, status_t::failure otherwise
  *
- * @note The source and destination buffers must not overlap.
- * @note For bf16 data, the buffer should be uint16_t* type-punned.
- * @note For int8 data, the buffer should be int8_t*.
- * @note For uint8 data, the buffer should be uint8_t*.
+ * @note Shape is mandatory; nelems is computed automatically from shape.
+ * @note Destination is always written in contiguous format.
+ * @note Buffers must not overlap.
  *
- * @example
+ * @example Basic usage (BF16 to S8 quantization):
  * @code
- * // BF16 to INT8 quantization
  * float scale = 0.5f;
  * int32_t zero_point = 0;
  *
- * lowoha_reorder_params_t params;
- * params.dtypes.src = data_type_t::bf16;
- * params.dtypes.dst = data_type_t::s8;
+ * reorder_params_t params;
+ * params.src_dtype = data_type_t::bf16;
+ * params.dst_dtype = data_type_t::s8;
+ * params.src_shape = {128, 256};  // 2D matrix
  * params.quant_params.scale.buff = &scale;
  * params.quant_params.scale.dt = data_type_t::f32;
  * params.quant_params.zero_point.buff = &zero_point;
  * params.quant_params.zero_point.dt = data_type_t::s32;
  *
- * status_t status = reorder_direct(bf16_buffer, int8_buffer, nelems, params);
- *
- * // INT8 to BF16 dequantization
- * lowoha_reorder_params_t dequant_params;
- * dequant_params.dtypes.src = data_type_t::s8;
- * dequant_params.dtypes.dst = data_type_t::bf16;
- * dequant_params.quant_params.scale.buff = &scale;
- * dequant_params.quant_params.scale.dt = data_type_t::f32;
- * dequant_params.quant_params.zero_point.buff = &zero_point;
- * dequant_params.quant_params.zero_point.dt = data_type_t::s32;
- *
- * status = reorder_direct(int8_buffer, bf16_buffer, nelems, dequant_params);
- *
- * // BF16 to UINT8 quantization
- * int32_t u8_zero_point = 128;
- * lowoha_reorder_params_t u8_quant_params;
- * u8_quant_params.dtypes.src = data_type_t::bf16;
- * u8_quant_params.dtypes.dst = data_type_t::u8;
- * u8_quant_params.quant_params.scale.buff = &scale;
- * u8_quant_params.quant_params.scale.dt = data_type_t::f32;
- * u8_quant_params.quant_params.zero_point.buff = &u8_zero_point;
- * u8_quant_params.quant_params.zero_point.dt = data_type_t::s32;
- *
- * status = reorder_direct(bf16_buffer, uint8_buffer, nelems, u8_quant_params);
- *
- * // UINT8 to BF16 dequantization
- * lowoha_reorder_params_t u8_dequant_params;
- * u8_dequant_params.dtypes.src = data_type_t::u8;
- * u8_dequant_params.dtypes.dst = data_type_t::bf16;
- * u8_dequant_params.quant_params.scale.buff = &scale;
- * u8_dequant_params.quant_params.scale.dt = data_type_t::f32;
- * u8_dequant_params.quant_params.zero_point.buff = &u8_zero_point;
- * u8_dequant_params.quant_params.zero_point.dt = data_type_t::s32;
- *
- * status = reorder_direct(uint8_buffer, bf16_buffer, nelems, u8_dequant_params);
+ * status_t status = reorder_direct(bf16_buffer, int8_buffer, params);
  * @endcode
  */
-status_t reorder_direct(const void *src, void *dst, size_t nelems,
-                        lowoha_reorder_params_t params);
+status_t reorder_direct(const void *src, void *dst,
+                         reorder_params_t params);
 
 
 /**
@@ -151,4 +112,3 @@ struct reorder_threadlimit {
 } // namespace zendnnl
 
 #endif // _LOWOHA_REORDER_HPP
-

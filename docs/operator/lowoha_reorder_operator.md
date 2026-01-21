@@ -1,5 +1,5 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # LowOHA Reorder Operator
 
@@ -11,7 +11,8 @@ Unlike the standard Reorder operator which uses the operator factory pattern, Lo
 - Minimal execution overhead
 - Quantization (BF16 → INT8/UINT8)
 - Dequantization (INT8/UINT8 → BF16)
-- Direct control over quantization parameters
+- Per-tensor, per-channel, and per-group quantization granularities
+- Strided (non-contiguous) source memory support
 
 
 ## Quantization/Dequantization Formulas
@@ -41,10 +42,9 @@ The primary interface for LowOHA Reorder is the `reorder_direct` function:
 
 ```cpp
 status_t reorder_direct(
-  const void *src,                  // Pointer to source data buffer
-  void *dst,                        // Pointer to destination data buffer
-  size_t nelems,                    // Number of elements to convert
-  lowoha_reorder_params_t params    // Reorder parameters
+  const void *src,                      // Pointer to source data buffer
+  void *dst,                            // Pointer to destination data buffer
+  reorder_params_t params        // Reorder parameters
 );
 ```
 
@@ -58,31 +58,57 @@ status_t reorder_direct(
 
 ## Parameters Structure
 
-### `lowoha_reorder_params_t`
+### `reorder_params_t`
 
 The main configuration structure for LowOHA Reorder:
 
 ```cpp
-struct lowoha_reorder_params_t {
-  reorder_data_types_t dtypes;        // Source and destination data types
-  reorder_quant_params_t quant_params; // Quantization parameters (scale, zero_point)
-  reorder_algo_t algo;                // Algorithm selection
-  uint64_t num_threads;               // Number of threads (0 = auto)
+struct reorder_params_t {
+  data_type_t src_dtype;                  // Source data type
+  data_type_t dst_dtype;                  // Destination data type
+  reorder_quant_params_t quant_params;    // Quantization parameters (scale, zero_point)
+  reorder_algo_t algo;                    // Algorithm selection
+  uint64_t num_threads;                   // Number of threads (0 = auto)
+  std::vector<int64_t> src_shape;         // Source shape: [N] or [M, N] or [batch, M, N] (mandatory)
+  std::vector<int64_t> dst_shape;         // Destination shape: must match src_shape (mandatory)
+  std::vector<int64_t> src_strides;       // Source strides for non-contiguous memory (optional)
+  std::vector<int64_t> dst_strides;       // Destination strides (reserved for future, not currently supported)
 };
 ```
 
-### `reorder_data_types_t`
+### Shape Format
 
-Specifies the source and destination data types:
+Both `src_shape` and `dst_shape` are **mandatory** and determine the tensor dimensionality:
 
-```cpp
-struct reorder_data_types_t {
-  data_type_t src;  // Source data type
-  data_type_t dst;  // Destination data type
-};
-```
+| Shape Size | Format | Description |
+|------------|--------|-------------|
+| 1 | `[N]` | 1D array with N elements |
+| 2 | `[M, N]` | 2D matrix with M rows and N columns |
+| 3 | `[batch, M, N]` | 3D batched matrix |
 
-**Supported Combinations:**
+The total number of elements is computed automatically from the shape.
+
+**Important Constraint:** `src_shape` and `dst_shape` **must be identical**. An error will be thrown if they differ.
+
+### Strides Format (Optional)
+
+#### Source Strides (`src_strides`)
+
+Source strides enable reading from non-contiguous source memory:
+
+| Strides Size | Format | Description |
+|--------------|--------|-------------|
+| Empty | - | Contiguous memory (default) |
+| 1 | `[stride]` | 1D with custom stride |
+| 2 | `[stride_M, stride_N]` | 2D with row and column strides |
+| 3 | `[stride_batch, stride_M, stride_N]` | 3D with batch, row, and column strides |
+
+#### Destination Strides (`dst_strides`)
+
+**Note:** `dst_strides` is reserved for future implementation and is **currently not supported**. The destination is always written in contiguous format. Providing `dst_strides` will result in an error.
+
+
+### Supported Data Type Combinations
 
 | Source Type | Destination Type | Operation |
 |-------------|------------------|-----------|
@@ -94,21 +120,18 @@ struct reorder_data_types_t {
 
 ### `reorder_quant_params_t`
 
-Quantization parameters for scale and zero-point, using a flexible structure for future extensibility:
+Quantization parameters for scale and zero-point:
 
 ```cpp
 struct reorder_quant_params_t {
-  /**
-   * Individual quantization parameter (scale or zero-point)
-   */
   struct quant_t {
     const void *buff;              // Pointer to quantization data buffer
     data_type_t dt;                // Data type of the buffer
-    std::vector<int64_t> dims;     // Dimensions of the quantization tensor
+    std::vector<int64_t> dims;     // Dimensions (mandatory, must match tensor dims)
   };
 
-  quant_t scale;        // Scale factor (currently f32 only)
-  quant_t zero_point;   // Zero point offset (currently s32 only)
+  quant_t scale;        // Scale factor (f32 only)
+  quant_t zero_point;   // Zero point offset (s32 only)
 };
 ```
 
@@ -117,19 +140,46 @@ struct reorder_quant_params_t {
 | Parameter | Supported Type | Description |
 |-----------|---------------|-------------|
 | `scale` | `f32` | Scale factor (must be positive and finite) |
-| `zero_point` | `s32` | Zero point offset (must be in [-128, 127] for INT8, [0, 255] for UINT8) |
+| `zero_point` | `s32` | Zero point offset |
 
-**Quantization Granularities (via `dims`):**
 
-| Granularity | `dims` Value | Description |
-|-------------|--------------|-------------|
-| Per-tensor | `{}` (empty) | Single scale/zp for entire tensor (currently supported) |
-| Per-channel | `{num_channels}` | One scale/zp per channel (future) |
-| Per-group | `{num_groups, group_size}` | Grouped quantization (future) |
+## Quantization Granularities
 
-**Default Values (when `buff` is nullptr):**
-- `scale`: 1.0f
-- `zero_point`: 0
+The `dims` field determines the quantization granularity. **dims is mandatory** and must match the tensor dimensionality.
+
+### 1D Tensor (shape = [N])
+
+| Granularity | dims | Total Values | Description |
+|-------------|------|--------------|-------------|
+| Per-tensor | `{1}` | 1 | Single scale/zp for all elements |
+| Per-channel | `{N}` | N | Different scale/zp for each element |
+
+### 2D Tensor (shape = [M, N])
+
+| Granularity | dims | Total Values | Description |
+|-------------|------|--------------|-------------|
+| Per-tensor | `{1, 1}` | 1 | Single scale/zp for entire matrix |
+| Per-channel | `{1, N}` | N | Different scale/zp for each column |
+| Per-group | `{G, N}` | G × N | G groups across rows, each with N values |
+
+**Per-group constraint:** M must be divisible by G (M % G == 0)
+
+### 3D Tensor (shape = [batch, M, N])
+
+| Granularity | dims | Total Values | Description |
+|-------------|------|--------------|-------------|
+| Per-tensor | `{1, 1, 1}` | 1 | Single scale/zp for entire tensor |
+| Per-channel | `{1, 1, N}` | N | Different scale/zp for each column |
+| Per-group | `{1, G, N}` | G × N | G groups across rows, each with N values |
+
+**Per-group constraint:** M must be divisible by G (M % G == 0)
+
+### Per-Group Index Calculation
+
+For per-group quantization with dims `{G, N}`:
+- `group_size = M / G`
+- `group_idx = row / group_size`
+- `index = group_idx * N + col`
 
 
 ### `reorder_algo_t`
@@ -139,7 +189,7 @@ Algorithm selection for the reorder operation:
 ```cpp
 enum class reorder_algo_t : int {
   none = -1,        // No specific algorithm
-  DT = 0,           // Decision tree based algorithm selection
+  DT = 0,           // Decision tree based algorithm selection (recommended)
   native = 1,       // Native vectorized implementation (AVX512)
   reference = 2,    // Reference scalar implementation
   algo_count        // Number of algorithms (must be last)
@@ -150,191 +200,341 @@ enum class reorder_algo_t : int {
 
 | Algorithm | Description | Best For |
 |-----------|-------------|----------|
-| `native` | AVX512 vectorized implementation | Large buffers |
+| `native` | AVX512 vectorized implementation | Large buffers (≥64 elements) |
 | `reference` | Scalar implementation | Small buffers or debugging |
 | `DT` | Decision tree based selection | General use (recommended) |
 
 
 ## Usage Examples
 
-### Example 1: BF16 to INT8 Quantization
+### Example 1: Per-Tensor Quantization (BF16 → INT8)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 
-int bf16_to_int8_quantization_example() {
-  using namespace zendnnl::lowoha;
+int bf16_to_int8_per_tensor_example() {
+  using namespace zendnnl::lowoha::reorder;
   
-  constexpr size_t nelems = 1024;
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Per-tensor: single scale and zero_point
   float scale = 0.5f;
   int32_t zero_point = 0;
   
-  // Allocate buffers
-  // BF16 data is stored as uint16_t
-  std::vector<uint16_t> input_bf16(nelems);
-  std::vector<int8_t> output_int8(nelems);
+  // Allocate buffers (BF16 stored as uint16_t)
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_int8(M * N);
   
-  // Initialize BF16 input (example: fill with some values)
-  for (size_t i = 0; i < nelems; ++i) {
-    float val = static_cast<float>(i) * 0.1f - 50.0f;
-    // Convert float to bf16 (simplified)
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(float));
-    input_bf16[i] = static_cast<uint16_t>(bits >> 16);
-  }
+  // Initialize input...
   
   // Configure reorder parameters
-  lowoha_reorder_params_t params;
-  params.dtypes.src = data_type_t::bf16;
-  params.dtypes.dst = data_type_t::s8;
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};  // 2D matrix (mandatory)
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1} for 2D
   params.quant_params.scale.buff = &scale;
   params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};  // per-tensor
+  
   params.quant_params.zero_point.buff = &zero_point;
   params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};  // per-tensor
+  
   params.algo = reorder_algo_t::DT;
   
   // Execute quantization
-  status_t status = reorder_direct(
-    input_bf16.data(),
-    output_int8.data(),
-    nelems,
-    params
-  );
+  status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
   
   return (status == status_t::success) ? 0 : -1;
 }
 ```
 
-### Example 2: INT8 to BF16 Dequantization
+### Example 2: Per-Channel Quantization (BF16 → INT8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int bf16_to_int8_per_channel_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 4;
+  
+  // Per-channel: different scale/zp for each column (N values)
+  std::vector<float> scales = {0.25f, 0.5f, 0.75f, 1.0f};
+  std::vector<int32_t> zero_points = {0, 5, -5, 10};
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_int8(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-channel: dims = {1, N} for 2D (N values, one per column)
+  params.quant_params.scale.buff = scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, N};  // per-channel
+  
+  params.quant_params.zero_point.buff = zero_points.data();
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, N};  // per-channel
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute quantization
+  status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 3: Per-Group Quantization (BF16 → INT8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int bf16_to_int8_per_group_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 8;   // Rows
+  constexpr int64_t N = 4;   // Columns
+  constexpr int64_t G = 2;   // Number of groups (M % G == 0)
+  // group_size = M / G = 4 rows per group
+  
+  // Per-group: G × N total values (each group has N scale/zp values)
+  // Layout: [group0_col0, group0_col1, ..., group0_colN-1, group1_col0, ...]
+  std::vector<float> scales = {
+    0.25f, 0.5f, 0.75f, 1.0f,    // Group 0: different per column
+    0.5f, 1.0f, 1.5f, 2.0f       // Group 1: different per column
+  };
+  std::vector<int32_t> zero_points = {
+    0, 5, -5, 10,                // Group 0
+    -10, 0, 5, 15                // Group 1
+  };
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_int8(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-group: dims = {G, N} for 2D (G×N total values)
+  params.quant_params.scale.buff = scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {G, N};  // per-group
+  
+  params.quant_params.zero_point.buff = zero_points.data();
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {G, N};  // per-group
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute quantization
+  status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 4: Dequantization (INT8 → BF16)
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 
 int int8_to_bf16_dequantization_example() {
-  using namespace zendnnl::lowoha;
+  using namespace zendnnl::lowoha::reorder;
   
-  constexpr size_t nelems = 1024;
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
   float scale = 0.5f;
   int32_t zero_point = 0;
   
   // Allocate buffers
-  std::vector<int8_t> input_int8(nelems);
-  std::vector<uint16_t> output_bf16(nelems);
+  std::vector<int8_t> input_int8(M * N);
+  std::vector<uint16_t> output_bf16(M * N);
   
-  // Initialize INT8 input
-  for (size_t i = 0; i < nelems; ++i) {
-    input_int8[i] = static_cast<int8_t>((i % 256) - 128);
-  }
+  // Initialize input...
   
   // Configure reorder parameters
-  lowoha_reorder_params_t params;
-  params.dtypes.src = data_type_t::s8;
-  params.dtypes.dst = data_type_t::bf16;
+  reorder_params_t params;
+  params.src_dtype = data_type_t::s8;
+  params.dst_dtype = data_type_t::bf16;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1}
   params.quant_params.scale.buff = &scale;
   params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
   params.quant_params.zero_point.buff = &zero_point;
   params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
   params.algo = reorder_algo_t::DT;
   
   // Execute dequantization
-  status_t status = reorder_direct(
-    input_int8.data(),
-    output_bf16.data(),
-    nelems,
-    params
-  );
+  status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
   
   return (status == status_t::success) ? 0 : -1;
 }
 ```
 
-### Example 3: BF16 to UINT8 Quantization
+### Example 5: Strided Source Memory
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 
-int bf16_to_uint8_quantization_example() {
-  using namespace zendnnl::lowoha;
+int strided_reorder_example() {
+  using namespace zendnnl::lowoha::reorder;
   
-  constexpr size_t nelems = 1024;
+  // Logical shape: [4, 4] but embedded in [4, 8] physical memory
+  constexpr int64_t M = 4;
+  constexpr int64_t N = 4;
+  constexpr int64_t physical_cols = 8;  // Padded for alignment
+  
   float scale = 0.5f;
-  int32_t zero_point = 128;  // Typical zero-point for unsigned quantization
+  int32_t zero_point = 0;
   
-  // Allocate buffers
-  // BF16 data is stored as uint16_t
-  std::vector<uint16_t> input_bf16(nelems);
-  std::vector<uint8_t> output_uint8(nelems);
+  // Source: [4 × 8] physical layout, reading [4 × 4] logical
+  std::vector<uint16_t> input_bf16(M * physical_cols);
+  // Destination: contiguous [4 × 4]
+  std::vector<int8_t> output_int8(M * N);
   
-  // Initialize BF16 input (example: fill with some values)
-  for (size_t i = 0; i < nelems; ++i) {
-    float val = static_cast<float>(i) * 0.1f - 50.0f;
-    // Convert float to bf16 (simplified)
-    uint32_t bits;
-    std::memcpy(&bits, &val, sizeof(float));
-    input_bf16[i] = static_cast<uint16_t>(bits >> 16);
-  }
+  // Initialize input with data in columns 0-3, padding in columns 4-7...
   
   // Configure reorder parameters
-  lowoha_reorder_params_t params;
-  params.dtypes.src = data_type_t::bf16;
-  params.dtypes.dst = data_type_t::u8;
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};  // Logical shape
+  params.dst_shape = {M, N};  // Must match src_shape
+  params.src_strides = {physical_cols, 1};  // stride_M=8, stride_N=1
+  // dst_strides not set - destination is always contiguous
+  
   params.quant_params.scale.buff = &scale;
   params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
   params.quant_params.zero_point.buff = &zero_point;
   params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
   params.algo = reorder_algo_t::DT;
   
-  // Execute quantization
-  status_t status = reorder_direct(
-    input_bf16.data(),
-    output_uint8.data(),
-    nelems,
-    params
-  );
+  // Execute - reads strided input, writes contiguous output
+  status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
   
   return (status == status_t::success) ? 0 : -1;
 }
 ```
 
-### Example 4: UINT8 to BF16 Dequantization
+### Example 6: 3D Batched Tensor with Per-Tensor Scale
 
 ```cpp
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 
-int uint8_to_bf16_dequantization_example() {
-  using namespace zendnnl::lowoha;
+int batched_reorder_example() {
+  using namespace zendnnl::lowoha::reorder;
   
-  constexpr size_t nelems = 1024;
+  constexpr int64_t batch = 4;
+  constexpr int64_t M = 32;
+  constexpr int64_t N = 64;
+  
   float scale = 0.5f;
-  int32_t zero_point = 128;  // Typical zero-point for unsigned quantization
+  int32_t zero_point = 0;
   
-  // Allocate buffers
-  std::vector<uint8_t> input_uint8(nelems);
-  std::vector<uint16_t> output_bf16(nelems);
+  std::vector<uint16_t> input_bf16(batch * M * N);
+  std::vector<int8_t> output_int8(batch * M * N);
   
-  // Initialize UINT8 input
-  for (size_t i = 0; i < nelems; ++i) {
-    input_uint8[i] = static_cast<uint8_t>(i % 256);
-  }
+  // Initialize input...
   
-  // Configure reorder parameters
-  lowoha_reorder_params_t params;
-  params.dtypes.src = data_type_t::u8;
-  params.dtypes.dst = data_type_t::bf16;
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {batch, M, N};  // 3D batched matrix
+  params.dst_shape = {batch, M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1, 1} for 3D
   params.quant_params.scale.buff = &scale;
   params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1, 1};
+  
   params.quant_params.zero_point.buff = &zero_point;
   params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1, 1};
+  
   params.algo = reorder_algo_t::DT;
   
-  // Execute dequantization
-  status_t status = reorder_direct(
-    input_uint8.data(),
-    output_bf16.data(),
-    nelems,
-    params
-  );
+  status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
   
   return (status == status_t::success) ? 0 : -1;
 }
 ```
+
+
+## Validation
+
+The operator performs the following validations:
+
+1. **Null pointer checks:** Source and destination buffers must not be null
+2. **Shape validation:** src_shape and dst_shape must be non-empty with all positive dimensions
+3. **Shape matching:** src_shape and dst_shape must be identical (error thrown if different)
+4. **Data type validation:** Source/destination type combination must be supported
+5. **Scale validation:** Must be finite (for f32)
+6. **Zero-point validation:** Must be within valid range for target type
+7. **Dims validation:** Must match tensor dimensionality and follow granularity rules
+8. **Per-group validation:** M must be divisible by G
+9. **Destination strides:** dst_strides must be empty (strided destination not currently supported)
+
+
+## Implementation Support Matrix
+
+The following table shows which combinations have optimized (AVX512) vs reference implementations:
+
+### BF16 ↔ S8/U8
+
+| Granularity | Source Contiguous | Source Strided (last_stride=1) | Source Strided (other) |
+|-------------|-------------------|--------------------------------|------------------------|
+| Per-tensor | ✅ Optimal | ✅ Optimal | ⚙️ Reference |
+| Per-channel | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
+| Per-group | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
+
+**Legend:**
+- ✅ **Optimal:** AVX512 vectorized implementation for best performance
+- ⚙️ **Reference:** Scalar implementation (functionally correct, lower throughput)
+
+**Notes:**
+- Strided source memory with `stride_N = 1` (last dimension contiguous) can use optimal path for per-tensor
+- Per-channel and per-group granularities currently use reference implementation
+- The `DT` algorithm automatically selects the best available implementation
+- Destination memory is always written contiguously (strided destination not currently supported)
+
+
+## Performance Considerations
+
+- **Algorithm Selection:** Use `DT` (default) for automatic selection based on buffer size and configuration
+- **Vectorization:** `native` algorithm uses AVX512 for large buffers (≥64 elements) with supported configurations
+- **Threading:** Set `num_threads` to control parallelism (0 = use all available)
+- **Source Memory Layout:** Contiguous source memory is fastest; strided source with last_stride=1 can still use optimal path
+- **Destination Memory:** Always written contiguously (strided destination not currently supported)
+- **Granularity:** Per-tensor is fastest with optimal support; per-channel/per-group use reference implementation

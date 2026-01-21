@@ -24,7 +24,7 @@ void matmul_config_t::set_default_config() {
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
   set_weight_cache(1);
-  set_zp_comp_cache(true);  // Disable ZP compensation caching by default
+  set_zp_comp_cache(true);  // Enable ZP compensation caching by default
 }
 
 status_t matmul_config_t::set_user_config(json config_json) {

@@ -74,6 +74,18 @@ int main() {
     run_lowoha_reorder_int8_to_bf16_test();
     run_lowoha_reorder_bf16_to_uint8_test();
     run_lowoha_reorder_uint8_to_bf16_test();
+    run_lowoha_reorder_bf16_to_s8_per_tensor_test();
+    run_lowoha_reorder_bf16_to_s8_per_channel_test();
+    run_lowoha_reorder_bf16_to_s8_per_group_test();
+    run_lowoha_reorder_bf16_to_s8_mixed_granularity_test();
+    run_lowoha_reorder_bf16_to_s8_batched_test();
+    run_lowoha_reorder_s8_to_bf16_per_tensor_test();
+    run_lowoha_reorder_s8_to_bf16_per_channel_test();
+    run_lowoha_reorder_s8_to_bf16_per_group_test();
+    run_lowoha_reorder_s8_to_bf16_mixed_granularity_test();
+    run_lowoha_reorder_bf16_to_s8_strided_2d_test();
+    run_lowoha_reorder_bf16_to_s8_strided_3d_test();
+    run_lowoha_reorder_bf16_to_s8_strided_row_padding_test();
 
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,

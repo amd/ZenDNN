@@ -69,7 +69,9 @@ inline int32_t* cache_or_compute_zp_compensation(
   
   // Only cache 1D compensation (src_zp only case) since it depends only on weights
   // 2D compensation depends on source data which changes per inference
-  const bool can_cache = (wei_zp == 0 && src_zp != 0) && is_weights_const &&
+  // Caching is enabled by default and requires weights to be constant
+  const bool can_cache = (wei_zp == 0 && src_zp != 0) && 
+                         is_weights_const &&
                          ops::matmul_config_t::instance().get_zp_comp_cache();
   
   // Static LRU cache for 1D zero-point compensation
