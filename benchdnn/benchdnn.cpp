@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
   std::string op, input_file;
   benchdnn::global_options options;
   options.ndims = 2;
-  bool isLOWOHA = false;
+  bool isLOWOHA = true;
   benchdnn::InputMode inputMode = benchdnn::InputMode::COMMAND_LINE;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -65,8 +65,19 @@ int main(int argc, char **argv) {
         return NOT_OK;
       }
     }
-    else if (arg.find("--lowoha") == 0) {
-      isLOWOHA = true;
+    else if (arg.find("--lowoha=") == 0) {
+      std::string value = arg.substr(9);
+      std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+      if (value == "true" || value == "1") {
+        isLOWOHA = true;
+      }
+      else if (value == "false" || value == "0") {
+        isLOWOHA = false;
+      }
+      else {
+        commonlog_error("Invalid value for --lowoha. Use true/false or 1/0.");
+        return NOT_OK;
+      }
     }
     else if (arg.find("--input_model_file=") == 0) {
       input_file = arg.substr(19);
@@ -77,9 +88,6 @@ int main(int argc, char **argv) {
         commonlog_error("Multiple input modes specified. Please specify only one input mode.");
         return NOT_OK;
       }
-    }
-    else if (arg.find("--lowoha") == 0) {
-      isLOWOHA = true;
     }
     else {
       int status = benchdnn::parseCLArgs(options, arg);

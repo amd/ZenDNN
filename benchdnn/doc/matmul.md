@@ -1,4 +1,4 @@
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Matmul Operator
 
@@ -11,12 +11,12 @@ This describes all ways to provide input for the matmul benchmark in BenchDNN, i
 Run the matmul benchmark using one of the following input methods:
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha]
+./install/benchdnn/bin/benchdnn --op=matmul [--input_file=inputs.txt] [--input_model_file=model_file] [command-line options] [--ndims=3] [--lowoha=true/false]
 ```
 
 > **Note:**
 > - When `--ndims=3` is specified, the benchmark runs in batched matmul (BMM) mode. In this case, `bs` (batch size) must be provided.
-> - The `--lowoha` option enables benchmarking for low overhead API. Use `--lowoha` in combination with other matmul options to benchmark low overhead scenarios.
+> - The `--lowoha` option controls benchmarking for low overhead API. User can pass either `--lowoha=true` or `--lowoha=false`. If not specified, it is enabled by default.
 
 ### 1. Input File (`--input_file`)
 Provide a file with one configuration per line. Each line should contain:
