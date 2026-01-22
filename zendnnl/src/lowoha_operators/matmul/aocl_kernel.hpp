@@ -197,6 +197,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
  * @param ldc Leading dimension of each matrix C
  * @param dtypes Data types structure specifying src, weight, and dst tensor types
  * @param batch_count Number of independent matrix multiplications to perform
+ * @param Batch_A Number of A matrices (1 for broadcasting A across all batches)
+ * @param Batch_B Number of B matrices (1 for broadcasting B across all batches)
  * @param mem_format_a Memory format specifier for matrices A
  * @param mem_format_b Memory format specifier for matrices B
  * @param src_stride Byte offset between consecutive A matrices in the batch
@@ -208,7 +210,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                float beta,
-                               void *C, int ldc, matmul_data_types &dtypes, int batch_count, char mem_format_a,
+                               void *C, int ldc, matmul_data_types &dtypes, int batch_count,
+                               int Batch_A, int Batch_B, char mem_format_a,
                                char mem_format_b, size_t src_stride, size_t weight_stride,
                                size_t dst_stride, const matmul_params &lowoha_param, const void *bias,
                                int num_threads);

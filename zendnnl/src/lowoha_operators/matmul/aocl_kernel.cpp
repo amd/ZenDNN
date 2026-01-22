@@ -1651,7 +1651,8 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
                                int N, int K, float alpha, const void *A, int lda, const void *B, int ldb,
                                float beta, void *C, int ldc, matmul_data_types &dtypes, int batch_count,
-                               char mem_format_a, char mem_format_b, size_t src_stride, size_t weight_stride,
+                               int Batch_A, int Batch_B, char mem_format_a, char mem_format_b,
+                               size_t src_stride, size_t weight_stride,
                                size_t dst_stride, const matmul_params &lowoha_param, const void *bias,
                                int num_threads) {
 
@@ -1678,16 +1679,21 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   dim_t group_size = batch_count;
 #endif
 
+  // Helper lambda for batch index calculation (handles broadcasting)
+  auto get_batch_idx = [](int b, int batch_size) {
+    return (batch_size == 1) ? 0 : (b % batch_size);
+  };
+
   // Prepare pointer arrays for matrices
   std::vector<const void *> a_ptrs(batch_count);
   std::vector<const void *> b_ptrs(batch_count);
   std::vector<void *> c_ptrs(batch_count);
 
-  // Set up pointers for each batch
+  // Set up pointers for each batch (with broadcasting support)
   #pragma omp parallel for num_threads(num_threads)
   for (int b = 0; b < batch_count; ++b) {
-    a_ptrs[b] = static_cast<const uint8_t *>(A) + b * src_stride;
-    b_ptrs[b] = static_cast<const uint8_t *>(B) + b * weight_stride;
+    a_ptrs[b] = static_cast<const uint8_t *>(A) + get_batch_idx(b, Batch_A) * src_stride;
+    b_ptrs[b] = static_cast<const uint8_t *>(B) + get_batch_idx(b, Batch_B) * weight_stride;
     c_ptrs[b] = static_cast<uint8_t *>(C) + b * dst_stride;
   }
 

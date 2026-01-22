@@ -119,6 +119,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                               M, N, K, alpha,
                               src, lda, weight, ldb, beta, dst, ldc,
                               params.dtypes, batch_count,
+                              batch_params.Batch_A, batch_params.Batch_B,
                               params.mem_format_a, params.mem_format_b,
                               src_batch_stride_bytes, weight_batch_stride_bytes, dst_batch_stride_bytes,
                               params, bias, num_threads);
