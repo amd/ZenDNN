@@ -91,6 +91,47 @@ status_t validate_conv_inputs(
     return status_t::success;
 }
 
+status_t validate_depthwise_params(conv_params &params) {
+    const conv_dims_t &dims = params.dims;
+    const depthwise_params &dw = params.depthwise;
+
+    if (!dw.is_depthwise) {
+        log_error("DepthwiseConv validation: is_depthwise flag not set");
+        return status_t::failure;
+    }
+
+    // Validate depth_multiplier
+    if (dw.depth_multiplier == 0) {
+        log_error("DepthwiseConv validation failed: depth_multiplier cannot be zero");
+        return status_t::failure;
+    }
+
+    // For depthwise convolution:
+    // - groups must equal in_channels
+    // - out_channels must equal in_channels * depth_multiplier
+
+    uint64_t expected_groups = dims.in_channels;
+    uint64_t expected_out_channels = dims.in_channels * dw.depth_multiplier;
+
+    if (dw.groups != expected_groups) {
+        log_error("DepthwiseConv validation failed: groups must equal in_channels. ",
+                  "Expected groups: ", expected_groups, ", Got: ", dw.groups);
+        return status_t::failure;
+    }
+
+    if (dims.out_channels != expected_out_channels) {
+        log_error("DepthwiseConv validation failed: out_channels must equal in_channels * depth_multiplier. ",
+                  "Expected out_channels: ", expected_out_channels, ", Got: ", dims.out_channels,
+                  " (in_channels=", dims.in_channels, ", depth_multiplier=", dw.depth_multiplier, ")");
+        return status_t::failure;
+    }
+
+    log_info("DepthwiseConv validation successful: in_channels=", dims.in_channels,
+             ", depth_multiplier=", dw.depth_multiplier, ", out_channels=", dims.out_channels,
+             ", groups=", dw.groups);
+    return status_t::success;
+}
+
 } // namespace conv
 } // namespace lowoha
 } // namespace zendnnl

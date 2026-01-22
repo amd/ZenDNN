@@ -88,6 +88,21 @@ struct conv_dims_t {
 };
 
 /**
+ * @brief Depthwise convolution parameters
+ */
+struct depthwise_params {
+    // Grouped/Depthwise convolution settings
+    uint32_t groups;               ///< Number of groups for grouped convolution (1 = standard conv)
+    bool is_depthwise;             ///< True if depthwise convolution (groups == in_channels)
+    uint32_t depth_multiplier;     ///< Depth multiplier for depthwise (output_channels_per_group)
+
+    /**
+     * @brief Default constructor
+     */
+    depthwise_params() : groups(1), is_depthwise(false), depth_multiplier(1) {}
+};
+
+/**
  * @brief Convolution algorithm type
  */
  enum class conv_algo_t {
@@ -102,12 +117,13 @@ struct conv_dims_t {
 };
 
 /**
- * @brief Conv parameters (strides, padding, dilations)
+ * @brief Conv parameters (strides, padding, dilations, grouped/depthwise settings)
  *
  * Represents all parameters needed for convolution computation:
  * - Strides: Step size for filter movement
  * - Padding: Zero-padding around input
  * - Dilations: Spacing between filter elements
+ * - Grouped/Depthwise: Settings for grouped and depthwise convolutions
  */
 struct conv_params {
 
@@ -124,6 +140,8 @@ struct conv_params {
     // Dilations [dilation_h, dilation_w]
     uint32_t dilation_h;           ///< Dilation along height dimension
     uint32_t dilation_w;           ///< Dilation along width dimension
+
+    depthwise_params depthwise;     ///< Depthwise convolution parameters
 
     // Data format (currently NHWC only)
     char data_format[8];           ///< Data format string ("NHWC")
@@ -142,6 +160,7 @@ struct conv_params {
                         pad_top(0), pad_left(0),
                         pad_bottom(0), pad_right(0),
                         dilation_h(1), dilation_w(1),
+                        depthwise(),
                         dims(), algo(conv_algo_t::none),
                         dtypes(), postop_() {
         std::strncpy(data_format, "NHWC", 8);

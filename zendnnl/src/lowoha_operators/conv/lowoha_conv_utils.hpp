@@ -45,6 +45,19 @@ status_t validate_conv_inputs(
     conv_params &params
 );
 
+/**
+ * @brief Validate DepthwiseConv2D specific constraints
+ *
+ * Validates that the convolution parameters are correct for depthwise:
+ * - groups must equal in_channels
+ * - out_channels must equal in_channels * depth_multiplier
+ * - depth_multiplier must be >= 1
+ *
+ * @param params       Convolution parameters
+ * @return status_t::success if valid, status_t::failure otherwise
+ */
+status_t validate_depthwise_params(conv_params &params);
+
 } // namespace conv
 } // namespace lowoha
 } // namespace zendnnl

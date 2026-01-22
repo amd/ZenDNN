@@ -67,10 +67,21 @@ status_t conv_direct(
         return status_t::failure;
     }
 
+    // Additional validation for depthwise convolution
+    if (params.depthwise.is_depthwise) {
+        if (validate_depthwise_params(params) != status_t::success) {
+            return status_t::failure;
+        }
+    }
+
     // Log API call
     [[maybe_unused]] std::ostringstream ss;
     if (apilog_info_enabled() || is_profile) {
-        ss << "LOWOHA conv_direct: batch=" << dims.batch
+        ss << "LOWOHA conv_direct";
+        if (params.depthwise.is_depthwise) {
+            ss << " (DEPTHWISE)";
+        }
+        ss << ": batch=" << dims.batch
            << ", in_h=" << dims.in_height << ", in_w=" << dims.in_width
            << ", in_c=" << dims.in_channels
            << ", out_h=" << dims.out_height << ", out_w=" << dims.out_width
@@ -79,8 +90,12 @@ status_t conv_direct(
            << ", stride_h=" << params.stride_h << ", stride_w=" << params.stride_w
            << ", pad_t=" << params.pad_top << ", pad_l=" << params.pad_left
            << ", pad_b=" << params.pad_bottom << ", pad_r=" << params.pad_right
-           << ", dilation_h=" << params.dilation_h << ", dilation_w=" << params.dilation_w
-           << ", bias=" << (bias != nullptr ? "true" : "false");
+           << ", dilation_h=" << params.dilation_h << ", dilation_w=" << params.dilation_w;
+        if (params.depthwise.is_depthwise) {
+            ss << ", groups=" << params.depthwise.groups
+               << ", depth_multiplier=" << params.depthwise.depth_multiplier;
+        }
+        ss << ", bias=" << (bias != nullptr ? "true" : "false");
     }
     apilog_info(ss.str());
 
