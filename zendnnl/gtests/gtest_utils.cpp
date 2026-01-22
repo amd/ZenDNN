@@ -178,7 +178,13 @@ EmbagType::EmbagType() {
   offsets_dtype = indices_dtype;
   fp16_scale_bias = std::rand() % 2;
   strided = std::rand() % 2;
-  use_LOWOHA = std::rand() % 2;
+  // LOWOHA configuration based on command-line input or random selection
+  if (!cmd_lowoha.empty()) {
+    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  }
+  else {
+    use_LOWOHA = std::rand() % 2;
+  }
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
   }
@@ -198,7 +204,13 @@ EmbeddingType::EmbeddingType() {
   indices_dtype = rand() % 2 == 0 ? data_type_t::s32 : data_type_t::s64;
   fp16_scale_bias = std::rand() % 2;
   strided = std::rand() % 2;
-  use_LOWOHA = std::rand() % 2;
+  // LOWOHA configuration based on command-line input or random selection
+  if (!cmd_lowoha.empty()) {
+    use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
+  }
+  else {
+    use_LOWOHA = std::rand() % 2;
+  }
   if (cmd_num_threads) {
     num_threads = cmd_num_threads;
   }
