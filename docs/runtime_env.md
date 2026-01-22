@@ -57,6 +57,13 @@ The auto-tuner automatically selects the best-performing algorithm for matrix mu
 
 ---
 
+## Embedding Bag Algorithm Configuration
+
+| Variable | Description | Default | Valid Values |
+|----------|-------------|---------|--------------|
+| `ZENDNNL_EMBAG_ALGO` | Selects the Embedding Bag algorithm/kernel to use | `none` (auto-select) | `1` (native kernel), `2`  (FBGEMM)
+---
+
 ## Logging Configuration
 
 Log levels control the verbosity of messages for different modules.

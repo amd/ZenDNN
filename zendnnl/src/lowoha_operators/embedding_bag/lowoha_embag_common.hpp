@@ -82,7 +82,7 @@ struct embag_params_t {
     num_embeddings(0), embedding_dim(0), num_threads(0),
     num_indices(0), num_bags(0), is_weights(false), include_last_offset(false),
     padding_idx(-1), fp16_scale_bias(false), dst_stride(0),
-    kernel(embag_kernel_t::fbgemm) {}
+    kernel(embag_kernel_t::none) {}
 };
 
 /**
@@ -106,13 +106,13 @@ inline static embag_kernel_t kernel_select(embag_params_t &params) {
   int32_t algo = params.kernel == embag_kernel_t::none ?
                  embag_config.get_kernel() : static_cast<int32_t>(params.kernel);
 
-  // Default to native kernel if none specified
+  // Default to fbgemm kernel if none specified
   embag_kernel_t kernel = (algo == static_cast<int32_t>(embag_kernel_t::none)) ?
-                          embag_kernel_t::native : static_cast<embag_kernel_t>(algo);
+                          embag_kernel_t::fbgemm : static_cast<embag_kernel_t>(algo);
 
   // TODO: Add auto_tuner kernel selection
   if (kernel == embag_kernel_t::auto_tuner) {
-    kernel = embag_kernel_t::native;
+    kernel = embag_kernel_t::fbgemm;
   }
 
   // Update params with selected kernel
