@@ -105,13 +105,15 @@ inline int32_t* cache_or_compute_zp_compensation(
     
     // Compute column sums of weights
     std::vector<int32_t> wei_col_sum(N, 0);
-    for (int k = 0; k < K; ++k) {
-      for (int n = 0; n < N; ++n) {
+    #pragma omp parallel for
+    for (int n = 0; n < N; ++n) {
+      for (int k = 0; k < K; ++k) {
         wei_col_sum[n] += wei_buff[wei_s0 * k + wei_s1 * n];
       }
     }
     
     // Compute compensation: zp_comp[n] = -src_zp * wei_col_sum[n]
+    #pragma omp parallel for
     for (int n = 0; n < N; ++n) {
       zp_comp_acc[n] = -src_zp * wei_col_sum[n];
     }

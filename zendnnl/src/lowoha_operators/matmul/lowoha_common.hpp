@@ -134,11 +134,12 @@ struct matmul_params {
   char mem_format_b;                              ///< Memory format for matrix B
   matmul_algo_t lowoha_algo;                      ///< Selected algorithm
   uint64_t num_threads;                            ///< Number of threads
+  std::string plugin_op;                       ///< Plugin op name
   /**
    * @brief Default constructor for matmul_params
    */
   matmul_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
-    mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0) {}
+    mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0), plugin_op("") {}
 };
 
 } // namespace matmul
