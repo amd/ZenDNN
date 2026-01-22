@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ struct Key_matmul {
   unsigned int ldb = 1;
   const void *weights = nullptr;
   uint32_t algo = static_cast<uint32_t>(matmul_algo_t::none);
+  size_t extra_input_hash = 0;
 
   // Default constructor, uses the default member initializers
   Key_matmul() = default;
@@ -40,18 +41,18 @@ struct Key_matmul {
   Key_matmul(bool TransB, unsigned int K,
              unsigned int N,
              unsigned int ldb, const void *B_Array,
-             uint32_t algo)
+             uint32_t algo, size_t extra_input_hash = 0)
     : transpose_weights(TransB), k(K), n(N),
-      ldb(ldb), weights(B_Array), algo(algo) {
+      ldb(ldb), weights(B_Array), algo(algo), extra_input_hash(extra_input_hash) {
   }
 
   // Constructor to initialize all member variables
   Key_matmul(bool TransA, bool TransB, unsigned int M, unsigned int K,
              unsigned int N,
              unsigned int lda, unsigned int ldb, const void *B_Array,
-             uint32_t algo)
+             uint32_t algo, size_t extra_input_hash = 0)
     : transpose_inp(TransA), transpose_weights(TransB), m(M), k(K), n(N),
-      lda(lda), ldb(ldb), weights(B_Array), algo(algo) {
+      lda(lda), ldb(ldb), weights(B_Array), algo(algo), extra_input_hash(extra_input_hash) {
   }
 
   bool operator==(const Key_matmul &other) const {
@@ -64,6 +65,7 @@ struct Key_matmul {
             && transpose_inp == other.transpose_inp
             && transpose_weights == other.transpose_weights
             && algo == other.algo
+            && extra_input_hash == other.extra_input_hash
            );
   }
 };
@@ -83,6 +85,7 @@ struct hash<Key_matmul> {
     seed = zendnnl::common::hash_combine(seed, (k.ldb));
     seed = zendnnl::common::hash_combine(seed, (k.weights));
     seed = zendnnl::common::hash_combine(seed, (k.algo));
+    seed = zendnnl::common::hash_combine(seed, (k.extra_input_hash));
     return seed;
   }
 };

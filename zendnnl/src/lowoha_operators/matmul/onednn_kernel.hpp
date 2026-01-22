@@ -47,7 +47,8 @@ namespace matmul {
  */
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
-                           void *C, int ldc, matmul_params &lowoha_params, matmul_batch_params_t &batch_params,
+                           void *C, int ldc, matmul_params &lowoha_params,
+                           matmul_batch_params_t &batch_params,
                            const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const,
                            size_t src_batch_stride=static_cast<size_t>(-1),
                            size_t weight_batch_stride=static_cast<size_t>(-1),
@@ -61,25 +62,15 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
  * @param key Unique cache key for the weight tensor
  * @param dnnl_params OneDNN parameters containing weight memory info
  * @param weight_cache_type Type of caching mechanism to use
- * @param matmul_attr OneDNN primitive attributes for the matmul operation
+ * @param dnnl_weight_mem OneDNN weight memory
+ * @param dnnl_blocked_weight_mem OneDNN blocked weight memory
  * @param eng OneDNN engine for memory operations
  * @return true if reordering was performed
  */
 bool reorderAndCacheWeights(Key_matmul key,
                             onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::primitive_attr matmul_attr, dnnl::engine &eng);
-/**
- * @brief Reorder weights to OneDNN's optimal format without caching
- *
- * Performs one-time weight matrix reordering from user format to
- * OneDNN's internal optimized memory layout for better performance.
- *
- * @param dnnl_params OneDNN parameters containing source and destination memory
- * @param matmul_attr OneDNN primitive attributes for the matmul operation
- * @param eng OneDNN engine for executing the reorder operation
- */
-void reorderWeights(onednn_utils_t::onednn_matmul_params &dnnl_params,
-                    dnnl::primitive_attr matmul_attr, dnnl::engine &eng);
+                            dnnl::memory &dnnl_weight_mem, dnnl::memory &dnnl_blocked_weight_mem,
+                            dnnl::engine &eng);
 #endif
 
 } // namespace matmul
