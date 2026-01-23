@@ -308,7 +308,7 @@ jobs:
         echo "Running ai_gtests with filter: presub"
         
         # Run the ai_gtests with configurable parameters
-        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*:-AITests/TestBatch*" |& tee $WORKSPACE/ai_gtest_output.log
+        ./install/gtests/gtests --ai_test_mode pre-sub --gtest_filter="AITests/*" |& tee $WORKSPACE/ai_gtest_output.log
         
         # Check for test failures
         if grep -F -q "[  FAILED  ]" "$WORKSPACE/ai_gtest_output.log"; then
