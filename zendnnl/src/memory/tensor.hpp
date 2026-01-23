@@ -232,12 +232,23 @@ class tensor_t final : public hash_object_t {
 
   /** @brief Check if tensor is transposed based on strides.
    *
-   *  A tensor is considered transposed if the second-to-last stride is less than
-   *  the last stride, indicating column-major or transposed memory layout.
-   *  For a 2D tensor with strides [s0, s1], transposed means s0 < s1.
-   *  For a 3D tensor with strides [s0, s1, s2], checks s1 < s2.
+   *  Determines if the tensor has a non-row-major (transposed/column-major) layout
+   *  by comparing the innermost two dimensions' strides against expected row-major
+   *  pattern.
    *
-   *  @return true if the tensor layout is transposed, false otherwise.
+   *  Row-major criteria:
+   *  - Column stride (last dim) should be 1
+   *  - Row stride (second-to-last dim) should be >= column size
+   *
+   *  Examples:
+   *  - [M, N] with strides [N, 1]: row-major -> NOT transposed
+   *  - [M, N] with strides [1, M]: column-major -> IS transposed
+   *  - [B, M, N] with strides [M*N, N, 1]: row-major -> NOT transposed
+   *  - [B, M, N] with strides [M*N, 1, M]: column-major -> IS transposed
+   *
+   *  @note Returns false for tensors with fewer than 2 dimensions.
+   *  @return true if the tensor layout is transposed (non-row-major),
+   *          false otherwise.
    */
   bool is_transposed() const;
 

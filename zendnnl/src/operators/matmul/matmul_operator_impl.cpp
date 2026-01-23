@@ -300,6 +300,12 @@ status_t matmul_impl_t::validate() {
     forced_kernel = "aocl_dlp_blocked";
   }
 
+  if (weights->get_layout() & uint16_t(tensor_layout_t::blocked) ||
+      weights->get_layout() & uint16_t(tensor_layout_t::blocked_aocl)) {
+    apilog_info("Weight tensor is prepacked, forcing aocl_dlp_blocked kernel");
+    forced_kernel = "aocl_dlp_blocked";
+  }
+
   if (bias) {
     auto bias_size  = bias->get_size();
     if (bias_size.size() != output_size.size()) {

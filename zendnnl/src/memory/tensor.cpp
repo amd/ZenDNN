@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -136,12 +136,22 @@ tensor_t::index_type tensor_t::get_stride(uint32_t index_) const {
 
 bool tensor_t::is_transposed() const {
   const auto &strides = option.stride;
-  if (strides.size() < 2) {
+  const auto &sizes = option.size;
+
+  if (strides.size() < 2 || sizes.size() < 2) {
     return false;
   }
-  // Compare second-to-last and last stride
-  // Transposed if row stride < column stride (for row-major base)
-  return strides[strides.size() - 2] < strides[strides.size() - 1];
+
+  size_t dim = strides.size();
+  auto row_stride = strides[dim - 2];
+  auto col_stride = strides[dim - 1];
+  auto col_size = sizes[dim - 1];
+
+  // TODO: Add support for col stride > 1
+  // Row-major check: col_stride should be 1, row_stride should be >= col_size
+  bool is_row_major = (col_stride == 1) && (row_stride >= col_size);
+
+  return !is_row_major;
 }
 
 tensor_t  &tensor_t::set_quant_scale(const tensor_t &quant_scale_) {
