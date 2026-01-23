@@ -157,6 +157,56 @@ static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale,
 }
 
 //==============================================================================
+// Inline helper functions for FP32 scalar quantization/dequantization
+//==============================================================================
+
+/**
+ * @brief Quantize a single fp32 value to int8
+ * @param f32_val Input fp32 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Quantized int8 value
+ */
+static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale, int zp) {
+  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
+}
+
+/**
+ * @brief Quantize a single fp32 value to uint8
+ * @param f32_val Input fp32 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Quantized uint8 value
+ */
+static inline uint8_t quantize_f32_to_u8_scalar(float f32_val, float scale, int zp) {
+  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
+}
+
+/**
+ * @brief Dequantize a single int8 value to fp32
+ * @param s8_val Input int8 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Dequantized fp32 value
+ */
+static inline float dequantize_s8_to_f32_scalar(int8_t s8_val, float scale, int zp) {
+  return (static_cast<float>(s8_val) - zp) * scale;
+}
+
+/**
+ * @brief Dequantize a single uint8 value to fp32
+ * @param u8_val Input uint8 value
+ * @param scale Scale factor
+ * @param zp Zero point
+ * @return Dequantized fp32 value
+ */
+static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale, int zp) {
+  return (static_cast<float>(u8_val) - zp) * scale;
+}
+
+//==============================================================================
 // Inline helper functions for granularity detection and index calculation
 //==============================================================================
 

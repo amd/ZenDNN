@@ -74,8 +74,9 @@ status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
       return status_t::failure;
     }
 
-    // For bf16->int8 quantization, check zero_point is within valid range
-    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+    // For bf16/f32->int8 quantization, check zero_point is within valid range
+    if ((params.src_dtype == data_type_t::bf16 || params.src_dtype == data_type_t::f32) && 
+        params.dst_dtype == data_type_t::s8) {
       int32_t zp_val = *static_cast<const int32_t *>(params.quant_params.zero_point.buff);
       if (zp_val < -128 || zp_val > 127) {
         log_error("Invalid zero_point for int8 quantization. Must be in [-128, 127]. Got: ",
@@ -84,8 +85,9 @@ status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
       }
     }
 
-    // For bf16->uint8 quantization, check zero_point is within valid range
-    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+    // For bf16/f32->uint8 quantization, check zero_point is within valid range
+    if ((params.src_dtype == data_type_t::bf16 || params.src_dtype == data_type_t::f32) && 
+        params.dst_dtype == data_type_t::u8) {
       int32_t zp_val = *static_cast<const int32_t *>(params.quant_params.zero_point.buff);
       if (zp_val < 0 || zp_val > 255) {
         log_error("Invalid zero_point for uint8 quantization. Must be in [0, 255]. Got: ",
@@ -268,11 +270,19 @@ bool is_reorder_supported(data_type_t src_dtype, data_type_t dst_dtype) {
   // 2. s8 -> bf16 (dequantization)
   // 3. bf16 -> u8 (quantization)
   // 4. u8 -> bf16 (dequantization)
+  // 5. f32 -> s8 (quantization)
+  // 6. s8 -> f32 (dequantization)
+  // 7. f32 -> u8 (quantization)
+  // 8. u8 -> f32 (dequantization)
 
   return (src_dtype == data_type_t::bf16 && dst_dtype == data_type_t::s8) ||
          (src_dtype == data_type_t::s8 && dst_dtype == data_type_t::bf16) ||
          (src_dtype == data_type_t::bf16 && dst_dtype == data_type_t::u8) ||
-         (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::bf16);
+         (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::bf16) ||
+         (src_dtype == data_type_t::f32 && dst_dtype == data_type_t::s8) ||
+         (src_dtype == data_type_t::s8 && dst_dtype == data_type_t::f32) ||
+         (src_dtype == data_type_t::f32 && dst_dtype == data_type_t::u8) ||
+         (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::f32);
 }
 
 status_t validate_reorder_shape(const reorder_params_t &params) {

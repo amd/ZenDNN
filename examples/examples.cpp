@@ -70,6 +70,7 @@ int main() {
      *  Demonstrates data type conversion between BF16 and INT8/UINT8 using
      *  the low-overhead LOWOHA reorder API.
      */
+    // BF16 <-> INT8/UINT8 tests
     run_lowoha_reorder_bf16_to_int8_test();
     run_lowoha_reorder_int8_to_bf16_test();
     run_lowoha_reorder_bf16_to_uint8_test();
@@ -86,6 +87,24 @@ int main() {
     run_lowoha_reorder_bf16_to_s8_strided_2d_test();
     run_lowoha_reorder_bf16_to_s8_strided_3d_test();
     run_lowoha_reorder_bf16_to_s8_strided_row_padding_test();
+
+    // FP32 <-> INT8/UINT8 tests
+    run_lowoha_reorder_f32_to_int8_test();
+    run_lowoha_reorder_int8_to_f32_test();
+    run_lowoha_reorder_f32_to_uint8_test();
+    run_lowoha_reorder_uint8_to_f32_test();
+    run_lowoha_reorder_f32_to_s8_per_tensor_test();
+    run_lowoha_reorder_f32_to_s8_per_channel_test();
+    run_lowoha_reorder_f32_to_s8_per_group_test();
+    run_lowoha_reorder_f32_to_s8_mixed_granularity_test();
+    run_lowoha_reorder_f32_to_s8_batched_test();
+    run_lowoha_reorder_s8_to_f32_per_tensor_test();
+    run_lowoha_reorder_s8_to_f32_per_channel_test();
+    run_lowoha_reorder_s8_to_f32_per_group_test();
+    run_lowoha_reorder_s8_to_f32_mixed_granularity_test();
+    run_lowoha_reorder_f32_to_s8_strided_2d_test();
+    run_lowoha_reorder_f32_to_s8_strided_3d_test();
+    run_lowoha_reorder_f32_to_s8_strided_row_padding_test();
 
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,

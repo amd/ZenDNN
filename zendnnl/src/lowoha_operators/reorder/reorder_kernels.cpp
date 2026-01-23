@@ -58,6 +58,16 @@ static inline __m256i float_to_bf16_vec(__m512 val) {
   return _mm512_cvtepi32_epi16(bf16);
 }
 
+/**
+ * @brief Batch convert BF16 array to float32 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 BF16 values (256-bit)
+ *   2. Zero-extend each 16-bit value to 32-bit integer
+ *   3. Shift left by 16 bits to place BF16 mantissa/exponent in float32 format
+ *   4. Reinterpret integer bits as float32
+ *   5. Scalar fallback handles remaining elements
+ */
 __attribute__((target("avx512f")))
 void bf16_to_float32_avx512(const uint16_t *input, float *output, size_t nelems) {
   size_t i = 0;
@@ -76,6 +86,16 @@ void bf16_to_float32_avx512(const uint16_t *input, float *output, size_t nelems)
   }
 }
 
+/**
+ * @brief Batch convert float32 array to BF16 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 float32 values (512-bit)
+ *   2. Apply round-to-nearest-even: add rounding bias (0x7FFF + LSB)
+ *   3. Shift right by 16 bits to extract upper 16 bits as BF16
+ *   4. Narrow 32-bit integers to 16-bit
+ *   5. Scalar fallback handles remaining elements with same rounding
+ */
 __attribute__((target("avx512f")))
 void float32_to_bf16_avx512(const float *input, uint16_t *output, size_t nelems) {
   size_t i = 0;
@@ -98,6 +118,18 @@ void float32_to_bf16_avx512(const float *input, uint16_t *output, size_t nelems)
   }
 }
 
+/**
+ * @brief Quantize BF16 array to int8 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 BF16 values and convert to float32
+ *   2. Divide by scale: scaled_val = val / scale
+ *   3. Round to nearest integer (banker's rounding via _mm512_cvtps_epi32)
+ *   4. Add zero_point: q = round(val/scale) + zp
+ *   5. Clamp to int8 range [-128, 127]
+ *   6. Narrow to int8 with saturation
+ *   7. Scalar fallback uses nearbyint() for consistent rounding
+ */
 __attribute__((target("avx512f")))
 void quantize_bf16_to_int8_avx512(const uint16_t *input, int8_t *output,
                                    size_t nelems, float scale, int zero_point) {
@@ -150,6 +182,17 @@ void quantize_bf16_to_int8_avx512(const uint16_t *input, int8_t *output,
   }
 }
 
+/**
+ * @brief Dequantize int8 array to BF16 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 int8 values (128-bit)
+ *   2. Sign-extend to 32-bit integers
+ *   3. Convert to float32
+ *   4. Dequantize: val = (x - zero_point) * scale
+ *   5. Convert float32 to BF16 with round-to-nearest-even
+ *   6. Scalar fallback handles remaining elements
+ */
 __attribute__((target("avx512f")))
 void dequantize_int8_to_bf16_avx512(const int8_t *input, uint16_t *output,
                                      size_t nelems, float scale, int zero_point) {
@@ -224,6 +267,18 @@ void dequantize_int8_to_bf16_ref(const int8_t *input, uint16_t *output,
   }
 }
 
+/**
+ * @brief Quantize BF16 array to uint8 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 BF16 values and convert to float32
+ *   2. Divide by scale: scaled_val = val / scale
+ *   3. Round to nearest integer (banker's rounding via _mm512_cvtps_epi32)
+ *   4. Add zero_point: q = round(val/scale) + zp
+ *   5. Clamp to uint8 range [0, 255]
+ *   6. Narrow to uint8 with unsigned saturation
+ *   7. Scalar fallback uses nearbyint() for consistent rounding
+ */
 __attribute__((target("avx512f")))
 void quantize_bf16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
                                     size_t nelems, float scale, int zero_point) {
@@ -276,6 +331,17 @@ void quantize_bf16_to_uint8_avx512(const uint16_t *input, uint8_t *output,
   }
 }
 
+/**
+ * @brief Dequantize uint8 array to BF16 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 uint8 values (128-bit)
+ *   2. Zero-extend to 32-bit integers (unsigned extension)
+ *   3. Convert to float32
+ *   4. Dequantize: val = (x - zero_point) * scale
+ *   5. Convert float32 to BF16 with round-to-nearest-even
+ *   6. Scalar fallback handles remaining elements
+ */
 __attribute__((target("avx512f")))
 void dequantize_uint8_to_bf16_avx512(const uint8_t *input, uint16_t *output,
                                       size_t nelems, float scale, int zero_point) {
@@ -347,6 +413,250 @@ void dequantize_uint8_to_bf16_ref(const uint8_t *input, uint16_t *output,
     uint32_t rounding_bias = 0x7FFF + lsb;
     bits += rounding_bias;
     output[i] = static_cast<uint16_t>(bits >> 16);
+  }
+}
+
+//==============================================================================
+// FP32 <-> INT8 Conversion Functions
+//==============================================================================
+
+/**
+ * @brief Quantize float32 array to int8 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 float32 values (512-bit)
+ *   2. Divide by scale: scaled_val = val / scale
+ *   3. Round to nearest integer (banker's rounding via _mm512_cvtps_epi32)
+ *   4. Add zero_point: q = round(val/scale) + zp
+ *   5. Clamp to int8 range [-128, 127]
+ *   6. Narrow to int8 with signed saturation
+ *   7. Scalar fallback uses nearbyint() for consistent rounding
+ */
+__attribute__((target("avx512f")))
+void quantize_f32_to_int8_avx512(const float *input, int8_t *output,
+                                  size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+
+  // Prepare broadcast vectors for scale and zero_point
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512i zp_vec_i32 = _mm512_set1_epi32(zero_point);
+  __m512i min_val_i32 = _mm512_set1_epi32(-128);
+  __m512i max_val_i32 = _mm512_set1_epi32(127);
+
+  // Process 16 elements at a time using AVX512
+  for (; i + 15 < nelems; i += 16) {
+    // Load 16 float32 values
+    __m512 float_vals = _mm512_loadu_ps(input + i);
+
+    // Step 1: Divide by scale (in float)
+    __m512 scaled_vals = _mm512_div_ps(float_vals, scale_vec);
+
+    // Step 2: Round to nearest integer FIRST (matches reference nearbyint behavior)
+    __m512i rounded_vals = _mm512_cvtps_epi32(scaled_vals);
+
+    // Step 3: Add zero_point (in int32)
+    __m512i with_zp = _mm512_add_epi32(rounded_vals, zp_vec_i32);
+
+    // Step 4: Clamp to int8 range [-128, 127] AFTER rounding (matches reference)
+    __m512i clamped_vals = _mm512_max_epi32(min_val_i32, _mm512_min_epi32(max_val_i32, with_zp));
+
+    // Narrow to int8 with saturation
+    __m128i int8_vals = _mm512_cvtsepi32_epi8(clamped_vals);
+
+    // Store 16 int8 values
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(output + i), int8_vals);
+  }
+
+  // Handle remaining elements with scalar code
+  for (; i < nelems; ++i) {
+    // Apply quantization (use nearbyint for consistent rounding with reference)
+    int32_t q = static_cast<int32_t>(std::nearbyint(input[i] / scale)) + zero_point;
+    q = std::max(-128, std::min(127, q));
+    output[i] = static_cast<int8_t>(q);
+  }
+}
+
+/**
+ * @brief Dequantize int8 array to float32 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 int8 values (128-bit)
+ *   2. Sign-extend to 32-bit integers
+ *   3. Convert to float32
+ *   4. Dequantize: val = (x - zero_point) * scale
+ *   5. Store 16 float32 values directly
+ *   6. Scalar fallback handles remaining elements
+ */
+__attribute__((target("avx512f")))
+void dequantize_int8_to_f32_avx512(const int8_t *input, float *output,
+                                    size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+
+  // Prepare broadcast vectors
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 zp_vec = _mm512_set1_ps(static_cast<float>(zero_point));
+
+  // Process 16 elements at a time using AVX512
+  for (; i + 15 < nelems; i += 16) {
+    // Load 16 int8 values
+    __m128i int8_vals = _mm_loadu_si128(reinterpret_cast<const __m128i *>(input + i));
+
+    // Extend to 32-bit integers (sign extension)
+    __m512i int32_vals = _mm512_cvtepi8_epi32(int8_vals);
+
+    // Dequantize: (x - zp) * scale
+    __m512 float_vals = _mm512_mul_ps(
+        _mm512_sub_ps(_mm512_cvtepi32_ps(int32_vals), zp_vec),
+        scale_vec
+    );
+
+    // Store 16 float32 values
+    _mm512_storeu_ps(output + i, float_vals);
+  }
+
+  // Handle remaining elements with scalar code
+  for (; i < nelems; ++i) {
+    output[i] = (static_cast<float>(input[i]) - zero_point) * scale;
+  }
+}
+
+void quantize_f32_to_int8_ref(const float *input, int8_t *output,
+                               size_t nelems, float scale, int zero_point) {
+  for (size_t i = 0; i < nelems; ++i) {
+    // Apply quantization: (val / scale) + zero_point (use nearbyint for consistent rounding)
+    int32_t q = static_cast<int32_t>(std::nearbyint(input[i] / scale)) + zero_point;
+    q = std::max(-128, std::min(127, q));
+    output[i] = static_cast<int8_t>(q);
+  }
+}
+
+void dequantize_int8_to_f32_ref(const int8_t *input, float *output,
+                                 size_t nelems, float scale, int zero_point) {
+  for (size_t i = 0; i < nelems; ++i) {
+    // Dequantize: (x - zp) * scale
+    output[i] = (static_cast<float>(input[i]) - zero_point) * scale;
+  }
+}
+
+//==============================================================================
+// FP32 <-> UINT8 Conversion Functions
+//==============================================================================
+
+/**
+ * @brief Quantize float32 array to uint8 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 float32 values (512-bit)
+ *   2. Divide by scale: scaled_val = val / scale
+ *   3. Round to nearest integer (banker's rounding via _mm512_cvtps_epi32)
+ *   4. Add zero_point: q = round(val/scale) + zp
+ *   5. Clamp to uint8 range [0, 255]
+ *   6. Narrow to uint8 with unsigned saturation
+ *   7. Scalar fallback uses nearbyint() for consistent rounding
+ */
+__attribute__((target("avx512f")))
+void quantize_f32_to_uint8_avx512(const float *input, uint8_t *output,
+                                   size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+
+  // Prepare broadcast vectors for scale and zero_point
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512i zp_vec_i32 = _mm512_set1_epi32(zero_point);
+  __m512i min_val_i32 = _mm512_set1_epi32(0);
+  __m512i max_val_i32 = _mm512_set1_epi32(255);
+
+  // Process 16 elements at a time using AVX512
+  for (; i + 15 < nelems; i += 16) {
+    // Load 16 float32 values
+    __m512 float_vals = _mm512_loadu_ps(input + i);
+
+    // Step 1: Divide by scale (in float)
+    __m512 scaled_vals = _mm512_div_ps(float_vals, scale_vec);
+
+    // Step 2: Round to nearest integer FIRST (matches reference nearbyint behavior)
+    __m512i rounded_vals = _mm512_cvtps_epi32(scaled_vals);
+
+    // Step 3: Add zero_point (in int32)
+    __m512i with_zp = _mm512_add_epi32(rounded_vals, zp_vec_i32);
+
+    // Step 4: Clamp to uint8 range [0, 255] AFTER rounding (matches reference)
+    __m512i int32_vals = _mm512_max_epi32(min_val_i32, _mm512_min_epi32(max_val_i32, with_zp));
+
+    // Narrow to uint8 with saturation using unsigned saturation
+    __m128i uint8_vals = _mm512_cvtusepi32_epi8(int32_vals);
+
+    // Store 16 uint8 values
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(output + i), uint8_vals);
+  }
+
+  // Handle remaining elements with scalar code
+  for (; i < nelems; ++i) {
+    // Apply quantization (use nearbyint for consistent rounding with reference)
+    int32_t q = static_cast<int32_t>(std::nearbyint(input[i] / scale)) + zero_point;
+    q = std::max(0, std::min(255, q));
+    output[i] = static_cast<uint8_t>(q);
+  }
+}
+
+/**
+ * @brief Dequantize uint8 array to float32 array using AVX512.
+ *
+ * Computation steps (vectorized for 16 elements):
+ *   1. Load 16 uint8 values (128-bit)
+ *   2. Zero-extend to 32-bit integers (unsigned extension)
+ *   3. Convert to float32
+ *   4. Dequantize: val = (x - zero_point) * scale
+ *   5. Store 16 float32 values directly
+ *   6. Scalar fallback handles remaining elements
+ */
+__attribute__((target("avx512f")))
+void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
+                                     size_t nelems, float scale, int zero_point) {
+  size_t i = 0;
+
+  // Prepare broadcast vectors
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 zp_vec = _mm512_set1_ps(static_cast<float>(zero_point));
+
+  // Process 16 elements at a time using AVX512
+  for (; i + 15 < nelems; i += 16) {
+    // Load 16 uint8 values
+    __m128i uint8_vals = _mm_loadu_si128(reinterpret_cast<const __m128i *>(input + i));
+
+    // Extend to 32-bit integers (zero extension for unsigned)
+    __m512i int32_vals = _mm512_cvtepu8_epi32(uint8_vals);
+
+    // Dequantize: (x - zp) * scale
+    __m512 float_vals = _mm512_mul_ps(
+        _mm512_sub_ps(_mm512_cvtepi32_ps(int32_vals), zp_vec),
+        scale_vec
+    );
+
+    // Store 16 float32 values
+    _mm512_storeu_ps(output + i, float_vals);
+  }
+
+  // Handle remaining elements with scalar code
+  for (; i < nelems; ++i) {
+    output[i] = (static_cast<float>(input[i]) - zero_point) * scale;
+  }
+}
+
+void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
+                                size_t nelems, float scale, int zero_point) {
+  for (size_t i = 0; i < nelems; ++i) {
+    // Apply quantization: (val / scale) + zero_point
+    int32_t q = static_cast<int32_t>(std::round(input[i] / scale) + zero_point);
+    q = std::max(0, std::min(255, q));
+    output[i] = static_cast<uint8_t>(q);
+  }
+}
+
+void dequantize_uint8_to_f32_ref(const uint8_t *input, float *output,
+                                  size_t nelems, float scale, int zero_point) {
+  for (size_t i = 0; i < nelems; ++i) {
+    // Dequantize: (x - zp) * scale
+    output[i] = (static_cast<float>(input[i]) - zero_point) * scale;
   }
 }
 

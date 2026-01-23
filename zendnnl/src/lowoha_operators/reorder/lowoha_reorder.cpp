@@ -100,6 +100,62 @@ static void reorder_dynamic_impl(const void *src, void *dst, size_t nelems,
     }
     return;
   }
+
+  // FP32 -> INT8 (Quantization)
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    int8_t *dst_int8 = static_cast<int8_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      quantize_f32_to_int8_avx512(src_f32, dst_int8, nelems, scale, zero_point);
+    }
+    else {
+      quantize_f32_to_int8_ref(src_f32, dst_int8, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // INT8 -> FP32 (Dequantization)
+  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f32) {
+    const int8_t *src_int8 = static_cast<const int8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      dequantize_int8_to_f32_avx512(src_int8, dst_f32, nelems, scale, zero_point);
+    }
+    else {
+      dequantize_int8_to_f32_ref(src_int8, dst_f32, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // FP32 -> UINT8 (Quantization)
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      quantize_f32_to_uint8_avx512(src_f32, dst_uint8, nelems, scale, zero_point);
+    }
+    else {
+      quantize_f32_to_uint8_ref(src_f32, dst_uint8, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // UINT8 -> FP32 (Dequantization)
+  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f32) {
+    const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      dequantize_uint8_to_f32_avx512(src_uint8, dst_f32, nelems, scale, zero_point);
+    }
+    else {
+      dequantize_uint8_to_f32_ref(src_uint8, dst_f32, nelems, scale, zero_point);
+    }
+    return;
+  }
 }
 
 /**
@@ -185,6 +241,82 @@ static void reorder_granular_scaler_impl_2d(const void *src, void *dst,
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
         dst_bf16[work_idx] = dequantize_u8_to_bf16_scalar(src_uint8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+
+  // FP32 -> INT8
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    int8_t *dst_int8 = static_cast<int8_t *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // FP32 -> UINT8
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // INT8 -> FP32
+  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f32) {
+    const int8_t *src_int8 = static_cast<const int8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // UINT8 -> FP32
+  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f32) {
+    const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[work_idx], scale, zp);
       }
     });
     return;
@@ -284,6 +416,99 @@ static void reorder_granular_scaler_impl_3d(const void *src, void *dst,
     });
     return;
   }
+
+  // FP32 -> INT8
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    int8_t *dst_int8 = static_cast<int8_t *>(dst);
+
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_int8[work_idx] = quantize_f32_to_s8_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // FP32 -> UINT8
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint8_t *dst_uint8 = static_cast<uint8_t *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_uint8[work_idx] = quantize_f32_to_u8_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // INT8 -> FP32
+  if (params.src_dtype == data_type_t::s8 && params.dst_dtype == data_type_t::f32) {
+    const int8_t *src_int8 = static_cast<const int8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = dequantize_s8_to_f32_scalar(src_int8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+  
+  // UINT8 -> FP32
+  if (params.src_dtype == data_type_t::u8 && params.dst_dtype == data_type_t::f32) {
+    const uint8_t *src_uint8 = static_cast<const uint8_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+}
+
+/**
+ * @brief Helper function to get element size for a given data type
+ */
+static inline size_t get_dtype_size(data_type_t dtype) {
+  switch (dtype) {
+    case data_type_t::f32:  return sizeof(float);
+    case data_type_t::bf16: return sizeof(uint16_t);
+    case data_type_t::s8:   return sizeof(int8_t);
+    case data_type_t::u8:   return sizeof(uint8_t);
+    default:                return 1;
+  }
 }
 
 /**
@@ -298,8 +523,8 @@ static void reorder_granular_scaler_impl_3d(const void *src, void *dst,
 static void reorder_wrapper(const void *src, void *dst, size_t nelems,
                                       const reorder_params_t &params,
                                       reorder_algo_t algo) {
-  const size_t src_elem_size = (params.src_dtype == data_type_t::bf16) ? sizeof(uint16_t) : sizeof(uint8_t);
-  const size_t dst_elem_size = (params.dst_dtype == data_type_t::bf16) ? sizeof(uint16_t) : sizeof(uint8_t);
+  const size_t src_elem_size = get_dtype_size(params.src_dtype);
+  const size_t dst_elem_size = get_dtype_size(params.dst_dtype);
 
   // Check granularity type
   granularity_type_t granularity = get_granularity_type(params);
@@ -334,7 +559,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
   // 1D strided (stride != 1, otherwise would be contiguous)
   if (shape_size == 1) {
     const int64_t stride = strides[0];
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(params.num_threads)
     for (int64_t i = 0; i < static_cast<int64_t>(nelems); ++i) {
       const uint8_t *src_ptr = static_cast<const uint8_t *>(src) + i * stride * src_elem_size;
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + i * dst_elem_size;
@@ -352,7 +577,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
 
     // Optimized path: if stride_N == 1, rows are contiguous - use AVX512 per row
     if (stride_N == 1) {
-      #pragma omp parallel for
+      #pragma omp parallel for num_threads(params.num_threads)
       for (int64_t i = 0; i < M; ++i) {
         const uint8_t *src_ptr = static_cast<const uint8_t *>(src) + i * stride_M * src_elem_size;
         uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + i * N * dst_elem_size;
@@ -360,7 +585,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
       }
     } else {
       // Fallback: element-by-element for non-contiguous rows
-      #pragma omp parallel for collapse(2)
+      #pragma omp parallel for collapse(2) num_threads(params.num_threads)
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           const int64_t src_offset = i * stride_M + j * stride_N;
@@ -388,7 +613,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
 
     // Optimized path: if stride_N == 1, rows are contiguous - use AVX512 per row
     if (stride_N == 1) {
-      #pragma omp parallel for collapse(2)
+      #pragma omp parallel for collapse(2) num_threads(params.num_threads)
       for (int64_t b = 0; b < batch; ++b) {
         for (int64_t i = 0; i < M; ++i) {
           const int64_t src_offset = b * stride_batch + i * stride_M;
@@ -402,7 +627,7 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
       }
     } else {
       // Fallback: element-by-element for non-contiguous rows
-      #pragma omp parallel for collapse(3)
+      #pragma omp parallel for collapse(3) num_threads(params.num_threads)
       for (int64_t b = 0; b < batch; ++b) {
         for (int64_t i = 0; i < M; ++i) {
           for (int64_t j = 0; j < N; ++j) {
@@ -480,10 +705,10 @@ status_t reorder_direct(const void *src, void *dst,
     profiler.tbp_start();
   }
 
-  const int num_threads = params.num_threads > 0 ? params.num_threads :
-  omp_get_max_threads();
+  params.num_threads = params.num_threads > 0 ? params.num_threads :
+                       omp_get_max_threads();
 
-  reorder_threadlimit thread_guard(num_threads);
+  reorder_threadlimit thread_guard(params.num_threads);
   // Execute reorder (handles all cases: contiguous, 1D/2D/3D strided)
   reorder_wrapper(src, dst, nelems, params, algo);
 

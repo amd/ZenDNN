@@ -36,10 +36,11 @@ using zendnnl::memory::data_type_t;
  *
  * Supported conversions:
  * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
  *
  * Quantization formulas:
- * - Quantize:   int_val = clamp(round(bf16_val / scale) + zero_point, min, max)
- * - Dequantize: bf16_val = (int_val - zero_point) * scale
+ * - Quantize:   int_val = clamp(round(src_val / scale) + zero_point, min, max)
+ * - Dequantize: dst_val = (int_val - zero_point) * scale
  *
  * Shape: [nelems] for 1D, [M, N] for 2D, [batch, M, N] for 3D (mandatory)
  * Strides: Optional for non-contiguous source memory

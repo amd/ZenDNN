@@ -187,6 +187,102 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test();
  */
 int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test();
 
+//==============================================================================
+// FP32 Basic Data Type Conversion Tests
+//==============================================================================
+
+/** @fn run_lowoha_reorder_f32_to_int8_test
+ *  @brief Demonstrates FP32 to INT8 quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_int8_test();
+
+/** @fn run_lowoha_reorder_int8_to_f32_test
+ *  @brief Demonstrates INT8 to FP32 dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_int8_to_f32_test();
+
+/** @fn run_lowoha_reorder_f32_to_uint8_test
+ *  @brief Demonstrates FP32 to UINT8 quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_uint8_test();
+
+/** @fn run_lowoha_reorder_uint8_to_f32_test
+ *  @brief Demonstrates UINT8 to FP32 dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_uint8_to_f32_test();
+
+//==============================================================================
+// FP32 Granularity Tests
+//==============================================================================
+
+/** @fn run_lowoha_reorder_f32_to_s8_per_tensor_test
+ *  @brief Demonstrates FP32 to S8 per-tensor quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_per_tensor_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_per_channel_test
+ *  @brief Demonstrates FP32 to S8 per-channel quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_per_channel_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_per_group_test
+ *  @brief Demonstrates FP32 to S8 per-group quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_per_group_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_mixed_granularity_test
+ *  @brief Demonstrates FP32 to S8 mixed granularity quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_mixed_granularity_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_batched_test
+ *  @brief Demonstrates FP32 to S8 batched quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_batched_test();
+
+//==============================================================================
+// FP32 Dequantization Tests (INT8 -> FP32)
+//==============================================================================
+
+/** @fn run_lowoha_reorder_s8_to_f32_per_tensor_test
+ *  @brief Demonstrates S8 to FP32 per-tensor dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_per_tensor_test();
+
+/** @fn run_lowoha_reorder_s8_to_f32_per_channel_test
+ *  @brief Demonstrates S8 to FP32 per-channel dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_per_channel_test();
+
+/** @fn run_lowoha_reorder_s8_to_f32_per_group_test
+ *  @brief Demonstrates S8 to FP32 per-group dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_per_group_test();
+
+/** @fn run_lowoha_reorder_s8_to_f32_mixed_granularity_test
+ *  @brief Demonstrates S8 to FP32 mixed granularity dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_mixed_granularity_test();
+
+//==============================================================================
+// FP32 Strided Memory Layout Tests
+//==============================================================================
+
+/** @fn run_lowoha_reorder_f32_to_s8_strided_2d_test
+ *  @brief Demonstrates FP32 to S8 strided 2D matrix quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_strided_2d_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_strided_3d_test
+ *  @brief Demonstrates FP32 to S8 strided 3D batched matrix quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_strided_3d_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_strided_row_padding_test
+ *  @brief Demonstrates FP32 to S8 row-padded matrix quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_strided_row_padding_test();
+
 } // namespace examples
 } // namespace zendnnl
 

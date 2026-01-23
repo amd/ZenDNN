@@ -151,6 +151,114 @@ void quantize_bf16_to_uint8_ref(const uint16_t *input, uint8_t *output,
 void dequantize_uint8_to_bf16_ref(const uint8_t *input, uint16_t *output,
                                    size_t nelems, float scale, int zero_point);
 
+//==============================================================================
+// FP32 <-> INT8/UINT8 Conversion Functions
+//==============================================================================
+
+/**
+ * @brief Quantize FP32 input to int8 output using AVX512.
+ *
+ * Formula: int8_val = clamp(round(f32_val / scale) + zero_point, -128, 127)
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination int8 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for quantization (must be positive and finite)
+ * @param zero_point Zero point offset
+ */
+void quantize_f32_to_int8_avx512(const float *input, int8_t *output,
+                                  size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Dequantize int8 input to FP32 output using AVX512.
+ *
+ * Formula: f32_val = (int8_val - zero_point) * scale
+ *
+ * @param input Pointer to source int8 data
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for dequantization (must be positive and finite)
+ * @param zero_point Zero point offset
+ */
+void dequantize_int8_to_f32_avx512(const int8_t *input, float *output,
+                                    size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Quantize FP32 input to int8 output using reference scalar implementation.
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination int8 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for quantization
+ * @param zero_point Zero point offset
+ */
+void quantize_f32_to_int8_ref(const float *input, int8_t *output,
+                               size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Dequantize int8 input to FP32 output using reference scalar implementation.
+ *
+ * @param input Pointer to source int8 data
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for dequantization
+ * @param zero_point Zero point offset
+ */
+void dequantize_int8_to_f32_ref(const int8_t *input, float *output,
+                                 size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Quantize FP32 input to uint8 output using AVX512.
+ *
+ * Formula: uint8_val = clamp(round(f32_val / scale) + zero_point, 0, 255)
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination uint8 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for quantization (must be positive and finite)
+ * @param zero_point Zero point offset
+ */
+void quantize_f32_to_uint8_avx512(const float *input, uint8_t *output,
+                                   size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Dequantize uint8 input to FP32 output using AVX512.
+ *
+ * Formula: f32_val = (uint8_val - zero_point) * scale
+ *
+ * @param input Pointer to source uint8 data
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for dequantization (must be positive and finite)
+ * @param zero_point Zero point offset
+ */
+void dequantize_uint8_to_f32_avx512(const uint8_t *input, float *output,
+                                     size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Quantize FP32 input to uint8 output using reference scalar implementation.
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination uint8 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for quantization
+ * @param zero_point Zero point offset
+ */
+void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
+                                size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Dequantize uint8 input to FP32 output using reference scalar implementation.
+ *
+ * @param input Pointer to source uint8 data
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor for dequantization
+ * @param zero_point Zero point offset
+ */
+void dequantize_uint8_to_f32_ref(const uint8_t *input, float *output,
+                                  size_t nelems, float scale, int zero_point);
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl

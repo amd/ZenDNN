@@ -5,34 +5,34 @@
 
 ## Overview
 
-The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization and dequantization workloads**. It provides a direct API to convert data between BF16 and INT8/UINT8 formats with configurable scale and zero-point parameters.
+The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization and dequantization workloads**. It provides a direct API to convert data between BF16/FP32 and INT8/UINT8 formats with configurable scale and zero-point parameters.
 
 Unlike the standard Reorder operator which uses the operator factory pattern, LowOHA Reorder provides a **function-based interface** optimized for:
 - Minimal execution overhead
-- Quantization (BF16 → INT8/UINT8)
-- Dequantization (INT8/UINT8 → BF16)
+- Quantization (BF16/FP32 → INT8/UINT8)
+- Dequantization (INT8/UINT8 → BF16/FP32)
 - Per-tensor, per-channel, and per-group quantization granularities
 - Strided (non-contiguous) source memory support
 
 
 ## Quantization/Dequantization Formulas
 
-### Quantization (BF16 → INT8)
+### Quantization (BF16/FP32 → INT8)
 
 $$
-\mathrm{int8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{bf16}}{\mathrm{scale}}) + \mathrm{zp}, -128, 127)
+\mathrm{int8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{input}}{\mathrm{scale}}) + \mathrm{zp}, -128, 127)
 $$
 
-### Quantization (BF16 → UINT8)
+### Quantization (BF16/FP32 → UINT8)
 
 $$
-\mathrm{uint8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{bf16}}{\mathrm{scale}}) + \mathrm{zp}, 0, 255)
+\mathrm{uint8} = \mathrm{clamp}(\mathrm{round}(\frac{\mathrm{input}}{\mathrm{scale}}) + \mathrm{zp}, 0, 255)
 $$
 
-### Dequantization (INT8/UINT8 → BF16)
+### Dequantization (INT8/UINT8 → BF16/FP32)
 
 $$
-\mathrm{bf16} = (\mathrm{int8} - \mathrm{zp}) \times \mathrm{scale}
+\mathrm{output} = (\mathrm{int8} - \mathrm{zp}) \times \mathrm{scale}
 $$
 
 
@@ -116,6 +116,10 @@ Source strides enable reading from non-contiguous source memory:
 | S8 (INT8) | BF16 | Dequantization |
 | BF16 | U8 (UINT8) | Quantization |
 | U8 (UINT8) | BF16 | Dequantization |
+| FP32 | S8 (INT8) | Quantization |
+| S8 (INT8) | FP32 | Dequantization |
+| FP32 | U8 (UINT8) | Quantization |
+| U8 (UINT8) | FP32 | Dequantization |
 
 
 ### `reorder_quant_params_t`
@@ -486,6 +490,142 @@ int batched_reorder_example() {
   params.algo = reorder_algo_t::DT;
   
   status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 7: FP32 Quantization (FP32 → INT8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_int8_quantization_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  float scale = 0.5f;
+  int32_t zero_point = 0;
+  
+  // Allocate buffers
+  std::vector<float> input_f32(M * N);
+  std::vector<int8_t> output_int8(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1} for 2D
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute quantization
+  status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 8: FP32 Dequantization (INT8 → FP32)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int int8_to_f32_dequantization_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  float scale = 0.5f;
+  int32_t zero_point = 0;
+  
+  // Allocate buffers
+  std::vector<int8_t> input_int8(M * N);
+  std::vector<float> output_f32(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::s8;
+  params.dst_dtype = data_type_t::f32;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1}
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute dequantization
+  status_t status = reorder_direct(input_int8.data(), output_f32.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 9: FP32 Per-Channel Quantization (FP32 → UINT8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_uint8_per_channel_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 4;
+  
+  // Per-channel: different scale/zp for each column
+  std::vector<float> scales = {0.25f, 0.5f, 0.75f, 1.0f};
+  std::vector<int32_t> zero_points = {128, 130, 125, 128};  // Typical for UINT8
+  
+  // Allocate buffers
+  std::vector<float> input_f32(M * N);
+  std::vector<uint8_t> output_uint8(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::u8;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-channel: dims = {1, N} for 2D
+  params.quant_params.scale.buff = scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, N};
+  
+  params.quant_params.zero_point.buff = zero_points.data();
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, N};
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute quantization
+  status_t status = reorder_direct(input_f32.data(), output_uint8.data(), params);
   
   return (status == status_t::success) ? 0 : -1;
 }
