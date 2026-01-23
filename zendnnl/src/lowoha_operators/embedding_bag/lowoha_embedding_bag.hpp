@@ -18,6 +18,7 @@
 #define _LOWOHA_EMBEDDING_BAG_HPP
 
 #include <omp.h>
+#include <vector>
 #include "lowoha_embag_common.hpp"
 
 namespace zendnnl {
@@ -117,6 +118,46 @@ zendnnl::common::status_t embedding_direct(
   const float *weights,
   void *dst,
   embag_params_t params);
+
+/**
+ * @brief Direct API for group embedding bag operation
+ *
+ * Performs multiple embedding bag operations in a single call. Each operation
+ * performs embedding bag lookup and reduction on its corresponding embedding table.
+ * This is useful for batching multiple embedding bag operations together.
+ *
+ * @param tables          Vector of pointers to embedding table data
+ * @param indices         Vector of pointers to indices arrays (int32 or int64)
+ * @param offsets         Vector of pointers to offsets arrays (int32 or int64)
+ * @param weights         Vector of pointers to (optional) weights arrays (float)
+ * @param dsts            Vector of pointers to output buffers
+ * @param params          Vector of embedding bag parameters for each operation
+ *
+ * @return status_t::success if all operations succeed, status_t::failure otherwise
+ *
+ * @note All vectors must have the same size. Each index i in the vectors
+ *       corresponds to one embedding bag operation.
+ *
+ * @par Example Usage:
+ * @code
+ *   std::vector<const void*> tables = {table1, table2};
+ *   std::vector<const void*> indices = {idx1, idx2};
+ *   std::vector<const void*> offsets = {off1, off2};
+ *   std::vector<const float*> weights = {nullptr, nullptr};
+ *   std::vector<void*> outputs = {out1, out2};
+ *   std::vector<embag_params_t> params = {params1, params2};
+ *
+ *   status_t status = group_embedding_bag_direct(
+ *       tables, indices, offsets, weights, outputs, params);
+ * @endcode
+ */
+zendnnl::common::status_t group_embedding_bag_direct(
+  const std::vector<const void*> &tables,
+  const std::vector<const void*> &indices,
+  const std::vector<const void*> &offsets,
+  const std::vector<const float*> &weights,
+  const std::vector<void*> &dsts,
+  const std::vector<embag_params_t> &params);
 
 } // namespace embag
 } // namespace lowoha

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -29,6 +29,10 @@
 
 namespace zendnnl {
 namespace examples {
+
+using namespace zendnnl::lowoha::embag;
+using zendnnl::interface::testlog_info;
+using zendnnl::interface::testlog_error;
 
 /** @fn embedding_bag_f32_kernel_example
  *  @brief Demonstrates embedding bag operator on fp32 inputs.
@@ -84,6 +88,18 @@ int embedding_bag_u4_ref_kernel_example();
  *  one of its fp32 computation based kernel.
  */
 int embedding_bag_u4_kernel_example();
+
+/** @fn group_embedding_bag_direct_example
+ *  @brief Demonstrates group embedding bag direct API for batched operations.
+ *
+ * Group embedding bag performs multiple embedding bag operations in a single call.
+ * This is useful when you have multiple embedding tables and want to batch the
+ * operations together for efficiency.
+ *
+ * This example demonstrates the direct LOWOHA API for group embedding bag
+ * operations using fp32 data types with sum reduction.
+ */
+int group_embedding_bag_direct_example();
 
 } // namespace examples
 } // namespace zendnnl

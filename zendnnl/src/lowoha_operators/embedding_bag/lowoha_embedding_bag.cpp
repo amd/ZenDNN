@@ -18,6 +18,7 @@
 #include "dispatch_kernel.hpp"
 
 #include <sstream>
+#include <vector>
 
 namespace zendnnl {
 namespace lowoha {
@@ -89,6 +90,40 @@ status_t embedding_direct(
 
   params.algo = embag_algo_t::none;
   return embedding_bag_direct(table, indices, nullptr, weights, dst, params);
+}
+
+status_t group_embedding_bag_direct(
+  const std::vector<const void*> &tables,
+  const std::vector<const void*> &indices,
+  const std::vector<const void*> &offsets,
+  const std::vector<const float*> &weights,
+  const std::vector<void*> &dsts,
+  const std::vector<embag_params_t> &params) {
+
+  apilog_info("LOWOHA group_embedding_bag_direct: num_ops=", tables.size());
+  const size_t num_ops = tables.size();
+
+  // Validate that all vectors have the same size
+  if (indices.size() != num_ops ||
+      offsets.size() != num_ops ||
+      weights.size() != num_ops ||
+      dsts.size() != num_ops ||
+      params.size() != num_ops) {
+    log_error("group_embedding_bag_direct: all input vectors must have the same size");
+    return status_t::failure;
+  }
+
+  // Execute each embedding bag operation
+  for (size_t i = 0; i < num_ops; ++i) {
+    status_t status = embedding_bag_direct(
+        tables[i], indices[i], offsets[i], weights[i], dsts[i], params[i]);
+    if (status != status_t::success) {
+      log_error("group_embedding_bag_direct: operation ", i, " failed");
+      return status_t::failure;
+    }
+  }
+
+  return status_t::success;
 }
 
 } // namespace embag
