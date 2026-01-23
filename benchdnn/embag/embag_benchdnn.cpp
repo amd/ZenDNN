@@ -286,7 +286,7 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
 }
 
 int bench(const std::string &in_filename, const std::string &out_filename,
-          size_t cache_size) {
+          const bool isLOWOHA, size_t cache_size) {
 
   // Open the input file for reading benchmark configurations
   std::ifstream infile(in_filename);
@@ -298,22 +298,33 @@ int bench(const std::string &in_filename, const std::string &out_filename,
   inputParser(infile, embagConfig);
 
   std::vector<std::pair<EmbagConfig, TimingStats>> embag_results;
-  int status = embag_benchdnn(embagConfig, embag_results, cache_size);
-  if (status != OK) {
-    testlog_error("Embag benchmark failed.");
-    return NOT_OK;
+  int status;
+
+  if (!isLOWOHA) {
+    status = embag_benchdnn(embagConfig, embag_results, cache_size);
+    if (status != OK) {
+      testlog_error("Embag benchmark failed.");
+      return NOT_OK;
+    }
+  }
+  else {
+    status = embag_lowoha_benchdnn(embagConfig, embag_results, cache_size);
+    if (status != OK) {
+      testlog_error("LOWOHA Embag benchmark failed.");
+      return NOT_OK;
+    }
   }
 
   // Print results to console for each configuration
-  print_results(embag_results, std::cout);
+  print_results(embag_results, std::cout, isLOWOHA);
 
   std::ofstream outfile(out_filename);
   if (!outfile.is_open()) {
     testlog_error("Error: Cannot write to output file ", out_filename, "\n");
-    return 1;
+    return NOT_OK;
   }
   // Export results to CSV file
-  log_results(embag_results, outfile);
+  log_results(embag_results, outfile, isLOWOHA);
   outfile.close();
 
   std::cout << "Timing results written to " << out_filename << std::endl;

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include "benchdnn.hpp"
 #include "embag_utils.hpp"
 #include "embag_tensor_factory.hpp"
+#include "embag_lowoha.hpp"
 
 namespace zendnnl {
 namespace benchdnn {
@@ -71,10 +72,12 @@ int embag_benchdnn(std::vector<EmbagConfig> configs,
  *
  * @param in_filename Path to the input file containing benchmark configurations.
  * @param out_filename Path to the output CSV file for writing results.
+ * @param isLOWOHA If true, runs the LOWOHA (Low Overhead API) benchmark variant.
+ * @param cache_size Cache size for cold cache flushing (if enabled).
  * @return int Returns OK (0) on success, NOT_OK (1) on failure.
  */
 int bench(const std::string &in_filename, const std::string &out_filename,
-          size_t cache_size);
+          const bool isLOWOHA, size_t cache_size);
 
 } // namespace embag
 } // namespace benchdnn

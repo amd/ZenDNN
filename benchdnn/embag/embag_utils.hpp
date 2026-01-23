@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -91,24 +91,27 @@ void log_benchmark_failure(const EmbagConfig &cfg);
  * @brief Prints the embag benchmark results in a formatted table to the given output stream.
  *
  * Dynamically calculates column widths for neat alignment and prints a table of results for each configuration.
- * Includes detailed timing breakdowns if enabled at compile time.
+ * Includes detailed timing breakdowns if enabled at compile time (only for non-LOWOHA mode).
  *
  * @param embag_results Vector of pairs (EmbagConfig, TimingStats) containing benchmark results.
  * @param outfile Output stream to print the table (e.g., std::cout or file stream).
+ * @param isLOWOHA If true, skips individual timing metrics (context/operator creation/execution).
  */
 void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
-                   &embag_results, std::ostream &outfile);
+                   &embag_results, std::ostream &outfile, const bool isLOWOHA);
 
 /**
  * @brief Logs the embag benchmark results in CSV format to the given output stream.
  *
- * Writes a CSV header and a row for each configuration, including timing breakdowns if enabled.
+ * Writes a CSV header and a row for each configuration, including timing breakdowns if enabled
+ * (only for non-LOWOHA mode).
  *
  * @param embag_results Vector of pairs (EmbagConfig, TimingStats) containing benchmark results.
  * @param outfile Output stream to write the CSV data (e.g., file stream).
+ * @param isLOWOHA If true, skips individual timing metrics (context/operator creation/execution).
  */
 void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
-                 &embag_results, std::ostream &outfile);
+                 &embag_results, std::ostream &outfile, const bool isLOWOHA);
 
 } // namespace embag
 } // namespace benchdnn

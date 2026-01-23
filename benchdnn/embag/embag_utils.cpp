@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -91,7 +91,7 @@ void inputParser(std::ifstream &infile, std::vector<EmbagConfig> &configs) {
       if (!fields[7].empty()) {
         std::string fp16_scale_bias_flag = fields[7];
         std::transform(fp16_scale_bias_flag.begin(), fp16_scale_bias_flag.end(),
-                        fp16_scale_bias_flag.begin(),::tolower);
+                       fp16_scale_bias_flag.begin(),::tolower);
         if (fp16_scale_bias_flag == "true" || fp16_scale_bias_flag == "1") {
           cfg.fp16_scale_bias = true;
         }
@@ -155,20 +155,23 @@ void log_benchmark_failure(const EmbagConfig &cfg) {
   testlog_error("Benchmark failed for ", cfg.num_embeddings, ", ",
                 cfg.embedding_dims, ", ", cfg.num_bags, ", ", cfg.num_indices, ", ",
                 embagalgoToStr(cfg.algo), ", ", cfg.iters, ", ", datatypeToStr(cfg.dt[0]), ", ",
-                datatypeToStr(cfg.dt[1]), ", ", cfg.fp16_scale_bias, ", ", 
-                cfg.padding_index, ", ", cfg.include_last_offset, ", ", cfg.is_weights, ", ", 
+                datatypeToStr(cfg.dt[1]), ", ", cfg.fp16_scale_bias, ", ",
+                cfg.padding_index, ", ", cfg.include_last_offset, ", ", cfg.is_weights, ", ",
                 cfg.scatter_stride, ", ", cfg.warmup_iters);
 }
 
 void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
-                   &embag_results, std::ostream &outfile) {
+                   &embag_results, std::ostream &outfile, const bool isLOWOHA) {
   std::vector<std::string> headers = {
     "Num_Embeddings", "Embedding_Dims", "Num_Bags", "Num_Indices", "Algo", "Iterations", "Data_type", "Fp16_Scale_Bias", "Padding_Index", "Include_Last_Offset", "Is_Weights", "Scatter_Stride", "Warmup_iters", "Total_time(ms) (all iters)"
   };
 #if MEASURE_INDIVIDUAL_TIMINGS
-  headers.push_back("Ctx_Creation(ms_%)");
-  headers.push_back("Op_Creation(ms_%)");
-  headers.push_back("Op_Execution(ms_%)");
+  // Only add individual timing headers for non-LOWOHA mode
+  if (!isLOWOHA) {
+    headers.push_back("Ctx_Creation(ms_%)");
+    headers.push_back("Op_Creation(ms_%)");
+    headers.push_back("Op_Execution(ms_%)");
+  }
 #endif
   std::vector<size_t> col_widths(headers.size());
   // Initialize with header lengths
@@ -213,22 +216,25 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
     total_time_ss << std::fixed << std::setprecision(2) << stat.total_time_ms;
     col_widths[13] = std::max(col_widths[13], total_time_ss.str().size() + 2);
 #if MEASURE_INDIVIDUAL_TIMINGS
-    std::ostringstream ctx_str, op_create_str, op_exec_str;
-    double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
-                                     * 100;
-    double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
-                                    * 100;
-    double op_execution_percentage = (stat.operator_execution_ms /
-                                      stat.total_time_ms) * 100;
-    ctx_str << std::fixed << std::setprecision(2)
-            << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
-    op_create_str << std::fixed << std::setprecision(2)
-                  << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
-    op_exec_str << std::fixed << std::setprecision(2)
-                << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
-    col_widths[14] = std::max(col_widths[14], ctx_str.str().size() + 2);
-    col_widths[15] = std::max(col_widths[15], op_create_str.str().size() + 2);
-    col_widths[16] = std::max(col_widths[16], op_exec_str.str().size() + 2);
+    // Only compute individual timing widths for non-LOWOHA mode
+    if (!isLOWOHA) {
+      std::ostringstream ctx_str, op_create_str, op_exec_str;
+      double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
+                                       * 100;
+      double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
+                                      * 100;
+      double op_execution_percentage = (stat.operator_execution_ms /
+                                        stat.total_time_ms) * 100;
+      ctx_str << std::fixed << std::setprecision(2)
+              << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
+      op_create_str << std::fixed << std::setprecision(2)
+                    << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
+      op_exec_str << std::fixed << std::setprecision(2)
+                  << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+      col_widths[14] = std::max(col_widths[14], ctx_str.str().size() + 2);
+      col_widths[15] = std::max(col_widths[15], op_create_str.str().size() + 2);
+      col_widths[16] = std::max(col_widths[16], op_exec_str.str().size() + 2);
+    }
 #endif
   }
   // Helper lambda to print a row for the table
@@ -259,7 +265,7 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
     row.push_back((config.dt[0] == data_type_t::s8 ||
                    config.dt[0] == data_type_t::s4 ||
                    config.dt[0] == data_type_t::u4) ?
-                   std::to_string(config.fp16_scale_bias) : "");
+                  std::to_string(config.fp16_scale_bias) : "");
     row.push_back(std::to_string(config.padding_index));
     row.push_back(std::to_string(config.include_last_offset));
     row.push_back(std::to_string(config.is_weights));
@@ -269,35 +275,41 @@ void print_results(std::vector<std::pair<EmbagConfig, TimingStats>>
     total_time_ss << std::fixed << std::setprecision(2) << stat.total_time_ms;
     row.push_back(total_time_ss.str());
 #if MEASURE_INDIVIDUAL_TIMINGS
-    std::ostringstream ctx_str, op_create_str, op_exec_str;
-    double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
-                                     * 100;
-    double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
-                                    * 100;
-    double op_execution_percentage = (stat.operator_execution_ms /
-                                      stat.total_time_ms) * 100;
-    ctx_str << std::fixed << std::setprecision(2)
-            << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
-    op_create_str << std::fixed << std::setprecision(2)
-                  << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
-    op_exec_str << std::fixed << std::setprecision(2)
-                << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
-    row.push_back(ctx_str.str());
-    row.push_back(op_create_str.str());
-    row.push_back(op_exec_str.str());
+    // Only add individual timing data for non-LOWOHA mode
+    if (!isLOWOHA) {
+      std::ostringstream ctx_str, op_create_str, op_exec_str;
+      double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
+                                       * 100;
+      double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
+                                      * 100;
+      double op_execution_percentage = (stat.operator_execution_ms /
+                                        stat.total_time_ms) * 100;
+      ctx_str << std::fixed << std::setprecision(2)
+              << stat.context_creation_ms << " (" << ctx_creation_percentage << " %)";
+      op_create_str << std::fixed << std::setprecision(2)
+                    << stat.operator_creation_ms << " (" << op_creation_percentage << " %)";
+      op_exec_str << std::fixed << std::setprecision(2)
+                  << stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+      row.push_back(ctx_str.str());
+      row.push_back(op_create_str.str());
+      row.push_back(op_exec_str.str());
+    }
 #endif
     print_row(row);
   }
 }
 
 void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
-                 &embag_results, std::ostream &outfile) {
+                 &embag_results, std::ostream &outfile, const bool isLOWOHA) {
   // Write CSV header
   outfile <<
           "Num_Embeddings, Embedding_Dims, Num_Bags, Num_Indices, Algo, Iterations, Data_type, Fp16_Scale_Bias, Padding_Index, Include_Last_Offset, Is_Weights, Scatter_Stride, Warmup_iters, Total_time(ms) (all iters)";
 #if MEASURE_INDIVIDUAL_TIMINGS
-  outfile <<
-          ", Context Creation Time (ms & %), Operator Creation Time (ms & %), Operator Execution Time (ms & %)";
+  // Only add individual timing headers for non-LOWOHA mode
+  if (!isLOWOHA) {
+    outfile <<
+            ", Context Creation Time (ms & %), Operator Creation Time (ms & %), Operator Execution Time (ms & %)";
+  }
 #endif
   outfile << std::endl;
 
@@ -316,7 +328,7 @@ void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
             ((config.dt[0] == data_type_t::s8 ||
               config.dt[0] == data_type_t::s4 ||
               config.dt[0] == data_type_t::u4) ?
-              std::to_string(config.fp16_scale_bias) : "") << ", " <<
+             std::to_string(config.fp16_scale_bias) : "") << ", " <<
             config.padding_index << ", " <<
             config.include_last_offset << ", " <<
             config.is_weights << ", " <<
@@ -324,16 +336,19 @@ void log_results(std::vector<std::pair<EmbagConfig, TimingStats>>
             config.warmup_iters << ", " <<
             stat.total_time_ms;
 #if MEASURE_INDIVIDUAL_TIMINGS
-    double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
-                                     * 100;
-    double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
-                                    * 100;
-    double op_execution_percentage = (stat.operator_execution_ms /
-                                      stat.total_time_ms) * 100;
-    outfile << ", " <<
-            stat.context_creation_ms << " (" << ctx_creation_percentage << " %), " <<
-            stat.operator_creation_ms << " (" << op_creation_percentage << " %), " <<
-            stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+    // Only add individual timing data for non-LOWOHA mode
+    if (!isLOWOHA) {
+      double ctx_creation_percentage = (stat.context_creation_ms / stat.total_time_ms)
+                                       * 100;
+      double op_creation_percentage = (stat.operator_creation_ms / stat.total_time_ms)
+                                      * 100;
+      double op_execution_percentage = (stat.operator_execution_ms /
+                                        stat.total_time_ms) * 100;
+      outfile << ", " <<
+              stat.context_creation_ms << " (" << ctx_creation_percentage << " %), " <<
+              stat.operator_creation_ms << " (" << op_creation_percentage << " %), " <<
+              stat.operator_execution_ms << " (" << op_execution_percentage << " %)";
+    }
 #endif
     outfile << std::endl;
   }

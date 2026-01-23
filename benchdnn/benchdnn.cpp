@@ -137,22 +137,20 @@ int main(int argc, char **argv) {
 
   // Dispatch to the appropriate benchmark based on operator type
   if (op == "matmul") {
-    benchdnn::matmul::bench(in_filename, out_filename, inputMode,
-                            options, isLOWOHA, cache_size); ///< Run matmul benchmark
+    return benchdnn::matmul::bench(in_filename, out_filename, inputMode,
+                                   options, isLOWOHA, cache_size); ///< Run matmul benchmark
   }
   else if (op == "reorder") {
-    benchdnn::reorder::bench(in_filename, out_filename,
-                             cache_size); ///< Run reorder benchmark
+    return benchdnn::reorder::bench(in_filename, out_filename,
+                                    cache_size); ///< Run reorder benchmark
   }
   else if (op == "embag") {
-    benchdnn::embag::bench(in_filename, out_filename,
-                           cache_size); ///< Run embag benchmark
+    return benchdnn::embag::bench(in_filename, out_filename,
+                                  isLOWOHA, cache_size); ///< Run embag benchmark
   }
   else {
     commonlog_error("Unsupported operator: ", op);
     commonlog_error("Supported operators: matmul, reorder, embag");
     return NOT_OK;
   }
-
-  return OK;
 }

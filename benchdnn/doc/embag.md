@@ -1,4 +1,4 @@
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Embag Operator
 
@@ -11,8 +11,11 @@ This describes all ways to provide input for the embag benchmark in BenchDNN, in
 Run the embag benchmark using the following input methods:
 
 ```sh
-./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt
+./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt [--lowoha=true/false]
 ```
+
+> **Note:**
+> - The `--lowoha` option controls benchmarking for the Low Overhead API. User can pass either `--lowoha=true` or `--lowoha=false`. If not specified, it is enabled by default.
 
 ---
 
@@ -24,7 +27,7 @@ Provide a file with one configuration per line. Each line should contain:
 - `num_indices` (Number of indices across all bags)
 - `algo` (Algorithm used for embag computation (e.g., "sum", "mean", "max"))
 - `iters` (Number of iterations)
-- `dt` (Data types: src:dst)
+- `dt` (Data types: table:output)
 - `fp16_scale_bias` (Flag indicating the data type of Scale and ZeroPoint used only for INT8/INT4 table data types)
 - `padding_index` (Index used for padding)
 - `include_last_offset` (Flag indicating whether to include the last offset in the offsets array)
@@ -33,8 +36,15 @@ Provide a file with one configuration per line. Each line should contain:
 - `warmup_iters` (optional)
 
 **Example usage:**
+
+- LOWOHA mode (default):
 ```sh
 ./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt
+```
+
+- Regular API mode:
+```sh
+./install/benchdnn/bin/benchdnn --op=embag --input_file=embag_inputs.txt --lowoha=false
 ```
 
 **Example input file (`embag_inputs.txt`):**
@@ -51,14 +61,21 @@ Provide a file with one configuration per line. Each line should contain:
 
 The benchmark prints the following for each input:
 - Total execution time
-- Detailed timing statistics for all iterations of each input, including:
+- Detailed timing statistics for all iterations of each input (only for non-LOWOHA mode), including:
   - Context creation time
   - Operator creation time
   - Operator execution time
 
 Output is printed to the console and also saved to a CSV file named `timings_<current timestamp>.csv` in the `build` directory.
 
-### Example (embag, console/CSV)
+### Example (LOWOHA mode, console/CSV)
+```
+Num_Embeddings  Embedding_Dims  Num_Bags  Num_Indices  Algo  Iterations  Data_type  Fp16_Scale_Bias  Padding_Index  Include_Last_Offset  Is_Weights  Scatter_Stride  Warmup_iters  Total_time(ms) (all iters)  
+100             16              5         10           max   100         f32:f32                     -1             1                    1           -1              50            8.27                        
+100             16              5         10           sum   100         s4:f32     1                -1             1                    1           -1              50            10.54                       
+```
+
+### Example (Regular API mode with `--lowoha=false`, console/CSV)
 ```
 Num_Embeddings  Embedding_Dims  Num_Bags  Num_Indices  Algo  Iterations  Data_type  Fp16_Scale_Bias  Padding_Index  Include_Last_Offset  Is_Weights  Scatter_Stride  Warmup_iters  Total_time(ms) (all iters)  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
 100             16              5         10           sum   100         s4:f32     1                -1             1                    1           -1              50            1114.37                     1.36 (0.12 %)       1.42 (0.13 %)      1111.59 (99.75 %)   

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -374,7 +374,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     std::ofstream outfile(out_filename);
     if (!outfile.is_open()) {
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
-      return 1;
+      return NOT_OK;
     }
     log_pipeline_results(matmul_results, outfile, options, inputMode);
     outfile.close();
@@ -387,7 +387,7 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     std::ofstream outfile(out_filename);
     if (!outfile.is_open()) {
       testlog_error("Error: Cannot write to output file ", out_filename, "\n");
-      return 1;
+      return NOT_OK;
     }
     log_results(matmul_results, outfile, options, isLOWOHA, inputMode);
     outfile.close();
