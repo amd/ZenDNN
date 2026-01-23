@@ -223,6 +223,7 @@ class Parser {
   void operator()(const int &argc,
                   char *argv[],
                   int64_t &seed, uint32_t &test_num, std::string &po, std::string &backend,
+                  std::string &ai_test_mode,
                   std::string &lowoha, uint32_t &num_threads, std::string &input_file,
                   std::string &op, uint32_t &ndims);
 };

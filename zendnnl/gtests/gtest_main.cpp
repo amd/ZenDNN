@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include "gtest_utils.hpp"
+#include "ai_gtests/gtest_utils_ai.hpp"
 #include <ctime>
 
 using namespace std;
@@ -54,6 +55,7 @@ uint32_t cmd_num_threads = 0;
 std::string cmd_input_file {};
 std::string cmd_operator {};
 uint32_t ndims = 2;
+std::string ai_test_mode_str {};
 
 /** @brief matmul_test Data Structure(vector of structures) to hold random Matmul Parameters */
 std::vector<MatmulType> matmul_test{};
@@ -75,8 +77,13 @@ int main(int argc, char **argv) {
     dtype_arr = {data_type_t::f32, data_type_t::bf16, data_type_t::s8, data_type_t::u8};
     // Command line argument parser
     Parser parse;
-    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, cmd_lowoha,
+    parse(argc, argv, seed, test_num, cmd_post_op, cmd_backend, ai_test_mode_str,
+          cmd_lowoha,
           cmd_num_threads, cmd_input_file, cmd_operator, ndims);
+
+    // Initialize AI test mode from command-line argument
+    ai_gtests::initialize_test_mode(ai_test_mode_str);
+
     srand(static_cast<unsigned int>(seed));
     std::cout << "Value " << seed << " is used as seed. \n";
 

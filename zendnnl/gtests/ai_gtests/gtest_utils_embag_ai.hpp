@@ -222,7 +222,8 @@ class EmbagParameterGenerator {
     embag_algo_t algo,
     TestCategory category,
     bool use_offsets = true,
-    bool expect_success = true);
+    bool expect_success = true,
+    const std::string &suite_name = "");
 };
 
 } // namespace ai_gtests

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ using namespace zendnnl::ops;
 using namespace zendnnl::error_handling;
 
 namespace ai_gtests {
+
+// Explicit template instantiation for BatchMatmulParamsAI
+template std::vector<BatchMatmulParamsAI>
+get_test_suite_for_mode<BatchMatmulParamsAI, BatchMatmulParameterGenerator>();
 
 // Enum for test case counts
 enum class TestCaseCount : int {
@@ -435,7 +439,7 @@ BatchMatmulParameterGenerator::generate_random_params_for_accuracy_subcategory(
 
   return create_param(batch_size, m, n, k, data_combo, TestCategory::ACCURACY,
                       post_op_config, broadcast_weights, broadcast_input,
-                      expect_success);
+                      expect_success, "accuracy");
 }
 
 std::vector<BatchMatmulParamsAI>
@@ -461,92 +465,92 @@ BatchMatmulParameterGenerator::generate_minimal_test_suite() {
   minimal_params.push_back(create_param(1, 1, 1, 1,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::BOUNDARY,
-                                        post_op_configs[0]));
+                                        post_op_configs[0], false, false, true, "minimal"));
   minimal_params.push_back(create_param(8, 8, 8, 8,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::BOUNDARY,
-                                        post_op_configs[0]));
+                                        post_op_configs[0], false, false, true, "minimal"));
 
   // Add edge cases
   // Very large batch with tiny matrix
   minimal_params.push_back(create_param(256, 4, 4, 4,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   // Prime number batch
   minimal_params.push_back(create_param(7, 32, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   // Power-of-2 boundary (2^6 - 1)
   minimal_params.push_back(create_param(63, 16, 16, 16,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   // Single dimension edge case
   minimal_params.push_back(create_param(1, 1024, 1024, 1,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   // Batch size 512 tests
   minimal_params.push_back(create_param(512, 4, 4, 4,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   minimal_params.push_back(create_param(512, 16, 16, 16,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   // Batch size 1024 tests
   minimal_params.push_back(create_param(1024, 4, 4, 4,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   minimal_params.push_back(create_param(1024, 16, 16, 16,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
   minimal_params.push_back(create_param(1024, 32, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::EDGE_CASE,
-                                        post_op_configs[0], false, false, true));
+                                        post_op_configs[0], false, false, true, "minimal"));
 
   // Add invalid cases
   // Zero batch size
   minimal_params.push_back(create_param(0, 32, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Zero m dimension
   minimal_params.push_back(create_param(4, 0, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Zero n dimension
   minimal_params.push_back(create_param(4, 32, 0, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Zero k dimension
   minimal_params.push_back(create_param(4, 32, 32, 0,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Oversized batch
   minimal_params.push_back(create_param(AI_MAX_DIM + 1, 32, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Oversized m dimension
   minimal_params.push_back(create_param(4, AI_MAX_DIM + 1, 32, 32,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], false, false, false));
+                                        post_op_configs[0], false, false, false, "minimal"));
   // Invalid broadcast configuration (both input and weights broadcasted)
   minimal_params.push_back(create_param(4, 8, 8, 8,
                                         DataTypeCombination::F32_F32_F32,
                                         TestCategory::INVALID,
-                                        post_op_configs[0], true, true, false));
+                                        post_op_configs[0], true, true, false, "minimal"));
 
   return minimal_params;
 }
@@ -593,7 +597,7 @@ void BatchMatmulParameterGenerator::add_minimal_accuracy_params(
               post_op_config.post_ops)) {
           params.push_back(create_param(batch, m, n, k, data_combo,
                                         TestCategory::ACCURACY,
-                                        post_op_config, false, false, true));
+                                        post_op_config, false, false, true, "minimal"));
         }
       }
     }
@@ -610,40 +614,40 @@ void BatchMatmulParameterGenerator::add_accuracy_params(
     "xl_batch_tiny", "xl_batch_small", "xxl_batch_tiny", "xxl_batch_small"
   };
 
-  // Reduced test counts for batch matmul (more expensive than regular matmul)
-  auto get_max_cases = [](const std::string& category) -> TestCaseCount {
+  // Use MaxTestCases static members directly (no object needed)
+  auto get_max_cases = [](const std::string& category) -> int {
     if (category == "tiny_square" || category == "tiny_rectangular") {
-      return TestCaseCount::TINY;
+      return MaxTestCases::TINY_MATRIX;
     }
     if (category == "small_square") {
-      return TestCaseCount::SMALL;
+      return MaxTestCases::SMALL_MATRIX;
     }
     if (category == "medium_square" || category == "large_square") {
-      return TestCaseCount::MEDIUM;
+      return MaxTestCases::MEDIUM_LARGE_MATRIX;
     }
     if (category == "rectangular") {
-      return TestCaseCount::RECTANGULAR;
+      return MaxTestCases::RECTANGULAR_MATRIX;
     }
     if (category == "skinny") {
-      return TestCaseCount::SKINNY;
+      return MaxTestCases::SKINNY_MATRIX;
     }
     if (category == "min") {
-      return TestCaseCount::MIN;
+      return MaxTestCases::MIN;
     }
     if (category == "max") {
-      return TestCaseCount::MAX;
+      return MaxTestCases::MAX;
     }
     if (category == "xl_batch_tiny" || category == "xl_batch_small") {
-      return TestCaseCount::XL_BATCH;
+      return MaxTestCases::XL_BATCH;
     }
     if (category == "xxl_batch_tiny" || category == "xxl_batch_small") {
-      return TestCaseCount::XXL_BATCH;
+      return MaxTestCases::XXL_BATCH;
     }
-    return TestCaseCount::DEFAULT;
+    return MaxTestCases::DEFAULT;
   };
 
   for (const auto &category : categories) {
-    const int max_cases = static_cast<int>(get_max_cases(category));
+    const int max_cases = get_max_cases(category);
     for (auto data_combo : ParameterGenerator::supported_combinations) {
       for (const auto &post_op_config : post_op_configs) {
         if (AITestUtils::is_aocl_kernel_supported(
@@ -686,7 +690,7 @@ void BatchMatmulParameterGenerator::add_boundary_params(
               post_op_config.post_ops)) {
           params.push_back(create_param(batch, m, n, k, data_combo,
                                         TestCategory::BOUNDARY,
-                                        post_op_config, false, false, true));
+                                        post_op_config, false, false, true, "boundary"));
         }
       }
     }
@@ -717,7 +721,7 @@ void BatchMatmulParameterGenerator::add_edge_case_params(
               post_op_config.post_ops)) {
           params.push_back(create_param(batch, m, n, k, data_combo,
                                         TestCategory::EDGE_CASE,
-                                        post_op_config, false, false, true));
+                                        post_op_config, false, false, true, "edge_case"));
         }
       }
     }
@@ -739,21 +743,21 @@ void BatchMatmulParameterGenerator::add_invalid_params(
         // Invalid batch size
         params.push_back(create_param(0, 32, 32, 32, data_combo,
                                       TestCategory::INVALID,
-                                      post_op_config, false, false, false));
+                                      post_op_config, false, false, false, "invalid"));
         // Invalid dimensions
         params.push_back(create_param(4, 0, 32, 32, data_combo,
                                       TestCategory::INVALID,
-                                      post_op_config, false, false, false));
+                                      post_op_config, false, false, false, "invalid"));
         params.push_back(create_param(4, 32, 0, 32, data_combo,
                                       TestCategory::INVALID,
-                                      post_op_config, false, false, false));
+                                      post_op_config, false, false, false, "invalid"));
         params.push_back(create_param(4, 32, 32, 0, data_combo,
                                       TestCategory::INVALID,
-                                      post_op_config, false, false, false));
+                                      post_op_config, false, false, false, "invalid"));
         // Oversized dimensions
         params.push_back(create_param(AI_MAX_DIM + 1, 32, 32, 32, data_combo,
                                       TestCategory::INVALID,
-                                      post_op_config, false, false, false));
+                                      post_op_config, false, false, false, "invalid"));
       }
     }
   }
@@ -761,7 +765,7 @@ void BatchMatmulParameterGenerator::add_invalid_params(
   // Invalid broadcasting configurations (both input and weights broadcasted)
   params.push_back(create_param(4, 8, 8, 8, DataTypeCombination::F32_F32_F32,
                                 TestCategory::INVALID, post_op_configs[0],
-                                true, true, false));
+                                true, true, false, "invalid"));
 }
 
 void BatchMatmulParameterGenerator::add_broadcast_params(
@@ -780,11 +784,11 @@ void BatchMatmulParameterGenerator::add_broadcast_params(
         // Broadcast weights (2D weights, 3D input)
         params.push_back(create_param(4, 32, 32, 32, data_combo,
                                       TestCategory::ACCURACY,
-                                      post_op_config, true, false, true));
+                                      post_op_config, true, false, true, "accuracy"));
         // Broadcast input (3D weights, 2D input)
         params.push_back(create_param(4, 32, 32, 32, data_combo,
                                       TestCategory::ACCURACY,
-                                      post_op_config, false, true, true));
+                                      post_op_config, false, true, true, "accuracy"));
       }
     }
   }
@@ -819,7 +823,7 @@ void BatchMatmulParameterGenerator::generate_reference_kernel_exhaustive_params(
               post_op_config.post_ops)) {
           params.push_back(create_param(batch, m, n, k, data_combo,
                                         TestCategory::REFERENCE_KERNEL,
-                                        post_op_config, false, false, true));
+                                        post_op_config, false, false, true, "reference"));
         }
       }
     }
@@ -833,7 +837,8 @@ BatchMatmulParamsAI BatchMatmulParameterGenerator::create_param(
   const PostOpConfig &post_op_config,
   bool broadcast_weights,
   bool broadcast_input,
-  bool expect_success) {
+  bool expect_success,
+  const std::string &suite_name) {
 
   BatchMatmulParamsAI param;
   param.batch_size = batch_size;
@@ -882,7 +887,8 @@ BatchMatmulParamsAI BatchMatmulParameterGenerator::create_param(
     broadcast_str += "_bi";
   }
 
-  param.test_name = "b" + std::to_string(batch_size) +
+  std::string suite_prefix = suite_name.empty() ? "" : suite_name + "_";
+  param.test_name = suite_prefix + "b" + std::to_string(batch_size) +
                     "_m" + std::to_string(m) +
                     "_n" + std::to_string(n) +
                     "_k" + std::to_string(k) +

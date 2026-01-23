@@ -59,6 +59,97 @@ using namespace zendnnl::ops;
 
 namespace ai_gtests {
 
+/** @brief Test mode selection for different testing scenarios */
+enum class TestMode {
+  PRE_SUB,    // Minimal testing for pre-submission
+  POST_SUB,   // Comprehensive testing for post-submission
+  NIGHTLY,    // Comprehensive nightly testing
+  MINIMAL,    // Minimal test suite
+  ACCURACY,   // Accuracy-focused tests only
+  INVALID,    // Invalid input tests only
+  BOUNDARY,   // Boundary condition tests only
+  DEFAULT     // Default comprehensive testing
+};
+
+// Global variable to store current test mode (default: DEFAULT)
+inline TestMode ai_gtest_mode = TestMode::DEFAULT;
+
+/** @brief Test categories for comprehensive coverage */
+enum class TestCategory {
+  ACCURACY,      // Standard accuracy tests
+  BOUNDARY,      // Boundary condition tests
+  EDGE_CASE,     // Edge case tests
+  INVALID,       // Invalid input tests
+  REFERENCE_KERNEL // Exhaustive reference kernel tests only
+};
+
+// Initialize test mode from command-line string
+// Normalizes input by removing special characters and converting to lowercase
+void initialize_test_mode(const std::string &mode_str);
+
+// Standalone function to initialize nightly test configuration
+// Sets MaxTestCases values for nightly mode (10x base values)
+void initialize_nightly_config();
+
+// Template function to get test suite for any parameter generator
+// Returns the appropriate test suite based on the global test mode
+template<typename ParamsType, typename GeneratorType>
+std::vector<ParamsType> get_test_suite_for_mode() {
+  if (ai_gtest_mode == TestMode::PRE_SUB) {
+    return GeneratorType::generate_minimal_test_suite();
+  }
+  else if (ai_gtest_mode == TestMode::POST_SUB) {
+    return GeneratorType::generate_comprehensive_test_suite();
+  }
+  else if (ai_gtest_mode == TestMode::NIGHTLY) {
+    initialize_nightly_config();
+    return GeneratorType::generate_comprehensive_test_suite();
+  }
+  else if (ai_gtest_mode == TestMode::MINIMAL) {
+    return GeneratorType::generate_minimal_test_suite();
+  }
+  else if (ai_gtest_mode == TestMode::ACCURACY) {
+    return GeneratorType::generate_category_specific_params(TestCategory::ACCURACY);
+  }
+  else if (ai_gtest_mode == TestMode::INVALID) {
+    return GeneratorType::generate_category_specific_params(TestCategory::INVALID);
+  }
+  else if (ai_gtest_mode == TestMode::BOUNDARY) {
+    return GeneratorType::generate_category_specific_params(TestCategory::BOUNDARY);
+  }
+  else if (ai_gtest_mode == TestMode::DEFAULT) {
+    return GeneratorType::generate_comprehensive_test_suite();
+  }
+  // Final fallback to comprehensive suite (should never reach here)
+  return GeneratorType::generate_comprehensive_test_suite();
+}
+
+// -----------------------------------------------------------------------------
+// MaxTestCases
+//
+// Singleton class to hold maximum test case counts for different matrix categories.
+// Values represent the maximum of MatMul and BatchMatMul test counts.
+// Can be modified at runtime based on test mode (post-sub vs nightly).
+// Access via MaxTestCases::VARIABLE_NAME (no instance() function needed).
+// Uses inline static members (C++17) for cleaner code.
+// -----------------------------------------------------------------------------
+class MaxTestCases {
+ public:
+  // Inline static members with default values for post-sub mode
+  inline static int TINY_MATRIX = 10;              // max(10, 5) = 10
+  inline static int SMALL_MATRIX = 10;             // max(10, 5) = 10
+  inline static int MEDIUM_LARGE_MATRIX = 30;      // max(30, 10) = 30
+  inline static int RECTANGULAR_MATRIX = 30;       // max(30, 10) = 30
+  inline static int SKINNY_MATRIX = 20;            // max(20, 8) = 20
+  inline static int DEFAULT = 5;                   // max(5, 3) = 5
+
+  // BatchMatMul-specific categories
+  inline static int MIN = 3;
+  inline static int MAX = 3;
+  inline static int XL_BATCH = 3;
+  inline static int XXL_BATCH = 2;
+};
+
 enum class MatrixDimensions : uint64_t {
   // Fixed dimensions
   TINY_SQUARE_FIXED = 4,
@@ -104,15 +195,6 @@ enum class MatrixDimensions : uint64_t {
   SKINNY_MIN = 4,
   SKINNY_MAX_SMALL = 16,
   SKINNY_MAX_LARGE = 512
-};
-
-/** @brief Test categories for comprehensive coverage */
-enum class TestCategory {
-  ACCURACY,      // Standard accuracy tests
-  BOUNDARY,      // Boundary condition tests
-  EDGE_CASE,     // Edge case tests
-  INVALID,       // Invalid input tests
-  REFERENCE_KERNEL // Exhaustive reference kernel tests only
 };
 
 /** @brief Data type combinations for testing */
@@ -304,7 +386,8 @@ class ParameterGenerator {
                                      DataTypeCombination data_types,
                                      TestCategory category,
                                      const PostOpConfig &post_op_config,
-                                     bool expect_success = true);
+                                     bool expect_success = true,
+                                     const std::string &suite_name = "");
 };
 
 } // namespace ai_gtests

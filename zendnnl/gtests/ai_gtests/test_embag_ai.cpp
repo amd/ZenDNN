@@ -704,69 +704,15 @@ TEST_P(TestEmbagAI, ComprehensiveEmbagTest) {
   }
 }
 
-// Test instantiation with minimal parameter set for quick testing
+// Single test instantiation based on global test mode
+// The test mode (PRE_SUB, POST_SUB, NIGHTLY) is determined by the global variable ai_gtest_mode
+// which can be set externally before test instantiation
 INSTANTIATE_TEST_SUITE_P(
-  AIMinimalTests,
+  AITests,
   TestEmbagAI,
   ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_minimal_test_suite()),
+    get_test_suite_for_mode<EmbagParamsAI, EmbagParameterGenerator>()),
 [](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "Minimal_" + info.param.test_name;
-}
-);
-
-// Category-specific test instantiations for targeted testing
-INSTANTIATE_TEST_SUITE_P(
-  AIAccuracyTests,
-  TestEmbagAI,
-  ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_category_specific_params(
-      TestCategory::ACCURACY)),
-[](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "Accuracy_" + info.param.test_name;
-}
-);
-
-INSTANTIATE_TEST_SUITE_P(
-  AIBoundaryTests,
-  TestEmbagAI,
-  ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_category_specific_params(
-      TestCategory::BOUNDARY)),
-[](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "Boundary_" + info.param.test_name;
-}
-);
-
-INSTANTIATE_TEST_SUITE_P(
-  AIInvalidTests,
-  TestEmbagAI,
-  ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_category_specific_params(
-      TestCategory::INVALID)),
-[](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "Invalid_" + info.param.test_name;
-}
-);
-
-INSTANTIATE_TEST_SUITE_P(
-  AIReferenceKernelCategoryTests,
-  TestEmbagAI,
-  ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_category_specific_params(
-      TestCategory::REFERENCE_KERNEL)),
-[](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "ReferenceKernel_" + info.param.test_name;
-}
-);
-
-INSTANTIATE_TEST_SUITE_P(
-  AIEdgeCaseTests,
-  TestEmbagAI,
-  ::testing::ValuesIn(
-    EmbagParameterGenerator::generate_category_specific_params(
-      TestCategory::EDGE_CASE)),
-[](const ::testing::TestParamInfo<EmbagParamsAI> &info) {
-  return "EdgeCase_" + info.param.test_name;
+  return info.param.test_name;
 }
 );

@@ -33,6 +33,103 @@ using namespace zendnnl::ops;
 using namespace zendnnl::error_handling;
 
 namespace ai_gtests {
+
+// Explicit template instantiation for MatmulParamsAI
+// (Template definition is in gtest_utils_ai.hpp)
+template std::vector<MatmulParamsAI>
+get_test_suite_for_mode<MatmulParamsAI, ParameterGenerator>();
+
+// -----------------------------------------------------------------------------
+// initialize_test_mode
+//
+// Initializes the global test mode from a command-line string.
+// Normalizes the input string by removing special characters and converting
+// to lowercase before comparison.
+//
+// Parameters:
+//   mode_str - String from command-line (e.g., "pre-sub", "POST_SUB", "nightly")
+//
+// Supported values (case-insensitive, special chars ignored):
+//   - "presub" or "pre-sub" -> PRE_SUB
+//   - "postsub" or "post-sub" -> POST_SUB
+//   - "nightly" -> NIGHTLY
+//
+// Usage:
+//   Called from gtest_main.cpp after parsing command-line arguments
+// -----------------------------------------------------------------------------
+void initialize_test_mode(const std::string &mode_str) {
+  // Normalize string: remove special characters, convert to lowercase
+  std::string normalized;
+  for (char c : mode_str) {
+    if (std::isalnum(static_cast<unsigned char>(c))) {
+      normalized += std::tolower(static_cast<unsigned char>(c));
+    }
+  }
+
+  // Check normalized string against known modes
+  if (normalized == "presub") {
+    ai_gtest_mode = TestMode::PRE_SUB;
+    std::cout << "[AI_GTEST] Test mode set to PRE_SUB" << std::endl;
+  }
+  else if (normalized == "postsub") {
+    ai_gtest_mode = TestMode::POST_SUB;
+    std::cout << "[AI_GTEST] Test mode set to POST_SUB" << std::endl;
+  }
+  else if (normalized == "nightly") {
+    ai_gtest_mode = TestMode::NIGHTLY;
+    std::cout << "[AI_GTEST] Test mode set to NIGHTLY" << std::endl;
+  }
+  else if (normalized == "minimal") {
+    ai_gtest_mode = TestMode::MINIMAL;
+    std::cout << "[AI_GTEST] Test mode set to MINIMAL" << std::endl;
+  }
+  else if (normalized == "accuracy") {
+    ai_gtest_mode = TestMode::ACCURACY;
+    std::cout << "[AI_GTEST] Test mode set to ACCURACY" << std::endl;
+  }
+  else if (normalized == "invalid") {
+    ai_gtest_mode = TestMode::INVALID;
+    std::cout << "[AI_GTEST] Test mode set to INVALID" << std::endl;
+  }
+  else if (normalized == "boundary") {
+    ai_gtest_mode = TestMode::BOUNDARY;
+    std::cout << "[AI_GTEST] Test mode set to BOUNDARY" << std::endl;
+  }
+  else {
+    // Unknown or empty mode - use DEFAULT
+    ai_gtest_mode = TestMode::DEFAULT;
+    std::cout << "[AI_GTEST] Unknown test mode '" << mode_str
+              << "', using DEFAULT" << std::endl;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// initialize_nightly_config
+//
+// Standalone function to initialize nightly test configuration.
+// Sets MaxTestCases values for nightly mode (10x base values).
+// This function is automatically called when ai_gtest_mode is set to NIGHTLY.
+//
+// Usage:
+//   Called automatically by get_test_suite_for_mode() when in NIGHTLY mode
+//   to configure test counts for nightly testing.
+// -----------------------------------------------------------------------------
+void initialize_nightly_config() {
+  // Set each value explicitly for nightly mode (10x base values)
+  MaxTestCases::TINY_MATRIX = 50;              // 10 * 5
+  MaxTestCases::SMALL_MATRIX = 50;             // 10 * 5
+  MaxTestCases::MEDIUM_LARGE_MATRIX = 150;      // 30 * 5
+  MaxTestCases::RECTANGULAR_MATRIX = 150;       // 30 * 5
+  MaxTestCases::SKINNY_MATRIX = 100;            // 20 * 5
+  MaxTestCases::DEFAULT = 25;                   // 5 * 5
+  MaxTestCases::MIN = 15;                       // 3 * 5
+  MaxTestCases::MAX = 15;                       // 3 * 5
+  MaxTestCases::XL_BATCH = 15;                  // 3 * 5
+  MaxTestCases::XXL_BATCH = 15;                 // 2 * 5
+  std::cout << "[AI_GTEST] Nightly mode enabled: using 10x test counts" <<
+            std::endl;
+}
+
 // Debug print utility
 static bool ai_debug_enabled = [] {
   const char *env = std::getenv("AI_GTEST_DEBUG");
@@ -1574,7 +1671,8 @@ ParameterGenerator::generate_random_params_for_accuracy_subcategory(
                       data_combo,
                       TestCategory::ACCURACY,
                       post_op_config,
-                      expect_success);
+                      expect_success,
+                      "accuracy");
 }
 
 // Static member definitions for ParameterGenerator
@@ -1627,11 +1725,11 @@ std::vector<MatmulParamsAI> ParameterGenerator::generate_minimal_test_suite() {
 
   // Add a minimal boundary test
   minimal_params.push_back(create_param(1, 1, 1, DataTypeCombination::F32_F32_F32,
-                                        TestCategory::BOUNDARY, post_op_configs[0]));
+                                        TestCategory::BOUNDARY, post_op_configs[0], true, "minimal"));
   // Add a minimal invalid test
   minimal_params.push_back(create_param(0, 32, 32,
                                         DataTypeCombination::F32_F32_F32, TestCategory::INVALID, post_op_configs[0],
-                                        false));
+                                        false, "minimal"));
   return minimal_params;
 }
 
@@ -1784,7 +1882,7 @@ void ParameterGenerator::add_minimal_accuracy_params(std::vector<MatmulParamsAI>
               data_combo), AITestUtils::get_weight_dtype(data_combo),
             AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
           params.push_back(create_param(m, n, k, data_combo, TestCategory::ACCURACY,
-                                        post_op_config, true));
+                                        post_op_config, true, "minimal"));
         }
       }
     }
@@ -1793,7 +1891,6 @@ void ParameterGenerator::add_minimal_accuracy_params(std::vector<MatmulParamsAI>
 
 void ParameterGenerator::add_accuracy_params(std::vector<MatmulParamsAI>
     &params) {
-
 
   auto post_op_configs = AITestUtils::get_all_post_op_configs();
   // Define test categories and their counts
@@ -1807,34 +1904,24 @@ void ParameterGenerator::add_accuracy_params(std::vector<MatmulParamsAI>
     "skinny"
   };
 
-  // Enum for maximum test cases per category
-  enum class MaxTestCases {
-    MAX_NUM_TINY_MATRIX = 10,       // Fewer cases for tiny matrices
-    MAX_NUM_SMALL_MATRIX = 10,      // Medium number for small matrices
-    MAX_NUM_MEDIUM_LARGE_MATRIX = 30, // Fewer cases for large matrices due to compute time
-    MAX_NUM_RECTANGULAR_MATRIX = 30,  // Medium number for rectangular cases
-    MAX_NUM_SKINNY_MATRIX = 20,      // Fewer cases for skinny matrices
-    MAX_NUM_DEFAULT = 5            // Default case
-  };
-
-  // Helper function to get max test cases based on category
+  // Helper function to get max test cases based on category using MaxTestCases
   auto get_max_cases_for_category = [](const std::string& category) -> int {
     if (category == "tiny_square" || category == "tiny_rectangular") {
-      return static_cast<int>(MaxTestCases::MAX_NUM_TINY_MATRIX);
+      return MaxTestCases::TINY_MATRIX;
     }
     else if (category == "small_square") {
-      return static_cast<int>(MaxTestCases::MAX_NUM_SMALL_MATRIX);
+      return MaxTestCases::SMALL_MATRIX;
     }
     else if (category == "medium_square" || category == "large_square") {
-      return static_cast<int>(MaxTestCases::MAX_NUM_MEDIUM_LARGE_MATRIX);
+      return MaxTestCases::MEDIUM_LARGE_MATRIX;
     }
     else if (category == "rectangular") {
-      return static_cast<int>(MaxTestCases::MAX_NUM_RECTANGULAR_MATRIX);
+      return MaxTestCases::RECTANGULAR_MATRIX;
     }
     else if (category == "skinny") {
-      return static_cast<int>(MaxTestCases::MAX_NUM_SKINNY_MATRIX);
+      return MaxTestCases::SKINNY_MATRIX;
     }
-    return static_cast<int>(MaxTestCases::MAX_NUM_DEFAULT);
+    return MaxTestCases::DEFAULT;
   };
 
   // Add randomly generated test cases for each category
@@ -1894,7 +1981,7 @@ void ParameterGenerator::add_boundary_params(std::vector<MatmulParamsAI>
               data_combo), AITestUtils::get_weight_dtype(data_combo),
             AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
           params.push_back(create_param(m, n, k, data_combo, TestCategory::BOUNDARY,
-                                        post_op_config, true));
+                                        post_op_config, true, "boundary"));
         }
       }
     }
@@ -1933,7 +2020,7 @@ void ParameterGenerator::add_edge_case_params(std::vector<MatmulParamsAI>
               data_combo), AITestUtils::get_weight_dtype(data_combo),
             AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
           params.push_back(create_param(m, n, k, data_combo, TestCategory::EDGE_CASE,
-                                        post_op_config, true));
+                                        post_op_config, true, "edge_case"));
         }
       }
     }
@@ -1974,15 +2061,15 @@ void ParameterGenerator::add_invalid_params(std::vector<MatmulParamsAI>
           AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
         // Add invalid dimension cases for all supported data type combinations
         params.push_back(create_param(0, 32, 32, data_combo, TestCategory::INVALID,
-                                      post_op_config, false));
+                                      post_op_config, false, "invalid"));
         params.push_back(create_param(32, 0, 32, data_combo, TestCategory::INVALID,
-                                      post_op_config, false));
+                                      post_op_config, false, "invalid"));
         params.push_back(create_param(32, 32, 0, data_combo, TestCategory::INVALID,
-                                      post_op_config, false));
+                                      post_op_config, false, "invalid"));
         params.push_back(create_param(0, 0, 0, data_combo, TestCategory::INVALID,
-                                      post_op_config, false));
+                                      post_op_config, false, "invalid"));
         params.push_back(create_param(AI_MAX_DIM + 1, 32, 32, data_combo,
-                                      TestCategory::INVALID, post_op_config, false));
+                                      TestCategory::INVALID, post_op_config, false, "invalid"));
       }
     }
   }
@@ -2138,7 +2225,7 @@ void ParameterGenerator::generate_reference_kernel_exhaustive_params(
               AITestUtils::get_weight_dtype(data_combo),
               AITestUtils::get_output_dtype(data_combo), post_op_config.post_ops)) {
           params.push_back(create_param(m, n, k, data_combo,
-                                        TestCategory::REFERENCE_KERNEL, post_op_config, true));
+                                        TestCategory::REFERENCE_KERNEL, post_op_config, true, "reference"));
         }
       }
     }
@@ -2148,7 +2235,8 @@ void ParameterGenerator::generate_reference_kernel_exhaustive_params(
     bad_postop.config_name = "bad_postop";
     bad_postop.post_ops = {static_cast<post_op_type_t>(999)};
     params.push_back(ParameterGenerator::create_param(
-                       8, 8, 8, combo, TestCategory::REFERENCE_KERNEL, bad_postop, false));
+                       8, 8, 8, combo, TestCategory::REFERENCE_KERNEL, bad_postop, false,
+                       "reference"));
   }
 }
 
@@ -2157,7 +2245,8 @@ MatmulParamsAI ai_gtests::ParameterGenerator::create_param(
   DataTypeCombination combo,
   TestCategory category,
   const PostOpConfig &post_op_config,
-  bool expect_success) {
+  bool expect_success,
+  const std::string &suite_name) {
   MatmulParamsAI param;
   param.m = m;
   param.n = n;
@@ -2192,8 +2281,10 @@ MatmulParamsAI ai_gtests::ParameterGenerator::create_param(
                                    combo));
   std::string output_dtype_str = dtype_to_str(AITestUtils::get_output_dtype(
                                    combo));
-  // Always use the new format for test_name
-  param.test_name = "m" + std::to_string(m) + "_n" + std::to_string(
+  // Build test name with suite prefix
+  std::string suite_prefix = suite_name.empty() ? "" : suite_name + "_";
+  param.test_name = suite_prefix + "m" + std::to_string(m) + "_n" +
+                    std::to_string(
                       n) + "_k" + std::to_string(k)
                     + "_in_" + input_dtype_str + "_wt_" + weight_dtype_str + "_out_" +
                     output_dtype_str

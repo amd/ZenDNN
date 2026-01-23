@@ -384,14 +384,14 @@ EmbagParameterGenerator::generate_minimal_test_suite() {
                                         EmbagDataTypeCombination::F32_F32,
                                         embag_algo_t::sum,
                                         TestCategory::BOUNDARY,
-                                        true, true));
+                                        true, true, "minimal"));
 
   // Add minimal invalid test
   minimal_params.push_back(create_param(0, 8, 4, 2,
                                         EmbagDataTypeCombination::F32_F32,
                                         embag_algo_t::sum,
                                         TestCategory::INVALID,
-                                        true, false));
+                                        true, false, "minimal"));
 
   return minimal_params;
 }
@@ -499,7 +499,7 @@ EmbagParameterGenerator::generate_random_params_for_accuracy_subcategory(
   }
 
   return create_param(num_embeddings, embedding_dim, num_indices, num_bags,
-                      data_combo, algo, TestCategory::ACCURACY, true, expect_success);
+                      data_combo, algo, TestCategory::ACCURACY, true, expect_success, "accuracy");
 }
 
 void EmbagParameterGenerator::add_minimal_accuracy_params(
@@ -529,7 +529,7 @@ void EmbagParameterGenerator::add_minimal_accuracy_params(
               EmbagTestUtils::get_table_dtype(data_combo),
               EmbagTestUtils::get_output_dtype(data_combo), algo)) {
           params.push_back(create_param(num_emb, emb_dim, num_idx, num_bag,
-                                        data_combo, algo, TestCategory::ACCURACY, true, true));
+                                        data_combo, algo, TestCategory::ACCURACY, true, true, "minimal"));
         }
       }
     }
@@ -585,7 +585,7 @@ void EmbagParameterGenerator::add_boundary_params(
               EmbagTestUtils::get_table_dtype(data_combo),
               EmbagTestUtils::get_output_dtype(data_combo), algo)) {
           params.push_back(create_param(num_emb, emb_dim, num_idx, num_bag,
-                                        data_combo, algo, TestCategory::BOUNDARY, true, true));
+                                        data_combo, algo, TestCategory::BOUNDARY, true, true, "boundary"));
         }
       }
     }
@@ -606,7 +606,7 @@ void EmbagParameterGenerator::add_edge_case_params(
             EmbagTestUtils::get_table_dtype(data_combo),
             EmbagTestUtils::get_output_dtype(data_combo), embag_algo_t::sum)) {
         params.push_back(create_param(num_emb, emb_dim, num_idx, num_bag,
-                                      data_combo, embag_algo_t::sum, TestCategory::EDGE_CASE, true, true));
+                                      data_combo, embag_algo_t::sum, TestCategory::EDGE_CASE, true, true, "edge_case"));
       }
     }
   }
@@ -617,11 +617,11 @@ void EmbagParameterGenerator::add_invalid_params(
   for (auto data_combo : supported_combinations) {
     // Invalid dimensions - zero values
     params.push_back(create_param(0, 64, 16, 4, data_combo, embag_algo_t::sum,
-                                  TestCategory::INVALID, true, false));
+                                  TestCategory::INVALID, true, false, "invalid"));
     params.push_back(create_param(100, 0, 16, 4, data_combo, embag_algo_t::sum,
-                                  TestCategory::INVALID, true, false));
+                                  TestCategory::INVALID, true, false, "invalid"));
     params.push_back(create_param(100, 64, 0, 4, data_combo, embag_algo_t::sum,
-                                  TestCategory::INVALID, true, false));
+                                  TestCategory::INVALID, true, false, "invalid"));
     
     // Note: num_bags > num_indices is NOT tested as invalid because the operator
     // allows this configuration (creates empty bags with zero output)
@@ -642,7 +642,7 @@ void EmbagParameterGenerator::add_embedding_lookup_params(
             EmbagTestUtils::get_table_dtype(data_combo),
             EmbagTestUtils::get_output_dtype(data_combo), embag_algo_t::none)) {
         params.push_back(create_param(num_emb, emb_dim, num_idx, 0,
-                                      data_combo, embag_algo_t::none, TestCategory::EDGE_CASE, false, true));
+                                      data_combo, embag_algo_t::none, TestCategory::EDGE_CASE, false, true, "accuracy"));
       }
     }
   }
@@ -675,7 +675,7 @@ void EmbagParameterGenerator::generate_reference_kernel_exhaustive_params(
           params.push_back(create_param(num_emb, emb_dim, num_idx,
                                         use_offsets ? num_bag : 0,
                                         data_combo, algo, TestCategory::REFERENCE_KERNEL,
-                                        use_offsets, true));
+                                        use_offsets, true, "reference"));
         }
       }
     }
@@ -689,7 +689,8 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
   embag_algo_t algo,
   TestCategory category,
   bool use_offsets,
-  bool expect_success) {
+  bool expect_success,
+  const std::string &suite_name) {
 
   EmbagParamsAI param;
   param.num_embeddings = num_embeddings;
@@ -753,7 +754,8 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
                                    EmbagTestUtils::get_output_dtype(data_types));
   std::string algo_str = algo_to_str(algo);
 
-  param.test_name = "emb" + std::to_string(num_embeddings) +
+  std::string suite_prefix = suite_name.empty() ? "" : suite_name + "_";
+  param.test_name = suite_prefix + "emb" + std::to_string(num_embeddings) +
                     "_dim" + std::to_string(embedding_dim) +
                     "_idx" + std::to_string(num_indices) +
                     "_bag" + std::to_string(num_bags) +

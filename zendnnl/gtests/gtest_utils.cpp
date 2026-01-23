@@ -788,7 +788,8 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
 }
 
 void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
-                        uint32_t &tests, std::string &po, std::string &backend, std::string &lowoha,
+                        uint32_t &tests, std::string &po, std::string &backend,
+                        std::string &ai_test_mode, std::string &lowoha,
                         uint32_t &num_threads, std::string &input_file, std::string &op,
                         uint32_t &ndims) {
   for (int i=1; i<argc; ++i) {
@@ -802,6 +803,7 @@ void Parser::operator()(const int &argc, char *argv[], int64_t &seed,
   read_from_umap("test", tests);
   read_from_umap("postop", po);
   read_from_umap("backend", backend);
+  read_from_umap("ai_test_mode", ai_test_mode);
   read_from_umap("lowoha", lowoha);
   read_from_umap("num_threads", cmd_num_threads);
   read_from_umap("input_file", input_file);
