@@ -5,17 +5,18 @@
 
 ## Overview
 
-The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization and dequantization workloads**. It provides a direct API to convert data between BF16/FP32 and INT8/UINT8 formats with configurable scale and zero-point parameters.
+The **LowOHA Reorder Operator** is a high-performance, low-overhead data type conversion operator designed for **quantization, dequantization, and data type conversion in workloads**. It provides a direct API to convert data between BF16/FP32 and INT8/UINT8 formats, as well as between FP32 and BF16 formats, with configurable scale and zero-point parameters.
 
 Unlike the standard Reorder operator which uses the operator factory pattern, LowOHA Reorder provides a **function-based interface** optimized for:
 - Minimal execution overhead
 - Quantization (BF16/FP32 → INT8/UINT8)
 - Dequantization (INT8/UINT8 → BF16/FP32)
+- Data type conversion (FP32 ⇔ BF16)
 - Per-tensor, per-channel, and per-group quantization granularities
 - Strided (non-contiguous) source memory support
 
 
-## Quantization/Dequantization Formulas
+## Quantization/Dequantization/Conversion Formulas
 
 ### Quantization (BF16/FP32 → INT8)
 
@@ -33,6 +34,34 @@ $$
 
 $$
 \mathrm{output} = (\mathrm{int8} - \mathrm{zp}) \times \mathrm{scale}
+$$
+
+### Data Type Conversion (FP32 → BF16)
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{bf16} = \mathrm{bf16}(\mathrm{f32})
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{bf16} = \mathrm{bf16}(\frac{\mathrm{f32}}{\mathrm{scale}} + \mathrm{zp})
+$$
+
+### Data Type Conversion (BF16 → FP32)
+
+**Simple conversion (no scale/zero-point):**
+
+$$
+\mathrm{f32} = \mathrm{f32}(\mathrm{bf16})
+$$
+
+**With scale and zero-point:**
+
+$$
+\mathrm{f32} = (\mathrm{f32}(\mathrm{bf16}) - \mathrm{zp}) \times \mathrm{scale}
 $$
 
 
@@ -120,6 +149,8 @@ Source strides enable reading from non-contiguous source memory:
 | S8 (INT8) | FP32 | Dequantization |
 | FP32 | U8 (UINT8) | Quantization |
 | U8 (UINT8) | FP32 | Dequantization |
+| FP32 | BF16 | Data Type Conversion |
+| BF16 | FP32 | Data Type Conversion |
 
 
 ### `reorder_quant_params_t`
@@ -145,6 +176,11 @@ struct reorder_quant_params_t {
 |-----------|---------------|-------------|
 | `scale` | `f32` | Scale factor (must be positive and finite) |
 | `zero_point` | `s32` | Zero point offset |
+
+**Note on FP32 ↔ BF16 Conversion:**
+- For FP32 ↔ BF16 data type conversion, the `quant_params` are **optional**
+- If `quant_params.scale.buff` is `nullptr`, a simple direct conversion is performed without scaling
+- When scale/zero-point are provided, the conversion formulas are applied (see [Data Type Conversion formulas](#data-type-conversion-fp32--bf16))
 
 
 ## Quantization Granularities
@@ -631,6 +667,166 @@ int f32_to_uint8_per_channel_example() {
 }
 ```
 
+### Example 10: FP32 to BF16 Simple Conversion (No Scale/Zero-Point)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_bf16_simple_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers (BF16 stored as uint16_t)
+  std::vector<float> input_f32(M * N);
+  std::vector<uint16_t> output_bf16(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::bf16;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  // No scale/zp parameters - simple type conversion
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute conversion
+  status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 11: FP32 to BF16 with Scale/Zero-Point
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int f32_to_bf16_with_scale_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  float scale = 0.5f;
+  int32_t zero_point = 2;
+  
+  // Allocate buffers
+  std::vector<float> input_f32(M * N);
+  std::vector<uint16_t> output_bf16(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  // Formula: bf16_val = bf16(f32_val / scale + zero_point)
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::bf16;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1} for 2D
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute conversion
+  status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 12: BF16 to FP32 Simple Conversion (No Scale/Zero-Point)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int bf16_to_f32_simple_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers (BF16 stored as uint16_t)
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<float> output_f32(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::f32;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  // No scale/zp parameters - simple type conversion
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute conversion
+  status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 13: BF16 to FP32 with Scale/Zero-Point
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int bf16_to_f32_with_scale_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  float scale = 0.5f;
+  int32_t zero_point = 2;
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<float> output_f32(M * N);
+  
+  // Initialize input...
+  
+  // Configure reorder parameters
+  // Formula: f32_val = (bf16_as_f32 - zero_point) * scale
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::f32;
+  params.src_shape = {M, N};  // 2D matrix
+  params.dst_shape = {M, N};  // Must match src_shape
+  
+  // Per-tensor: dims = {1, 1} for 2D
+  params.quant_params.scale.buff = &scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};
+  
+  params.quant_params.zero_point.buff = &zero_point;
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};
+  
+  params.algo = reorder_algo_t::DT;
+  
+  // Execute conversion
+  status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
 
 ## Validation
 
@@ -651,7 +847,7 @@ The operator performs the following validations:
 
 The following table shows which combinations have optimized (AVX512) vs reference implementations:
 
-### BF16 ↔ S8/U8
+### BF16/FP32 ↔ S8/U8 and FP32 ↔ BF16
 
 | Granularity | Source Contiguous | Source Strided (last_stride=1) | Source Strided (other) |
 |-------------|-------------------|--------------------------------|------------------------|
@@ -668,6 +864,7 @@ The following table shows which combinations have optimized (AVX512) vs referenc
 - Per-channel and per-group granularities currently use reference implementation
 - The `DT` algorithm automatically selects the best available implementation
 - Destination memory is always written contiguously (strided destination not currently supported)
+- FP32 ↔ BF16 conversion supports both simple (no scale/zp) and scaled conversions
 
 
 ## Performance Considerations
@@ -678,3 +875,4 @@ The following table shows which combinations have optimized (AVX512) vs referenc
 - **Source Memory Layout:** Contiguous source memory is fastest; strided source with last_stride=1 can still use optimal path
 - **Destination Memory:** Always written contiguously (strided destination not currently supported)
 - **Granularity:** Per-tensor is fastest with optimal support; per-channel/per-group use reference implementation
+- **FP32 ↔ BF16 Conversion:** Simple conversion (no scale/zp) is fastest; scaled conversion follows the same granularity performance characteristics as quantization/dequantization

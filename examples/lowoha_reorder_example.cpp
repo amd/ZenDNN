@@ -3065,5 +3065,720 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
   return OK;
 }
 
+//==============================================================================
+// FP32 <-> BF16 Conversion Tests (with optional scale/zero-point)
+//==============================================================================
+
+int run_lowoha_reorder_f32_to_bf16_simple_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 Simple Conversion (No Scale/ZP)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> input_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("No scale/zero-point - simple type conversion");
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    // No scale/zp - leave as nullptr for simple type conversion
+
+    status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    // Verify by converting back to f32 and comparing
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      // Convert bf16 back to float for comparison
+      uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
+      float result;
+      std::memcpy(&result, &bits, sizeof(result));
+      
+      // BF16 has limited precision, allow small error
+      float expected = input_f32[i];
+      float rel_error = std::abs(result - expected) / (std::abs(expected) + 1e-6f);
+      if (rel_error > 0.01f) {  // Allow 1% relative error for bf16
+        log_error("Mismatch at index ", i, ": expected ~", expected, ", got ", result);
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 simple conversion test PASSED!");
+    } else {
+      log_error("FP32 to BF16 simple conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_f32_to_bf16_with_scale_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 with Scale/Zero-Point");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    float scale = 0.5f;
+    int32_t zero_point = 2;
+
+    std::vector<float> input_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Formula: bf16_val = bf16(f32_val / scale + zero_point)");
+    log_info("scale=", scale, ", zero_point=", zero_point);
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.quant_params.scale.buff = &scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.buff = &zero_point;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+
+    status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      // Expected: bf16(f32_val / scale + zp)
+      float expected_f32 = input_f32[i] / scale + static_cast<float>(zero_point);
+      
+      // Convert output bf16 back to float
+      uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
+      float result;
+      std::memcpy(&result, &bits, sizeof(result));
+      
+      float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+      if (rel_error > 0.01f) {
+        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ", result);
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 with scale/zp test PASSED!");
+    } else {
+      log_error("FP32 to BF16 with scale/zp test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_bf16_to_f32_simple_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: BF16 to FP32 Simple Conversion (No Scale/ZP)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Create BF16 values from known floats
+    std::vector<float> reference_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      // Convert f32 to bf16
+      uint32_t bits;
+      std::memcpy(&bits, &reference_f32[i], sizeof(bits));
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+    }
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("No scale/zero-point - simple type conversion");
+
+    std::vector<float> output_f32(nelems, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::f32;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    // No scale/zp - leave as nullptr for simple type conversion
+
+    status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      float rel_error = std::abs(output_f32[i] - reference_f32[i]) / (std::abs(reference_f32[i]) + 1e-6f);
+      if (rel_error > 0.01f) {
+        log_error("Mismatch at index ", i, ": expected ~", reference_f32[i], ", got ", output_f32[i]);
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 to FP32 simple conversion test PASSED!");
+    } else {
+      log_error("BF16 to FP32 simple conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_bf16_to_f32_with_scale_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: BF16 to FP32 with Scale/Zero-Point");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    float scale = 0.5f;
+    int32_t zero_point = 2;
+
+    // Create BF16 values
+    std::vector<float> bf16_as_f32 = {
+      -2.0f,  0.0f,  2.0f,  4.0f,
+       6.0f,  8.0f, 10.0f, 12.0f,
+      -1.0f,  1.0f,  3.0f,  5.0f,
+       7.0f,  9.0f, 11.0f, 13.0f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      uint32_t bits;
+      std::memcpy(&bits, &bf16_as_f32[i], sizeof(bits));
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+    }
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Formula: f32_val = (bf16_as_f32 - zero_point) * scale");
+    log_info("scale=", scale, ", zero_point=", zero_point);
+
+    std::vector<float> output_f32(nelems, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::f32;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.quant_params.scale.buff = &scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{1, 1};
+    params.quant_params.zero_point.buff = &zero_point;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1};
+
+    status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      // Expected: (bf16_val - zp) * scale
+      float expected = (bf16_as_f32[i] - static_cast<float>(zero_point)) * scale;
+      float rel_error = std::abs(output_f32[i] - expected) / (std::abs(expected) + 1e-6f);
+      if (rel_error > 0.01f) {
+        log_error("Mismatch at index ", i, ": expected ", expected, ", got ", output_f32[i]);
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 to FP32 with scale/zp test PASSED!");
+    } else {
+      log_error("BF16 to FP32 with scale/zp test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_f32_to_bf16_per_channel_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 Per-Channel Conversion");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> scales = {0.25f, 0.5f, 0.75f, 1.0f};
+    std::vector<int32_t> zero_points = {0, 1, 2, 3};
+
+    std::vector<float> input_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.quant_params.scale.buff = scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.buff = zero_points.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+
+    status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (int64_t i = 0; i < M; ++i) {
+      for (int64_t j = 0; j < N; ++j) {
+        size_t idx = i * N + j;
+        float scale_j = scales[j];
+        int32_t zp_j = zero_points[j];
+        float expected_f32 = input_f32[idx] / scale_j + static_cast<float>(zp_j);
+        
+        uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
+        float result;
+        std::memcpy(&result, &bits, sizeof(result));
+        
+        float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+        if (rel_error > 0.02f) {
+          log_error("Mismatch at [", i, ",", j, "]: expected ~", expected_f32,
+                    ", got ", result, " (scale=", scale_j, ", zp=", zp_j, ")");
+          all_correct = false;
+        }
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 per-channel conversion test PASSED!");
+    } else {
+      log_error("FP32 to BF16 per-channel conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_f32_to_bf16_per_group_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 Per-Group Conversion");
+    log_info("========================================");
+
+    constexpr int64_t M = 8;
+    constexpr int64_t N = 4;
+    constexpr int64_t G = 2;
+    constexpr int64_t group_size = M / G;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> scales = {
+      0.25f, 0.5f, 0.75f, 1.0f,
+      0.5f, 1.0f, 1.5f, 2.0f
+    };
+    std::vector<int32_t> zero_points = {
+      0, 1, -1, 2,
+      -2, 0, 1, 3
+    };
+
+    std::vector<float> input_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f,
+       1.0f,  1.5f,  2.0f,  2.5f,
+       3.0f,  3.5f,  4.0f,  4.5f,
+       0.5f,  1.0f,  1.5f,  2.0f,
+       2.5f,  3.0f,  3.5f,  4.0f
+    };
+
+    log_info("Input shape: [M=", M, ", N=", N, "] = ", nelems, " elements");
+    log_info("Groups: G=", G, " groups of ", group_size, " rows each");
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.quant_params.scale.buff = scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{G, N};
+    params.quant_params.zero_point.buff = zero_points.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{G, N};
+
+    status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (int64_t i = 0; i < M; ++i) {
+      for (int64_t j = 0; j < N; ++j) {
+        size_t idx = i * N + j;
+        int64_t group_idx = i / group_size;
+        size_t scale_zp_idx = group_idx * N + j;
+        float scale_g = scales[scale_zp_idx];
+        int32_t zp_g = zero_points[scale_zp_idx];
+        float expected_f32 = input_f32[idx] / scale_g + static_cast<float>(zp_g);
+        
+        uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
+        float result;
+        std::memcpy(&result, &bits, sizeof(result));
+        
+        float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+        if (rel_error > 0.02f) {
+          log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ~", expected_f32,
+                    ", got ", result, " (scale=", scale_g, ", zp=", zp_g, ")");
+          all_correct = false;
+        }
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 per-group conversion test PASSED!");
+    } else {
+      log_error("FP32 to BF16 per-group conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_bf16_to_f32_per_channel_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: BF16 to FP32 Per-Channel Conversion");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> scales = {0.25f, 0.5f, 0.75f, 1.0f};
+    std::vector<int32_t> zero_points = {0, 2, -2, 4};
+
+    // Create BF16 input values
+    std::vector<float> bf16_as_f32 = {
+      -4.0f,  6.0f, -2.0f,  8.0f,
+       0.0f,  4.0f,  2.0f,  7.0f,
+       4.0f,  5.0f,  4.0f, 10.0f,
+       8.0f, 10.0f,  6.0f, 12.0f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      uint32_t bits;
+      std::memcpy(&bits, &bf16_as_f32[i], sizeof(bits));
+      input_bf16[i] = static_cast<uint16_t>((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+    }
+
+    log_info("Input shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Per-channel scales: [", scales[0], ", ", scales[1], ", ", scales[2], ", ", scales[3], "]");
+    log_info("Per-channel zero_points: [", zero_points[0], ", ", zero_points[1], ", ", zero_points[2], ", ", zero_points[3], "]");
+
+    std::vector<float> output_f32(nelems, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::f32;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.quant_params.scale.buff = scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{1, N};
+    params.quant_params.zero_point.buff = zero_points.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{1, N};
+
+    status_t status = reorder_direct(input_bf16.data(), output_f32.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (int64_t i = 0; i < M; ++i) {
+      for (int64_t j = 0; j < N; ++j) {
+        size_t idx = i * N + j;
+        float scale_j = scales[j];
+        int32_t zp_j = zero_points[j];
+        float expected = (bf16_as_f32[idx] - static_cast<float>(zp_j)) * scale_j;
+        
+        float rel_error = std::abs(output_f32[idx] - expected) / (std::abs(expected) + 1e-6f);
+        if (rel_error > 0.02f) {
+          log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
+                    ", got ", output_f32[idx], " (scale=", scale_j, ", zp=", zp_j, ")");
+          all_correct = false;
+        }
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 to FP32 per-channel conversion test PASSED!");
+    } else {
+      log_error("BF16 to FP32 per-channel conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_f32_to_bf16_strided_2d_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 Strided 2D (Simple Conversion)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr int64_t src_row_stride = 8;
+    constexpr int64_t src_col_stride = 2;
+    constexpr size_t nelems = M * N;
+
+    // Source data in strided layout (4x8 matrix, we extract columns 0,2,4,6)
+    std::vector<float> src_f32_full = {
+      -2.0f, 99.0f, -1.5f, 99.0f, -1.0f, 99.0f, -0.5f, 99.0f,
+       0.0f, 99.0f,  0.5f, 99.0f,  1.0f, 99.0f,  1.5f, 99.0f,
+       2.0f, 99.0f,  2.5f, 99.0f,  3.0f, 99.0f,  3.5f, 99.0f,
+       4.0f, 99.0f,  4.5f, 99.0f,  5.0f, 99.0f,  5.5f, 99.0f
+    };
+
+    std::vector<float> expected_f32 = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    log_info("Source layout: [4, 8] (contiguous)");
+    log_info("Logical shape: [", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Strides: [", src_row_stride, ", ", src_col_stride, "] (extract every 2nd column)");
+    log_info("No scale/zp - simple type conversion");
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{M, N};
+    params.dst_shape = std::vector<int64_t>{M, N};
+    params.src_strides = std::vector<int64_t>{src_row_stride, src_col_stride};
+    // No scale/zp - simple type conversion
+
+    status_t status = reorder_direct(src_f32_full.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (int64_t i = 0; i < M; ++i) {
+      for (int64_t j = 0; j < N; ++j) {
+        size_t idx = i * N + j;
+        
+        uint32_t bits = static_cast<uint32_t>(output_bf16[idx]) << 16;
+        float result;
+        std::memcpy(&result, &bits, sizeof(result));
+        
+        float rel_error = std::abs(result - expected_f32[idx]) / (std::abs(expected_f32[idx]) + 1e-6f);
+        if (rel_error > 0.01f) {
+          log_error("Mismatch at [", i, ",", j, "]: expected ~", expected_f32[idx], ", got ", result);
+          all_correct = false;
+        }
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 strided 2D conversion test PASSED!");
+    } else {
+      log_error("FP32 to BF16 strided 2D conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int run_lowoha_reorder_f32_to_bf16_batched_test() {
+  try {
+    log_info("========================================");
+    log_info("LOWOHA Reorder: FP32 to BF16 Batched 3D with Scale/ZP");
+    log_info("========================================");
+
+    constexpr int64_t batch = 2;
+    constexpr int64_t M = 2;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = batch * M * N;
+
+    float scale = 0.5f;
+    int32_t zero_point = 1;
+
+    std::vector<float> input_f32 = {
+      // Batch 0
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+      // Batch 1
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    log_info("Input shape: [", batch, ", ", M, ", ", N, "] = ", nelems, " elements");
+    log_info("Per-tensor scale=", scale, ", zero_point=", zero_point);
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = std::vector<int64_t>{batch, M, N};
+    params.dst_shape = std::vector<int64_t>{batch, M, N};
+    params.quant_params.scale.buff = &scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = std::vector<int64_t>{1, 1, 1};
+    params.quant_params.zero_point.buff = &zero_point;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = std::vector<int64_t>{1, 1, 1};
+
+    status_t status = reorder_direct(input_f32.data(), output_bf16.data(), params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      float expected_f32 = input_f32[i] / scale + static_cast<float>(zero_point);
+      
+      uint32_t bits = static_cast<uint32_t>(output_bf16[i]) << 16;
+      float result;
+      std::memcpy(&result, &bits, sizeof(result));
+      
+      float rel_error = std::abs(result - expected_f32) / (std::abs(expected_f32) + 1e-6f);
+      if (rel_error > 0.02f) {
+        log_error("Mismatch at index ", i, ": expected ~", expected_f32, ", got ", result);
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("FP32 to BF16 batched 3D conversion test PASSED!");
+    } else {
+      log_error("FP32 to BF16 batched 3D conversion test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
 } // namespace examples
 } // namespace zendnnl

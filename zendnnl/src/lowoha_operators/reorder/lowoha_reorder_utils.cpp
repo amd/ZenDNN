@@ -120,6 +120,17 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
   const auto &zp = params.quant_params.zero_point;
   const auto &shape = params.src_shape;
   
+  // For f32 <-> bf16 conversions, scale/zp are optional
+  // If both buffers are null, skip quant params validation
+  bool is_f32_bf16_conversion = 
+      (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) ||
+      (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32);
+  
+  if (is_f32_bf16_conversion && scale.buff == nullptr && zp.buff == nullptr) {
+    // Pure type conversion without scaling - no validation needed
+    return status_t::success;
+  }
+  
   // Get shape dimensions
   const int64_t M = params.M();
   const int64_t N = params.N();
@@ -274,6 +285,8 @@ bool is_reorder_supported(data_type_t src_dtype, data_type_t dst_dtype) {
   // 6. s8 -> f32 (dequantization)
   // 7. f32 -> u8 (quantization)
   // 8. u8 -> f32 (dequantization)
+  // 9. f32 -> bf16 (type conversion with optional quantization)
+  // 10. bf16 -> f32 (type conversion with optional dequantization)
 
   return (src_dtype == data_type_t::bf16 && dst_dtype == data_type_t::s8) ||
          (src_dtype == data_type_t::s8 && dst_dtype == data_type_t::bf16) ||
@@ -282,7 +295,9 @@ bool is_reorder_supported(data_type_t src_dtype, data_type_t dst_dtype) {
          (src_dtype == data_type_t::f32 && dst_dtype == data_type_t::s8) ||
          (src_dtype == data_type_t::s8 && dst_dtype == data_type_t::f32) ||
          (src_dtype == data_type_t::f32 && dst_dtype == data_type_t::u8) ||
-         (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::f32);
+         (src_dtype == data_type_t::u8 && dst_dtype == data_type_t::f32) ||
+         (src_dtype == data_type_t::f32 && dst_dtype == data_type_t::bf16) ||
+         (src_dtype == data_type_t::bf16 && dst_dtype == data_type_t::f32);
 }
 
 status_t validate_reorder_shape(const reorder_params_t &params) {

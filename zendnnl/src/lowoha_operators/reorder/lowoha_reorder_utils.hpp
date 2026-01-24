@@ -207,6 +207,52 @@ static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale, int
 }
 
 //==============================================================================
+// Inline helper functions for FP32 <-> BF16 conversion with optional scale/zp
+//==============================================================================
+
+/**
+ * @brief Convert a single fp32 value to bf16 with optional scale/zero-point
+ * 
+ * If scale is provided (scale != 1.0 or zp != 0), applies:
+ *   bf16_val = bf16(f32_val / scale + zp)
+ * Otherwise, performs simple type conversion:
+ *   bf16_val = bf16(f32_val)
+ * 
+ * @param f32_val Input fp32 value
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted bf16 value (as uint16_t)
+ */
+static inline uint16_t convert_f32_to_bf16_scalar(float f32_val, float scale, int zp) {
+  float scaled_val = f32_val;
+  if (scale != 1.0f || zp != 0) {
+    scaled_val = f32_val / scale + static_cast<float>(zp);
+  }
+  return float_to_bf16(scaled_val);
+}
+
+/**
+ * @brief Convert a single bf16 value to fp32 with optional scale/zero-point
+ * 
+ * If scale is provided (scale != 1.0 or zp != 0), applies:
+ *   f32_val = (bf16_as_f32 - zp) * scale
+ * Otherwise, performs simple type conversion:
+ *   f32_val = bf16_as_f32
+ * 
+ * @param bf16_val Input bf16 value (as uint16_t)
+ * @param scale Scale factor (1.0 means no scaling)
+ * @param zp Zero point (0 means no offset)
+ * @return Converted fp32 value
+ */
+static inline float convert_bf16_to_f32_scalar(uint16_t bf16_val, float scale, int zp) {
+  float f32_val = bf16_to_float(bf16_val);
+  if (scale != 1.0f || zp != 0) {
+    f32_val = (f32_val - static_cast<float>(zp)) * scale;
+  }
+  return f32_val;
+}
+
+//==============================================================================
 // Inline helper functions for granularity detection and index calculation
 //==============================================================================
 
@@ -219,7 +265,8 @@ static inline float dequantize_u8_to_f32_scalar(uint8_t u8_val, float scale, int
  *   - 3D: {1, 1, 1}
  */
 static inline bool is_per_tensor_dims(const std::vector<int64_t> &dims) {
-  if (dims.empty()) return false;  // Empty dims is invalid in new convention
+  // Empty dims means no scale/zp provided - treat as per-tensor (default: scale=1.0, zp=0)
+  if (dims.empty()) return true;
   for (int64_t d : dims) {
     if (d != 1) return false;
   }

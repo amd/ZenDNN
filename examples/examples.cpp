@@ -106,6 +106,17 @@ int main() {
     run_lowoha_reorder_f32_to_s8_strided_3d_test();
     run_lowoha_reorder_f32_to_s8_strided_row_padding_test();
 
+    // FP32 <-> BF16 tests (with optional scale/zero-point)
+    run_lowoha_reorder_f32_to_bf16_simple_test();
+    run_lowoha_reorder_f32_to_bf16_with_scale_test();
+    run_lowoha_reorder_bf16_to_f32_simple_test();
+    run_lowoha_reorder_bf16_to_f32_with_scale_test();
+    run_lowoha_reorder_f32_to_bf16_per_channel_test();
+    run_lowoha_reorder_f32_to_bf16_per_group_test();
+    run_lowoha_reorder_bf16_to_f32_per_channel_test();
+    run_lowoha_reorder_f32_to_bf16_strided_2d_test();
+    run_lowoha_reorder_f32_to_bf16_batched_test();
+
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,
      */

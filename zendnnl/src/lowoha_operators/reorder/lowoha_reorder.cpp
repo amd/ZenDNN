@@ -156,6 +156,34 @@ static void reorder_dynamic_impl(const void *src, void *dst, size_t nelems,
     }
     return;
   }
+
+  // FP32 -> BF16 (Type conversion with optional scaling)
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      convert_f32_to_bf16_avx512(src_f32, dst_bf16, nelems, scale, zero_point);
+    }
+    else {
+      convert_f32_to_bf16_ref(src_f32, dst_bf16, nelems, scale, zero_point);
+    }
+    return;
+  }
+
+  // BF16 -> FP32 (Type conversion with optional scaling)
+  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32) {
+    const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+
+    if (algo == reorder_algo_t::native) {
+      convert_bf16_to_f32_avx512(src_bf16, dst_f32, nelems, scale, zero_point);
+    }
+    else {
+      convert_bf16_to_f32_ref(src_bf16, dst_f32, nelems, scale, zero_point);
+    }
+    return;
+  }
 }
 
 /**
@@ -317,6 +345,44 @@ static void reorder_granular_scaler_impl_2d(const void *src, void *dst,
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
         dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+
+  // FP32 -> BF16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+
+  // BF16 -> FP32 (with optional scaling)
+  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32) {
+    const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t i = work_idx / N;
+        int64_t j = work_idx % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[work_idx], scale, zp);
       }
     });
     return;
@@ -492,6 +558,46 @@ static void reorder_granular_scaler_impl_3d(const void *src, void *dst,
         float scale = get_scale_value(params.quant_params.scale, scale_idx);
         int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
         dst_f32[work_idx] = dequantize_u8_to_f32_scalar(src_uint8[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+
+  // FP32 -> BF16 (with optional scaling)
+  if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::bf16) {
+    const float *src_f32 = static_cast<const float *>(src);
+    uint16_t *dst_bf16 = static_cast<uint16_t *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_bf16[work_idx] = convert_f32_to_bf16_scalar(src_f32[work_idx], scale, zp);
+      }
+    });
+    return;
+  }
+
+  // BF16 -> FP32 (with optional scaling)
+  if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::f32) {
+    const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+    float *dst_f32 = static_cast<float *>(dst);
+    
+    zendnnl_parallel_for(0, total_work, 1, [&](int64_t start_idx, int64_t end_idx) {
+      for (int64_t work_idx = start_idx; work_idx < end_idx; ++work_idx) {
+        int64_t elem_in_matrix = work_idx % matrix_size;
+        int64_t i = elem_in_matrix / N;
+        int64_t j = elem_in_matrix % N;
+        size_t scale_idx = get_scale_index(params, i, j, N);
+        size_t zp_idx = get_zp_index(params, i, j, N);
+        float scale = get_scale_value(params.quant_params.scale, scale_idx);
+        int zp = get_zero_point_value(params.quant_params.zero_point, zp_idx);
+        dst_f32[work_idx] = convert_bf16_to_f32_scalar(src_bf16[work_idx], scale, zp);
       }
     });
     return;

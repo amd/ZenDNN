@@ -37,10 +37,18 @@ using zendnnl::memory::data_type_t;
  * Supported conversions:
  * - BF16 ↔ S8/U8: Quantization/Dequantization with scale and zero-point
  * - F32  ↔ S8/U8: Quantization/Dequantization with scale and zero-point
+ * - F32  ↔ BF16:  Type conversion with optional scale and zero-point
  *
  * Quantization formulas:
  * - Quantize:   int_val = clamp(round(src_val / scale) + zero_point, min, max)
  * - Dequantize: dst_val = (int_val - zero_point) * scale
+ * - F32->BF16:  bf16_val = bf16((f32_val / scale) + zero_point)  [scale/zp optional]
+ * - BF16->F32:  f32_val = (bf16_as_f32 - zero_point) * scale     [scale/zp optional]
+ *
+ * For F32 ↔ BF16 conversions:
+ * - Scale and zero_point are OPTIONAL
+ * - If not provided (buff = nullptr), simple type conversion is performed
+ * - Default values when not provided: scale = 1.0, zero_point = 0
  *
  * Shape: [nelems] for 1D, [M, N] for 2D, [batch, M, N] for 3D (mandatory)
  * Strides: Optional for non-contiguous source memory
@@ -55,23 +63,6 @@ using zendnnl::memory::data_type_t;
  * @note Shape is mandatory; nelems is computed automatically from shape.
  * @note Destination is always written in contiguous format.
  * @note Buffers must not overlap.
- *
- * @example Basic usage (BF16 to S8 quantization):
- * @code
- * float scale = 0.5f;
- * int32_t zero_point = 0;
- *
- * reorder_params_t params;
- * params.src_dtype = data_type_t::bf16;
- * params.dst_dtype = data_type_t::s8;
- * params.src_shape = {128, 256};  // 2D matrix
- * params.quant_params.scale.buff = &scale;
- * params.quant_params.scale.dt = data_type_t::f32;
- * params.quant_params.zero_point.buff = &zero_point;
- * params.quant_params.zero_point.dt = data_type_t::s32;
- *
- * status_t status = reorder_direct(bf16_buffer, int8_buffer, params);
- * @endcode
  */
 status_t reorder_direct(const void *src, void *dst,
                          reorder_params_t params);

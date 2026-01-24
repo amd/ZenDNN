@@ -259,6 +259,68 @@ void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
 void dequantize_uint8_to_f32_ref(const uint8_t *input, float *output,
                                   size_t nelems, float scale, int zero_point);
 
+//==============================================================================
+// FP32 <-> BF16 conversion kernels with optional scale/zero-point
+//==============================================================================
+
+/**
+ * @brief Convert FP32 to BF16 using AVX512 with optional scale/zero-point.
+ *
+ * If scale != 1.0 or zero_point != 0:
+ *   bf16_val = bf16(f32_val / scale + zero_point)
+ * Otherwise:
+ *   bf16_val = bf16(f32_val)  (simple type conversion)
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination BF16 data (stored as uint16_t)
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor (1.0 for no scaling)
+ * @param zero_point Zero point offset (0 for no offset)
+ */
+void convert_f32_to_bf16_avx512(const float *input, uint16_t *output,
+                                 size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Convert BF16 to FP32 using AVX512 with optional scale/zero-point.
+ *
+ * If scale != 1.0 or zero_point != 0:
+ *   f32_val = (bf16_as_f32 - zero_point) * scale
+ * Otherwise:
+ *   f32_val = bf16_as_f32  (simple type conversion)
+ *
+ * @param input Pointer to source BF16 data (stored as uint16_t)
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor (1.0 for no scaling)
+ * @param zero_point Zero point offset (0 for no offset)
+ */
+void convert_bf16_to_f32_avx512(const uint16_t *input, float *output,
+                                 size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Convert FP32 to BF16 using reference scalar implementation.
+ *
+ * @param input Pointer to source float32 data
+ * @param output Pointer to destination BF16 data (stored as uint16_t)
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor (1.0 for no scaling)
+ * @param zero_point Zero point offset (0 for no offset)
+ */
+void convert_f32_to_bf16_ref(const float *input, uint16_t *output,
+                              size_t nelems, float scale, int zero_point);
+
+/**
+ * @brief Convert BF16 to FP32 using reference scalar implementation.
+ *
+ * @param input Pointer to source BF16 data (stored as uint16_t)
+ * @param output Pointer to destination float32 data
+ * @param nelems Number of elements to convert
+ * @param scale Scale factor (1.0 for no scaling)
+ * @param zero_point Zero point offset (0 for no offset)
+ */
+void convert_bf16_to_f32_ref(const uint16_t *input, float *output,
+                              size_t nelems, float scale, int zero_point);
+
 } // namespace reorder
 } // namespace lowoha
 } // namespace zendnnl

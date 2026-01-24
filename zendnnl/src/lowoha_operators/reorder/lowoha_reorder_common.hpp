@@ -42,9 +42,18 @@ enum class reorder_algo_t : int {
  * @brief Structure for reorder quantization parameters
  *
  * Used for quantization (bf16/f32 -> int8/uint8) and dequantization (int8/uint8 -> bf16/f32).
- * For quantization (s8):   int8_val = clamp(round(src_val / scale) + zero_point, -128, 127)
- * For quantization (u8):   uint8_val = clamp(round(src_val / scale) + zero_point, 0, 255)
- * For dequantization: dst_val = (int_val - zero_point) * scale
+ * Also used for f32 <-> bf16 type conversion with optional scaling.
+ *
+ * Formulas:
+ *   - Quantization (s8):   int8_val = clamp(round(src_val / scale) + zero_point, -128, 127)
+ *   - Quantization (u8):   uint8_val = clamp(round(src_val / scale) + zero_point, 0, 255)
+ *   - Dequantization:      dst_val = (int_val - zero_point) * scale
+ *   - f32 -> bf16:         bf16_val = bf16((f32_val / scale) + zero_point)  [scale/zp optional]
+ *   - bf16 -> f32:         f32_val = (bf16_as_f32 - zero_point) * scale     [scale/zp optional]
+ *
+ * Note: For f32 <-> bf16 conversions, scale and zero_point are OPTIONAL.
+ *       If not provided (buff = nullptr), simple type conversion is performed.
+ *       Default values: scale = 1.0, zero_point = 0
  *
  * Granularity convention for dims (must match tensor dimensionality):
  *

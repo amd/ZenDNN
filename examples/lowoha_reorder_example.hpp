@@ -283,6 +283,55 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test();
  */
 int run_lowoha_reorder_f32_to_s8_strided_row_padding_test();
 
+//==============================================================================
+// FP32 <-> BF16 Conversion Tests (with optional scale/zero-point)
+//==============================================================================
+
+/** @fn run_lowoha_reorder_f32_to_bf16_simple_test
+ *  @brief Demonstrates simple FP32 to BF16 type conversion (no scale/zp).
+ */
+int run_lowoha_reorder_f32_to_bf16_simple_test();
+
+/** @fn run_lowoha_reorder_f32_to_bf16_with_scale_test
+ *  @brief Demonstrates FP32 to BF16 conversion with scale and zero-point.
+ */
+int run_lowoha_reorder_f32_to_bf16_with_scale_test();
+
+/** @fn run_lowoha_reorder_bf16_to_f32_simple_test
+ *  @brief Demonstrates simple BF16 to FP32 type conversion (no scale/zp).
+ */
+int run_lowoha_reorder_bf16_to_f32_simple_test();
+
+/** @fn run_lowoha_reorder_bf16_to_f32_with_scale_test
+ *  @brief Demonstrates BF16 to FP32 conversion with scale and zero-point.
+ */
+int run_lowoha_reorder_bf16_to_f32_with_scale_test();
+
+/** @fn run_lowoha_reorder_f32_to_bf16_per_channel_test
+ *  @brief Demonstrates FP32 to BF16 per-channel conversion with scale/zp.
+ */
+int run_lowoha_reorder_f32_to_bf16_per_channel_test();
+
+/** @fn run_lowoha_reorder_f32_to_bf16_per_group_test
+ *  @brief Demonstrates FP32 to BF16 per-group conversion with scale/zp.
+ */
+int run_lowoha_reorder_f32_to_bf16_per_group_test();
+
+/** @fn run_lowoha_reorder_bf16_to_f32_per_channel_test
+ *  @brief Demonstrates BF16 to FP32 per-channel conversion with scale/zp.
+ */
+int run_lowoha_reorder_bf16_to_f32_per_channel_test();
+
+/** @fn run_lowoha_reorder_f32_to_bf16_strided_2d_test
+ *  @brief Demonstrates FP32 to BF16 strided 2D conversion.
+ */
+int run_lowoha_reorder_f32_to_bf16_strided_2d_test();
+
+/** @fn run_lowoha_reorder_f32_to_bf16_batched_test
+ *  @brief Demonstrates FP32 to BF16 batched 3D conversion.
+ */
+int run_lowoha_reorder_f32_to_bf16_batched_test();
+
 } // namespace examples
 } // namespace zendnnl
 
