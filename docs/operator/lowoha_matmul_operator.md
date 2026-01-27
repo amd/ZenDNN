@@ -149,6 +149,15 @@ struct matmul_post_op {
 | `post_op_type_t::binary_add` | Element-wise Add | Yes |
 | `post_op_type_t::binary_mul` | Element-wise Multiply | Yes |
 
+**Binary Post-Op Dimensions:**
+
+For binary post-ops (`binary_add` and `binary_mul`), the `dims` field specifies the tensor shape:
+
+| Operation | Dims | Shape | Description |
+|-----------|------|-------|-------------|
+| MM | 2D | `{M, N}` | Element-wise operation on output |
+| BMM | 2D | `{M, N}` | Same values broadcast to all batches |
+| BMM | 3D | `{Batch, M, N}` | Different values per batch |
 
 ### `matmul_quantization_params_t`
 

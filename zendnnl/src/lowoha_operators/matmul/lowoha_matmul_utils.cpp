@@ -35,6 +35,38 @@ std::mutex &get_lowoha_mutex() {
   return lowoha_mutex;
 }
 
+size_t get_postop_batch_stride(const matmul_post_op &po) {
+  if (po.dims.size() < 3 || po.dims[0] <= 1) {
+    return 0;  // Not a 3D tensor or batch dimension is 1 (broadcast)
+  }
+  // Assuming dims layout is [Batch, M, N] with row-major storage
+  size_t element_size = zendnnl::common::size_of(po.dtype);
+  return po.dims[1] * po.dims[2] * element_size;
+}
+
+void apply_bmm_postop_offsets(matmul_params &params, int batch_idx,
+                              int m_start, int N) {
+  for (auto &po : params.postop_) {
+    if ((po.po_type == post_op_type_t::binary_add ||
+         po.po_type == post_op_type_t::binary_mul) &&
+        po.buff != nullptr) {
+
+      size_t element_size = zendnnl::common::size_of(po.dtype);
+      size_t total_offset = 0;
+
+      // Add batch offset for 3D post-ops
+      if (is_3d_postop(po)) {
+        total_offset += batch_idx * get_postop_batch_stride(po);
+      }
+
+      // Add row offset for partitioned execution
+      total_offset += m_start * N * element_size;
+
+      po.buff = static_cast<uint8_t *>(po.buff) + total_offset;
+    }
+  }
+}
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,

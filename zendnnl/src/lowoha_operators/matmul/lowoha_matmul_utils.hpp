@@ -97,6 +97,45 @@ inline int get_batch_index(int b, int batch_size) {
 }
 
 /**
+ * @brief Check if post-op tensor has batch dimension (3D)
+ *
+ * A post-op is considered 3D if it has 3 dimensions and the batch dimension > 1.
+ * This is used to determine if batch-specific offsets need to be applied during BMM.
+ *
+ * @param po The post-op to check
+ * @return true if the post-op has a non-trivial batch dimension
+ */
+inline bool is_3d_postop(const matmul_post_op &po) {
+  return po.dims.size() >= 3 && po.dims[0] > 1;
+}
+
+/**
+ * @brief Calculate the batch stride for a 3D post-op tensor
+ *
+ * For a 3D tensor with dims [Batch, M, N], the batch stride is M * N elements.
+ * This function returns the stride in bytes.
+ *
+ * @param po The post-op containing dimension and type information
+ * @return The batch stride in bytes, or 0 if not a 3D tensor
+ */
+size_t get_postop_batch_stride(const matmul_post_op &po);
+
+/**
+ * @brief Apply batch and row offsets to post-op buffers for BMM
+ *
+ * This function modifies post-op buffer pointers to account for:
+ * 1. Batch offset: For 3D post-ops, offset by batch_idx * batch_stride
+ * 2. Row offset: For partitioned execution, offset by m_start * N
+ *
+ * @param params The matmul_params to modify (post-op buffers will be updated)
+ * @param batch_idx The current batch index
+ * @param m_start The starting row index for partitioned execution
+ * @param N The number of columns in the output matrix
+ */
+void apply_bmm_postop_offsets(matmul_params &params, int batch_idx,
+                              int m_start, int N);
+
+/**
 * @brief Validates input parameters for matrix multiplication direct operation.
 *
 * This function performs comprehensive validation of all input parameters to ensure

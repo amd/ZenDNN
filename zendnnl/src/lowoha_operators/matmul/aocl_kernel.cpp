@@ -329,7 +329,7 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 
   dlp_metadata->pre_ops->group_size = static_cast<int>(group_size);
 
-  log_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=",
+  apilog_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=",
            group_size);
 }
 
@@ -1060,7 +1060,7 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
       }
       aocl_po->pre_ops->group_size = static_cast<dim_t>(group_size);
 
-      log_info("WOQ BLIS: scale_len=", get_num_elements(wei_scale.dims),
+      apilog_info("WOQ BLIS: scale_len=", get_num_elements(wei_scale.dims),
                ", group_size=", group_size);
     }
   }
@@ -1489,7 +1489,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
 
       if (zp_comp_acc) {
         bool is_cacheable = (wei_zp == 0 && is_weights_const && matmul_config.get_zp_comp_cache());
-        log_info("INT8 ZP compensation: src_zp=", src_zp, ", wei_zp=", wei_zp,
+        apilog_info("INT8 ZP compensation: src_zp=", src_zp, ", wei_zp=", wei_zp,
                  ", ndim=", zp_comp_ndim, ", cached=", (is_cacheable ? "yes" : "no"));
       }
     }
@@ -1622,7 +1622,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
     }
   }
   else {
-    log_info("Data type not supported");
+    apilog_info("Data type not supported");
   }
   // Free reordered buffer for AOCL blocked non-cached
   bool weight_cache_disabled = (weight_cache_type == 0 &&
@@ -1699,7 +1699,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
 
   // Call appropriate batch GEMM based on data types
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_f32f32f32of32");
+    apilog_info("executing aocl_batch_gemm_f32f32f32of32");
     aocl_batch_gemm_f32f32f32of32(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
@@ -1714,7 +1714,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32of32");
+    apilog_info("executing aocl_batch_gemm_bf16bf16f32of32");
     aocl_batch_gemm_bf16bf16f32of32(
       &layout, &transA, &transB,
       &m_, &n_, &k_,
@@ -1729,7 +1729,7 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
       &metadata_array);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
-    log_info("executing aocl_batch_gemm_bf16bf16f32obf16");
+    apilog_info("executing aocl_batch_gemm_bf16bf16f32obf16");
     aocl_batch_gemm_bf16bf16f32obf16(
       &layout, &transA, &transB,
       &m_, &n_, &k_,

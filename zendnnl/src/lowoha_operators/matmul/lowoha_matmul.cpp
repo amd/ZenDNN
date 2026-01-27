@@ -172,18 +172,9 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
       void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
 
       // Create a modified post_op with offset binary tensor buffers
+      // Supports both 2D (M x N) and 3D (Batch x M x N) post-op tensors
       matmul_params thread_lowoha_params = params;
-      for (auto &po : thread_lowoha_params.postop_) {
-        if (po.po_type == post_op_type_t::binary_add ||
-            po.po_type == post_op_type_t::binary_mul) {
-          if (po.buff != nullptr) {
-            // Calculate offset based on m_start and data type
-            size_t element_size = size_of(po.dtype);
-            size_t row_offset = m_start * N * element_size;
-            po.buff = static_cast<uint8_t *>(const_cast<void *>(po.buff)) + row_offset;
-          }
-        }
-      }
+      apply_bmm_postop_offsets(thread_lowoha_params, batch_idx, m_start, N);
 
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             m_len, N, K, alpha,
@@ -217,13 +208,18 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
       const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight) +
                                   get_batch_index(b, batch_params.Batch_B) * weight_batch_stride_bytes;
       uint8_t *dst_ptr = static_cast<uint8_t *>(dst) + b * dst_batch_stride_bytes;
+
+      // Create batch-specific params with offset post-op buffers for 3D post-ops
+      matmul_params batch_lowoha_params = params;
+      apply_bmm_postop_offsets(batch_lowoha_params, b, 0, N);
+
       matmul_kernel_wrapper(layout, trans_input, trans_weight,
                             M, N, K, alpha,
                             src_ptr, lda, weight_ptr,
                             ldb, beta, dst_ptr, ldc,
                             params.dtypes, kernel,
-                            params.mem_format_a, params.mem_format_b, params, batch_params,
-                            bias, is_weights_const);
+                            params.mem_format_a, params.mem_format_b, batch_lowoha_params,
+                            batch_params, bias, is_weights_const);
     }
   }
 }
