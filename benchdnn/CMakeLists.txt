@@ -68,4 +68,17 @@ target_link_libraries(benchdnn
   embag_benchdnn
   benchdnn_utils)
 
+if(ZENDNNL_CODE_COVERAGE)
+  message(STATUS "code-coverage enabled for zendnnl benchdnn")
+  target_compile_options(benchdnn PRIVATE --coverage -O0 -g)
+  target_link_options(benchdnn PRIVATE --coverage)
+endif()
+
+if(ZENDNNL_BUILD_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(STATUS "ASAN enabled for zendnnl benchdnn")
+  set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_compile_options(benchdnn PRIVATE ${SANITIZER_FLAGS})
+  target_link_options(benchdnn PRIVATE "-fsanitize=address")
+endif()
+
 install(TARGETS benchdnn)
