@@ -19,6 +19,7 @@
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
 #include <vector>
 #include <limits>
+#include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
@@ -66,10 +67,38 @@ status_t sdpa_direct(
   const uint64_t seq_len = params.seq_len;
   const uint64_t head_dim = params.head_dim;
   const uint64_t batch_heads = batch * num_heads;
+  const int num_threads = params.num_threads > 0 ? params.num_threads :
+                          omp_get_max_threads();
 
   // Determine element size based on data type
   size_t elem_size = (params.q_dt == data_type_t::bf16) ? sizeof(
                        uint16_t) : sizeof(float);
+
+
+  // =========================================================================
+  // Step 1 prep: Build masks to add to scores (Q @ K^T)
+  // =========================================================================
+  std::vector<matmul::matmul_post_op> mask_postops;
+  if (params.has_attn_mask && attn_mask != nullptr) {
+    matmul::matmul_post_op mask_po;
+    mask_po.po_type = zendnnl::ops::post_op_type_t::binary_add;
+    mask_po.buff = const_cast<void *>(attn_mask);
+    mask_po.dtype = params.mask_dt == data_type_t::none ? data_type_t::f32
+                    : params.mask_dt;
+    if (batch_heads == 1) {
+      mask_po.dims = {static_cast<int64_t>(seq_len),
+                      static_cast<int64_t>(seq_len)
+                     };
+    }
+    else {
+      mask_po.dims = {static_cast<int64_t>(batch_heads),
+                      static_cast<int64_t>(seq_len),
+                      static_cast<int64_t>(seq_len)
+                     };
+    }
+    mask_po.leading_dim = static_cast<int>(seq_len);
+    mask_postops.push_back(mask_po);
+  }
 
   // Allocate intermediate buffer for scores: [batch * num_heads, seq_len, seq_len]
   const uint64_t scores_size = batch_heads * seq_len * seq_len;
@@ -77,7 +106,7 @@ status_t sdpa_direct(
   void *scores = scores_buffer.data();
 
   // =========================================================================
-  // Step 1: BMM - scores = Q @ K^T
+  // Step 1: BMM - scores = Q @ K^T (+ attn_mask post-op if provided)
   // Q: [batch * num_heads, seq_len, head_dim]
   // K: [batch * num_heads, seq_len, head_dim] -> K^T: [batch * num_heads, head_dim, seq_len]
   // scores: [batch * num_heads, seq_len, seq_len]
@@ -87,15 +116,14 @@ status_t sdpa_direct(
     mm_params.dtypes.src = params.q_dt;
     mm_params.dtypes.wei = params.k_dt;
     mm_params.dtypes.dst = params.q_dt;  // scores same type as Q
-    mm_params.num_threads = params.num_threads;
+    mm_params.num_threads = num_threads;
+    if (!mask_postops.empty()) {
+      mm_params.postop_ = mask_postops;
+    }
 
     matmul::matmul_batch_params_t batch_params;
     batch_params.Batch_A = batch_heads;
     batch_params.Batch_B = batch_heads;
-    // Let matmul calculate strides automatically
-    batch_params.batch_stride_src = -1;
-    batch_params.batch_stride_wei = -1;
-    batch_params.batch_stride_dst = -1;
 
     // Q @ K^T: M=seq_len, N=seq_len, K=head_dim, transB=true
     status_t status = matmul::matmul_direct(
@@ -126,39 +154,30 @@ status_t sdpa_direct(
   }
 
   // =========================================================================
-  // Step 2: Apply attention mask (if provided) or causal mask
-  // scores = scores + mask (where mask is -inf for masked positions)
+  // Step 1.6: Apply causal mask separately (after Q @ K^T)
   // =========================================================================
-  if (params.is_causal || params.has_attn_mask) {
-    float neg_inf = -std::numeric_limits<float>::infinity();
-
-    if (params.q_dt == data_type_t::f32) {
-      float *scores_f32 = static_cast<float *>(scores);
-      const float *mask_f32 = static_cast<const float *>(attn_mask);
-
-      #pragma omp parallel for collapse(2)
-      for (uint64_t bh = 0; bh < batch_heads; ++bh) {
-        for (uint64_t i = 0; i < seq_len; ++i) {
-          for (uint64_t j = 0; j < seq_len; ++j) {
-            uint64_t idx = bh * seq_len * seq_len + i * seq_len + j;
-
-            // Apply causal mask: mask out future positions (j > i)
-            if (params.is_causal && j > i) {
-              scores_f32[idx] = neg_inf;
-            }
-            // Apply custom attention mask
-            else if (params.has_attn_mask && mask_f32 != nullptr) {
-              scores_f32[idx] += mask_f32[idx];
-            }
+  if (params.is_causal) {
+    if (params.q_dt != data_type_t::f32) {
+      log_error("SDPA: Causal mask currently supports only f32 scores");
+      return status_t::failure;
+    }
+    float *scores_f32 = static_cast<float *>(scores);
+    const float neg_inf = -std::numeric_limits<float>::infinity();
+    #pragma omp parallel for collapse(2) num_threads(num_threads)
+    for (uint64_t bh = 0; bh < batch_heads; ++bh) {
+      for (uint64_t i = 0; i < seq_len; ++i) {
+        for (uint64_t j = 0; j < seq_len; ++j) {
+          uint64_t idx = bh * seq_len * seq_len + i * seq_len + j;
+          if (j > i) {
+            scores_f32[idx] = neg_inf;
           }
         }
       }
     }
-    // TODO: Add BF16 support for masking
   }
 
   // =========================================================================
-  // Step 3: Softmax on scores
+  // Step 2: Softmax on scores
   // attn_weights = softmax(scores, dim=-1)
   // =========================================================================
   {
@@ -169,7 +188,7 @@ status_t sdpa_direct(
     sm_params.log_softmax = false;
     sm_params.src_dt = params.q_dt;
     sm_params.dst_dt = params.q_dt;
-    sm_params.num_threads = params.num_threads;
+    sm_params.num_threads = num_threads;
     sm_params.algorithm = softmax::softmax_algo_t::onednn;
 
     // Setup shape for OneDNN backend (required)
@@ -200,7 +219,7 @@ status_t sdpa_direct(
     mm_params.dtypes.src = params.q_dt;  // attn_weights same type as Q
     mm_params.dtypes.wei = params.v_dt;
     mm_params.dtypes.dst = params.out_dt;
-    mm_params.num_threads = params.num_threads;
+    mm_params.num_threads = num_threads;
 
     matmul::matmul_batch_params_t batch_params;
     batch_params.Batch_A = batch_heads;
@@ -237,6 +256,7 @@ status_t sdpa_direct(
       return status_t::failure;
     }
   }
+
 
   if (is_profile) {
     profiler.tbp_stop();
