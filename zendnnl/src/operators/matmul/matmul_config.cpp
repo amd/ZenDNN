@@ -47,6 +47,35 @@ status_t matmul_config_t::set_user_config(json config_json) {
         matmul_algo = static_cast<int32_t>(str_to_matmul_algo(matmul_algo_str));
       }
     }
+    // Read MM partitioner setting from JSON
+    auto mm_partitioner_json = matmul_json["mm_partitioner_enabled"];
+    if (! mm_partitioner_json.empty()) {
+      auto mm_partitioner_str = mm_partitioner_json.template get<std::string>();
+      if (! mm_partitioner_str.empty()) {
+        std::string value_str = mm_partitioner_str;
+        std::transform(value_str.begin(), value_str.end(), value_str.begin(),
+        [](unsigned char c) {
+          return std::tolower(c);
+        });
+        mm_partitioner_enabled = (value_str == "true" || value_str == "1" ||
+                                  value_str == "on");
+      }
+    }
+    // Read tile sizes from JSON
+    auto tile_m_json = matmul_json["tile_m"];
+    if (! tile_m_json.empty()) {
+      tile_m = tile_m_json.template get<int32_t>();
+      if (tile_m <= 0) {
+        tile_m = 0;
+      }
+    }
+    auto tile_n_json = matmul_json["tile_n"];
+    if (! tile_n_json.empty()) {
+      tile_n = tile_n_json.template get<int32_t>();
+      if (tile_n <= 0) {
+        tile_n = 0;
+      }
+    }
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
     if (! matmul_weight_cache_json.empty()) {
       auto matmul_weight_cache_str = matmul_weight_cache_json.template
@@ -77,6 +106,10 @@ status_t matmul_config_t::set_user_config(json config_json) {
   set_weight_cache(matmul_weight_cache);
   set_zp_comp_cache(zp_comp_cache_enabled);
   set_lru_cache_capacity(lru_cache_capacity);
+  set_mm_partitioner_enabled(mm_partitioner_enabled);
+  set_tile_m(tile_m);
+  set_tile_n(tile_n);
+
   return status_t::success;
 }
 
@@ -113,6 +146,7 @@ void matmul_config_t::set_env_config() {
     }
   }
   set_algo(matmul_algo);
+
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
   [[maybe_unused]] int32_t matmul_weight_cache = 1;
   if (weight_cache_env) {
@@ -130,12 +164,63 @@ void matmul_config_t::set_env_config() {
     zp_comp_cache_enabled = (std::stoi(zp_comp_cache_env) != 0);
   }
   set_zp_comp_cache(zp_comp_cache_enabled);
+
   char *lru_cache_capacity_env = std::getenv("ZENDNNL_LRU_CACHE_CAPACITY");
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   if (lru_cache_capacity_env) {
     lru_cache_capacity = std::stoi(lru_cache_capacity_env);
   }
   set_lru_cache_capacity(lru_cache_capacity);
+
+  // Read MM partitioner enable setting from environment
+  char *mm_partitioner_env = std::getenv("ZENDNN_ENABLE_MM_PARTITIONER");
+  bool mm_partitioner_enabled = false;  // Default disabled
+  if (mm_partitioner_env) {
+    std::string value_str(mm_partitioner_env);
+    std::transform(value_str.begin(), value_str.end(), value_str.begin(),
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
+
+    if (value_str == "true" || value_str == "1" || value_str == "on") {
+      mm_partitioner_enabled = true;
+    }
+    else if (value_str == "false" || value_str == "0" || value_str == "off") {
+      mm_partitioner_enabled = false;
+    }
+  }
+  set_mm_partitioner_enabled(mm_partitioner_enabled);
+
+  // Read tile size settings from environment
+  char *tile_m_env = std::getenv("ZENDNN_MM_TILE_M");
+  int32_t tile_m = 0;
+  if (tile_m_env) {
+    try {
+      int32_t value = std::stoi(tile_m_env);
+      if (value > 0) {
+        tile_m = value;
+      }
+    }
+    catch (const std::exception &e) {
+      // Keep default value on error
+    }
+  }
+  set_tile_m(tile_m);
+
+  char *tile_n_env = std::getenv("ZENDNN_MM_TILE_N");
+  int32_t tile_n = 0;
+  if (tile_n_env) {
+    try {
+      int32_t value = std::stoi(tile_n_env);
+      if (value > 0) {
+        tile_n = value;
+      }
+    }
+    catch (const std::exception &e) {
+      // Keep default value on error
+    }
+  }
+  set_tile_n(tile_n);
 }
 
 void matmul_config_t::set_algo(int32_t algo) {
@@ -169,6 +254,30 @@ void matmul_config_t::set_lru_cache_capacity(uint32_t capacity) {
 uint32_t matmul_config_t::get_lru_cache_capacity() {
   return lru_cache_capacity;
 }
+void matmul_config_t::set_mm_partitioner_enabled(bool enabled) {
+  mm_partitioner_enabled = enabled;
+}
+
+bool matmul_config_t::get_mm_partitioner_enabled() {
+  return mm_partitioner_enabled;
+}
+
+void matmul_config_t::set_tile_m(int32_t size) {
+  tile_m = size;
+}
+
+int32_t matmul_config_t::get_tile_m() {
+  return tile_m;
+}
+
+void matmul_config_t::set_tile_n(int32_t size) {
+  tile_n = size;
+}
+
+int32_t matmul_config_t::get_tile_n() {
+  return tile_n;
+}
+
 
 matmul_config_t &matmul_config_t::instance() {
   // The static local variable 'instance' is created on first call

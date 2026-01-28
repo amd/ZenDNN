@@ -91,7 +91,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
   }
   return 1;
 }
-
+#if ENABLE_LIBXSMM_BRGEMM_KERNEL
 /**
  * @brief Template function for LibXSMM BRGEMM dispatch and execution
  */
@@ -189,8 +189,7 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
   }
   return kernel_status;
 }
-
-
+#endif
 
 /**
  * @brief Run LibXSMM GEMM with automatic type dispatch
@@ -198,7 +197,8 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
 static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                               float beta, int lda, int ldb, int ldc,
                               const void *A, const void *B, void *C,
-                              const matmul_data_types &dtypes, const matmul_params &lowoha_para, const void *bias) {
+                              const matmul_data_types &dtypes, const matmul_params &lowoha_para,
+                              const void *bias) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
     kernel_status = libxsmm_gemm<float,float,float>(

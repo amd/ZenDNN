@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -121,6 +121,54 @@ class matmul_config_t final : public op_config_t {
    */
   uint32_t get_lru_cache_capacity();
 
+  /** @brief Sets mm_partitioner_enabled flag.
+  *
+  * @param enabled Whether to enable MM partitioner.
+  */
+  void set_mm_partitioner_enabled(bool enabled);
+
+  /** @brief Get mm_partitioner_enabled flag.
+   *
+   * @return true if MM partitioner is enabled.
+   */
+  bool get_mm_partitioner_enabled();
+
+  /** @brief Sets tile_m size.
+  *
+  * @param size The tile size for M dimension.
+  */
+  void set_tile_m(int32_t size);
+
+  /** @brief Get tile_m size.
+   *
+   * @return tile_m size.
+   */
+  int32_t get_tile_m();
+
+  /** @brief Sets tile_n size.
+  *
+  * @param size The tile size for N dimension.
+  */
+  void set_tile_n(int32_t size);
+
+  /** @brief Get tile_n size.
+   *
+   * @return tile_n size.
+   */
+  int32_t get_tile_n();
+
+  /** @brief Sets tile_k size.
+  *
+  * @param size The tile size for K dimension.
+  */
+  void set_tile_k(int32_t size);
+
+  /** @brief Get tile_k size.
+   *
+   * @return tile_k size.
+   */
+  int32_t get_tile_k();
+
   /** @brief Returns the singleton instance of matmul_config_t.
   *
   *  This method ensures only one instance of matmul_config_t exists
@@ -152,6 +200,9 @@ class matmul_config_t final : public op_config_t {
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
   uint32_t lru_cache_capacity; /**< LRU cache capacity. */
+  bool mm_partitioner_enabled;      /**< Enable MM partitioner. */
+  int32_t tile_m;                   /**< Tile size for M dimension. */
+  int32_t tile_n;                   /**< Tile size for N dimension. */
 };
 
 }

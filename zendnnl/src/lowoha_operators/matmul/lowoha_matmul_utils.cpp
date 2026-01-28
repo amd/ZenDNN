@@ -615,6 +615,11 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   return kernel;
 }
 
+bool should_use_mm_partitioner() {
+  matmul_config_t &matmul_config = matmul_config_t::instance();
+  return matmul_config.get_mm_partitioner_enabled();
+}
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl

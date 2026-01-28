@@ -244,6 +244,16 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
  */
 unsigned int get_auto_tuner_ver();
 
+/**
+ * @brief Check if MM partitioner should be enabled
+ *
+ * Checks both compile-time flag and runtime environment variable.
+ * Environment variable ZENDNN_ENABLE_MM_PARTITIONER can override the default.
+ *
+ * @return true if MM partitioner should be used, false otherwise
+ */
+bool should_use_mm_partitioner();
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
