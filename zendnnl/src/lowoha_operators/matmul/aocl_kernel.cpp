@@ -329,8 +329,9 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
 
   dlp_metadata->pre_ops->group_size = static_cast<int>(group_size);
 
-  apilog_info("WOQ: scale_len=", get_num_elements(wei_scale.dims), ", group_size=",
-           group_size);
+  apilog_info("WOQ: scale_len=", get_num_elements(wei_scale.dims),
+              ", group_size=",
+              group_size);
 }
 
 // Helper function to create post_op structure for bias and post-ops
@@ -338,8 +339,6 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                                    const void *bias, const matmul_data_types &dtypes, int N, int K,
                                    int M, int32_t *zp_comp_acc, int zp_comp_ndim,
                                    zendnnl::ops::matmul_algo_t kernel) {
-  // Count total operations (bias + post-ops + zp_comp)
-  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size();
 
   // Check if this is a WOQ case (need metadata even if no post-ops)
   bool is_woq = dtypes.wei == data_type_t::s4 &&
@@ -351,23 +350,23 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
                   dtypes.src == data_type_t::s8) &&
                  dtypes.wei == data_type_t::s8;
 
-  // Count INT8 scale post-ops
+  //Count INT8 scale post-ops
   int int8_scale_count = 0;
   if (is_int8) {
-    // Source scale
     if (lowoha_param.quant_params.src_scale.buff) {
       int8_scale_count++;
     }
-    // Weight scale
     if (lowoha_param.quant_params.wei_scale.buff) {
       int8_scale_count++;
     }
-    // Destination scale (applied at the end)
-    if (lowoha_param.quant_params.dst_scale.buff) {
+    if (lowoha_param.quant_params.dst_scale.buff ||
+        lowoha_param.quant_params.dst_zp.buff) {
       int8_scale_count++;
     }
-    total_ops += int8_scale_count;
   }
+
+  // Count total operations (bias + post-ops + scales + zp_comp)
+  int total_ops = (bias ? 1 : 0) + lowoha_param.postop_.size() + int8_scale_count;
 
   // Add zero-point compensation to total ops
   if (zp_comp_ndim > 0) {
@@ -510,7 +509,20 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->bias = static_cast<dlp_post_op_bias *>(calloc(bias_count,
                          sizeof(dlp_post_op_bias)));
     if (!dlp_metadata->bias) {
-      free(dlp_metadata->seq_vector);
+      if (dlp_metadata->scale) {
+        for (int i = 0; i < scale_count; ++i) {
+          if (dlp_metadata->scale[i].sf) {
+            free(dlp_metadata->scale[i].sf);
+          }
+          if (dlp_metadata->scale[i].zp) {
+            free(dlp_metadata->scale[i].zp);
+          }
+        }
+        free(dlp_metadata->scale);
+      }
+      if (dlp_metadata->seq_vector) {
+        free(dlp_metadata->seq_vector);
+      }
       free(dlp_metadata);
       return nullptr;
     }
@@ -1061,7 +1073,7 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
       aocl_po->pre_ops->group_size = static_cast<dim_t>(group_size);
 
       apilog_info("WOQ BLIS: scale_len=", get_num_elements(wei_scale.dims),
-               ", group_size=", group_size);
+                  ", group_size=", group_size);
     }
   }
 
@@ -1379,13 +1391,13 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
 }
 
 void run_dlp(char layout, char transA, char transB, int M, int N,
-              int K,
-              float alpha, float beta, int lda, int ldb, int ldc,
-              char mem_format_a, char mem_format_b, const void *A,
-              const void *B, void *C, const matmul_data_types &dtypes,
-              const matmul_params &lowoha_param, const void *bias,
-              zendnnl::ops::matmul_algo_t kernel,
-              bool is_weights_const) {
+             int K,
+             float alpha, float beta, int lda, int ldb, int ldc,
+             char mem_format_a, char mem_format_b, const void *A,
+             const void *B, void *C, const matmul_data_types &dtypes,
+             const matmul_params &lowoha_param, const void *bias,
+             zendnnl::ops::matmul_algo_t kernel,
+             bool is_weights_const) {
 
   bool is_weight_blocked = false;
   void *reordered_mem = nullptr;
@@ -1488,9 +1500,10 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                       zp_comp_ndim);
 
       if (zp_comp_acc) {
-        bool is_cacheable = (wei_zp == 0 && is_weights_const && matmul_config.get_zp_comp_cache());
+        bool is_cacheable = (wei_zp == 0 && is_weights_const &&
+                             matmul_config.get_zp_comp_cache());
         apilog_info("INT8 ZP compensation: src_zp=", src_zp, ", wei_zp=", wei_zp,
-                 ", ndim=", zp_comp_ndim, ", cached=", (is_cacheable ? "yes" : "no"));
+                    ", ndim=", zp_comp_ndim, ", cached=", (is_cacheable ? "yes" : "no"));
       }
     }
   }
@@ -1692,8 +1705,10 @@ void matmul_batch_gemm_wrapper(char layout, char transA, char transB, int M,
   // Set up pointers for each batch (with broadcasting support)
   #pragma omp parallel for num_threads(num_threads)
   for (int b = 0; b < batch_count; ++b) {
-    a_ptrs[b] = static_cast<const uint8_t *>(A) + get_batch_idx(b, Batch_A) * src_stride;
-    b_ptrs[b] = static_cast<const uint8_t *>(B) + get_batch_idx(b, Batch_B) * weight_stride;
+    a_ptrs[b] = static_cast<const uint8_t *>(A) + get_batch_idx(b,
+                Batch_A) * src_stride;
+    b_ptrs[b] = static_cast<const uint8_t *>(B) + get_batch_idx(b,
+                Batch_B) * weight_stride;
     c_ptrs[b] = static_cast<uint8_t *>(C) + b * dst_stride;
   }
 

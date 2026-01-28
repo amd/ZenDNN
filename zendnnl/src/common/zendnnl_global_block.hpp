@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -103,14 +103,15 @@ private:
    */
   zendnnl_global_block_t& operator=(const zendnnl_global_block_t&) = delete;
 
-  static std::mutex              instance_mutex; /*!< mutex for thread safety */
-  static zendnnl_global_block_t* instance; /*!< singleton instance pointer */
+  static std::once_flag              init_flag;  /*!< flag for thread-safe initialization */
+  static zendnnl_global_block_t*     instance;   /*!< singleton instance pointer */
 
-  config_manager_t               config_manager; /*!< config manager */
-  platform_info_t                platform_info; /*!< platform info */
-  logger_t                       logger; /*!< logger */
-  sptr_lru_cache_t               lru_cache; /*!< global lru cache */
+  config_manager_t                   config_manager; /*!< config manager */
+  platform_info_t                    platform_info;  /*!< platform info */
+  logger_t                           logger;         /*!< logger */
+  sptr_lru_cache_t                   lru_cache;      /*!< global lru cache */
 };
+
 
 }//common
 

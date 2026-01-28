@@ -146,24 +146,22 @@ inline static status_t validate_embag_inputs(
     return status_t::failure;
   }
 
-  if (params.num_embeddings <= 0) {
-    log_error("embedding_bag_direct: num_embeddings must be positive");
+  if (params.num_embeddings == 0) {
+    log_error("embedding_bag_direct: num_embeddings cannot be zero");
     return status_t::failure;
   }
-  if (params.embedding_dim <= 0) {
-    log_error("embedding_bag_direct: embedding_dim must be positive");
+  if (params.embedding_dim == 0) {
+    log_error("embedding_bag_direct: embedding_dim cannot be zero");
     return status_t::failure;
   }
-
-  if (params.num_indices < 0) {
-    log_error("embedding_bag_direct: num_indices cannot be negative");
+  if (params.num_indices == 0) {
+    log_error("embedding_bag_direct: num_indices cannot be zero");
     return status_t::failure;
   }
-  if (params.num_bags <= 0 && params.algo != embag_algo_t::none) {
-    log_error("embedding_bag_direct: num_bags must be positive for reduction ops");
+  if (params.num_bags == 0 && params.algo != embag_algo_t::none) {
+    log_error("embedding_bag_direct: num_bags cannot be zero for reduction ops");
     return status_t::failure;
   }
-
   if (params.dtypes.table == data_type_t::none) {
     log_error("embedding_bag_direct: table data type not specified");
     return status_t::failure;

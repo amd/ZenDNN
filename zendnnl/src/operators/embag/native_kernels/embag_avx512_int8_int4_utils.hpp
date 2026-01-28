@@ -64,13 +64,18 @@ inline float half_to_float(uint16_t h) {
       f_bits = sign << 31; // Zero
     }
     else {
-      exponent = 1;
+      // Use int32_t for subnormal exponent calculation
+      int32_t exp_signed = 1;
+
       while ((mantissa & 0x400) == 0) {
         mantissa <<= 1;
-        exponent--;
+        exp_signed--;
       }
       mantissa &= 0x3FF;
-      exponent += 127 - 15;
+      exp_signed += 127 - 15;  // Add bias
+
+      // Convert back to uint32_t for bit packing
+      exponent = static_cast<uint32_t>(exp_signed);
       f_bits = (sign << 31) | (exponent << 23) | (mantissa << 13);
     }
   }

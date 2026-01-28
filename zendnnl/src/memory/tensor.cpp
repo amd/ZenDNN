@@ -878,6 +878,15 @@ void tensor_t::set_default_stride_with_order() {
     char ch            = 'a' + i -1;
     auto loc           = option.order.find(ch);
 
+    if (loc == std::string::npos) {
+      std::string message = "Invalid order: character '";
+      message += ch;
+      message += "' not found in order string '";
+      message += option.order;
+      message += "'";
+      EXCEPTION_WITH_LOC(message);
+    }
+
     /* stride, size and aligned size of fastest moving axis */
     auto size         = option.size.at(loc);
     auto aligned_size = option.aligned_size.at(loc);
@@ -925,6 +934,15 @@ status_t tensor_t::stride_sanity_check_with_order() {
     /* get next fastest moving axis */
     char ch            = 'a' + i -1;
     auto loc           = option.order.find(ch);
+
+        if (loc == std::string::npos) {
+      std::string message = "Invalid order: character '";
+      message += ch;
+      message += "' not found in order string '";
+      message += option.order;
+      message += "'";
+      EXCEPTION_WITH_LOC(message);
+    }
 
     /* stride, size and aligned size of fastest moving axis */
     auto &stride       = option.stride[loc];
