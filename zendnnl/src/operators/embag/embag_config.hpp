@@ -38,6 +38,20 @@ enum class embag_kernel_t : int32_t {
   kernel_count           /*!< Kernel count */
 };
 
+/** @enum eb_thread_algo_t
+ *  @brief Defines different threading algorithms for group embedding bag operations.
+ *
+ * These algorithms control how work is distributed across threads when
+ * processing multiple embedding tables in parallel.
+ */
+enum class eb_thread_algo_t : int32_t {
+  batch_threaded = 0,      /*!< Sequential tables with batch-level threading */
+  table_threaded = 1,      /*!< Thread-per-table parallelism */
+  ccd_threaded = 2,        /*!< CCD-aware threading with nested parallelism */
+  hybrid_threaded = 3,     /*!< Hybrid threading when tables < threads */
+  thread_algo_count        /*!< Thread algorithm count */
+};
+
 /**
 * @class embag_config_t
 * @brief config for @c embag_operator_t.
@@ -81,6 +95,18 @@ class embag_config_t final : public op_config_t {
    */
   int32_t get_kernel();
 
+  /** @brief Sets thread algorithm for group embedding bag.
+  *
+  * @param algo The thread algorithm to set.
+  */
+  void set_thread_algo(int32_t algo);
+
+  /** @brief Get thread algorithm for group embedding bag.
+   *
+   * @return thread algorithm.
+   */
+  eb_thread_algo_t get_thread_algo();
+
   static embag_config_t &instance();
 
   /** @brief Convert from string to embag_kernel.
@@ -92,6 +118,13 @@ class embag_config_t final : public op_config_t {
   */
   embag_kernel_t str_to_embag_kernel(std::string kernel);
 
+  /** @brief Convert from string to thread algorithm.
+  *
+  *  @param str_ : string contains thread algo name.
+  *  @return thread algorithm for appropriate string.
+  */
+  eb_thread_algo_t str_to_thread_algo(std::string algo);
+
  private:
   /**
   * @brief Private constructor for singleton pattern.
@@ -101,7 +134,8 @@ class embag_config_t final : public op_config_t {
   */
   embag_config_t() = default;
 
-  embag_kernel_t embag_kernel;         /**< Embag runtime kernel. */
+  embag_kernel_t embag_kernel;  /**< Embag runtime kernel. */
+  eb_thread_algo_t thread_algo; /**< Thread algorithm. */
 };
 
 }

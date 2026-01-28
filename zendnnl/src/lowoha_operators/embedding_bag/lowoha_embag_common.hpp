@@ -30,9 +30,13 @@ namespace embag {
 
 using namespace zendnnl::memory;
 
-// Use the same embag_algo_t and embag_kernel_t from ops namespace
+/** @brief Default number of threads per CCD (Core Complex Die) */
+constexpr int CCD_NUM_THREADS = 8;
+
+// Use the same embag_algo_t, embag_kernel_t, eb_thread_algo_t from ops namespace
 using embag_algo_t = zendnnl::ops::embag_algo_t;
 using embag_kernel_t = zendnnl::ops::embag_kernel_t;
+using eb_thread_algo_t = zendnnl::ops::eb_thread_algo_t;
 
 /**
  * @brief Structure to hold data types for embedding bag operands
@@ -81,7 +85,7 @@ struct embag_params_t {
   embag_params_t() : dtypes(), algo(embag_algo_t::sum),
     num_embeddings(0), embedding_dim(0), num_threads(0),
     num_indices(0), num_bags(0), is_weights(false), include_last_offset(false),
-    padding_idx(-1), fp16_scale_bias(false), dst_stride(0),
+    padding_idx(-1), fp16_scale_bias(true), dst_stride(0),
     kernel(embag_kernel_t::none) {}
 };
 
@@ -233,6 +237,37 @@ inline static const char *kernel_to_string(embag_kernel_t kernel) {
   default:
     return "unknown";
   }
+}
+
+/**
+ * @brief Convert eb_thread_algo_t to string for logging
+ *
+ * @param algo The thread algorithm enum value
+ * @return const char* string representation
+ */
+inline static const char *thread_algo_to_string(eb_thread_algo_t algo) {
+  switch (algo) {
+  case eb_thread_algo_t::batch_threaded:
+    return "batch_threaded";
+  case eb_thread_algo_t::table_threaded:
+    return "table_threaded";
+  case eb_thread_algo_t::hybrid_threaded:
+    return "hybrid_threaded";
+  case eb_thread_algo_t::ccd_threaded:
+    return "ccd_threaded";
+  default:
+    return "unknown";
+  }
+}
+
+/**
+ * @brief Integer division rounding up
+ * @param x Dividend
+ * @param y Divisor
+ * @return Ceiling of x/y
+ */
+inline int64_t divup(int64_t x, int64_t y) {
+  return (x + y - 1) / y;
 }
 
 } // namespace embag

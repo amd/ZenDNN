@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "embag_config.hpp"
+#include <omp.h>
 
 namespace zendnnl {
 namespace ops {
@@ -23,6 +24,7 @@ void embag_config_t::set_default_config() {
   // Set default configuration for embag
   int32_t embag_kernel = static_cast<int32_t>(embag_kernel_t::none);
   set_kernel(embag_kernel);
+  set_thread_algo(static_cast<int32_t>(eb_thread_algo_t::table_threaded));
 }
 
 status_t embag_config_t::set_user_config(json config_json) {
@@ -71,6 +73,27 @@ void embag_config_t::set_env_config() {
     }
   }
   set_kernel(embag_kernel);
+
+  // Set thread algorithm from environment variable
+  char *thread_algo_env = std::getenv("ZENDNNL_EMBAG_THREAD_ALGO");
+  int32_t thread_algo_val = static_cast<int32_t>
+                            (eb_thread_algo_t::table_threaded);
+  if (thread_algo_env) {
+    try {
+      int32_t algo = std::stoi(thread_algo_env);
+      if (algo >= 0 && algo <= 5) {
+        thread_algo_val = algo;
+      }
+    }
+    catch (const std::invalid_argument &e) {
+      // Try string parsing
+      thread_algo_val = static_cast<int32_t>(str_to_thread_algo(thread_algo_env));
+    }
+    catch (const std::out_of_range &e) {
+      // Use default
+    }
+  }
+  set_thread_algo(thread_algo_val);
 }
 
 void embag_config_t::set_kernel(int32_t kernel) {
@@ -79,6 +102,14 @@ void embag_config_t::set_kernel(int32_t kernel) {
 
 int32_t embag_config_t::get_kernel() {
   return static_cast<int32_t>(embag_kernel);
+}
+
+void embag_config_t::set_thread_algo(int32_t algo) {
+  thread_algo = static_cast<eb_thread_algo_t>(algo);
+}
+
+eb_thread_algo_t embag_config_t::get_thread_algo() {
+  return thread_algo;
 }
 
 embag_config_t &embag_config_t::instance() {
@@ -113,6 +144,29 @@ embag_kernel_t embag_config_t::str_to_embag_kernel(std::string kernel) {
   }
 
   return embag_kernel_t::kernel_count;
+}
+
+eb_thread_algo_t embag_config_t::str_to_thread_algo(std::string algo) {
+  //transform algo to lower case.
+  std::transform(algo.begin(), algo.end(),
+  algo.begin(), [](unsigned char c) {
+    return std::tolower(c);
+  });
+
+  if (algo == "batch_threaded" || algo == "0") {
+    return eb_thread_algo_t::batch_threaded;
+  }
+  else if (algo == "table_threaded" || algo == "1") {
+    return eb_thread_algo_t::table_threaded;
+  }
+  else if (algo == "ccd_threaded" || algo == "2") {
+    return eb_thread_algo_t::ccd_threaded;
+  }
+  else if (algo == "hybrid_threaded" || algo == "3") {
+    return eb_thread_algo_t::hybrid_threaded;
+  }
+
+  return eb_thread_algo_t::batch_threaded;
 }
 
 }
