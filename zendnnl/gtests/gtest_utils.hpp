@@ -470,6 +470,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               uint64_t n, uint64_t k, const float rtol,
                               const float epsilon, bool &flag,
                               bool enable_f32_relaxation = false,
+                              float alpha = 1.0f,
                               bool is_woq = false);
 
 /** @fn compare_tensor_3D_matrix
@@ -485,7 +486,8 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
                               tensor_t &output_tensor_ref, uint64_t batch_size,
                               uint64_t m, uint64_t n, uint64_t k, const float rtol,
                               const float epsilon, bool &flag,
-                              bool enable_f32_relaxation = false);
+                              bool enable_f32_relaxation = false,
+                              float alpha = 1.0f);
 
 /** @fn get_aligned_size
  *  @brief Function to align the given size_ according to the alignment

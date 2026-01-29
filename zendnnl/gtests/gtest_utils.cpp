@@ -2370,6 +2370,7 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
                               const float epsilon,
                               bool &is_comparison_successful,
                               bool enable_f32_relaxation,
+                              float alpha,
                               bool is_woq) {
   constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
@@ -2380,13 +2381,12 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
   enable_f32_relaxation = true;
 #endif
 
-
-  // Accumulation-based absolute bound
-  // abs_bound = (C*k+P)*epsilon
+  // Accumulation-based absolute bound, scaled by alpha
+  // abs_bound = alpha * (C*k+P)*epsilon
   const float abs_bound =
     (output_tensor.get_data_type() == data_type_t::bf16) || is_woq
-    ? (k * epsilon)
-    : (((C + log2(k) / scale_factor) * k + P) * epsilon);
+    ? (alpha * k * epsilon)
+    : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
@@ -2442,7 +2442,8 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
                               const float rtol,
                               const float epsilon,
                               bool &is_comparison_successful,
-                              bool enable_f32_relaxation) {
+                              bool enable_f32_relaxation,
+                              float alpha) {
   constexpr int C = 20; // Margin for F32 tolerance
   //ToDo: Add P value according to the postop currently, same value is used for all.
   constexpr int P = 15; // Post-op accumulation margin
@@ -2452,14 +2453,13 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
   enable_f32_relaxation = true;
 #endif
 
-
-  // Accumulation-based absolute bound
-  //float abs_bound = ((20 + log2(k)/4) * k + 15) * epsilon;
-  //(C*K+P)*epsilon
+  // Accumulation-based absolute bound, scaled by alpha
+  //float abs_bound = alpha * ((20 + log2(k)/4) * k + 15) * epsilon;
+  //(alpha*C*K+P)*epsilon
   const float abs_bound =
     (output_tensor.get_data_type() == data_type_t::bf16)
-    ? (k * epsilon)
-    : (((C + log2(k) / scale_factor) * k + P) * epsilon);
+    ? (alpha * k * epsilon)
+    : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
