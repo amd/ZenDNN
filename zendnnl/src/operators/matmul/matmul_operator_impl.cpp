@@ -127,7 +127,10 @@ status_t matmul_impl_t::validate_buffer_post_op(std::vector<uint64_t>
 
 status_t matmul_impl_t::update_matmul_kernel() {
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = matmul_config.get_algo();
+
+  // Use BMM algo for batch operations, otherwise use matmul algo
+  int32_t algo = is_bmm ? matmul_config.get_bmm_algo() : matmul_config.get_algo();
+
   if (algo == static_cast<int>(matmul_algo_t::aocl_dlp)) {
     forced_kernel = "aocl_dlp";
   }
@@ -189,6 +192,8 @@ status_t matmul_impl_t::validate() {
                                       weights_size.size() == 3)) && (output_size.size() == 3);
   bool is_onednn_kernel = (forced_kernel == "onednn" ||
                            forced_kernel == "onednn_blocked");
+
+  is_bmm =  is_bmm_sizes || is_bmm;
 
   if (!is_mm_sizes && !is_bmm_sizes && !is_broadcast_bmm_sizes) {
     apilog_error("input, weight or output size is not valid");

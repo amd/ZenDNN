@@ -23,6 +23,7 @@ void matmul_config_t::set_default_config() {
   // Set default configuration for matmul
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
+  set_bmm_algo(matmul_algo);
   set_weight_cache(1);
   set_zp_comp_cache(true);  // Enable ZP compensation caching by default
 }
@@ -35,12 +36,13 @@ status_t matmul_config_t::set_user_config(json config_json) {
   }
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
+  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 1;
   bool zp_comp_cache_enabled = true;  // Default enabled
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   auto matmul_json = runtime_variables_json["matmul"];
   if (! matmul_json.empty()) {
-    auto matmul_algo_json = matmul_json["kernel"];
+    auto matmul_algo_json = matmul_json["mm_kernel"];
     if (! matmul_algo_json.empty()) {
       auto matmul_algo_str = matmul_algo_json.template get<std::string>();
       if (! matmul_algo_str.empty()) {
@@ -76,6 +78,20 @@ status_t matmul_config_t::set_user_config(json config_json) {
         tile_n = 0;
       }
     }
+    auto bmm_algo_json = matmul_json["bmm_kernel"];
+    if (! bmm_algo_json.empty()) {
+      auto bmm_algo_str = bmm_algo_json.template get<std::string>();
+      if (! bmm_algo_str.empty()) {
+        bmm_algo = static_cast<int32_t>(str_to_matmul_algo(bmm_algo_str));
+      }
+    }
+
+    // If bmm_kernel is not specified or set to "none", fallback to matmul algo
+    if (bmm_algo_json.empty() ||
+        bmm_algo == static_cast<int32_t>(matmul_algo_t::none)) {
+      bmm_algo = matmul_algo;
+    }
+
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
     if (! matmul_weight_cache_json.empty()) {
       auto matmul_weight_cache_str = matmul_weight_cache_json.template
@@ -103,6 +119,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
     }
   }
   set_algo(matmul_algo);
+  set_bmm_algo(bmm_algo);
   set_weight_cache(matmul_weight_cache);
   set_zp_comp_cache(zp_comp_cache_enabled);
   set_lru_cache_capacity(lru_cache_capacity);
@@ -146,7 +163,43 @@ void matmul_config_t::set_env_config() {
     }
   }
   set_algo(matmul_algo);
+  char *bmm_algo_env = std::getenv("ZENDNNL_BMM_ALGO");
+  int32_t bmm_algo = matmul_algo;  // Default to matmul_algo
+  if (bmm_algo_env) {
+    std::string bmm_algoStr(bmm_algo_env);
+    std::transform(bmm_algoStr.begin(), bmm_algoStr.end(), bmm_algoStr.begin(),
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
+    if (bmm_algoStr == "auto") {
+      bmm_algo = static_cast<int32_t>(matmul_algo_t::auto_tuner);
+    }
+    else {
+      try {
+        int32_t algo = std::stoi(bmm_algoStr);
+        if (algo > static_cast<int32_t>(matmul_algo_t::none) &&
+            algo < static_cast<int32_t>(matmul_algo_t::algo_count)) {
+          bmm_algo = static_cast<int32_t>(matmul_algo_t(algo));
+        }
+        else {
+          bmm_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+        }
+      }
+      catch (const std::invalid_argument &e) {
+        bmm_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+      }
+      catch (const std::out_of_range &e) {
+        bmm_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
+      }
+    }
+  }
 
+  // If ZENDNNL_BMM_ALGO is set to -1 (none), fallback to matmul_algo
+  if (bmm_algo == static_cast<int32_t>(matmul_algo_t::none)) {
+    bmm_algo = matmul_algo;
+  }
+
+  set_bmm_algo(bmm_algo);
   char *weight_cache_env = std::getenv("ZENDNNL_MATMUL_WEIGHT_CACHE");
   [[maybe_unused]] int32_t matmul_weight_cache = 1;
   if (weight_cache_env) {
@@ -229,6 +282,14 @@ void matmul_config_t::set_algo(int32_t algo) {
 
 int32_t matmul_config_t::get_algo() {
   return matmul_algo;
+}
+
+void matmul_config_t::set_bmm_algo(int32_t algo) {
+  bmm_algo = algo;
+}
+
+int32_t matmul_config_t::get_bmm_algo() {
+  return bmm_algo;
 }
 
 void matmul_config_t::set_weight_cache(int32_t weight_cache) {

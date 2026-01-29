@@ -68,7 +68,8 @@ struct MatmulType {
   data_type_t output_dtype;
   quant_granularity_t weight_granularity;
   uint32_t num_threads;
-  MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1);
+  MatmulType(uint32_t test_index = 0, uint32_t total_tests = 1,
+             bool is_bmm = false);
 };
 
 /** @brief BatchMatmul Op Parameters Structure */

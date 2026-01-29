@@ -43,7 +43,7 @@ namespace matmul {
  */
 static inline bool can_use_libxsmm(char transA, char transB, int M,
                                    int N, int K, float alpha, float beta,
-                                   const matmul_data_types &dtypes, const matmul_params &lowoha_param,
+                                   const matmul_params &lowoha_param,
                                    const matmul_algo_t &kernel_name) {
 
 #if ZENDNNL_DEPENDS_LIBXSMM
@@ -85,9 +85,12 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
   }
 
 
-  return (dtypes.src == data_type_t::f32  && dtypes.dst == data_type_t::f32) ||
-         (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) ||
-         (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16);
+  return (lowoha_param.dtypes.src == data_type_t::f32  &&
+          lowoha_param.dtypes.dst == data_type_t::f32) ||
+         (lowoha_param.dtypes.src == data_type_t::bf16 &&
+          lowoha_param.dtypes.dst == data_type_t::f32) ||
+         (lowoha_param.dtypes.src == data_type_t::bf16 &&
+          lowoha_param.dtypes.dst == data_type_t::bf16);
 
 #endif
   return false;

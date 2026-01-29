@@ -16,7 +16,7 @@
 
 #include "gtest_utils.hpp"
 
-MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
+MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_k   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
   matmul_n   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
@@ -49,7 +49,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo_ = matmul_config.get_algo();
+  int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
+                  : matmul_config.get_algo();
   algo = static_cast<matmul_algo_t>(algo_);
 
   if (algo == matmul_algo_t::none) {
@@ -224,9 +225,8 @@ EmbeddingType::EmbeddingType() {
 
 BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   batch_size = BATCH_START + rand() % BATCH_END;
-  mat = MatmulType(test_index, total_tests);
+  mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
 }
-
 ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
   inplace_reorder = rand() % 2;
   mat = MatmulType(test_index, total_tests);
@@ -1071,7 +1071,13 @@ std::vector<BatchMatmulType> read_matmul_inputs(const std::string &file,
 
         if (fields[id].empty()) {
           matmul_config_t &matmul_config = matmul_config_t::instance();
-          int32_t algo_ = matmul_config.get_algo();
+          int32_t algo_;
+          if (ndims > 2) {
+            algo_ = matmul_config.get_bmm_algo();
+          }
+          else {
+            algo_ = matmul_config.get_algo();
+          }
           cfg.mat.algo = static_cast<matmul_algo_t>(algo_);
           if (cfg.mat.algo == matmul_algo_t::none) {
             // Random algorithm selection

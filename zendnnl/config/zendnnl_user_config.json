@@ -33,13 +33,17 @@
         "matmul" : {
             "__description" : [
                 "sets matmul configs",
-                "acceptable values for kernel are as follows",
-                "none, aocl_dlp, aocl_dlp_blocked, ",
-                "onednn, onednn_blocked, reference",
+                "acceptable values for mm_kernel are as follows",
+                "none, aocl_dlp, aocl_dlp_blocked,",
+                "onednn, onednn_blocked, libxsmm, libxsmm_blocked, auto, reference",
+                "acceptable values for bmm_kernel are as follows",
+                "none (falls back to mm_kernel value), aocl_dlp, aocl_dlp_blocked,",
+                "onednn, onednn_blocked, libxsmm",
                 "acceptable values for weight_cache are as follows",
                 "0, 1"
-                ],
-            "kernel" : "none",
+            ],
+            "mm_kernel" : "none",
+            "bmm_kernel" : "none",
             "weight_cache" : "0"
         }
     }

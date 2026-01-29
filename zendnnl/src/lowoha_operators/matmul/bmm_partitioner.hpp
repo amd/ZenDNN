@@ -45,7 +45,8 @@ struct bmm_partition_config_t {
    * @brief Default constructor for bmm_partition_config_t
    */
   bmm_partition_config_t() : M(0), N(0), K(0), batch_count(1), num_threads(1),
-    kernel(matmul_algo_t::none), src_batch_stride_bytes(0), weight_batch_stride_bytes(0),
+    kernel(matmul_algo_t::none), src_batch_stride_bytes(0),
+    weight_batch_stride_bytes(0),
     dst_batch_stride_bytes(0) {}
 };
 
@@ -60,13 +61,13 @@ struct bmm_partition_config_t {
  * @param dst_ptr       Pointer to destination data for this batch
  */
 using tile_callback_t = std::function<void(
-    int batch_idx,
-    int m_start,
-    int m_len,
-    const uint8_t *src_ptr,
-    const uint8_t *weight_ptr,
-    uint8_t *dst_ptr
-)>;
+                          int batch_idx,
+                          int m_start,
+                          int m_len,
+                          const uint8_t *src_ptr,
+                          const uint8_t *weight_ptr,
+                          uint8_t *dst_ptr
+                        )>;
 
 /**
  * @brief Calculate optimal M_block size for parallel partitioning
@@ -110,13 +111,13 @@ bool should_use_zendnnl_parallel(int M, int N, int K);
  * @param callback      Callback function to process each tile
  */
 void execute_parallel_zendnnl(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    int M_block,
-    const tile_callback_t &callback);
+  const void *src,
+  const void *weight,
+  void *dst,
+  const bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  int M_block,
+  const tile_callback_t &callback);
 
 /**
  * @brief Execute parallel partitioned BMM using OpenMP
@@ -134,36 +135,56 @@ void execute_parallel_zendnnl(
  * @param callback      Callback function to process each tile
  */
 void execute_parallel_omp(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    int M_block,
-    const tile_callback_t &callback);
+  const void *src,
+  const void *weight,
+  void *dst,
+  const bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  int M_block,
+  const tile_callback_t &callback);
 
 /**
- * @brief Execute partitioned BMM with automatic strategy selection
- *
- * This is the main entry point that automatically selects between
- * zendnnl_parallel_for and OpenMP based on workload characteristics.
- * It calculates the optimal M_block size and dispatches to the
- * appropriate parallelization strategy.
- *
+ * @brief Execute partitioned BMM with all logic encapsulated
  * @param src           Source data pointer
  * @param weight        Weight data pointer
  * @param dst           Destination data pointer
+ * @param bias          Bias data pointer (can be nullptr)
  * @param config        Partition configuration
  * @param batch_params  Batch parameters
- * @param callback      Callback function to process each tile
+ * @param params        Matrix multiplication parameters including post-ops
+ * @param layout        Memory layout ('r' for row-major)
+ * @param trans_input   Input transpose character ('t' or 'n')
+ * @param trans_weight  Weight transpose character ('t' or 'n')
+ * @param transA        Input transpose boolean
+ * @param alpha         Scaling factor for A*B
+ * @param beta          Scaling factor for C
+ * @param lda           Leading dimension of A
+ * @param ldb           Leading dimension of B
+ * @param ldc           Leading dimension of C
+ * @param src_type_size Size of source data type in bytes
+ * @param out_type_size Size of output data type in bytes
+ * @param is_weights_const Whether weights are constant
  */
-void execute_partitioned_bmm(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    const tile_callback_t &callback);
+void execute_bmm_partition(
+  const void *src,
+  const void *weight,
+  void *dst,
+  const void *bias,
+  bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  matmul::matmul_params &params,
+  char layout,
+  char trans_input,
+  char trans_weight,
+  bool transA,
+  float alpha,
+  float beta,
+  int lda,
+  int ldb,
+  int ldc,
+  size_t src_type_size,
+  size_t out_type_size,
+  bool is_weights_const);
 
 } // namespace lowoha
 } // namespace zendnnl

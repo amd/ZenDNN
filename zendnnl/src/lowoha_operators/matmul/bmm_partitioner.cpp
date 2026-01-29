@@ -17,6 +17,7 @@
 #include "bmm_partitioner.hpp"
 #include "lowoha_matmul_utils.hpp"
 #include "lowoha_matmul.hpp"
+#include "libxsmm_utils.hpp"
 #include <algorithm>
 #include <omp.h>
 
@@ -33,7 +34,8 @@ int calculate_optimal_m_block(const bmm_partition_config_t &config) {
    * distribute the workload among the threads assigned to that batch.
    */
   int threads_per_batch = std::max(1, config.num_threads / config.batch_count);
-  int M_block = std::max(1, (config.M + threads_per_batch - 1) / threads_per_batch);
+  int M_block = std::max(1,
+                         (config.M + threads_per_batch - 1) / threads_per_batch);
 
   // Optimize M_block based on batch count and M size
   // TODO: Further refine the tuning based on heuristics
@@ -68,13 +70,13 @@ bool should_use_zendnnl_parallel(int M, int N, int K) {
 }
 
 void execute_parallel_zendnnl(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    int M_block,
-    const tile_callback_t &callback) {
+  const void *src,
+  const void *weight,
+  void *dst,
+  const bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  int M_block,
+  const tile_callback_t &callback) {
 
   interface::apilog_info("Using zendnnl_parallel_for");
 
@@ -82,7 +84,8 @@ void execute_parallel_zendnnl(
   int total_m_blocks = (config.M + M_block - 1) / M_block;
   int total_work_items = config.batch_count * total_m_blocks;
 
-  matmul::zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx, int end_idx) {
+  matmul::zendnnl_parallel_for(0, total_work_items, 1, [&](int start_idx,
+  int end_idx) {
     for (int work_idx = start_idx; work_idx < end_idx; ++work_idx) {
       // Convert linear work index back to (batch, m_block) coordinates
       int b = work_idx / total_m_blocks;
@@ -105,13 +108,13 @@ void execute_parallel_zendnnl(
 }
 
 void execute_parallel_omp(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    int M_block,
-    const tile_callback_t &callback) {
+  const void *src,
+  const void *weight,
+  void *dst,
+  const bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  int M_block,
+  const tile_callback_t &callback) {
 
   interface::apilog_info("Using OpenMP parallel for");
 
@@ -134,26 +137,77 @@ void execute_parallel_omp(
   }
 }
 
-void execute_partitioned_bmm(
-    const void *src,
-    const void *weight,
-    void *dst,
-    const bmm_partition_config_t &config,
-    const matmul::matmul_batch_params_t &batch_params,
-    const tile_callback_t &callback) {
+void execute_bmm_partition(
+  const void *src,
+  const void *weight,
+  void *dst,
+  const void *bias,
+  bmm_partition_config_t &config,
+  matmul::matmul_batch_params_t &batch_params,
+  matmul::matmul_params &params,
+  char layout,
+  char trans_input,
+  char trans_weight,
+  bool transA,
+  float alpha,
+  float beta,
+  int lda,
+  int ldb,
+  int ldc,
+  size_t src_type_size,
+  size_t out_type_size,
+  bool is_weights_const) {
 
+  // Calculate optimal M_block size
   int M_block = calculate_optimal_m_block(config);
 
+  // Check libxsmm compatibility and fallback if needed
+  if (config.kernel == matmul_algo_t::libxsmm &&
+      !(matmul::can_use_libxsmm(trans_input, trans_weight, M_block, config.N,
+                                config.K, alpha, beta, params,
+                                config.kernel))) {
+    // Fallback to AOCL DLP kernel when libxsmm is not supported
+    interface::apilog_info("Using AOCL DLP kernel as fallback for libxsmm, algo: ",
+                             static_cast<int>(config.kernel));
+    config.kernel = matmul_algo_t::aocl_dlp;
+  }
+
+  // Define the tile processing callback
+  auto process_tile = [&](int batch_idx, int m_start, int m_len,
+                          const uint8_t *src_ptr, const uint8_t *weight_ptr,
+  uint8_t *dst_ptr) {
+    const void *A = matmul::get_matrix_block(src_ptr, m_start, 0, lda, transA,
+                    src_type_size);
+    void *C = matmul::get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
+
+    // Create a modified post_op with offset binary tensor buffers
+    // Supports both 2D (M x N) and 3D (Batch x M x N) post-op tensors
+    matmul::matmul_params thread_lowoha_params = params;
+    apply_bmm_postop_offsets(thread_lowoha_params, batch_idx, m_start, config.N);
+
+    matmul::matmul_kernel_wrapper(layout, trans_input, trans_weight,
+                                  m_len, config.N, config.K, alpha,
+                                  A, lda, weight_ptr, ldb,
+                                  beta, C, ldc,
+                                  params.dtypes, config.kernel,
+                                  params.mem_format_a, params.mem_format_b,
+                                  thread_lowoha_params, batch_params,
+                                  bias, is_weights_const);
+  };
+
   interface::apilog_info("Executing BMM LOWOHA kernel with parallel partitioning, algo: ",
-              static_cast<int>(config.kernel));
+                           static_cast<int>(config.kernel));
+
+  // Execute with automatic strategy selection
+  matmul::matmul_active_levels active_levels_guard(1);
 
   if (should_use_zendnnl_parallel(config.M, config.N, config.K)) {
     execute_parallel_zendnnl(src, weight, dst, config, batch_params,
-                             M_block, callback);
+                             M_block, process_tile);
   }
   else {
     execute_parallel_omp(src, weight, dst, config, batch_params,
-                         M_block, callback);
+                         M_block, process_tile);
   }
 }
 

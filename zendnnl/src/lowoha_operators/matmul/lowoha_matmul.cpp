@@ -153,49 +153,19 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     part_config.weight_batch_stride_bytes = weight_batch_stride_bytes;
     part_config.dst_batch_stride_bytes = dst_batch_stride_bytes;
 
-    int M_block = calculate_optimal_m_block(part_config);
-
-    if (kernel == matmul_algo_t::libxsmm &&
-        !(can_use_libxsmm(trans_input, trans_weight, M_block, N, K, alpha, beta,
-                          params.dtypes, params, kernel))) {
-      // Fallback to AOCL DLP kernel when libxsmm is not supported
-      apilog_info("Using AOCL DLP kernel as fallback for libxsmm, algo: ",
-                  static_cast<int>(kernel));
-      kernel = matmul_algo_t::aocl_dlp;
-    }
-    // Define the tile processing callback
-    auto process_tile = [&](int batch_idx, int m_start, int m_len,
-                            const uint8_t *src_ptr, const uint8_t *weight_ptr,
-    uint8_t *dst_ptr) {
-      const void *A = get_matrix_block(src_ptr, m_start, 0, lda, transA,
-                                       src_type_size);
-      void *C = get_output_block(dst_ptr, m_start, 0, ldc, out_type_size);
-
-      // Create a modified post_op with offset binary tensor buffers
-      // Supports both 2D (M x N) and 3D (Batch x M x N) post-op tensors
-      matmul_params thread_lowoha_params = params;
-      apply_bmm_postop_offsets(thread_lowoha_params, batch_idx, m_start, N);
-
-      matmul_kernel_wrapper(layout, trans_input, trans_weight,
-                            m_len, N, K, alpha,
-                            A, lda, weight_ptr, ldb,
-                            beta, C, ldc,
-                            params.dtypes, kernel,
-                            params.mem_format_a, params.mem_format_b,
-                            thread_lowoha_params, batch_params,
-                            bias, is_weights_const);
-    };
-
-    // Execute partitioned BMM with automatic strategy selection
-    matmul_active_levels active_levels_guard(1);
-    execute_partitioned_bmm(src, weight, dst, part_config, batch_params,
-                            process_tile);
+    // Execute partitioned BMM with all logic encapsulated
+    execute_bmm_partition(
+      src, weight, dst, bias,
+      part_config, batch_params, params,
+      layout, trans_input, trans_weight, transA,
+      alpha, beta, lda, ldb, ldc,
+      src_type_size, out_type_size, is_weights_const);
   }
   else {
     // Single thread execution for batches
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
-                          params.dtypes, params, kernel))) {
+                          params, kernel))) {
       kernel = matmul_algo_t::aocl_dlp;
     }
 
@@ -303,7 +273,7 @@ void matmul_execute(const char layout,
 
   if (kernel == matmul_algo_t::libxsmm &&
       !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
-                        params.dtypes, params, kernel))) {
+                        params, kernel))) {
     kernel = matmul_algo_t::aocl_dlp;
   }
 

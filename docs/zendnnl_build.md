@@ -142,7 +142,7 @@ The CMake build exposes the following component targets
 | Component         | CMake Target     | Depends On   |
 |-------------------|------------------|--------------|
 | Dependencies(TPL) | zendnnl-deps     | None         |
-| ZenDNN Library   | zendnnl          | zendnnl-deps |
+| ZenDNN Library    | zendnnl          | zendnnl-deps |
 | Examples          | zendnnl-examples | zendnnl      |
 | BenchDNN          | zendnnl-benchdnn | zendnnl      |
 | Doxygen Docs      | zendnnl-doxygen  | None         |

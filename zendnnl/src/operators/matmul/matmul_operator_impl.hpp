@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ namespace ops {
  *
  */
 class matmul_impl_t final : public operator_impl_t<matmul_context_t> {
-public:
+ public:
   /** @brief Self type **/
   using self_type = matmul_impl_t;
   /** @brief Parent type **/
@@ -75,7 +75,7 @@ public:
   /** @brief Kernel handle type */
   using   create_kernel_handle_type  = parent_type::create_kernel_handle_type;
 
-protected:
+ protected:
   /** @brief Validate input/output
    *
    * Validates if all mandatory inputs and outputs are given.
@@ -121,6 +121,8 @@ protected:
   status_t validate_buffer_post_op(std::vector<uint64_t> &output_size,
                                    std::vector<post_op_t> &po,
                                    std::map<std::string,tensor_t> &inputs);
+ private:
+  bool is_bmm = false;
 };
 
 } //namespace ops

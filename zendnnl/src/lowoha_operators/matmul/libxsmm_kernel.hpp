@@ -91,7 +91,7 @@ int libxsmm_gemm(const TA *A, const TB *B, TC *C, int M, int N, int K,
   }
   return 1;
 }
-#if ENABLE_LIBXSMM_BRGEMM_KERNEL
+
 /**
  * @brief Template function for LibXSMM BRGEMM dispatch and execution
  */
@@ -189,7 +189,6 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
   }
   return kernel_status;
 }
-#endif
 
 /**
  * @brief Run LibXSMM GEMM with automatic type dispatch

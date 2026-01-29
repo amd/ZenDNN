@@ -557,9 +557,19 @@ unsigned int get_auto_tuner_ver() {
 matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                             int batch_count, int M, int N, int K, int num_threads, const void *bias,
                             const bool is_weights_const) {
+
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = params.lowoha_algo == matmul_algo_t::none ?
-                 matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
+  int32_t algo;
+  if (batch_count > 1) {
+    // Get BMM algo for batched matrix multiplication
+    algo = params.lowoha_algo == matmul_algo_t::none ?
+           matmul_config.get_bmm_algo() : static_cast<int>(params.lowoha_algo);
+  }
+  else {
+    // Get regular matmul algo for single matrix multiplication
+    algo = params.lowoha_algo == matmul_algo_t::none ?
+           matmul_config.get_algo() : static_cast<int>(params.lowoha_algo);
+  }
 
   // Default to AOCL DLP blocked kernel
   matmul_algo_t kernel = (algo == static_cast<int>(matmul_algo_t::none)) ?

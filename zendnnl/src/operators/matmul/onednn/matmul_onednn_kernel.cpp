@@ -168,8 +168,12 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
   }
 
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  int32_t algo = matmul_config.get_algo();
-  params.algo = static_cast<matmul_algo_t>(algo);
+  if (dst_dim > 2) {
+    params.algo = static_cast<matmul_algo_t>(matmul_config.get_bmm_algo());
+  }
+  else {
+    params.algo = static_cast<matmul_algo_t>(matmul_config.get_algo());
+  }
 
   if (params.beta != 0.0f) {
     matmul_pops.append_sum(params.beta);

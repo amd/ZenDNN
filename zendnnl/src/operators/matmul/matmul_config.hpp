@@ -85,6 +85,18 @@ class matmul_config_t final : public op_config_t {
    */
   int32_t get_algo();
 
+  /** @brief Sets bmm algo.
+  *
+  * @param algo The BMM algorithm to set.
+  */
+  void set_bmm_algo(int32_t algo);
+
+  /** @brief Get bmm algo.
+   *
+   * @return bmm algo.
+   */
+  int32_t get_bmm_algo();
+
   /** @brief Sets matmul_weight_cache.
   *
   * @param weight_cache The matmul_weight_cache type to set.
@@ -197,6 +209,7 @@ class matmul_config_t final : public op_config_t {
   matmul_config_t() = default;
 
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
+  int32_t bmm_algo;            /**< Batched Matmul algorithm. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
   uint32_t lru_cache_capacity; /**< LRU cache capacity. */

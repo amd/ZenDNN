@@ -135,7 +135,7 @@ static matmul_algo_t select_partition_kernel(
     matmul_algo_t selected_kernel = config.kernel;
     if (can_use_libxsmm(trans_input, trans_weight, config.M, config.N, config.K,
                         alpha, beta,
-                        params.dtypes, params, selected_kernel)) {
+                        params, selected_kernel)) {
       return matmul_algo_t::libxsmm;
     }
     else {
