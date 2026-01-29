@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
+#include <mutex>
 
 namespace zendnnl {
 namespace lowoha {
@@ -441,6 +442,7 @@ bool reorderAndCacheWeights(Key_matmul key,
                             dnnl::engine &eng) {
   // Weight caching
   static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
+  static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
 
   if (weight_cache_type == 0) {
     apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
@@ -450,6 +452,8 @@ bool reorderAndCacheWeights(Key_matmul key,
     dnnl_params.weights.mem  = dnnl_blocked_weight_mem;
   }
   else {
+    // Use lock guard to protect the entire check-compute-cache operation
+    std::lock_guard<std::mutex> lock(weight_cache_mutex);
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
       apilog_info("onednn reorder weights WEIGHT_CACHE_OUT_OF_PLACE");

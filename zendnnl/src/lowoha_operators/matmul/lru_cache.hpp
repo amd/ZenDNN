@@ -66,6 +66,7 @@ class lru_cache_t {
   uint32_t capacity_;
   std::atomic<size_t> current_timestamp_;
   std::unique_ptr<std::unordered_map<lru_key_t, timed_entry_t>> lru_cache_map_;
+  mutable std::mutex mutex_;  // Mutex for thread-safe access
 };
 
 template <typename KEY_T, typename VALUE_T>
@@ -78,11 +79,11 @@ lru_cache_t<KEY_T, VALUE_T>::lru_cache_t(uint32_t capacity) :
 template <typename KEY_T, typename VALUE_T>
 lru_cache_t<KEY_T, VALUE_T>::~lru_cache_t() {
   evict();
-  return;
 }
 
 template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::set_capacity(uint32_t capacity) {
+  std::lock_guard<std::mutex> lock(mutex_);
   capacity_ = capacity;
   if (capacity_ < lru_cache_map_->size()) {
     evict(lru_cache_map_->size() - capacity_);
@@ -91,6 +92,7 @@ void lru_cache_t<KEY_T, VALUE_T>::set_capacity(uint32_t capacity) {
 
 template <typename KEY_T, typename VALUE_T>
 uint32_t lru_cache_t<KEY_T, VALUE_T>::get_capacity() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return capacity_;
 }
 
@@ -99,20 +101,34 @@ typename lru_cache_t<KEY_T, VALUE_T>::value_t
 lru_cache_t<KEY_T, VALUE_T>::get_or_add(
   const lru_key_t &key,
   const value_t &value) {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (lru_cache_map_->find(key) == lru_cache_map_->end()) {
-    add(key, value);
+    // Call internal add without lock (we already hold it)
+    evict(1);
+    size_t timestamp = current_timestamp_++;
+    lru_cache_map_->emplace(std::piecewise_construct,
+                            std::forward_as_tuple(key),
+                            std::forward_as_tuple(value, timestamp));
   }
-  return get(key);
+  // Return value and update timestamp
+  auto it = lru_cache_map_->find(key);
+  if (it != lru_cache_map_->end()) {
+    it->second.timestamp_ = current_timestamp_++;
+    return it->second.value_;
+  }
+  throw std::runtime_error("Key not found in cache.");
 }
 
 template <typename KEY_T, typename VALUE_T>
 bool lru_cache_t<KEY_T, VALUE_T>::find_key(const lru_key_t &key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return (lru_cache_map_->find(key) != lru_cache_map_->end());
 }
 
 template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::remove_if_invalidated(
   const lru_key_t &key) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto it = lru_cache_map_->find(key);
   if (it != lru_cache_map_->end()) {
     lru_cache_map_->erase(it);
@@ -121,6 +137,7 @@ void lru_cache_t<KEY_T, VALUE_T>::remove_if_invalidated(
 
 template <typename KEY_T, typename VALUE_T>
 int lru_cache_t<KEY_T, VALUE_T>::get_size() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return static_cast<int>(lru_cache_map_->size());
 }
 
@@ -166,6 +183,7 @@ void lru_cache_t<KEY_T, VALUE_T>::evict() {
 template <typename KEY_T, typename VALUE_T>
 void lru_cache_t<KEY_T, VALUE_T>::add(const lru_key_t &key,
                                       const value_t &value) {
+  std::lock_guard<std::mutex> lock(mutex_);
   evict(1);
   size_t timestamp = current_timestamp_++;
   lru_cache_map_->emplace(std::piecewise_construct,
@@ -177,6 +195,7 @@ template <typename KEY_T, typename VALUE_T>
 typename lru_cache_t<KEY_T, VALUE_T>::value_t
 lru_cache_t<KEY_T, VALUE_T>::get(
   const lru_key_t &key) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto it = lru_cache_map_->find(key);
   if (it != lru_cache_map_->end()) {
     it->second.timestamp_ = current_timestamp_++;

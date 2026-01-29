@@ -18,6 +18,7 @@
 #include "lowoha_operators/matmul/lowoha_cache.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace zendnnl {
 namespace lowoha {
@@ -1268,6 +1269,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
                             reorder_func_ptr<T> reorder_func, int weight_cache_type) {
   // Weight caching
   static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
+  static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
 
   // Weights are already reordered and algo is aocl_dlp_blocked
   // Add the key into map and value as nullptr
@@ -1298,6 +1300,7 @@ bool reorderAndCacheWeights(Key_matmul key, const void *weights,
   }
   // Out-of-place reordering
   else if (weight_cache_type == 1) {
+    std::lock_guard<std::mutex> lock(weight_cache_mutex);
     auto found_obj = matmul_weight_cache.find_key(key);
     if (!found_obj) {
       apilog_info("AOCL reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
@@ -1346,9 +1349,14 @@ void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
   // Weight caching inplace support cannot be added since buffer size is
   // always expanded.
   static lru_cache_t<Key_matmul, void *> matmul_weight_cache_woq;
-  auto found_obj = matmul_weight_cache_woq.find_key(key);
+  static std::mutex woq_cache_mutex;  // Mutex to prevent TOCTOU race
 
   bool is_transposed = (trans == 't');
+
+  // Use lock guard to protect the entire check-compute-cache operation
+  std::lock_guard<std::mutex> lock(woq_cache_mutex);
+  auto found_obj = matmul_weight_cache_woq.find_key(key);
+
   if (!is_weights_const || !found_obj) {
     apilog_info("WOQ Simulated AOCL reorder weights (weight_cache_type=",
                 weight_cache_type, ")");
