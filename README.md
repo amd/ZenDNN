@@ -83,9 +83,9 @@ ZenDNN downloads and builds these dependencies as a part of its build process. T
 
 ZenDNN library is intended to be used in conjunction with the frameworks mentioned below and cannot be used independently.
 
-ZenDNN library is integrated with TensorFlow v2.20 (Plugin), and PyTorch v2.9.1 (Plugin).
+ZenDNN library is integrated with TensorFlow v2.20 (Plugin), and PyTorch v2.10.0 (Plugin).
 - Python v3.9-v3.13 are supported versions to generate the TensorFlow v2.20 (Plugin) wheel files (*.whl).
-- Python v3.10-v3.13 are supported versions to generate the PyTorch v2.9.1 (Plugin) wheel files (*.whl).
+- Python v3.10-v3.13 are supported versions to generate the PyTorch v2.10.0 (Plugin) wheel files (*.whl).
 
 ## 1.5. Supported OS
 
