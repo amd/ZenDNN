@@ -30,6 +30,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
    * */
   virtual void SetUp() {
     MatmulType params = GetParam();
+    srand(static_cast<unsigned int>(seed));
     m            = params.matmul_m;
     k            = params.matmul_k;
     n            = params.matmul_n;
@@ -46,7 +47,7 @@ class TestMatmul : public ::testing::TestWithParam<MatmulType> {
     num_threads = params.num_threads;
     omp_set_num_threads(num_threads);
     log_info("m: ", m, " k: ", k, " n: ", n, " TransA: ", transA, " TransB: ",
-             transB,
+             transB, " alpha: ", alpha, " beta: ", beta,
              " postop: ", postOpsToStr(po_type), " algo: ", static_cast<int>(algo),
              " num_threads: ", num_threads);
   }

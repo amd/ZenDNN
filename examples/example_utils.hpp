@@ -28,6 +28,9 @@
 #define  MATMUL_K 6
 #define  MATMUL_N 4
 
+#define  ROWS 32
+#define  COLS 64
+
 namespace zendnnl {
 /** @namespace zendnnl::examples
  *  @brief A namespace that contains examples of how to use ZenDNNL.

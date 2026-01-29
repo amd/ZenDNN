@@ -30,6 +30,7 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
    * */
   virtual void SetUp() {
     BatchMatmulType params = GetParam();
+    srand(static_cast<unsigned int>(seed));
     batch_size = params.batch_size;
     m          = params.mat.matmul_m;
     n          = params.mat.matmul_n;
@@ -47,7 +48,8 @@ class TestBatchMatmul : public ::testing::TestWithParam<BatchMatmulType> {
     num_threads = params.mat.num_threads;
     omp_set_num_threads(num_threads);
     log_info("batch_size: ",batch_size, " m: ",m, " k: ",k, " n: ", n, " TransA: ",
-             transA, " TransB: ", transB, " po_type: ", postOpsToStr(po_type), " algo: ",
+             transA, " TransB: ", transB, " alpha: ", alpha, " beta: ", beta,
+             " po_type: ", postOpsToStr(po_type), " algo: ",
              static_cast<int>(algo), " num_threads: ", num_threads);
   }
 

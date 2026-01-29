@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -21,10 +21,6 @@
 
 #define  OK          (0)
 #define  NOT_OK      (1)
-
-#define  ROWS 50
-#define  COLS 50
-
 
 namespace zendnnl {
 namespace examples {
