@@ -26,13 +26,14 @@ status_t conv_kernel_wrapper(
     const void *filter,
     const void *bias,
     void *output,
+    const bool is_weights_const,
     conv_params &params
 ) {
 #if ZENDNNL_DEPENDS_ONEDNN
     if (params.algo == conv_algo_t::onednn ||
         params.algo == conv_algo_t::onednn_blocked) {
         log_info("Using OneDNN kernel for Conv");
-        status_t status = conv_onednn_wrapper(input, filter, bias, output, params);
+        status_t status = conv_onednn_wrapper(input, filter, bias, output, is_weights_const, params);
         if (status != status_t::success) {
             log_error("Conv: OneDNN kernel execution failed");
         }
@@ -50,6 +51,7 @@ status_t conv_direct(
     const void *filter,
     const void *bias,
     void *output,
+    const bool is_weights_const,
     conv_params &params
 ) {
     const conv_dims_t &dims = params.dims;
@@ -95,7 +97,8 @@ status_t conv_direct(
             ss << ", groups=" << params.depthwise.groups
                << ", depth_multiplier=" << params.depthwise.depth_multiplier;
         }
-        ss << ", bias=" << (bias != nullptr ? "true" : "false");
+        ss << ", bias=" << (bias != nullptr ? "true" : "false")
+           << ", is_weights_const=" << (is_weights_const ? "true" : "false");
     }
     apilog_info(ss.str());
 
@@ -112,7 +115,7 @@ status_t conv_direct(
     }
 
     // Execute convolution
-    status_t exec_status = conv_kernel_wrapper(input, filter, bias, output, params);
+    status_t exec_status = conv_kernel_wrapper(input, filter, bias, output, is_weights_const, params);
 
     if (is_profile) {
         profiler.tbp_stop();

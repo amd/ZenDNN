@@ -15,11 +15,8 @@
 # *******************************************************************************/
 
 #include "lowoha_operators/conv/onednn_kernel.hpp"
-
-#if ZENDNNL_DEPENDS_ONEDNN
-#include "dnnl.hpp"
-using namespace dnnl;
-#endif
+#include "lowoha_operators/conv/conv_cache_key.hpp"
+#include "../matmul/lru_cache.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -27,11 +24,62 @@ namespace conv {
 
 #if ZENDNNL_DEPENDS_ONEDNN
 
+
+/**
+ * @brief Reorder and cache convolution weights
+ *
+ * Similar to matmul's reorderAndCacheWeights pattern.
+ * Handles both cached and non-cached reordering based on is_weights_const flag.
+ *
+ * @param key               Cache key for weight identification
+ * @param src_weights_mem   Source weights in HWIO format
+ * @param dst_weights_mem   Destination weights in OneDNN blocked format
+ * @param eng               OneDNN engine
+ * @param is_weights_const  If true, enable caching; if false, reorder directly
+ * @return true on success
+ */
+bool reorderAndCacheWeights(
+    const Key_conv& key,
+    dnnl::memory& src_weights_mem,
+    dnnl::memory& dst_weights_mem,
+    const dnnl::engine& eng,
+    const bool is_weights_const) {
+
+    // Static weight cache
+    using namespace zendnnl::lowoha::matmul;
+    static lru_cache_t<Key_conv, dnnl::memory> conv_weight_cache(std::numeric_limits<uint32_t>::max());
+    static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
+
+    if (is_weights_const == 0) {
+        apilog_info("onednn conv reorder weights (WEIGHT_CACHE_DISABLE)");
+        dnnl::stream eng_stream(eng);
+        dnnl::reorder(src_weights_mem, dst_weights_mem).execute(eng_stream, src_weights_mem, dst_weights_mem);
+    }
+    else {
+        // Use lock guard to protect the entire check-compute-cache operation
+        std::lock_guard<std::mutex> lock(weight_cache_mutex);
+        auto found_obj = conv_weight_cache.find_key(key);
+        if (!found_obj) {
+            apilog_info("onednn conv reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+            dnnl::stream eng_stream(eng);
+            dnnl::reorder(src_weights_mem, dst_weights_mem).execute(eng_stream, src_weights_mem, dst_weights_mem);
+            conv_weight_cache.add(key, dst_weights_mem);
+        }
+        else {
+            apilog_info("Read onednn conv cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+            dst_weights_mem = conv_weight_cache.get(key);
+        }
+    }
+
+    return true;
+}
+
 status_t conv_onednn_wrapper(
     const void *input,
     const void *filter,
     const void *bias,
     void *output,
+    const bool is_weights_const,
     conv_params &params
 ) {
     try {
@@ -206,6 +254,10 @@ status_t conv_onednn_wrapper(
             conv_attr.set_post_ops(pops);
         }
 
+        // Create memory objects
+        auto src_mem = dnnl::memory(src_md, eng, const_cast<void*>(input));
+        auto dst_mem = dnnl::memory(dst_md, eng, output);
+
         // Create convolution primitive descriptor
         std::unique_ptr<dnnl::convolution_forward::primitive_desc> conv_pd;
 
@@ -229,176 +281,91 @@ status_t conv_onednn_wrapper(
             ));
         }
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, eng, const_cast<void*>(input));
-        auto dst_mem = dnnl::memory(dst_md, eng, output);
+        // Create hash for blocking format
+        auto hash_blocking_desc = [](const dnnl::memory::desc &mem_desc) -> size_t {
+            size_t hash_value = 0;
+            const size_t prime = 31;
 
-        // Handle weight reordering
-        // Note: Filter format in TensorFlow is [H, W, I, O] (HWIO)
-        // Standard Conv2D: Need to reorder to OneDNN's [O, I, H, W] (OIHW)
-        // Depthwise Conv2D: Need to reorder to OneDNN's [G, O_per_group, I_per_group, H, W] (GOIHW)
-        // TODO: Add caching for reorder blocked format of constant filters
+            const auto strides = mem_desc.get_strides();
+            for (const auto &stride : strides) {
+                hash_value = hash_value * prime + std::hash<int64_t>{}(stride);
+            }
 
-        const uint64_t filt_h = dims.filter_height;
-        const uint64_t filt_w = dims.filter_width;
-        std::vector<char> weights_reordered_buffer;
+            const int inner_nblks = mem_desc.get_inner_nblks();
+            hash_value = hash_value * prime + std::hash<int>{}(inner_nblks);
+
+            const auto inner_blks = mem_desc.get_inner_blks();
+            const auto inner_idxs = mem_desc.get_inner_idxs();
+            for (int i = 0; i < inner_nblks; ++i) {
+                hash_value = hash_value * prime + std::hash<int64_t>{}(inner_blks[i]);
+                hash_value = hash_value * prime + std::hash<int64_t>{}(inner_idxs[i]);
+            }
+
+            return hash_value;
+        };
+
+        size_t blocking_hash = hash_blocking_desc(conv_pd->weights_desc());
+
+        // Create cache key
+        Key_conv cache_key;
+        cache_key.filter_ptr = filter;
+        cache_key.in_channels = dims.in_channels;
+        cache_key.out_channels = dims.out_channels;
+        cache_key.filter_height = dims.filter_height;
+        cache_key.filter_width = dims.filter_width;
+        cache_key.is_depthwise = params.depthwise.is_depthwise;
+        cache_key.groups = params.depthwise.groups;
+        cache_key.depth_multiplier = params.depthwise.depth_multiplier;
+        cache_key.dtype = (dtype == dnnl::memory::data_type::f32) ? 0 : 1;
+        cache_key.blocking_hash = blocking_hash;
+
+        // Reorder weights using OneDNN reorder API
+        const int64_t filt_w = static_cast<int64_t>(dims.filter_width);
         auto weights_mem = dnnl::memory(conv_pd->weights_desc(), eng);
 
         if (params.depthwise.is_depthwise) {
-            // Depthwise convolution: HWIO -> GOIHW
-            // TF: [H, W, C_in, depth_multiplier]
-            // OneDNN: [groups, OC_per_group, IC_per_group, H, W] = [C_in, depth_multiplier, 1, H, W]
-            const uint64_t groups = params.depthwise.groups;           // = C_in
-            const uint64_t dm = params.depthwise.depth_multiplier;     // output channels per group
-            const uint64_t ic_per_group = 1;                            // always 1 for depthwise
+            // Depthwise convolution: HWIO -> GOIHW using OneDNN reorder
+            const int64_t groups = static_cast<int64_t>(params.depthwise.groups);
+            const int64_t dm = static_cast<int64_t>(params.depthwise.depth_multiplier);
 
-            size_t weights_size = groups * dm * ic_per_group * filt_h * filt_w;
-
-            if (dtype == dnnl::memory::data_type::f32) {
-                weights_reordered_buffer.resize(weights_size * sizeof(float));
-                const float* filter_hwio = static_cast<const float*>(filter);
-                float* filter_goihw = reinterpret_cast<float*>(weights_reordered_buffer.data());
-
-                // Transpose from HWIO [H,W,I,O] to GOIHW [G,O,I,H,W] where G=I, I_per_group=1
-                // In TF depthwise: I = C_in (groups), O = depth_multiplier
-                for (uint64_t g = 0; g < groups; ++g) {              // group index (= input channel)
-                    for (uint64_t o = 0; o < dm; ++o) {              // output index within group
-                        for (uint64_t h = 0; h < filt_h; ++h) {
-                            for (uint64_t w = 0; w < filt_w; ++w) {
-                                // TF layout: [H, W, I, O] where I=groups, O=depth_multiplier
-                                uint64_t hwio_idx = h * filt_w * groups * dm +
-                                                   w * groups * dm +
-                                                   g * dm +
-                                                   o;
-                                // OneDNN grouped layout: [G, O, 1, H, W]
-                                uint64_t goihw_idx = g * dm * ic_per_group * filt_h * filt_w +
-                                                    o * ic_per_group * filt_h * filt_w +
-                                                    0 * filt_h * filt_w +  // IC_per_group=1
-                                                    h * filt_w +
-                                                    w;
-                                filter_goihw[goihw_idx] = filter_hwio[hwio_idx];
-                            }
-                        }
-                    }
-                }
-            } else {  // bf16
-                weights_reordered_buffer.resize(weights_size * sizeof(uint16_t));
-                const uint16_t* filter_hwio = static_cast<const uint16_t*>(filter);
-                uint16_t* filter_goihw = reinterpret_cast<uint16_t*>(weights_reordered_buffer.data());
-
-                for (uint64_t g = 0; g < groups; ++g) {
-                    for (uint64_t o = 0; o < dm; ++o) {
-                        for (uint64_t h = 0; h < filt_h; ++h) {
-                            for (uint64_t w = 0; w < filt_w; ++w) {
-                                uint64_t hwio_idx = h * filt_w * groups * dm +
-                                                   w * groups * dm +
-                                                   g * dm +
-                                                   o;
-                                uint64_t goihw_idx = g * dm * ic_per_group * filt_h * filt_w +
-                                                    o * ic_per_group * filt_h * filt_w +
-                                                    0 * filt_h * filt_w +
-                                                    h * filt_w +
-                                                    w;
-                                filter_goihw[goihw_idx] = filter_hwio[hwio_idx];
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Create memory descriptor for GOIHW layout
-            // Note: OneDNN doesn't have a standard format tag for 2D grouped convolutions
-            // Use custom strides to define the layout: [G, O_per_group, I_per_group, H, W]
-            dnnl::memory::dims strides_goihw = {
-                static_cast<dnnl::memory::dim>(dm * ic_per_group * filt_h * filt_w),
-                static_cast<dnnl::memory::dim>(ic_per_group * filt_h * filt_w),
-                static_cast<dnnl::memory::dim>(filt_h * filt_w),
-                static_cast<dnnl::memory::dim>(filt_w),
-                static_cast<dnnl::memory::dim>(1)
+            dnnl::memory::dims hwio_strides_5d = {
+                dm,                                      // stride for G (maps to I in HWIO)
+                static_cast<dnnl::memory::dim>(1),       // stride for O_per_group (maps to O in HWIO)
+                static_cast<dnnl::memory::dim>(1),       // stride for I_per_group (trivial, size=1)
+                filt_w * groups * dm,                    // stride for H
+                groups * dm                              // stride for W
             };
-            auto weights_goihw_md = dnnl::memory::desc(weights_dims, dtype, strides_goihw);
-            auto weights_goihw_mem = dnnl::memory(weights_goihw_md, eng, weights_reordered_buffer.data());
 
-            // Reorder to OneDNN's optimal format if needed
-            if (conv_pd->weights_desc() != weights_goihw_mem.get_desc()) {
-                dnnl::reorder(weights_goihw_mem, weights_mem)
-                    .execute(strm, weights_goihw_mem, weights_mem);
-            } else {
-                weights_mem = weights_goihw_mem;
-            }
+            auto weights_hwio_md = dnnl::memory::desc(weights_dims, dtype, hwio_strides_5d);
+            auto weights_hwio_mem = dnnl::memory(weights_hwio_md, eng, const_cast<void*>(filter));
 
-            log_info("Conv OneDNN: Depthwise weights reordered from TF [H,W,I,dm] to OneDNN [G,O,I,H,W]");
+            // Reorder and cache weights
+            reorderAndCacheWeights(cache_key, weights_hwio_mem, weights_mem, eng, is_weights_const);
+
+            apilog_info("Conv OneDNN: Depthwise weights reordered from TF [H,W,I,dm] to OneDNN blocked format");
 
         } else {
-            // Standard Conv2D: HWIO -> OIHW
-            const uint64_t out_ch = dims.out_channels;
-            const uint64_t in_ch = dims.in_channels;
-            size_t weights_size = out_ch * in_ch * filt_h * filt_w;
+            // Standard Conv2D: HWIO -> OIHW using OneDNN reorder
+            const int64_t out_ch = static_cast<int64_t>(dims.out_channels);
+            const int64_t in_ch = static_cast<int64_t>(dims.in_channels);
 
-            if (dtype == dnnl::memory::data_type::f32) {
-                weights_reordered_buffer.resize(weights_size * sizeof(float));
-                const float* filter_hwio = static_cast<const float*>(filter);
-                float* filter_oihw = reinterpret_cast<float*>(weights_reordered_buffer.data());
+            dnnl::memory::dims hwio_strides_4d = {
+                static_cast<dnnl::memory::dim>(1),       // stride for O (innermost in HWIO)
+                out_ch,                                  // stride for I
+                filt_w * in_ch * out_ch,                 // stride for H
+                in_ch * out_ch                           // stride for W
+            };
 
-                // Manually transpose from HWIO to OIHW
-                for (uint64_t o = 0; o < out_ch; ++o) {
-                    for (uint64_t i = 0; i < in_ch; ++i) {
-                        for (uint64_t h = 0; h < filt_h; ++h) {
-                            for (uint64_t w = 0; w < filt_w; ++w) {
-                                uint64_t hwio_idx = h * filt_w * in_ch * out_ch +
-                                                   w * in_ch * out_ch +
-                                                   i * out_ch +
-                                                   o;
-                                uint64_t oihw_idx = o * in_ch * filt_h * filt_w +
-                                                   i * filt_h * filt_w +
-                                                   h * filt_w +
-                                                   w;
-                                filter_oihw[oihw_idx] = filter_hwio[hwio_idx];
-                            }
-                        }
-                    }
-                }
-            } else {  // bf16
-                weights_reordered_buffer.resize(weights_size * sizeof(uint16_t));
-                const uint16_t* filter_hwio = static_cast<const uint16_t*>(filter);
-                uint16_t* filter_oihw = reinterpret_cast<uint16_t*>(weights_reordered_buffer.data());
+            auto weights_hwio_md = dnnl::memory::desc(weights_dims, dtype, hwio_strides_4d);
+            auto weights_hwio_mem = dnnl::memory(weights_hwio_md, eng, const_cast<void*>(filter));
 
-                // Manually transpose from HWIO to OIHW
-                for (uint64_t o = 0; o < out_ch; ++o) {
-                    for (uint64_t i = 0; i < in_ch; ++i) {
-                        for (uint64_t h = 0; h < filt_h; ++h) {
-                            for (uint64_t w = 0; w < filt_w; ++w) {
-                                uint64_t hwio_idx = h * filt_w * in_ch * out_ch +
-                                                   w * in_ch * out_ch +
-                                                   i * out_ch +
-                                                   o;
-                                uint64_t oihw_idx = o * in_ch * filt_h * filt_w +
-                                                   i * filt_h * filt_w +
-                                                   h * filt_w +
-                                                   w;
-                                filter_oihw[oihw_idx] = filter_hwio[hwio_idx];
-                            }
-                        }
-                    }
-                }
-            }
+            // Reorder and cache weights
+            reorderAndCacheWeights(cache_key, weights_hwio_mem, weights_mem, eng, is_weights_const);
 
-            // Create memory descriptor for OIHW layout
-            auto weights_oihw_md = dnnl::memory::desc(weights_dims, dtype, dnnl::memory::format_tag::oihw);
-            auto weights_oihw_mem = dnnl::memory(weights_oihw_md, eng, weights_reordered_buffer.data());
-
-            // Reorder from OIHW to OneDNN's optimal format (if needed)
-            if (conv_pd->weights_desc() != weights_oihw_mem.get_desc()) {
-                dnnl::reorder(weights_oihw_mem, weights_mem)
-                    .execute(strm, weights_oihw_mem, weights_mem);
-            } else {
-                weights_mem = weights_oihw_mem;
-            }
-
-            log_info("Conv OneDNN: Standard weights reordered from TF [H,W,I,O] to OneDNN [O,I,H,W]");
+            apilog_info("Conv OneDNN: Standard weights reordered from TF [H,W,I,O] to OneDNN blocked format");
         }
 
-        // Create convolution primitive
+        // Create convolution primitive (fresh every time - cheap to create)
         auto conv_prim = dnnl::convolution_forward(*conv_pd);
 
         // Setup basic arguments
@@ -414,7 +381,7 @@ status_t conv_onednn_wrapper(
         // Execute convolution
         conv_prim.execute(strm, conv_args);
 
-        log_info("Conv OneDNN: Execution completed successfully");
+        apilog_info("Conv OneDNN: Execution completed successfully");
         return status_t::success;
 
     } catch (const dnnl::error &e) {

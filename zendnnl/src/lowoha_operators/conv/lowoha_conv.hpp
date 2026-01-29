@@ -34,6 +34,7 @@ namespace conv {
  * @param filter           Filter tensor [KH, KW, C_in, C_out]
  * @param bias             Optional bias [C_out]
  * @param output           Output tensor [N, H_out, W_out, C_out]
+ * @param is_weights_const Flag indicating if weights are constant (enables caching)
  * @param params           Convolution parameters
  *
  * @return status_t::success or status_t::failure
@@ -43,6 +44,7 @@ status_t conv_direct(
     const void *filter,          // [KH, KW, C_in, C_out]
     const void *bias,            // [C_out] or nullptr
     void *output,                // [N, H_out, W_out, C_out]
+    const bool is_weights_const, // Enable weight caching for constant filters
     conv_params &params
 );
 
@@ -53,6 +55,7 @@ status_t conv_direct(
  * @param filter           Filter tensor data
  * @param bias             Bias tensor data (optional)
  * @param output           Output tensor data
+ * @param is_weights_const Flag indicating if weights are constant
  * @param params           Convolution parameters
  * @return status_t::success or status_t::failure
  */
@@ -61,6 +64,7 @@ status_t conv_kernel_wrapper(
     const void *filter,
     const void *bias,
     void *output,
+    const bool is_weights_const,
     conv_params &params
 );
 
