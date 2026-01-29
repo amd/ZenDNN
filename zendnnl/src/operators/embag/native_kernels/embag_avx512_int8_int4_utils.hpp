@@ -34,24 +34,6 @@
 namespace zendnnl {
 namespace ops {
 
-// Extracts a signed 4-bit integer from a byte.
-// If 'high' is true, extracts the high nibble; otherwise, the low nibble.
-// Sign-extends the 4-bit value to an 8-bit signed integer.
-inline int8_t extract_int4(int8_t byte, bool high, data_type_t table_dtype) {
-  int8_t val = high ? (byte >> 4) & 0x0F : byte & 0x0F;
-  if (table_dtype == data_type_t::s4) {
-    return (val & 0x08) ? (val | 0xF0) : val;
-  }
-  else {
-    return val;
-  }
-}
-
-// Dequantizes a quantized value using scale and zero-point.
-inline float dequantize(int8_t val, float scale, float bias) {
-  return ((scale * static_cast<int32_t>(val)) + bias);
-}
-
 // Convert float16 (stored as uint16_t) to float32
 inline float half_to_float(uint16_t h) {
   uint32_t sign = (h >> 15) & 0x1;
@@ -93,31 +75,259 @@ inline float half_to_float(uint16_t h) {
 }
 
 /*-----------------------------------------------------------------------------
- AVX-512 optimized kernel for quantized embedding aggregation.
- Supports INT8 and INT4 input formats and FP32 or BF16 output formats.
- INT8 Path Register Usage
- | Register Type    | Count | Examples                           |
- |------------------|-------|------------------------------------|
- | Scalar Float     |   3   | scale, wt, wt_sum                  |
- | Scalar Integer   |   6   | idx, zp, start, end, pf_i, pf_idx  |
- | Mask Registers   |   1   | tail_mask                          |
- | Loop Counters    |   4   | oi, i, b, t                        |
- | Vector Registers |   7   | __m128i, __m512i, __m512, __m256bh |
-   Total Registers Used (INT8): 21
+| INT8 row processing function.
+| Processes a single row of INT8 quantized data and accumulates results.
+|
+| Parameters:
+|   row             - Pointer to the quantized INT8 row data
+|   acc             - Accumulator array for SIMD blocks
+|   full_blocks     - Number of full 16-element blocks
+|   tail            - Number of remaining elements after full blocks
+|   scale           - Dequantization scale factor
+|   bias            - Dequantization bias
+|   wt_vec          - Weight vector (broadcast)
+|   is_embedding    - True if embedding lookup (direct store)
+|   algo            - Aggregation algorithm (sum, mean, max)
+|   first_valid_index - True if this is the first valid row being processed
+*/
+template <typename InType>
+__attribute__((target("avx512f,avx512vl,avx512bf16")))
+inline void process_int8_row(
+  const InType *row,
+  __m512 *acc,
+  int full_blocks,
+  int tail,
+  float scale,
+  float bias,
+  __m512 wt_vec,
+  bool is_embedding,
+  embag_algo_t algo,
+  bool first_valid_index
+) {
+  constexpr int simd_width = 16;
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 bias_vec = _mm512_set1_ps(bias);
 
- INT4 Path Register Usage
- | Register Type    | Count | Examples                                           |
- |------------------|-------|----------------------------------------------------|
- | Scalar Float     |   4   | scale, wt, wt_sum, val                             |
- | Scalar Integer   |   9   | idx, zp, start, end, pf_i, pf_idx, j, packed, qval |
- | Mask Registers   |   1   | tail_mask                                          |
- | Loop Counters    |   4   | oi, i, j, t                                        |
- | Vector Registers |   3   | __m512, __m256bh                                   |
-   Total Registers Used (INT4): 21
+  // Process full blocks (16 elements each)
+  for (int b = 0; b < full_blocks; ++b) {
+    __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>
+                                       (row + b * simd_width));
+    __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
+    __m512 val_f32 = _mm512_add_ps(
+                       _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), scale_vec),
+                       bias_vec);
 
- Both INT8 and INT4 paths use 21 registers in total, but:
- - INT8 uses more vector registers due to full AVX-512 vectorization.
- - INT4 uses more scalar registers due to unpacking and scalar dequantization.
+    val_f32 = _mm512_mul_ps(val_f32, wt_vec);
+
+    // Accumulate values
+    if (is_embedding) {
+      acc[b] = val_f32;
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        if (first_valid_index) {
+          acc[b] = val_f32;
+        }
+        else {
+          acc[b] = _mm512_max_ps(acc[b], val_f32);
+        }
+      }
+      else {
+        acc[b] = _mm512_add_ps(acc[b], val_f32);
+      }
+    }
+  }
+
+  // Process tail elements
+  if (tail > 0) {
+    alignas(64) int8_t tmp[simd_width] = {0};
+    std::memcpy(tmp, row + full_blocks * simd_width, tail);
+    __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(tmp));
+    __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
+    __m512 val_f32 = _mm512_add_ps(
+                       _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), scale_vec),
+                       bias_vec);
+
+    val_f32 = _mm512_mul_ps(val_f32, wt_vec);
+
+    // Accumulate values
+    if (is_embedding) {
+      acc[full_blocks] = val_f32;
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        if (first_valid_index) {
+          acc[full_blocks] = val_f32;
+        }
+        else {
+          acc[full_blocks] = _mm512_max_ps(acc[full_blocks], val_f32);
+        }
+      }
+      else {
+        acc[full_blocks] = _mm512_add_ps(acc[full_blocks], val_f32);
+      }
+    }
+  }
+}
+
+/*-----------------------------------------------------------------------------
+| INT4 row processing function.
+| Processes a single row of INT4 quantized data and accumulates results.
+| Uses vectorized unpacking of packed INT4 nibbles.
+|
+| Parameters:
+|   row             - Pointer to the quantized INT4 row data (packed nibbles)
+|   acc             - Accumulator array for SIMD blocks
+|   full_blocks     - Number of full 16-element blocks
+|   tail            - Number of remaining elements after full blocks
+|   scale           - Dequantization scale factor
+|   bias            - Dequantization bias
+|   wt_vec          - Weight vector (broadcast)
+|   is_embedding    - True if embedding lookup (direct store)
+|   algo            - Aggregation algorithm (sum, mean, max)
+|   first_valid_index - True if this is the first valid row being processed
+|   table_dtype     - Data type (s4 for signed, u4 for unsigned)
+*/
+template <typename InType>
+__attribute__((target("avx512f,avx512vl,avx512bf16")))
+inline void process_int4_row(
+  const InType *row,
+  __m512 *acc,
+  int full_blocks,
+  int tail,
+  float scale,
+  float bias,
+  __m512 wt_vec,
+  bool is_embedding,
+  embag_algo_t algo,
+  bool first_valid_index,
+  data_type_t table_dtype
+) {
+  __m512 scale_vec = _mm512_set1_ps(scale);
+  __m512 bias_vec = _mm512_set1_ps(bias);
+
+  // Process full blocks (16 elements = 8 packed bytes each)
+  for (int b = 0; b < full_blocks; ++b) {
+    // Load 8 bytes containing 16 packed INT4 values
+    __m128i packed_data = _mm_loadl_epi64(reinterpret_cast<const __m128i *>
+                                          (row + b * 8));
+
+    // Extract low nibbles (even elements: 0, 2, 4, ..., 14)
+    __m128i low_nibbles = _mm_and_si128(packed_data, _mm_set1_epi8(0x0F));
+
+    // Extract high nibbles (odd elements: 1, 3, 5, ..., 15)
+    __m128i high_nibbles = _mm_and_si128(_mm_srli_epi16(packed_data, 4),
+                                         _mm_set1_epi8(0x0F));
+
+    // Interleave to get correct element order: [e0, e1, e2, e3, ..., e15]
+    __m128i interleaved = _mm_unpacklo_epi8(low_nibbles, high_nibbles);
+
+    // Sign extend for signed INT4 (s4): if bit 3 is set, extend to signed byte
+    if (table_dtype == data_type_t::s4) {
+      __m128i sign_bit = _mm_and_si128(interleaved, _mm_set1_epi8(0x08));
+      __m128i needs_extend = _mm_cmpeq_epi8(sign_bit, _mm_set1_epi8(0x08));
+      interleaved = _mm_or_si128(interleaved,
+                                 _mm_and_si128(needs_extend, _mm_set1_epi8(static_cast<char>(0xF0))));
+    }
+
+    // Convert to 32-bit integers and then to float
+    __m512i qvals_i32 = _mm512_cvtepi8_epi32(interleaved);
+    __m512 val_f32 = _mm512_add_ps(
+                       _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), scale_vec),
+                       bias_vec);
+
+    val_f32 = _mm512_mul_ps(val_f32, wt_vec);
+
+    // Accumulate values
+    if (is_embedding) {
+      acc[b] = val_f32;
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        if (first_valid_index) {
+          acc[b] = val_f32;
+        }
+        else {
+          acc[b] = _mm512_max_ps(acc[b], val_f32);
+        }
+      }
+      else {
+        acc[b] = _mm512_add_ps(acc[b], val_f32);
+      }
+    }
+  }
+
+  // Process tail elements
+  if (tail > 0) {
+    alignas(16) int8_t tmp[8] = {0};
+    std::memcpy(tmp, row + full_blocks * 8, (tail + 1) / 2);
+
+    __m128i packed_data = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(tmp));
+
+    __m128i low_nibbles = _mm_and_si128(packed_data, _mm_set1_epi8(0x0F));
+    __m128i high_nibbles = _mm_and_si128(_mm_srli_epi16(packed_data, 4),
+                                         _mm_set1_epi8(0x0F));
+    __m128i interleaved = _mm_unpacklo_epi8(low_nibbles, high_nibbles);
+
+    if (table_dtype == data_type_t::s4) {
+      __m128i sign_bit = _mm_and_si128(interleaved, _mm_set1_epi8(0x08));
+      __m128i needs_extend = _mm_cmpeq_epi8(sign_bit, _mm_set1_epi8(0x08));
+      interleaved = _mm_or_si128(interleaved,
+                                 _mm_and_si128(needs_extend, _mm_set1_epi8(static_cast<char>(0xF0))));
+    }
+
+    __m512i qvals_i32 = _mm512_cvtepi8_epi32(interleaved);
+    __m512 val_f32 = _mm512_add_ps(
+                       _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), scale_vec),
+                       bias_vec);
+
+    val_f32 = _mm512_mul_ps(val_f32, wt_vec);
+
+    // Accumulate values
+    if (is_embedding) {
+      acc[full_blocks] = val_f32;
+    }
+    else {
+      if (algo == embag_algo_t::max) {
+        if (first_valid_index) {
+          acc[full_blocks] = val_f32;
+        }
+        else {
+          acc[full_blocks] = _mm512_max_ps(acc[full_blocks], val_f32);
+        }
+      }
+      else {
+        acc[full_blocks] = _mm512_add_ps(acc[full_blocks], val_f32);
+      }
+    }
+  }
+}
+
+/*-----------------------------------------------------------------------------
+| AVX-512 optimized kernel for quantized embedding aggregation.
+| Supports INT8 and INT4 input formats and FP32 or BF16 output formats.
+|
+| INT8 Path Register Usage
+| | Register Type    | Count | Examples                           |
+| |------------------|-------|------------------------------------|
+| | Scalar Float     |   3   | scale, wt, wt_sum                  |
+| | Scalar Integer   |   6   | idx, zp, start, end, pf_i, pf_idx  |
+| | Mask Registers   |   1   | tail_mask                          |
+| | Loop Counters    |   4   | oi, i, b, t                        |
+| | Vector Registers |   7   | __m128i, __m512i, __m512, __m256bh |
+|   Total Registers Used (INT8): 21
+|
+| INT4 Path Register Usage
+| | Register Type    | Count | Examples                                           |
+| |------------------|-------|----------------------------------------------------|
+| | Scalar Float     |   4   | scale, wt, wt_sum, val                             |
+| | Scalar Integer   |   9   | idx, zp, start, end, pf_i, pf_idx, j, packed, qval |
+| | Mask Registers   |   1   | tail_mask                                          |
+| | Loop Counters    |   4   | oi, i, j, t                                        |
+| | Vector Registers |   7   | __m128i, __m512i, __m512, __m256bh                 |
+|   Total Registers Used (INT4): 21
+|
+| Both INT8 and INT4 paths use vectorized processing with AVX-512 intrinsics.
 */
 
 template <
@@ -205,87 +415,20 @@ void embag_avx512_int8_int4_kernel(
       }
       __m512 wt_vec = _mm512_set1_ps(wt);
 
+      // Dispatch to appropriate processing function based on data type
       if constexpr(!IsInt4) {
-        for (int b = 0; b < full_blocks; ++b) {
-          __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>
-                                             (row + b * simd_width));
-          __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
-          __m512 val_f32 = _mm512_add_ps(
-                             _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
-                             _mm512_set1_ps(bias));
-
-          val_f32 = _mm512_mul_ps(val_f32, wt_vec);
-
-          if (is_embedding) {
-            acc[b] = val_f32;
-          }
-          else {
-            if (algo == embag_algo_t::max) {
-              if (first_valid_index) {
-                acc[b] = val_f32;
-              }
-              else {
-                acc[b] = _mm512_max_ps(acc[b], val_f32);
-              }
-            }
-            else {
-              acc[b] = _mm512_add_ps(acc[b], val_f32);
-            }
-          }
-        }
-        if (tail > 0) {
-          // __mmask16 tail_mask = (1 << tail) - 1;
-          alignas(64) int8_t tmp[simd_width] = {0};
-          std::memcpy(tmp, row + full_blocks * simd_width, tail);
-          __m128i qvals_i8 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(tmp));
-          __m512i qvals_i32 = _mm512_cvtepi8_epi32(qvals_i8);
-          __m512 val_f32 = _mm512_add_ps(
-                             _mm512_mul_ps(_mm512_cvtepi32_ps(qvals_i32), _mm512_set1_ps(scale)),
-                             _mm512_set1_ps(bias));
-
-          val_f32 = _mm512_mul_ps(val_f32, wt_vec);
-          if (is_embedding) {
-            acc[full_blocks] = val_f32;
-          }
-          else {
-            if (algo == embag_algo_t::max) {
-              if (first_valid_index) {
-                acc[full_blocks] = val_f32;
-              }
-              else {
-                acc[full_blocks] = _mm512_max_ps(acc[full_blocks], val_f32);
-              }
-            }
-            else {
-              acc[full_blocks] = _mm512_add_ps(acc[full_blocks], val_f32);
-            }
-          }
-        }
-        first_valid_index = false;
+        process_int8_row(row, acc, full_blocks, tail, scale, bias,
+                         wt_vec, is_embedding, algo, first_valid_index);
       }
       else {
-        for (int j = 0; j < width; ++j) {
-          int8_t packed = row[j / 2];
-          int8_t qval = extract_int4(packed, j % 2, table_dtype);
-          float val = dequantize(qval, scale, bias) * wt;
-          if (is_embedding) {
-            reinterpret_cast<float *>(&acc[0])[j] = val;
-          }
-          else {
-            if (algo == embag_algo_t::max) {
-              reinterpret_cast<float *>(&acc[0])[j] = first_valid_index ? val :
-                                                      std::max(reinterpret_cast<float *>(&acc[0])[j], val);
-            }
-            else {
-              reinterpret_cast<float *>(&acc[0])[j] += val;
-            }
-          }
-        }
+        process_int4_row(row, acc, full_blocks, tail, scale, bias,
+                         wt_vec, is_embedding, algo, first_valid_index, table_dtype);
       }
       first_valid_index = false;
     }
+
     if (!is_embedding) {
-      //Normalize or mean reduction
+      // Normalize for mean reduction
       if (algo == embag_algo_t::mean && wt_sum > 0.0f) {
         __m512 div_vec = _mm512_set1_ps(wt_sum);
         for (int b = 0; b < full_blocks; ++b) {
@@ -305,7 +448,7 @@ void embag_avx512_int8_int4_kernel(
       else {
         __m256bh bf16_vec = _mm512_cvtneps_pbh(acc[b]);
         _mm256_storeu_si256(reinterpret_cast<__m256i *>(&dst[dst_offset + b *
-                                       simd_width]), (__m256i)bf16_vec);
+                            simd_width]), (__m256i)bf16_vec);
       }
     }
     if (tail > 0) {

@@ -159,6 +159,24 @@ void embag_ref_kernel(
 
 }
 
+// Extracts a signed 4-bit integer from a byte.
+// If 'high' is true, extracts the high nibble; otherwise, the low nibble.
+// Sign-extends the 4-bit value to an 8-bit signed integer.
+inline int8_t extract_int4(int8_t byte, bool high, data_type_t table_dtype) {
+  int8_t val = high ? (byte >> 4) & 0x0F : byte & 0x0F;
+  if (table_dtype == data_type_t::s4) {
+    return (val & 0x08) ? (val | 0xF0) : val;
+  }
+  else {
+    return val;
+  }
+}
+
+// Dequantizes a quantized value using scale and zero-point.
+inline float dequantize(int8_t val, float scale, float bias) {
+  return ((scale * static_cast<int32_t>(val)) + bias);
+}
+
 template <
   bool IsInt4,
   typename InType,
