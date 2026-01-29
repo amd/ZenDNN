@@ -386,14 +386,9 @@ inline matmul_algo_t select_algo_by_heuristics_woq_int4_mm(int M, int N, int K,
       }
     }
     else {
-      if (N <= K) {
-        // AOCL BF16 Kernel with Zen Weights Conversion
-        return matmul_algo_t::aocl_dlp;
-      }
-      else {
-        // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion
-        return matmul_algo_t::aocl_dlp;
-      }
+      // AOCL BF16 Kernel with Zen Weights Conversion
+      // TODO: Implement Blocked BRGEMM BF16 with Zen Weights Conversion for N > K case
+      return matmul_algo_t::aocl_dlp;
     }
   }
 }

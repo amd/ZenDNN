@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2023-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ using ordered_json = nlohmann::ordered_json;
 
 template<typename SELF_T, typename IMPL_T = hashable_object_t>
 class api_object_t {
-public:
+ public:
   using self_type      = SELF_T;
   using impl_type      = IMPL_T;
   using impl_sptr_type = std::shared_ptr<impl_type>;
@@ -72,8 +72,8 @@ public:
   //   return (*impl.*func_ptr)(std::forward<ARGS_T>(args_)...);
   // }
 
-public:
-  self_type&     set_name(std::string name_);
+ public:
+  self_type     &set_name(std::string name_);
   std::string    get_name() const;
 
   nlohmann::ordered_json  get_object_info() const;
@@ -86,15 +86,15 @@ public:
 
   std::size_t get_hash() const;
 
-  self_type& cache(bool cache_flag_);
-  self_type& load(std::size_t hash_key_);
+  self_type &cache(bool cache_flag_);
+  self_type &load(std::size_t hash_key_);
 
-  virtual self_type& create();
+  virtual self_type &create();
 
-protected:
+ protected:
   api_object_t();
 
-protected:
+ protected:
   bool            cache_flag;
   std::size_t     hash_key;
   impl_sptr_type  impl;
@@ -108,85 +108,76 @@ api_object_t<SELF_T, IMPL_T>::api_object_t() :
 }
 
 template<typename SELF_T, typename IMPL_T>
-SELF_T& api_object_t<SELF_T, IMPL_T>::set_name(std::string name_) {
+SELF_T &api_object_t<SELF_T, IMPL_T>::set_name(std::string name_) {
 
   SET_IMPL_FORWARD_VA(set_name, name_);
 
-  return static_cast<self_type&>(*this);
+  return static_cast<self_type &>(*this);
 }
 
 template<typename SELF_T, typename IMPL_T>
 std::string api_object_t<SELF_T, IMPL_T>::get_name() const {
 
   GET_IMPL_FORWARD(get_name);
-  return std::string{};
 }
 
 template<typename SELF_T, typename IMPL_T>
 ordered_json api_object_t<SELF_T, IMPL_T>::get_object_info() const {
 
   GET_IMPL_FORWARD(get_object_info);
-  return ordered_json{};
 }
 
 template<typename SELF_T, typename IMPL_T>
 ordered_json api_object_t<SELF_T, IMPL_T>::get_object_runtime_info() const {
 
   GET_IMPL_FORWARD(get_object_runtime_info);
-  return ordered_json{};
 }
 
 template<typename SELF_T, typename IMPL_T>
 std::string api_object_t<SELF_T, IMPL_T>::get_object_summary() const {
 
   GET_IMPL_FORWARD(get_object_summary);
-  return std::string{};
 }
 
 template<typename SELF_T, typename IMPL_T>
 std::string api_object_t<SELF_T, IMPL_T>::get_object_runtime_summary() const {
 
   GET_IMPL_FORWARD(get_object_runtime_summary);
-  return std::string{};
 }
 
 template<typename SELF_T, typename IMPL_T>
 status_t api_object_t<SELF_T, IMPL_T>::get_last_status() const {
 
   GET_IMPL_FORWARD(get_object_runtime_summary);
-  return status_t::failure;
 }
 
 template<typename SELF_T, typename IMPL_T>
 bool api_object_t<SELF_T, IMPL_T>::is_bad_object() const {
 
   GET_IMPL_FORWARD(is_bad_object);
-  return true;
 }
 
 template<typename SELF_T, typename IMPL_T>
 bool api_object_t<SELF_T, IMPL_T>::is_unnamed_object() const {
 
   GET_IMPL_FORWARD(is_unnamed_object);
-  return true;
 }
 
 template<typename SELF_T, typename IMPL_T>
 std::size_t api_object_t<SELF_T, IMPL_T>::get_hash() const {
 
   GET_IMPL_FORWARD(get_hash);
-  return 0;
 }
 
 template<typename SELF_T, typename IMPL_T>
-SELF_T& api_object_t<SELF_T, IMPL_T>::cache(bool cache_flag_) {
+SELF_T &api_object_t<SELF_T, IMPL_T>::cache(bool cache_flag_) {
 
   cache_flag = cache_flag_;
-  return static_cast<self_type&>(*this);
+  return static_cast<self_type &>(*this);
 }
 
 template<typename SELF_T, typename IMPL_T>
-SELF_T& api_object_t<SELF_T, IMPL_T>::load(std::size_t hash_key_) {
+SELF_T &api_object_t<SELF_T, IMPL_T>::load(std::size_t hash_key_) {
   auto cached_value = zendnnl_lru_cache().get_value(hash_key_);
   if (cached_value) {
     this->impl = std::static_pointer_cast<impl_type>(cached_value.value());
@@ -199,20 +190,21 @@ SELF_T& api_object_t<SELF_T, IMPL_T>::load(std::size_t hash_key_) {
     EXCEPTION_WITH_LOC(message);
   }
 
-  return static_cast<self_type&>(*this);
+  return static_cast<self_type &>(*this);
 }
 
 template<typename SELF_T, typename IMPL_T>
-SELF_T& api_object_t<SELF_T, IMPL_T>::create() {
+SELF_T &api_object_t<SELF_T, IMPL_T>::create() {
 
   //hash_key indicates the object is loaded.
-  if (hash_key)
-    return static_cast<self_type&>(*this);
+  if (hash_key) {
+    return static_cast<self_type &>(*this);
+  }
 
   impl->create();
   hash_key = impl->get_hash();
 
-  return static_cast<self_type&>(*this);
+  return static_cast<self_type &>(*this);
 }
 
 } //common
