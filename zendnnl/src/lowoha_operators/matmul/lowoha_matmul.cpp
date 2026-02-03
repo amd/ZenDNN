@@ -204,7 +204,7 @@ void matmul_execute(const char layout,
                     const bool is_weights_const,
                     const size_t src_type_size, const size_t out_type_size,
                     const int num_threads,
-                    matmul_algo_t kernel, matmul_params &params,
+                    matmul_algo_t &kernel, matmul_params &params,
                     matmul_batch_params_t &batch_params,
                     unsigned int auto_version) {
 
@@ -315,36 +315,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
                                        batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const);
+  matmul_algo_t api_log_kernel = kernel;
   static unsigned int auto_version = get_auto_tuner_ver();
-
-  [[maybe_unused]] std::ostringstream ss;
-  if (apilog_info_enabled() || is_profile) {
-    ss << "LOWOHA matmul_direct: M=" << M << ", N=" << N << ", K=" << K
-       << ", alpha=" << alpha << ", beta=" << beta
-       << ", lda=" << lda << ", ldb=" << ldb << ", ldc=" << ldc
-       << ", transA=" << (transA ? "true" : "false")
-       << ", transB=" << (transB ? "true" : "false")
-       << ", input_dtype=" << data_type_to_string(params.dtypes.src)
-       << ", output_dtype=" << data_type_to_string(params.dtypes.dst)
-       << ", bias=" << (bias != nullptr ? "true" : "false")
-       << ", is_weights_const=" << (is_weights_const ? "true" : "false")
-       << ", post_op=[" << post_op_names_to_string(params) << "]"
-    << ", post_op_dtype=[" << ([&]() {
-      std::string dtypes = post_op_data_types_to_string(params);
-      return dtypes.empty() ? "none" : dtypes;
-    })()
-        << "]"
-        << ", Batch_A=" << batch_params.Batch_A << ", Batch_B=" << batch_params.Batch_B
-        << ", plugin_op=" << params.plugin_op;
-
-    if (kernel == matmul_algo_t::auto_tuner) {
-      apilog_info(ss.str(), ", kernel=", kernel_to_string(kernel),
-                  ", auto_tuner version=", auto_version);
-    }
-    else {
-      apilog_info(ss.str(), ", kernel=", kernel_to_string(kernel));
-    }
-  }
 
   // TODO: Add memory unreordering logic
   // Unreorder if onednn/ libxsmm is used
@@ -370,9 +342,42 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
 
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", kernel=", kernel_to_string(kernel),
-                       ", weight_address=", static_cast<const void *>(weight),
-                       ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+  }
+
+  if (apilog_info_enabled() || is_profile) {
+    [[maybe_unused]] std::ostringstream ss;
+    ss << "LOWOHA matmul_direct: M=" << M << ", N=" << N << ", K=" << K
+       << ", alpha=" << alpha << ", beta=" << beta
+       << ", lda=" << lda << ", ldb=" << ldb << ", ldc=" << ldc
+       << ", transA=" << (transA ? "true" : "false")
+       << ", transB=" << (transB ? "true" : "false")
+       << ", input_dtype=" << data_type_to_string(params.dtypes.src)
+       << ", weight_dtype=" << data_type_to_string(params.dtypes.wei)
+       << ", output_dtype=" << data_type_to_string(params.dtypes.dst)
+       << ", bias_dtype=" << data_type_to_string(params.dtypes.bias)
+       << ", bias=" << (bias != nullptr ? "true" : "false")
+       << ", is_weights_const=" << (is_weights_const ? "true" : "false")
+       << ", post_op=[" << post_op_names_to_string(params) << "]"
+    << ", post_op_dtype=[" << ([&]() {
+      std::string dtypes = post_op_data_types_to_string(params);
+      return dtypes.empty() ? "none" : dtypes;
+    })()
+        << "]"
+        << ", Batch_A=" << batch_params.Batch_A << ", Batch_B=" << batch_params.Batch_B
+        << ", plugin_op=" << params.plugin_op;
+
+    if (kernel == matmul_algo_t::auto_tuner) {
+      apilog_info(ss.str(), ", kernel=", kernel_to_string(api_log_kernel),
+                  ", auto_tuner version=", auto_version);
+    }
+    else {
+      apilog_info(ss.str(), ", kernel=", kernel_to_string(api_log_kernel));
+    }
+    if (is_profile) {
+      profilelog_verbose(ss.str(), ", kernel=", kernel_to_string(api_log_kernel),
+                         ", weight_address=", static_cast<const void *>(weight),
+                         ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
+    }
   }
 
   return status_t::success;
