@@ -107,8 +107,10 @@ In order to configure the build according to dependencies, components, and stand
 | ZENDNNL_DEPENDS_PARLOOPER | PARLOOPER is a parallel loop abstraction library used by ZenDNN | BOOL | OFF |
 | ZENDNNL_DEPENDS_FBGEMM | FBGEMM is a backend for embedding_bag in ZenDNN | BOOL | ON |
 | ZENDNNL_LOCAL_AMDBLIS | Use a locally available code of amd-blis instead of downloading from a public repository. This option can be used by developers to test the library with the dependency version not yet publicly available, or a version still unstable. In such a case the developer still need to copy (or provide soft link) the dependency code to ${ZENDNNL_SOURCE_DIR}/dependencies directory. | BOOL | OFF |
-| ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_AOCLDLP | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLDLP | BOOL | OFF |
+| ZENDNNL_LOCAL_AOCLUTILS | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for AOCLUTILS | BOOL | OFF |
+| ZENDNNL_LOCAL_JSON | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for JSON (nlohmann-json) | BOOL | OFF |
+| ZENDNNL_LOCAL_ONEDNN | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for ONEDNN | BOOL | OFF |
 | ZENDNNL_LOCAL_LIBXSMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for LIBXSMM | BOOL | OFF |
 | ZENDNNL_LOCAL_PARLOOPER | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for PARLOOPER | BOOL | OFF |
 | ZENDNNL_LOCAL_FBGEMM | Its usage is same as that of ZENDNNL_LOCAL_AMDBLIS, except it is for FBGEMM | BOOL | OFF |
@@ -144,6 +146,7 @@ The CMake build exposes the following component targets
 | Dependencies(TPL) | zendnnl-deps     | None         |
 | ZenDNN Library    | zendnnl          | zendnnl-deps |
 | Examples          | zendnnl-examples | zendnnl      |
+| GTests            | zendnnl-gtest    | zendnnl      |
 | BenchDNN          | zendnnl-benchdnn | zendnnl      |
 | Doxygen Docs      | zendnnl-doxygen  | None         |
 
@@ -167,6 +170,52 @@ The standalone build can be done using command line CMake configuration and buil
 - Go to the `ZenDNN/scripts/` directory,
 - Invoke `source zendnnl_build.sh --help` to list down all the build options.
 - Invoke `source zendnnl_build.sh` with required build options to build the library (and its components).
+
+##### Build Script Options
+
+| Option | Description |
+|--------|-------------|
+| **Build Targets** | |
+| `--all` | Build and install all targets |
+| `--zendnnl` | Build and install zendnnl lib |
+| `--zendnnl-gtest` | Build and install zendnnl gtest |
+| `--examples` | Build and install examples |
+| `--benchdnn` | Build and install benchdnn |
+| `--doxygen` | Build and install doxygen docs |
+| **Clean Options** | |
+| `--clean` | Clean all targets |
+| `--clean-all` | Clean dependencies and build folders |
+| **Dependency Options** | |
+| `--no-deps` | Don't rebuild (or clean) dependencies |
+| `--enable-parlooper` | Enable parlooper |
+| `--enable-amdblis` | Enable amdblis (disables aocldlp which is default) |
+| **Local Dependency Options** | Requires source in `dependencies/<name>/` |
+| `--local-amdblis` | Use local amdblis |
+| `--local-aocldlp` | Use local aocldlp |
+| `--local-aoclutils` | Use local aoclutils |
+| `--local-json` | Use local json |
+| `--local-onednn` | Use local onednn |
+| `--local-libxsmm` | Use local libxsmm |
+| `--local-parlooper` | Use local parlooper |
+| `--local-fbgemm` | Use local fbgemm |
+| **Build Options** | |
+| `--nproc <N>` | Number of processes for parallel build (default: 1) |
+
+##### Build Script Examples
+
+```bash
+# Build all targets including dependencies
+source zendnnl_build.sh --all
+
+# Build all with parallel jobs
+source zendnnl_build.sh --all --nproc 8
+
+# Build only zendnnl lib
+source zendnnl_build.sh --zendnnl
+
+# Rebuild without re-downloading dependencies
+source zendnnl_build.sh --no-deps --all
+```
 
 ### 4.3 Framework Integration Build
 

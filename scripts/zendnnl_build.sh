@@ -20,115 +20,110 @@
 function parse_args() {
     while [[ $# -gt 0 ]]
     do
-	key="$1"
-	case $key in
-	    --all )
-		ZENDNNL_ALL=1
-		shift
-		;;
-	    --clean )
-		ZENDNNL_CLEAN=1
-		shift
-		;;
-	    --clean-all )
-		ZENDNNL_CLEAN_ALL=1
-		shift
-		;;
-	    --zendnnl )
-		ZENDNNL=1
-		shift
-		;;
-	    --zendnnl-gtest )
-		ZENDNNL_GTEST=1
-		shift
-		shift
-		;;
-	    --examples )
-		ZENDNNL_EXAMPLES=1
-		shift
-		;;
-	    --benchdnn )
-		ZENDNNL_BENCHDNN=1
-		shift
-		;;
-	    --doxygen )
-		ZENDNNL_DOXYGEN=1
-		shift
-		;;
-	    --no-deps )
+        key="$1"
+        case $key in
+            --all )
+                ZENDNNL_ALL=1
+                shift
+                ;;
+            --clean )
+                ZENDNNL_CLEAN=1
+                shift
+                ;;
+            --clean-all )
+                ZENDNNL_CLEAN_ALL=1
+                shift
+                ;;
+            --zendnnl )
+                ZENDNNL=1
+                shift
+                ;;
+            --zendnnl-gtest )
+                ZENDNNL_GTEST=1
+                shift
+                ;;
+            --examples )
+                ZENDNNL_EXAMPLES=1
+                shift
+                ;;
+            --benchdnn )
+                ZENDNNL_BENCHDNN=1
+                shift
+                ;;
+            --doxygen )
+                ZENDNNL_DOXYGEN=1
+                shift
+                ;;
+            --no-deps )
                 ZENDNNL_NODEPS=1
                 shift
-		;;
-            --enable-libxsmm )
-                ZENDNNL_DEPENDS_LIBXSMM=1
-                shift
-		;;
+                ;;
             --enable-parlooper )
                 ZENDNNL_DEPENDS_PARLOOPER=1
                 shift
-		;;
-            --enable-fbgemm )
-                ZENDNNL_DEPENDS_FBGEMM=1
-                shift
-		;;
-	    --enable-amdblis )
+                ;;
+            --enable-amdblis )
                 ZENDNNL_DEPENDS_AMDBLIS=1
                 shift
-		;;
-	    --local-amdblis )
+                ;;
+            --local-amdblis )
                 ZENDNNL_LOCAL_AMDBLIS=1
                 shift
-		;;
-	    --local-aocldlp )
+                ;;
+            --local-aocldlp )
                 ZENDNNL_LOCAL_AOCLDLP=1
                 shift
-		;;
-	    --local-aoclutils )
+                ;;
+            --local-aoclutils )
                 ZENDNNL_LOCAL_AOCLUTILS=1
                 shift
-		;;
-	    --local-json )
+                ;;
+            --local-json )
                 ZENDNNL_LOCAL_JSON=1
                 shift
-		;;
-	    --local-onednn )
+                ;;
+            --local-onednn )
                 ZENDNNL_LOCAL_ONEDNN=1
                 shift
-		;;
+                ;;
             --local-libxsmm )
                 ZENDNNL_LOCAL_LIBXSMM=1
                 shift
-		;;
+                ;;
             --local-parlooper )
                 ZENDNNL_LOCAL_PARLOOPER=1
                 shift
-		;;
+                ;;
             --local-fbgemm )
                 ZENDNNL_LOCAL_FBGEMM=1
                 shift
-		;;
+                ;;
             --nproc )
                 ZENDNNL_NPROC=$2
                 shift
                 shift
                 ;;
             --help )
-                echo " usage   : zendnnl-build <options>"
+                echo " usage   : source zendnnl_build.sh <options>"
                 echo
-                echo " options :"
+                echo " build targets :"
                 echo " --all              : build and install all targets."
-                echo " --clean            : clean all targets."
-                echo " --clean-all        : clean dependencies and build folders."
                 echo " --zendnnl          : build and install zendnnl lib."
                 echo " --zendnnl-gtest    : build and install zendnnl gtest."
                 echo " --examples         : build and install examples."
                 echo " --benchdnn         : build and install benchdnn."
                 echo " --doxygen          : build and install doxygen docs."
+                echo
+                echo " clean options :"
+                echo " --clean            : clean all targets."
+                echo " --clean-all        : clean dependencies and build folders."
+                echo
+                echo " dependency options :"
                 echo " --no-deps          : don't rebuild (or clean) dependencies."
-                echo " --enable-libxsmm   : enable libxsmm."
                 echo " --enable-parlooper : enable parlooper."
-                echo " --enable-fbgemm    : enable fbgemm."
-                echo " --enable-amdblis   : enable amdblis (and disable aocldlp which is default)."
+                echo " --enable-amdblis   : enable amdblis (disables aocldlp which is default)."
+                echo
+                echo " local dependency options (requires source in dependencies/<name>/) :"
                 echo " --local-amdblis    : use local amdblis."
                 echo " --local-aocldlp    : use local aocldlp."
                 echo " --local-aoclutils  : use local aoclutils."
@@ -137,38 +132,51 @@ function parse_args() {
                 echo " --local-libxsmm    : use local libxsmm."
                 echo " --local-parlooper  : use local parlooper."
                 echo " --local-fbgemm     : use local fbgemm."
-                echo " --nproc            : number of processes for parallel build."
+                echo
+                echo " build options :"
+                echo " --nproc <N>        : number of processes for parallel build (default: 1)."
                 echo
                 echo " examples :"
-                echo " build all targets including dependencies"
-                echo " source zendnnl_build.sh --all"
+                echo "   # build all targets including dependencies"
+                echo "   source zendnnl_build.sh --all"
                 echo
-                echo " build all targets if dependencies are already built"
-                echo " (will fail if dependencies are not built by previous build)"
-                echo " source zendnnl_build.sh --no-deps --all"
+                echo "   # build all with parallel jobs"
+                echo "   source zendnnl_build.sh --all --nproc 8"
+                echo
+                echo "   # build with gtest"
+                echo "   source zendnnl_build.sh --zendnnl --zendnnl-gtest"
+                echo
+                echo "   # build only zendnnl lib"
+                echo "   source zendnnl_build.sh --zendnnl"
+                echo
+                echo "   # rebuild without re-downloading dependencies"
+                echo "   source zendnnl_build.sh --no-deps --all"
                 echo
                 return 1
                 ;;
-	    * )
-		echo "unknown command line option $1"
-		return 1
-	esac
+            * )
+                echo "unknown command line option $1"
+                return 1
+        esac
     done
     return 0
 }
+
 # parse arguments
 ZENDNNL_ALL=0
 ZENDNNL_CLEAN=0
 ZENDNNL_CLEAN_ALL=0
+
+# build target options
 ZENDNNL=0
 ZENDNNL_GTEST=0
 ZENDNNL_EXAMPLES=0
 ZENDNNL_BENCHDNN=0
 ZENDNNL_DOXYGEN=0
+
+# configure options
 ZENDNNL_NODEPS=0
-ZENDNNL_DEPENDS_LIBXSMM=0
 ZENDNNL_DEPENDS_PARLOOPER=0
-ZENDNNL_DEPENDS_FBGEMM=0
 ZENDNNL_DEPENDS_AMDBLIS=0
 ZENDNNL_LOCAL_AMDBLIS=0
 ZENDNNL_LOCAL_AOCLDLP=0
@@ -176,15 +184,18 @@ ZENDNNL_LOCAL_AOCLUTILS=0
 ZENDNNL_LOCAL_JSON=0
 ZENDNNL_LOCAL_ONEDNN=0
 ZENDNNL_LOCAL_LIBXSMM=0
-ZENDNNL_LOCAL_PARLOOPER=0   
+ZENDNNL_LOCAL_PARLOOPER=0
 ZENDNNL_LOCAL_FBGEMM=0
 ZENDNNL_DEBUG_BUILD=0
+
+# build options
 ZENDNNL_NPROC=1
 
 if ! parse_args $@;
 then
    return 1
 fi
+
 # sanity check
 curr_dir="$(pwd)"
 parent_dir="$(dirname "$curr_dir")"
@@ -193,8 +204,46 @@ if [ ${last_dir} != "scripts" ];then
     echo "error: <${last_dir}> does not seem to be <scripts> folder."
     return 1;
 fi
+
+# Helper function to check if local dependency exists
+check_local_dep() {
+    local dep_name=$1
+    local dep_dir="${parent_dir}/dependencies/${dep_name}"
+    if [ ! -d "${dep_dir}" ]; then
+        echo "error: local ${dep_name} directory not found at ${dep_dir}"
+        echo "       please clone/copy ${dep_name} to ${dep_dir} before using --local-${dep_name}"
+        return 1
+    fi
+    return 0
+}
+
+# Validate local dependencies
+if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ]; then
+    if ! check_local_dep "amdblis"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_AOCLDLP} -eq 1 ]; then
+    if ! check_local_dep "aocldlp"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_AOCLUTILS} -eq 1 ]; then
+    if ! check_local_dep "aoclutils"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_JSON} -eq 1 ]; then
+    if ! check_local_dep "json"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_ONEDNN} -eq 1 ]; then
+    if ! check_local_dep "onednn"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_LIBXSMM} -eq 1 ]; then
+    if ! check_local_dep "libxsmm"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_PARLOOPER} -eq 1 ]; then
+    if ! check_local_dep "parlooper"; then return 1; fi
+fi
+if [ ${ZENDNNL_LOCAL_FBGEMM} -eq 1 ]; then
+    if ! check_local_dep "fbgemm"; then return 1; fi
+fi
+
 # create build folder
-# echo "switching to <${parent_dir}>."
 cd ${parent_dir}
 if [ ! -d "build" ];then
     echo "creating ${parent_dir}/build directory..."
@@ -242,22 +291,10 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DEPS=ON"
     fi
 
-    if [ ${ZENDNNL_DEPENDS_LIBXSMM} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=ON"
-    else
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_LIBXSMM=OFF"
-    fi
-
-    if [ ${ZENDNNL_DEPENDS_PARLOOPER} -eq 1 ];then
+    if [[ ${ZENDNNL_DEPENDS_PARLOOPER} -eq 1 || ${ZENDNNL_ALL} -eq 1 ]];then
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=OFF"
-    fi
-
-    if [ ${ZENDNNL_DEPENDS_FBGEMM} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=ON"
-    else
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_FBGEMM=OFF"
     fi
 
     if [ ${ZENDNNL_DEPENDS_AMDBLIS} -eq 1 ];then
@@ -266,7 +303,7 @@ else
     fi
 
     if [ ${ZENDNNL_LOCAL_AMDBLIS} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=ON"
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_AOCLDLP=OFF -DZENDNNL_DEPENDS_AMDBLIS=ON -DZENDNNL_LOCAL_AMDBLIS=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_AMDBLIS=OFF"
     fi
@@ -302,7 +339,7 @@ else
     fi
 
     if [ ${ZENDNNL_LOCAL_PARLOOPER} -eq 1 ];then
-        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_PARLOOPER=ON"
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_DEPENDS_PARLOOPER=ON -DZENDNNL_LOCAL_PARLOOPER=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_PARLOOPER=OFF"
     fi
@@ -311,6 +348,18 @@ else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_FBGEMM=ON"
     else
         CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_LOCAL_FBGEMM=OFF"
+    fi
+
+    if [[ ${ZENDNNL_GTEST} -eq 1 || ${ZENDNNL_ALL} -eq 1 ]]; then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_GTEST=ON"
+    fi
+
+    if [[ ${ZENDNNL_BENCHDNN} -eq 1 || ${ZENDNNL_ALL} -eq 1 ]]; then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_BENCHDNN=ON"
+    fi
+
+    if [[ ${ZENDNNL_DOXYGEN} -eq 1 || ${ZENDNNL_ALL} -eq 1 ]]; then
+        CMAKE_OPTIONS="${CMAKE_OPTIONS} -DZENDNNL_BUILD_DOXYGEN=ON"
     fi
 
     if [ ${ZENDNNL_ALL} -eq 1 ];then
@@ -335,6 +384,9 @@ else
         if [ ${ZENDNNL_EXAMPLES} -eq 1 ];then
             TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-examples"
         fi
+        if [ ${ZENDNNL_GTEST} -eq 1 ];then
+            TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-gtest"
+        fi
         if [ ${ZENDNNL_BENCHDNN} -eq 1 ];then
             TARGET_OPTIONS="${TARGET_OPTIONS} zendnnl-benchdnn"
         fi
@@ -354,4 +406,5 @@ else
         fi
     fi
 fi
+
 cd ${curr_dir}
