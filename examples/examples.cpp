@@ -23,6 +23,8 @@
 #include "embedding_bag_example.hpp"
 #include "lowoha_matmul_example.hpp"
 #include "lowoha_reorder_example.hpp"
+#include "lowoha_softmax_example.hpp"
+#include "lowoha_pooling_example.hpp"
 #include <iostream>
 #include "sdpa_example.hpp"
 
@@ -117,6 +119,22 @@ int main() {
     run_lowoha_reorder_f32_to_bf16_strided_2d_test();
     run_lowoha_reorder_f32_to_bf16_batched_test();
 
+    /** LOWOHA Softmax operator functionality examples.
+     *  Demonstrates softmax and log-softmax operations using the low-overhead
+     *  LOWOHA API with support for multi-dimensional tensors.
+     */
+    run_lowoha_softmax_fp32_test();
+    run_lowoha_softmax_bf16_test();
+
+    /** LOWOHA Pooling operator functionality examples.
+     *  Demonstrates max pooling and average pooling operations using the
+     *  low-overhead LOWOHA API with various configurations.
+     */
+    run_lowoha_maxpool_fp32_test();
+    run_lowoha_avgpool_fp32_test();
+    run_lowoha_maxpool_bf16_test();
+    run_lowoha_avgpool_padding_modes_test();
+
     /** BatchMatMul operator functionality examples.
      *  Demonstrates fused post-ops, different data types computation,
      */
@@ -163,7 +181,7 @@ int main() {
      */
     sample_f32_kernel_example();
     sample_bf16_kernel_example();
-    
+
     /** SDPA encoder functionality examples.
      *  Demonstrates SDPA encoder operator usage for transformer attention.
      */
