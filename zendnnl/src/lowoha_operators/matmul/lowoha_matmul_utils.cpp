@@ -470,12 +470,9 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
           }
         }
         else {
-          if (K <= 216) {
-            return matmul_algo_t::onednn_blocked;
-          }
-          else {
-            return matmul_algo_t::onednn_blocked;
-          }
+          // TODO: Consider adding K-based threshold check here (e.g., K <= 216)
+          // if different kernels are needed for different K ranges in the future
+          return matmul_algo_t::onednn_blocked;
         }
       }
       else {
@@ -523,12 +520,9 @@ inline matmul_algo_t select_algo_by_heuristics_bf16_mm(int M, int N, int K) {
           }
         }
         else {
-          if (K <= 2816) {
-            return matmul_algo_t::aocl_dlp_blocked;
-          }
-          else {
-            return matmul_algo_t::aocl_dlp_blocked;
-          }
+          // TODO: Consider adding K-based threshold check here (e.g., K <= 2816)
+          // if different kernels are needed for different K ranges in the future
+          return matmul_algo_t::aocl_dlp_blocked;
         }
       }
     }
