@@ -82,7 +82,28 @@ struct BatchMatmulType {
 struct ReorderType {
   bool inplace_reorder;
   MatmulType mat{};
-  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
+
+  // LOWOHA-specific parameters (used when is_lowoha_test = true)
+  bool is_lowoha_test;                  ///< Flag to distinguish LOWOHA reorder tests
+  uint64_t M;                           ///< Rows dimension (LOWOHA)
+  uint64_t N;                           ///< Columns dimension (LOWOHA)
+  uint64_t batch;                       ///< Batch dimension (0=1D, 1=2D, >1=3D) (LOWOHA)
+  data_type_t
+  src_dtype;                ///< Source data type (LOWOHA, set by TEST_P)
+  data_type_t
+  dst_dtype;                ///< Destination data type (LOWOHA, set by TEST_P)
+  quant_granularity_t granularity;      ///< Quantization granularity (LOWOHA)
+  uint64_t num_groups;                  ///< Number of groups for per-group quant (LOWOHA)
+  bool use_strided_src;                 ///< Use strided source memory (LOWOHA, set by TEST_P)
+  reorder_algo_t
+  lowoha_algo;           ///< LOWOHA algorithm selection (LOWOHA, set by TEST_P)
+  uint32_t num_threads;                 ///< Number of threads (LOWOHA)
+
+  /// @param test_index Index of current test (for partitioning)
+  /// @param total_tests Total number of tests
+  /// @param is_lowoha If true, configure for LOWOHA quantization tests
+  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1,
+              bool is_lowoha = false);
 };
 
 /** @brief Embag Op Parameters Structure */
@@ -119,6 +140,7 @@ struct EmbeddingType {
   EmbeddingType();
 };
 
+
 extern int gtest_argc;
 extern char **gtest_argv;
 extern const uint32_t po_size; //Supported postop
@@ -134,6 +156,9 @@ extern const float REORDER_TOL;
 extern const float EMBAG_F32_TOL;
 extern const float EMBAG_BF16_TOL;
 extern const float EMBAG_INT4_TOL;
+extern const float LOWOHA_REORDER_INT8_TOL;
+extern const float LOWOHA_REORDER_BF16_TOL;
+extern const float LOWOHA_REORDER_F32_TOL;
 extern const float epsilon_f32;
 extern const float epsilon_bf16;
 extern const float rtol_f32;
@@ -495,4 +520,92 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
  *
  * */
 size_t get_aligned_size(size_t alignment, size_t size_);
+
+/** @fn lowoha_reorder_kernel_test
+ *  @brief Test function for LOWOHA reorder kernel (quantization/dequantization)
+ *
+ *  Executes the LOWOHA reorder_direct API with the specified parameters.
+ *
+ *  @param src_tensor Source tensor
+ *  @param dst_tensor Destination tensor
+ *  @param scale_tensor Scale tensor for quantization
+ *  @param zp_tensor Zero-point tensor for quantization
+ *  @param params LOWOHA reorder test parameters (ReorderType with is_lowoha_test=true)
+ *  @return status_t Success or failure status
+ */
+status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
+                                    tensor_t &dst_tensor,
+                                    tensor_t &scale_tensor,
+                                    tensor_t &zp_tensor,
+                                    const ReorderType &params);
+
+/** @fn compare_lowoha_reorder_output
+ *  @brief Compare LOWOHA reorder output with reference
+ *
+ *  Compares actual output tensor with expected reference tensor element by element.
+ *
+ *  @param output_tensor Actual output tensor
+ *  @param ref_tensor Reference tensor
+ *  @param params LOWOHA reorder test parameters (ReorderType with is_lowoha_test=true)
+ *  @param is_comparison_successful Output flag indicating comparison result
+ */
+void compare_lowoha_reorder_output(tensor_t &output_tensor,
+                                   tensor_t &ref_tensor,
+                                   const ReorderType &params,
+                                   bool &is_comparison_successful);
+
+/** @fn granularityToStr
+ *  @brief Convert quantization granularity enum to string
+ *
+ *  @param granularity The quant_granularity_t enum value
+ *  @return std::string String representation
+ */
+std::string granularityToStr(quant_granularity_t granularity);
+
+/** @fn lowoha_reorder_algo_to_str
+ *  @brief Convert LOWOHA reorder algorithm enum to string
+ *
+ *  @param algo The reorder_algo_t enum value
+ *  @return std::string String representation
+ */
+std::string lowoha_reorder_algo_to_str(reorder_algo_t algo);
+
+/** @fn log_lowoha_test_info
+ *  @brief Log LOWOHA test information
+ *
+ *  @param params LOWOHA reorder test parameters
+ *  @param src_dt Source data type
+ *  @param dst_dt Destination data type
+ *  @param strided Whether strided memory is used
+ *  @param use_scale_zp Whether scale/zero-point is used
+ */
+void log_lowoha_test_info(const ReorderType &params, data_type_t src_dt,
+                          data_type_t dst_dt, bool strided, bool use_scale_zp);
+
+/** @fn get_lowoha_shape
+ *  @brief Get LOWOHA tensor shape based on batch dimension
+ *
+ *  @param params LOWOHA reorder test parameters
+ *  @return std::vector<size_t> Shape vector (1D, 2D, or 3D)
+ */
+std::vector<size_t> get_lowoha_shape(const ReorderType &params);
+
+/** @fn get_lowoha_strided_shape
+ *  @brief Get strided shape with row padding for LOWOHA tests
+ *
+ *  @param params LOWOHA reorder test parameters
+ *  @param use_row_padding Whether to add random row padding
+ *  @return std::vector<size_t> Strided shape vector
+ */
+std::vector<size_t> get_lowoha_strided_shape(const ReorderType &params,
+    bool use_row_padding);
+
+/** @fn get_lowoha_quant_shape
+ *  @brief Get quantization parameter shape based on granularity
+ *
+ *  @param params LOWOHA reorder test parameters
+ *  @return std::vector<size_t> Scale/zero-point shape vector
+ */
+std::vector<size_t> get_lowoha_quant_shape(const ReorderType &params);
+
 #endif

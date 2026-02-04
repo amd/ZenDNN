@@ -45,6 +45,11 @@ const float EMBAG_F32_TOL  = 0.001;
 const float EMBAG_BF16_TOL = 0.01;
 const float EMBAG_INT4_TOL = 0.01;
 
+// LOWOHA Reorder tolerance constants
+const float LOWOHA_REORDER_INT8_TOL = 0.01;   // For int8/uint8 output
+const float LOWOHA_REORDER_BF16_TOL = 0.01;  // For bf16 output
+const float LOWOHA_REORDER_F32_TOL  = 0.001; // For f32 output
+
 //number of testcases, random seed and empty post_op
 uint32_t test_num      = 400;
 int64_t  seed          = static_cast<int64_t>(std::time(nullptr));
@@ -71,6 +76,7 @@ std::vector<EmbagType> embag_test{};
 
 /** @brief embedding_test Data Structure(vector of structures) to hold random Embedding Parameters */
 std::vector<EmbeddingType> embedding_test{};
+
 
 int main(int argc, char **argv) {
   try {
@@ -123,10 +129,20 @@ int main(int argc, char **argv) {
       }
     }
     else {
-      // Creating Random parameters for Reorder
-      reorder_test.resize(test_num);
-      for (uint32_t i = 0; i < test_num; ++i) {
-        reorder_test[i] = ReorderType(i, test_num);
+      // Create reorder tests based on --lowoha flag
+      // --lowoha true  : only LOWOHA reorder tests (quantization/dequantization)
+      // (default)      : only regular reorder tests (matmul weight reordering)
+      if (cmd_lowoha == "true" || cmd_lowoha == "1") {
+        // Add LOWOHA reorder tests
+        for (uint32_t i = 0; i < test_num; ++i) {
+          reorder_test.push_back(ReorderType(i, test_num, true));  // LOWOHA mode
+        }
+      }
+      else {
+        // Add regular reorder tests (default)
+        for (uint32_t i = 0; i < test_num; ++i) {
+          reorder_test.push_back(ReorderType(i, test_num));  // Regular mode (default)
+        }
       }
     }
     // Creating Random parameters for Embedding Bag

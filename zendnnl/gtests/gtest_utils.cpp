@@ -15,6 +15,8 @@
 # *******************************************************************************/
 
 #include "gtest_utils.hpp"
+#include <cstring>
+#include <cmath>
 
 MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   matmul_m   = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END;
@@ -227,9 +229,116 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
   batch_size = BATCH_START + rand() % BATCH_END;
   mat = MatmulType(test_index, total_tests, true);  //set is_bmm=true
 }
-ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
+
+// @param test_index Index of current test (for partitioning)
+// @param total_tests Total number of tests
+// @param is_lowoha If true, also configure LOWOHA quantization params (regular tests still run)
+ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests,
+                         bool is_lowoha) {
+  is_lowoha_test = is_lowoha;
+
+  // ========== Always initialize Regular Reorder params ==========
+  // Regular tests always run (they don't support LOWOHA, ignore the flag)
   inplace_reorder = rand() % 2;
   mat = MatmulType(test_index, total_tests);
+
+  if (!is_lowoha) {
+    // Initialize LOWOHA fields to defaults (not used)
+    M = 0;
+    N = 0;
+    batch = 0;
+    src_dtype = data_type_t::f32;
+    dst_dtype = data_type_t::f32;
+    granularity = quant_granularity_t::tensor;
+    num_groups = 1;
+    use_strided_src = false;
+    lowoha_algo = reorder_algo_t::native;
+    num_threads = 1;
+  }
+  else {
+    // ========== Also initialize LOWOHA params when is_lowoha = true ==========
+    // Randomly decide dimensionality: 1D (20%), 2D (50%), 3D (30%)
+    int dim_choice = std::rand() % 10;
+    if (dim_choice < 2) {
+      // 1D: [N] - 20% of tests
+      M = 1;  // For 1D, M is not used but set to 1
+      N = 64 + std::rand() % 1024;  // N: 64-1087
+      batch = 0;  // batch = 0 indicates 1D
+    }
+    else if (dim_choice < 7) {
+      // 2D: [M, N] - 50% of tests
+      M = 16 + std::rand() % 256;   // M: 16-271
+      N = 16 + std::rand() % 256;   // N: 16-271
+      batch = 1;  // batch = 1 indicates 2D
+    }
+    else {
+      // 3D: [batch, M, N] - 30% of tests
+      M = 16 + std::rand() % 128;   // M: 16-143
+      N = 16 + std::rand() % 128;   // N: 16-143
+      batch = 2 + std::rand() % 7;  // batch: 2-8
+    }
+
+    // Default data types (will be overridden by individual TEST_P tests)
+    src_dtype = data_type_t::f32;
+    dst_dtype = data_type_t::s8;
+    use_strided_src = false;
+
+    // Quantization granularity based on dimensionality
+    // 1D: per-tensor or per-channel only (no per-group)
+    // 2D/3D: per-tensor, per-channel, or per-group
+    int granularity_choice = std::rand() % 10;
+    if (batch == 0) {
+      // 1D: only per-tensor (70%) or per-channel (30%)
+      if (granularity_choice < 7) {
+        granularity = quant_granularity_t::tensor;
+      }
+      else {
+        granularity = quant_granularity_t::channel;
+      }
+      num_groups = 1;
+    }
+    else {
+      // 2D/3D: per-tensor (60%), per-channel (30%), per-group (10%)
+      if (granularity_choice < 6) {
+        granularity = quant_granularity_t::tensor;
+        num_groups = 1;
+      }
+      else if (granularity_choice < 9) {
+        granularity = quant_granularity_t::channel;
+        num_groups = 1;
+      }
+      else {
+        granularity = quant_granularity_t::group;
+        // For per-group, num_groups must divide M evenly
+        std::vector<uint64_t> valid_groups;
+        for (uint64_t g = 2; g <= M && g <= 16; ++g) {
+          if (M % g == 0) {
+            valid_groups.push_back(g);
+          }
+        }
+        if (valid_groups.empty()) {
+          // Fallback to per-channel if no valid group size
+          granularity = quant_granularity_t::channel;
+          num_groups = 1;
+        }
+        else {
+          num_groups = valid_groups[std::rand() % valid_groups.size()];
+        }
+      }
+    }
+
+    // Algorithm: test will run native vs reference comparison
+    lowoha_algo = reorder_algo_t::native;
+
+    // Thread count
+    if (cmd_num_threads) {
+      num_threads = cmd_num_threads;
+    }
+    else {
+      int max_threads = omp_get_max_threads();
+      num_threads = 1 + (std::rand() % max_threads);
+    }
+  }
 }
 
 bool is_binary_postop(post_op_type_t post_op) {
@@ -2514,4 +2623,293 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
 }
 size_t get_aligned_size(size_t alignment, size_t size_) {
   return ((size_ + alignment - 1) & ~(alignment - 1));
+}
+
+std::string granularityToStr(quant_granularity_t granularity) {
+  switch (granularity) {
+  case quant_granularity_t::tensor:
+    return "per-tensor";
+  case quant_granularity_t::channel:
+    return "per-channel";
+  case quant_granularity_t::group:
+    return "per-group";
+  default:
+    return "unknown";
+  }
+}
+
+std::string lowoha_reorder_algo_to_str(reorder_algo_t algo) {
+  switch (algo) {
+  case reorder_algo_t::DT:
+    return "DT";
+  case reorder_algo_t::native:
+    return "native";
+  case reorder_algo_t::reference:
+    return "reference";
+  case reorder_algo_t::none:
+    return "none";
+  default:
+    return "unknown";
+  }
+}
+
+// Helper: Convert float32 to bf16 (as uint16_t)
+static inline uint16_t float_to_bf16_helper(float val) {
+  uint32_t bits;
+  std::memcpy(&bits, &val, sizeof(float));
+  // Round-to-nearest-even
+  uint32_t lsb = (bits >> 16) & 1;
+  uint32_t rounding_bias = 0x7FFF + lsb;
+  bits += rounding_bias;
+  return static_cast<uint16_t>(bits >> 16);
+}
+
+status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
+                                    tensor_t &dst_tensor,
+                                    tensor_t &scale_tensor,
+                                    tensor_t &zp_tensor,
+                                    const ReorderType &params) {
+  try {
+    // Build reorder_params_t structure
+    reorder_params_t reorder_params;
+    reorder_params.src_dtype = params.src_dtype;
+    reorder_params.dst_dtype = params.dst_dtype;
+    reorder_params.algo = params.lowoha_algo;
+    reorder_params.num_threads = params.num_threads;
+
+    // Set shape based on dimensionality
+    // batch = 0: 1D [N], batch = 1: 2D [M, N], batch > 1: 3D [batch, M, N]
+    if (params.batch == 0) {
+      // 1D
+      reorder_params.src_shape = {static_cast<int64_t>(params.N)};
+      reorder_params.dst_shape = reorder_params.src_shape;
+    }
+    else if (params.batch == 1) {
+      // 2D
+      reorder_params.src_shape = {static_cast<int64_t>(params.M),
+                                  static_cast<int64_t>(params.N)
+                                 };
+      reorder_params.dst_shape = reorder_params.src_shape;
+    }
+    else {
+      // 3D
+      reorder_params.src_shape = {static_cast<int64_t>(params.batch),
+                                  static_cast<int64_t>(params.M),
+                                  static_cast<int64_t>(params.N)
+                                 };
+      reorder_params.dst_shape = reorder_params.src_shape;
+    }
+
+    // Set strides if using strided source
+    if (params.use_strided_src) {
+      auto src_strides = src_tensor.get_stride();
+      reorder_params.src_strides.assign(src_strides.begin(), src_strides.end());
+    }
+
+    // Set quantization parameters
+    if (scale_tensor.get_nelem() > 0) {
+      reorder_params.quant_params.scale.buff = scale_tensor.get_raw_handle_unsafe();
+      reorder_params.quant_params.scale.dt = scale_tensor.get_data_type();
+      auto scale_size = scale_tensor.get_size();
+      reorder_params.quant_params.scale.dims.assign(scale_size.begin(),
+          scale_size.end());
+    }
+
+    if (zp_tensor.get_nelem() > 0) {
+      reorder_params.quant_params.zero_point.buff = zp_tensor.get_raw_handle_unsafe();
+      reorder_params.quant_params.zero_point.dt = zp_tensor.get_data_type();
+      auto zp_size = zp_tensor.get_size();
+      reorder_params.quant_params.zero_point.dims.assign(zp_size.begin(),
+          zp_size.end());
+    }
+
+    // Get raw pointers
+    void *src_ptr = src_tensor.get_raw_handle_unsafe();
+    void *dst_ptr = dst_tensor.get_raw_handle_unsafe();
+
+    // Execute LOWOHA reorder
+    status_t status = reorder_direct(src_ptr, dst_ptr, reorder_params);
+
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder_direct execution failed");
+      return status_t::failure;
+    }
+
+    return status_t::success;
+  }
+  catch (const exception_t &ex) {
+    log_error("LOWOHA reorder test exception: ", ex.what());
+    return status_t::failure;
+  }
+  catch (const std::exception &e) {
+    log_error("LOWOHA reorder test exception: ", e.what());
+    return status_t::failure;
+  }
+}
+
+void compare_lowoha_reorder_output(tensor_t &output_tensor,
+                                   tensor_t &ref_tensor,
+                                   const ReorderType &params,
+                                   bool &is_comparison_successful) {
+  const uint64_t batch = params.batch;
+  const uint64_t M = params.M;
+  const uint64_t N = params.N;
+
+  // Determine tolerance based on output data type
+  float tol;
+  if (params.dst_dtype == data_type_t::s8 ||
+      params.dst_dtype == data_type_t::u8) {
+    tol = LOWOHA_REORDER_INT8_TOL;
+  }
+  else if (params.dst_dtype == data_type_t::bf16) {
+    tol = LOWOHA_REORDER_BF16_TOL;
+  }
+  else {
+    tol = LOWOHA_REORDER_F32_TOL;
+  }
+
+  // Compare based on dimensionality using tensor.at() which returns float
+  // batch = 0: 1D [N], batch = 1: 2D [M, N], batch > 1: 3D [batch, M, N]
+  if (batch == 0) {
+    // 1D comparison
+    #pragma omp parallel for
+    for (uint64_t i = 0; i < N; ++i) {
+      if (is_comparison_successful) {
+        float actual_val = output_tensor.at({i});
+        float ref_val = ref_tensor.at({i});
+
+        float abs_err = std::fabs(ref_val - actual_val);
+        float rel_tol = tol * std::fabs(ref_val);
+        float allowed_err = tol + rel_tol;
+
+        if (abs_err > allowed_err) {
+          log_verbose("Mismatch at [", i, "]: actual=", actual_val,
+                      ", ref=", ref_val, ", abs_err=", abs_err, ", allowed=", allowed_err);
+          is_comparison_successful = false;
+        }
+      }
+    }
+  }
+  else if (batch == 1) {
+    // 2D comparison
+    #pragma omp parallel for collapse(2)
+    for (uint64_t i = 0; i < M; ++i) {
+      for (uint64_t j = 0; j < N; ++j) {
+        if (is_comparison_successful) {
+          float actual_val = output_tensor.at({i, j});
+          float ref_val = ref_tensor.at({i, j});
+
+          float abs_err = std::fabs(ref_val - actual_val);
+          float rel_tol = tol * std::fabs(ref_val);
+          float allowed_err = tol + rel_tol;
+
+          if (abs_err > allowed_err) {
+            log_verbose("Mismatch at [", i, ",", j, "]: actual=", actual_val,
+                        ", ref=", ref_val, ", abs_err=", abs_err, ", allowed=", allowed_err);
+            is_comparison_successful = false;
+          }
+        }
+      }
+    }
+  }
+  else {
+    // 3D comparison
+    #pragma omp parallel for collapse(3)
+    for (uint64_t b = 0; b < batch; ++b) {
+      for (uint64_t i = 0; i < M; ++i) {
+        for (uint64_t j = 0; j < N; ++j) {
+          if (is_comparison_successful) {
+            float actual_val = output_tensor.at({b, i, j});
+            float ref_val = ref_tensor.at({b, i, j});
+
+            float abs_err = std::fabs(ref_val - actual_val);
+            float rel_tol = tol * std::fabs(ref_val);
+            float allowed_err = tol + rel_tol;
+
+            if (abs_err > allowed_err) {
+              log_verbose("Mismatch at [", b, ",", i, ",", j, "]: actual=", actual_val,
+                          ", ref=", ref_val, ", abs_err=", abs_err, ", allowed=", allowed_err);
+              is_comparison_successful = false;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+void log_lowoha_test_info(const ReorderType &params, data_type_t src_dt,
+                          data_type_t dst_dt, bool strided, bool use_scale_zp) {
+  std::string src_dt_str = (src_dt == data_type_t::bf16) ? "BF16" :
+                           (src_dt == data_type_t::f32)  ? "F32" :
+                           (src_dt == data_type_t::s8)   ? "S8" :
+                           (src_dt == data_type_t::u8)   ? "U8" : "unknown";
+  std::string dst_dt_str = (dst_dt == data_type_t::bf16) ? "BF16" :
+                           (dst_dt == data_type_t::f32)  ? "F32" :
+                           (dst_dt == data_type_t::s8)   ? "S8" :
+                           (dst_dt == data_type_t::u8)   ? "U8" : "unknown";
+  log_info("LOWOHA Reorder: batch=", params.batch,
+           " M=", params.M, " N=", params.N,
+           " src=", src_dt_str, " dst=", dst_dt_str,
+           " granularity=", granularityToStr(params.granularity),
+           " groups=", params.num_groups, " strided=", strided,
+           " scale_zp=", use_scale_zp, " threads=", params.num_threads);
+}
+
+std::vector<size_t> get_lowoha_shape(const ReorderType &params) {
+  if (params.batch == 0) return {params.N};
+  else if (params.batch == 1) return {params.M, params.N};
+  else return {params.batch, params.M, params.N};
+}
+
+std::vector<size_t> get_lowoha_strided_shape(const ReorderType &params,
+    bool use_row_padding) {
+  uint64_t padding = use_row_padding ? ((std::rand() % 16) + 1) : 0;
+  uint64_t M = params.M;
+  uint64_t N = params.N;
+  uint64_t batch = params.batch;
+
+  if (batch == 0) {
+    // 1D: [N]
+    log_info("Strided 1D, padding=", padding, ", strided_shape={", N + padding,
+             "}");
+    return {N + padding};
+  }
+  else if (batch == 1) {
+    // 2D: [M, N] -> strides {N+padding, 1}
+    log_info("Strided 2D, padding=", padding, ", strided_shape={", M, ",",
+             N + padding, "}",
+             " strides={", N + padding, ",1}");
+    return {M, N + padding};
+  }
+  else {
+    // 3D: [batch, M, N] -> strides {M*(N+padding), N+padding, 1}
+    log_info("Strided 3D, padding=", padding, ", strided_shape={", batch, ",", M,
+             ",", N + padding, "}",
+             " strides={", M * (N + padding), ",", N + padding, ",1}");
+    return {batch, M, N + padding};
+  }
+}
+
+std::vector<size_t> get_lowoha_quant_shape(const ReorderType &params) {
+  uint64_t N = params.N;
+  uint64_t batch = params.batch;
+  uint64_t num_groups = params.num_groups;
+  quant_granularity_t granularity = params.granularity;
+
+  if (batch == 0) {
+    return (granularity == quant_granularity_t::tensor) ?
+           std::vector<size_t> {1} :
+           std::vector<size_t> {N};
+  }
+  else if (batch == 1) {
+    if (granularity == quant_granularity_t::tensor) return {1, 1};
+    else if (granularity == quant_granularity_t::channel) return {1, N};
+    else return {num_groups, N};
+  }
+  else {
+    if (granularity == quant_granularity_t::tensor) return {1, 1, 1};
+    else if (granularity == quant_granularity_t::channel) return {1, 1, N};
+    else return {1, num_groups, N};
+  }
 }

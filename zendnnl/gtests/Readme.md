@@ -100,7 +100,8 @@ The `zendnnl/gtests/` directory contains all test-related files and subdirectori
 gtests/
 ├── gtest_main.cpp           # Entry point for all tests.
 ├── test_matmul.cpp          # Matmul testsuite with different test cases.
-├── test_reorder.cpp         # Reorder testsuite with different test cases.
+├── test_batchmatmul.cpp     # Batch matmul testsuite with different test cases.
+├── test_reorder.cpp         # Reorder testsuite (regular + LOWOHA quantization/dequantization).
 ├── test_embag.cpp           # Embedding bag testsuite with different test cases.
 ├── test_embedding.cpp       # Embedding testsuite with different test cases.
 └── gtest_utils.cpp/hpp      # Utility functions for tests.
@@ -158,16 +159,20 @@ cmake --build .
      - `aocl_dlp`: Uses AOCL DLP backend for computations
 
 6. **`--lowoha <true/false>`** (Optional):
-   - Specifies whether to use LOWOHA (Low Overhead API) mode for matrix multiplication operations.
+   - Specifies whether to use LOWOHA (Low Overhead API) mode.
    - *Example*:
      - `true`: Use Low Overhead API
      - `false`: Use Regular API
-   - **Default behavior**: 
-     - If not specified, tests are automatically partitioned into thirds:
+   - **Default behavior varies by test suite**:
+     - **Reorder tests**: 
+       - Default (no flag): Runs only regular reorder tests (matmul weight blocking)
+       - `--lowoha true`: Runs only LOWOHA reorder tests (quantization/dequantization)
+     - **Matmul/BatchMatmul tests**: Tests are automatically partitioned into thirds:
        - First third: LOWOHA off
        - Second third: LOWOHA on
        - Last third: LOWOHA on with LIBXSMM backend
-     - For LIBXSMM backends, LOWOHA is always enabled by default
+     - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
+   - **Note**: For LIBXSMM backends, LOWOHA is always enabled by default
 
 7. **`--input_file <InputFile>`** (Optional):
    - Specifies an input file containing test configurations for operators.
@@ -207,7 +212,10 @@ cmake --build .
  - If **`<Seed>`** parameter is not provided, gtest sets the seed based on timestamp for generating test data.
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
- - If **`<lowoha>`** parameter is not provided, tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios.
+ - If **`<lowoha>`** parameter is not provided:
+   - **Reorder tests**: Only regular reorder tests are run (use `--lowoha true` for LOWOHA tests)
+   - **Matmul/BatchMatmul tests**: Tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios
+   - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
  - If **`<num_threads>`** parameter is not provided, a random value is selected from available thread count.
  - If **`<InputFile>`**, **`<Operator>`**, or **`<Dimensions>`** are not provided, tests will use randomly generated parameters instead of reading from a file.
  - If no parameters are provided, It will run all available tests with seed sets based on timestamp and randomly selected postops and backends.
@@ -262,7 +270,10 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 
 ## **Examples**
 ### Reorder Tests (Reorder + Matmul)
- - Reorder TestSuite has six testcases(F32_F32, BF16_F32, BF16_BF16, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride)
+ - Reorder TestSuite has two modes: Regular (default) and LOWOHA (`--lowoha true`)
+ - Regular testcases: F32_F32, BF16_F32, BF16_BF16, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride
+ - LOWOHA testcases: BF16_QUANT, FP32_QUANT, BF16_DEQUANT, FP32_DEQUANT, FP32_BF16_CONV, FP32_BF16_CONV_SCALED, QUANT_STRIDED, DEQUANT_STRIDED, FP32_BF16_CONV_STRIDED
+
 1. Run all BF16 reorder tests followed by Matmul(BF16 Input, F32 Output):
 ```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F32/*
@@ -272,12 +283,30 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_BF16/*
 ```
 3. Run all FP32 reorder tests followed by Matmul(F32 Input, F32 Output):
-``` bash
+```bash
 ./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/*
 ```
 4. Run BF16 matmul tests with specific backend (AOCL DLP):
-``` bash
+```bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_dlp
+```
+5. Run all LOWOHA reorder tests:
+```bash
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.*
+```
+6. Run LOWOHA quantization tests:
+```bash
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.BF16_QUANT/*
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_QUANT/*
+```
+7. Run LOWOHA dequantization tests:
+```bash
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.BF16_DEQUANT/*
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_DEQUANT/*
+```
+8. Run LOWOHA type conversion tests:
+```bash
+./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_BF16_CONV/*
 ```
 
 ### Matmul Tests
