@@ -136,6 +136,12 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
   const int64_t N = params.N();
   
   // Helper lambda to validate quant dims
+  // Supported configurations:
+  //   1D: {1} (per-tensor), {N} (per-channel)
+  //   2D: {1,1} (per-tensor), {1,N} (per-channel-col), {M,1} (per-channel-row),
+  //       {G,N} (per-group-row), {M,G} (per-group-col)
+  //   3D: {1,1,1} (per-tensor), {1,1,N} (per-channel-col), {1,M,1} (per-channel-row),
+  //       {1,G,N} (per-group-row), {1,M,G} (per-group-col)
   auto validate_quant_dims = [&](const std::vector<int64_t> &dims, 
                                   const char *param_name) -> status_t {
     // Dims are mandatory
@@ -169,39 +175,80 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
         return status_t::failure;
       }
     } else if (dims.size() == 2) {
-      // 2D: dims = {1,1} (per-tensor), {1,N} (per-channel), or {G,N} (per-group)
-      if (dims[1] != 1 && dims[1] != N) {
-        log_error(param_name, " dims[1]=", dims[1], 
-                  " must be 1 (per-tensor) or N=", N, " (per-channel/per-group)");
+      // 2D tensor (shape = [M, N]):
+      //   - per-tensor:      {1, 1}
+      //   - per-channel-col: {1, N}
+      //   - per-channel-row: {M, 1}
+      //   - per-group-row:   {G, N} where M % G == 0 and G > 1
+      //   - per-group-col:   {M, G} where N % G == 0 and G > 1
+      
+      bool is_per_tensor = (dims[0] == 1 && dims[1] == 1);
+      bool is_per_channel_col = (dims[0] == 1 && dims[1] == N);
+      bool is_per_channel_row = (dims[0] == M && dims[1] == 1);
+      bool is_per_group_row = (dims[0] > 1 && dims[0] != M && dims[1] == N && M % dims[0] == 0);
+      bool is_per_group_col = (dims[0] == M && dims[1] > 1 && dims[1] != N && N % dims[1] == 0);
+      
+      if (!is_per_tensor && !is_per_channel_col && !is_per_channel_row && 
+          !is_per_group_row && !is_per_group_col) {
+        log_error(param_name, " invalid dims {", dims[0], ", ", dims[1], 
+                  "} for shape {", M, ", ", N, "}. "
+                  "Expected: {1,1} (per-tensor), {1,", N, "} (per-channel-col), "
+                  "{", M, ",1} (per-channel-row), {G,", N, "} (per-group-row), "
+                  "or {", M, ",G} (per-group-col)");
         return status_t::failure;
       }
-      if (dims[0] != 1 && dims[1] == N) {
-        // Per-group: check M divisibility
-        if (M % dims[0] != 0) {
-          log_error(param_name, " per-group: M=", M, 
+      
+      // Additional validation for per-group divisibility
+      if (is_per_group_row && M % dims[0] != 0) {
+        log_error(param_name, " per-group-row: M=", M, 
                     " is not divisible by G=", dims[0]);
           return status_t::failure;
         }
+      if (is_per_group_col && N % dims[1] != 0) {
+        log_error(param_name, " per-group-col: N=", N, 
+                  " is not divisible by G=", dims[1]);
+        return status_t::failure;
       }
     } else if (dims.size() == 3) {
-      // 3D: dims = {1,1,1} (per-tensor), {1,1,N} (per-channel), or {1,G,N} (per-group)
+      // 3D tensor (shape = [batch, M, N]):
+      //   - per-tensor:      {1, 1, 1}
+      //   - per-channel-col: {1, 1, N}
+      //   - per-channel-row: {1, M, 1}
+      //   - per-group-row:   {1, G, N} where M % G == 0 and G > 1
+      //   - per-group-col:   {1, M, G} where N % G == 0 and G > 1
+      
       if (dims[0] != 1) {
         log_error(param_name, " dims[0]=", dims[0], 
                   " must be 1 for 3D tensors");
         return status_t::failure;
       }
-      if (dims[2] != 1 && dims[2] != N) {
-        log_error(param_name, " dims[2]=", dims[2], 
-                  " must be 1 (per-tensor) or N=", N, " (per-channel/per-group)");
+      
+      bool is_per_tensor = (dims[1] == 1 && dims[2] == 1);
+      bool is_per_channel_col = (dims[1] == 1 && dims[2] == N);
+      bool is_per_channel_row = (dims[1] == M && dims[2] == 1);
+      bool is_per_group_row = (dims[1] > 1 && dims[1] != M && dims[2] == N && M % dims[1] == 0);
+      bool is_per_group_col = (dims[1] == M && dims[2] > 1 && dims[2] != N && N % dims[2] == 0);
+      
+      if (!is_per_tensor && !is_per_channel_col && !is_per_channel_row && 
+          !is_per_group_row && !is_per_group_col) {
+        log_error(param_name, " invalid dims {", dims[0], ", ", dims[1], ", ", dims[2],
+                  "} for shape {batch, ", M, ", ", N, "}. "
+                  "Expected: {1,1,1} (per-tensor), {1,1,", N, "} (per-channel-col), "
+                  "{1,", M, ",1} (per-channel-row), {1,G,", N, "} (per-group-row), "
+                  "or {1,", M, ",G} (per-group-col)");
         return status_t::failure;
       }
-      if (dims[1] != 1 && dims[2] == N) {
-        // Per-group: check M divisibility
-        if (M % dims[1] != 0) {
-          log_error(param_name, " per-group: M=", M, 
+      
+      // Additional validation for per-group divisibility
+      if (is_per_group_row && M % dims[1] != 0) {
+        log_error(param_name, " per-group-row: M=", M, 
                     " is not divisible by G=", dims[1]);
           return status_t::failure;
         }
+      if (is_per_group_col && N % dims[2] != 0) {
+        log_error(param_name, " per-group-col: N=", N, 
+                  " is not divisible by G=", dims[2]);
+        return status_t::failure;
       }
     }
     

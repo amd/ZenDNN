@@ -62,16 +62,21 @@ enum class reorder_algo_t : int {
  *   - per-channel: dims = {N}       (N values, one per element)
  *
  * For 2D tensor (shape = [M, N]):
- *   - per-tensor:  dims = {1, 1}    (1 value for all elements)
- *   - per-channel: dims = {1, N}    (N values, one per column)
- *   - per-group:   dims = {G, N}    (G*N values, M % G == 0, each group has N values)
+ *   - per-tensor:      dims = {1, 1}    (1 value for all elements)
+ *   - per-channel-col: dims = {1, N}    (N values, one per column)
+ *   - per-channel-row: dims = {M, 1}    (M values, one per row, same across columns)
+ *   - per-group-row:   dims = {G, N}    (G*N values, M % G == 0, groups divide rows)
+ *   - per-group-col:   dims = {M, G}    (M*G values, N % G == 0, groups divide columns)
  *
  * For 3D tensor (shape = [batch, M, N]):
- *   - per-tensor:  dims = {1, 1, 1} (1 value for all elements)
- *   - per-channel: dims = {1, 1, N} (N values, one per column)
- *   - per-group:   dims = {1, G, N} (G*N values, M % G == 0, each group has N values)
+ *   - per-tensor:      dims = {1, 1, 1} (1 value for all elements)
+ *   - per-channel-col: dims = {1, 1, N} (N values, one per column)
+ *   - per-channel-row: dims = {1, M, 1} (M values, one per row, same across columns)
+ *   - per-group-row:   dims = {1, G, N} (G*N values, M % G == 0, groups divide rows)
+ *   - per-group-col:   dims = {1, M, G} (M*G values, N % G == 0, groups divide columns)
  *
- * Per-group indexing: index = group_idx * N + col, where group_idx = row / (M / G)
+ * Per-group-row indexing: index = group_idx * N + col, where group_idx = row / (M / G)
+ * Per-group-col indexing: index = row * G + group_idx, where group_idx = col / (N / G)
  *
  * Currently supported:
  *   - scale: f32 only

@@ -274,59 +274,151 @@ static inline bool is_per_tensor_dims(const std::vector<int64_t> &dims) {
 }
 
 /**
- * @brief Helper to check if dims represent per-channel quantization
+ * @brief Helper to check if dims represent per-channel-column quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
  * 
- * Per-channel dims (different value for each column):
+ * Per-channel-col dims (different value for each column):
  *   - 1D: dims = {N} where dims[0] == shape[0] (N values)
  *   - 2D: dims = {1, N} where dims[1] == shape[1] (N values)
  *   - 3D: dims = {1, 1, N} where dims[2] == shape[2] (N values)
  */
-static inline bool is_per_channel_dims(const std::vector<int64_t> &dims,
-                                        const std::vector<int64_t> &shape) {
+static inline bool is_per_channel_col_dims(const std::vector<int64_t> &dims,
+                                            const std::vector<int64_t> &shape) {
   if (dims.empty() || dims.size() != shape.size()) return false;
   
   if (dims.size() == 1) {
     // 1D: per-channel means dims[0] == shape[0] (N values)
     return dims[0] == shape[0];
   } else if (dims.size() == 2) {
-    // 2D: per-channel means dims = {1, N}
+    // 2D: per-channel-col means dims = {1, N}
     return dims[0] == 1 && dims[1] == shape[1];
   } else if (dims.size() == 3) {
-    // 3D: per-channel means dims = {1, 1, N}
+    // 3D: per-channel-col means dims = {1, 1, N}
     return dims[0] == 1 && dims[1] == 1 && dims[2] == shape[2];
   }
   return false;
 }
 
 /**
- * @brief Helper to check if dims represent per-group quantization
+ * @brief Helper to check if dims represent per-channel-row quantization
  * @param dims Quantization parameter dims
  * @param shape Tensor shape
  * 
- * Per-group dims (G groups across rows, each group has N values):
+ * Per-channel-row dims (different value for each row, same across columns):
+ *   - 1D: Not applicable (use per-channel-col)
+ *   - 2D: dims = {M, 1} where dims[0] == shape[0] (M values)
+ *   - 3D: dims = {1, M, 1} where dims[1] == shape[1] (M values)
+ */
+static inline bool is_per_channel_row_dims(const std::vector<int64_t> &dims,
+                                            const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) return false;
+  
+  if (dims.size() == 1) {
+    // 1D: no per-channel-row support
+    return false;
+  } else if (dims.size() == 2) {
+    // 2D: per-channel-row means dims = {M, 1}
+    return dims[0] == shape[0] && dims[1] == 1;
+  } else if (dims.size() == 3) {
+    // 3D: per-channel-row means dims = {1, M, 1}
+    return dims[0] == 1 && dims[1] == shape[1] && dims[2] == 1;
+  }
+  return false;
+}
+
+/**
+ * @brief Helper to check if dims represent per-channel quantization (either row or column)
+ * @param dims Quantization parameter dims
+ * @param shape Tensor shape
+ * 
+ * Per-channel dims:
+ *   - per-channel-col: {1, N} for 2D, {1, 1, N} for 3D
+ *   - per-channel-row: {M, 1} for 2D, {1, M, 1} for 3D
+ */
+static inline bool is_per_channel_dims(const std::vector<int64_t> &dims,
+                                        const std::vector<int64_t> &shape) {
+  return is_per_channel_col_dims(dims, shape) || is_per_channel_row_dims(dims, shape);
+}
+
+/**
+ * @brief Helper to check if dims represent per-group-row quantization
+ * @param dims Quantization parameter dims
+ * @param shape Tensor shape
+ * 
+ * Per-group-row dims (G groups across rows, each group has N values):
  *   - 1D: Not supported (use per-channel instead)
  *   - 2D: dims = {G, N} where M % G == 0 and G > 1 (G*N total values)
  *   - 3D: dims = {1, G, N} where M % G == 0 and G > 1 (G*N total values)
  */
-static inline bool is_per_group_dims(const std::vector<int64_t> &dims,
-                                      const std::vector<int64_t> &shape) {
+static inline bool is_per_group_row_dims(const std::vector<int64_t> &dims,
+                                          const std::vector<int64_t> &shape) {
   if (dims.empty() || dims.size() != shape.size()) return false;
   
   // 1D: no per-group support
   if (dims.size() == 1) {
     return false;
   } else if (dims.size() == 2) {
-    // 2D: per-group means dims = {G, N} where G > 1 (G*N total values)
+    // 2D: per-group-row means dims = {G, N} where G > 1 (G*N total values)
     int64_t G = dims[0];
-    return G > 1 && dims[1] == shape[1] && (shape[0] % G == 0);
+    int64_t M = shape[0];
+    int64_t N = shape[1];
+    return G > 1 && dims[1] == N && (M % G == 0);
   } else if (dims.size() == 3) {
-    // 3D: per-group means dims = {1, G, N} where G > 1 (G*N total values)
+    // 3D: per-group-row means dims = {1, G, N} where G > 1 (G*N total values)
     int64_t G = dims[1];
-    return dims[0] == 1 && G > 1 && dims[2] == shape[2] && (shape[1] % G == 0);
+    int64_t M = shape[1];
+    int64_t N = shape[2];
+    return dims[0] == 1 && G > 1 && dims[2] == N && (M % G == 0);
   }
   return false;
+}
+
+/**
+ * @brief Helper to check if dims represent per-group-col quantization
+ * @param dims Quantization parameter dims
+ * @param shape Tensor shape
+ * 
+ * Per-group-col dims (G groups across columns, each row has G values):
+ *   - 1D: Not supported
+ *   - 2D: dims = {M, G} where N % G == 0 and G > 1 (M*G total values)
+ *   - 3D: dims = {1, M, G} where N % G == 0 and G > 1 (M*G total values)
+ */
+static inline bool is_per_group_col_dims(const std::vector<int64_t> &dims,
+                                          const std::vector<int64_t> &shape) {
+  if (dims.empty() || dims.size() != shape.size()) return false;
+  
+  // 1D: no per-group support
+  if (dims.size() == 1) {
+    return false;
+  } else if (dims.size() == 2) {
+    // 2D: per-group-col means dims = {M, G} where G > 1 (M*G total values)
+    int64_t M = shape[0];
+    int64_t N = shape[1];
+    int64_t G = dims[1];
+    return dims[0] == M && G > 1 && (N % G == 0);
+  } else if (dims.size() == 3) {
+    // 3D: per-group-col means dims = {1, M, G} where G > 1 (M*G total values)
+    int64_t M = shape[1];
+    int64_t N = shape[2];
+    int64_t G = dims[2];
+    return dims[0] == 1 && dims[1] == M && G > 1 && (N % G == 0);
+  }
+  return false;
+}
+
+/**
+ * @brief Helper to check if dims represent per-group quantization (either row or column)
+ * @param dims Quantization parameter dims
+ * @param shape Tensor shape
+ * 
+ * Per-group dims:
+ *   - per-group-row: {G, N} for 2D, {1, G, N} for 3D (groups divide rows)
+ *   - per-group-col: {M, G} for 2D, {1, M, G} for 3D (groups divide columns)
+ */
+static inline bool is_per_group_dims(const std::vector<int64_t> &dims,
+                                      const std::vector<int64_t> &shape) {
+  return is_per_group_row_dims(dims, shape) || is_per_group_col_dims(dims, shape);
 }
 
 /**
@@ -370,11 +462,11 @@ static inline granularity_type_t get_granularity_type(const reorder_params_t &pa
 }
 
 /**
- * @brief Get number of groups from dims for per-group quantization
+ * @brief Get number of groups for per-group-row quantization
  * @param dims Quantization parameter dims
- * @return Number of groups (G), or 1 if not per-group
+ * @return Number of groups (G) for row grouping, or 1 if not per-group-row
  */
-static inline int64_t get_num_groups(const std::vector<int64_t> &dims) {
+static inline int64_t get_num_groups_row(const std::vector<int64_t> &dims) {
   // 1D: no per-group support, return 1
   if (dims.size() == 1) {
     return 1;
@@ -387,65 +479,64 @@ static inline int64_t get_num_groups(const std::vector<int64_t> &dims) {
 }
 
 /**
- * @brief Get scale index for per-channel/per-group quantization
- * @param params Reorder parameters
- * @param row Row index (M dimension, used for per-group)
- * @param col Column index (N dimension, used for per-channel)
- * @param N Number of columns
- * @return Index into the scale array
+ * @brief Get number of groups for per-group-col quantization
+ * @param dims Quantization parameter dims
+ * @return Number of groups (G) for column grouping, or 1 if not per-group-col
  */
-static inline size_t get_scale_index(const reorder_params_t &params, 
-                                      int64_t row, int64_t col, int64_t N) {
-  const auto &dims = params.quant_params.scale.dims;
-  const auto &shape = params.src_shape;
-  
-  if (is_per_tensor_dims(dims)) {
-    return 0;
-  } else if (is_per_channel_dims(dims, shape)) {
-    // Per-channel: index by column
-    if (dims.size() == 1) {
-      return static_cast<size_t>(col);  // 1D: treat as column index
-    }
-    return static_cast<size_t>(col);  // 2D/3D: column index
-  } else if (is_per_group_dims(dims, shape)) {
-    // Per-group: index = group_idx * N + col
-    int64_t G = get_num_groups(dims);
-    int64_t M = params.M();
-    int64_t group_size = M / G;
-    int64_t group_idx = row / group_size;
-    return static_cast<size_t>(group_idx * N + col);
+static inline int64_t get_num_groups_col(const std::vector<int64_t> &dims) {
+  // 1D: no per-group support, return 1
+  if (dims.size() == 1) {
+    return 1;
+  } else if (dims.size() == 2) {
+    return dims[1];  // 2D: dims = {M, G}
+  } else if (dims.size() == 3) {
+    return dims[2];  // 3D: dims = {1, M, G}
   }
-  return 0;
+  return 1;
 }
 
+
 /**
- * @brief Get zero-point index for per-channel/per-group quantization
- * @param params Reorder parameters
- * @param row Row index (M dimension, used for per-group)
- * @param col Column index (N dimension, used for per-channel)
+ * @brief Get quantization parameter index based on granularity
+ * @param dims Quantization parameter dims (scale or zero_point)
+ * @param shape Tensor shape
+ * @param M Number of rows
  * @param N Number of columns
- * @return Index into the zero_point array
+ * @param row Row index (M dimension)
+ * @param col Column index (N dimension)
+ * @return Index into the quantization parameter array
+ * 
+ * Index calculation for different granularities:
+ *   - per-tensor: 0
+ *   - per-channel-col {1, N}: col
+ *   - per-channel-row {M, 1}: row
+ *   - per-group-row {G, N}: group_row_idx * N + col, where group_row_idx = row / (M / G)
+ *   - per-group-col {M, G}: row * G + group_col_idx, where group_col_idx = col / (N / G)
  */
-static inline size_t get_zp_index(const reorder_params_t &params,
-                                   int64_t row, int64_t col, int64_t N) {
-  const auto &dims = params.quant_params.zero_point.dims;
-  const auto &shape = params.src_shape;
-  
+static inline size_t get_quant_param_index(const std::vector<int64_t> &dims,
+                                            const std::vector<int64_t> &shape,
+                                            int64_t M, int64_t N,
+                                            int64_t row, int64_t col) {
   if (is_per_tensor_dims(dims)) {
     return 0;
-  } else if (is_per_channel_dims(dims, shape)) {
-    // Per-channel: index by column
-    if (dims.size() == 1) {
-      return static_cast<size_t>(col);  // 1D: treat as column index
-    }
-    return static_cast<size_t>(col);  // 2D/3D: column index
-  } else if (is_per_group_dims(dims, shape)) {
-    // Per-group: index = group_idx * N + col
-    int64_t G = get_num_groups(dims);
-    int64_t M = params.M();
+  } else if (is_per_channel_col_dims(dims, shape)) {
+    // Per-channel-col: index by column
+    return static_cast<size_t>(col);
+  } else if (is_per_channel_row_dims(dims, shape)) {
+    // Per-channel-row: index by row
+    return static_cast<size_t>(row);
+  } else if (is_per_group_row_dims(dims, shape)) {
+    // Per-group-row: index = group_row_idx * N + col
+    int64_t G = get_num_groups_row(dims);
     int64_t group_size = M / G;
     int64_t group_idx = row / group_size;
     return static_cast<size_t>(group_idx * N + col);
+  } else if (is_per_group_col_dims(dims, shape)) {
+    // Per-group-col: index = row * G + group_col_idx
+    int64_t G = get_num_groups_col(dims);
+    int64_t group_size = N / G;
+    int64_t group_idx = col / group_size;
+    return static_cast<size_t>(row * G + group_idx);
   }
   return 0;
 }

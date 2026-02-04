@@ -68,24 +68,47 @@ int run_lowoha_reorder_uint8_to_bf16_test();
 int run_lowoha_reorder_bf16_to_s8_per_tensor_test();
 
 /** @fn run_lowoha_reorder_bf16_to_s8_per_channel_test
- *  @brief Demonstrates BF16 to S8 per-channel quantization using LOWOHA reorder API.
+ *  @brief Demonstrates BF16 to S8 per-channel-col quantization using LOWOHA reorder API.
  *
  *  This example demonstrates BF16 to INT8 quantization with different scale
- *  and zero-point per output channel (per-channel granularity).
+ *  and zero-point per column (per-channel-col granularity).
  *
- *  Granularity: scale.dims = {num_channels}, zero_point.dims = {num_channels}
+ *  Granularity: scale.dims = {1, N}, zero_point.dims = {1, N}
  */
 int run_lowoha_reorder_bf16_to_s8_per_channel_test();
 
-/** @fn run_lowoha_reorder_bf16_to_s8_per_group_test
- *  @brief Demonstrates BF16 to S8 per-group quantization using LOWOHA reorder API.
+/** @fn run_lowoha_reorder_bf16_to_s8_per_channel_row_test
+ *  @brief Demonstrates BF16 to S8 per-channel-row quantization using LOWOHA reorder API.
  *
  *  This example demonstrates BF16 to INT8 quantization with different scale
- *  and zero-point per group (per-group granularity).
+ *  and zero-point per row (per-channel-row granularity).
+ *  Values are the same across columns within each row.
  *
- *  Granularity: scale.dims = {num_groups, group_size}, zero_point.dims = {num_groups, group_size}
+ *  Granularity: scale.dims = {M, 1}, zero_point.dims = {M, 1}
+ */
+int run_lowoha_reorder_bf16_to_s8_per_channel_row_test();
+
+/** @fn run_lowoha_reorder_bf16_to_s8_per_group_test
+ *  @brief Demonstrates BF16 to S8 per-group-row quantization using LOWOHA reorder API.
+ *
+ *  This example demonstrates BF16 to INT8 quantization with different scale
+ *  and zero-point per row group (per-group-row granularity).
+ *  Groups divide rows: M is divided into G groups.
+ *
+ *  Granularity: scale.dims = {G, N}, zero_point.dims = {G, N}
  */
 int run_lowoha_reorder_bf16_to_s8_per_group_test();
+
+/** @fn run_lowoha_reorder_bf16_to_s8_per_group_col_test
+ *  @brief Demonstrates BF16 to S8 per-group-col quantization using LOWOHA reorder API.
+ *
+ *  This example demonstrates BF16 to INT8 quantization with different scale
+ *  and zero-point per column group (per-group-col granularity).
+ *  Groups divide columns: N is divided into G groups, each row has its own values.
+ *
+ *  Granularity: scale.dims = {M, G}, zero_point.dims = {M, G}
+ */
+int run_lowoha_reorder_bf16_to_s8_per_group_col_test();
 
 /** @fn run_lowoha_reorder_bf16_to_s8_mixed_granularity_test
  *  @brief Demonstrates BF16 to S8 mixed granularity quantization using LOWOHA reorder API.
@@ -93,9 +116,22 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test();
  *  This example demonstrates BF16 to INT8 quantization with per-tensor scale
  *  and per-channel zero-point (mixed granularity).
  *
- *  Granularity: scale.dims = {} (per-tensor), zero_point.dims = {num_channels} (per-channel)
+ *  Granularity: scale.dims = {1, 1} (per-tensor), zero_point.dims = {1, N} (per-channel-col)
  */
 int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test();
+
+/** @fn run_lowoha_reorder_bf16_to_s8_mixed_row_group_test
+ *  @brief Demonstrates BF16 to S8 mixed granularity with per-channel-row scale
+ *         and per-group-row zero-point.
+ *
+ *  This example demonstrates BF16 to INT8 quantization with:
+ *    - Per-channel-row scale: scale.dims = {M, 1} (M values, one per row)
+ *    - Per-group-row zero-point: zero_point.dims = {G, N} (G*N values)
+ *
+ *  This is useful when scale varies per row but zero-point needs finer
+ *  per-group granularity within each row.
+ */
+int run_lowoha_reorder_bf16_to_s8_mixed_row_group_test();
 
 /** @fn run_lowoha_reorder_bf16_to_s8_batched_test
  *  @brief Demonstrates BF16 to S8 batched matmul weight quantization using LOWOHA reorder API.
@@ -120,20 +156,36 @@ int run_lowoha_reorder_bf16_to_s8_batched_test();
 int run_lowoha_reorder_s8_to_bf16_per_tensor_test();
 
 /** @fn run_lowoha_reorder_s8_to_bf16_per_channel_test
- *  @brief Demonstrates S8 to BF16 per-channel dequantization using LOWOHA reorder API.
+ *  @brief Demonstrates S8 to BF16 per-channel-col dequantization using LOWOHA reorder API.
  *
  *  This example demonstrates INT8 to BF16 dequantization with different scale
- *  and zero-point per output channel (per-channel granularity).
+ *  and zero-point per column (per-channel-col granularity).
  */
 int run_lowoha_reorder_s8_to_bf16_per_channel_test();
 
-/** @fn run_lowoha_reorder_s8_to_bf16_per_group_test
- *  @brief Demonstrates S8 to BF16 per-group dequantization using LOWOHA reorder API.
+/** @fn run_lowoha_reorder_s8_to_bf16_per_channel_row_test
+ *  @brief Demonstrates S8 to BF16 per-channel-row dequantization using LOWOHA reorder API.
  *
  *  This example demonstrates INT8 to BF16 dequantization with different scale
- *  and zero-point per group (per-group granularity).
+ *  and zero-point per row (per-channel-row granularity).
+ */
+int run_lowoha_reorder_s8_to_bf16_per_channel_row_test();
+
+/** @fn run_lowoha_reorder_s8_to_bf16_per_group_test
+ *  @brief Demonstrates S8 to BF16 per-group-row dequantization using LOWOHA reorder API.
+ *
+ *  This example demonstrates INT8 to BF16 dequantization with different scale
+ *  and zero-point per row group (per-group-row granularity).
  */
 int run_lowoha_reorder_s8_to_bf16_per_group_test();
+
+/** @fn run_lowoha_reorder_s8_to_bf16_per_group_col_test
+ *  @brief Demonstrates S8 to BF16 per-group-col dequantization using LOWOHA reorder API.
+ *
+ *  This example demonstrates INT8 to BF16 dequantization with different scale
+ *  and zero-point per column group (per-group-col granularity).
+ */
+int run_lowoha_reorder_s8_to_bf16_per_group_col_test();
 
 /** @fn run_lowoha_reorder_s8_to_bf16_mixed_granularity_test
  *  @brief Demonstrates S8 to BF16 mixed granularity dequantization using LOWOHA reorder API.
@@ -142,6 +194,16 @@ int run_lowoha_reorder_s8_to_bf16_per_group_test();
  *  and per-channel zero-point (mixed granularity).
  */
 int run_lowoha_reorder_s8_to_bf16_mixed_granularity_test();
+
+/** @fn run_lowoha_reorder_s8_to_bf16_mixed_row_group_test
+ *  @brief Demonstrates S8 to BF16 mixed granularity with per-channel-row scale
+ *         and per-group-row zero-point.
+ *
+ *  This example demonstrates INT8 to BF16 dequantization with:
+ *    - Per-channel-row scale: scale.dims = {M, 1} (M values, one per row)
+ *    - Per-group-row zero-point: zero_point.dims = {G, N} (G*N values)
+ */
+int run_lowoha_reorder_s8_to_bf16_mixed_row_group_test();
 
 /** @fn run_lowoha_reorder_s8_to_bf16_batched_test
  *  @brief Demonstrates S8 to BF16 batched dequantization using LOWOHA reorder API.
@@ -221,19 +283,35 @@ int run_lowoha_reorder_uint8_to_f32_test();
 int run_lowoha_reorder_f32_to_s8_per_tensor_test();
 
 /** @fn run_lowoha_reorder_f32_to_s8_per_channel_test
- *  @brief Demonstrates FP32 to S8 per-channel quantization using LOWOHA reorder API.
+ *  @brief Demonstrates FP32 to S8 per-channel-col quantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_f32_to_s8_per_channel_test();
 
+/** @fn run_lowoha_reorder_f32_to_s8_per_channel_row_test
+ *  @brief Demonstrates FP32 to S8 per-channel-row quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_per_channel_row_test();
+
 /** @fn run_lowoha_reorder_f32_to_s8_per_group_test
- *  @brief Demonstrates FP32 to S8 per-group quantization using LOWOHA reorder API.
+ *  @brief Demonstrates FP32 to S8 per-group-row quantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_f32_to_s8_per_group_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_per_group_col_test
+ *  @brief Demonstrates FP32 to S8 per-group-col quantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_f32_to_s8_per_group_col_test();
 
 /** @fn run_lowoha_reorder_f32_to_s8_mixed_granularity_test
  *  @brief Demonstrates FP32 to S8 mixed granularity quantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_f32_to_s8_mixed_granularity_test();
+
+/** @fn run_lowoha_reorder_f32_to_s8_mixed_row_group_test
+ *  @brief Demonstrates FP32 to S8 mixed granularity with per-channel-row scale
+ *         and per-group-row zero-point.
+ */
+int run_lowoha_reorder_f32_to_s8_mixed_row_group_test();
 
 /** @fn run_lowoha_reorder_f32_to_s8_batched_test
  *  @brief Demonstrates FP32 to S8 batched quantization using LOWOHA reorder API.
@@ -250,19 +328,35 @@ int run_lowoha_reorder_f32_to_s8_batched_test();
 int run_lowoha_reorder_s8_to_f32_per_tensor_test();
 
 /** @fn run_lowoha_reorder_s8_to_f32_per_channel_test
- *  @brief Demonstrates S8 to FP32 per-channel dequantization using LOWOHA reorder API.
+ *  @brief Demonstrates S8 to FP32 per-channel-col dequantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_s8_to_f32_per_channel_test();
 
+/** @fn run_lowoha_reorder_s8_to_f32_per_channel_row_test
+ *  @brief Demonstrates S8 to FP32 per-channel-row dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_per_channel_row_test();
+
 /** @fn run_lowoha_reorder_s8_to_f32_per_group_test
- *  @brief Demonstrates S8 to FP32 per-group dequantization using LOWOHA reorder API.
+ *  @brief Demonstrates S8 to FP32 per-group-row dequantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_s8_to_f32_per_group_test();
+
+/** @fn run_lowoha_reorder_s8_to_f32_per_group_col_test
+ *  @brief Demonstrates S8 to FP32 per-group-col dequantization using LOWOHA reorder API.
+ */
+int run_lowoha_reorder_s8_to_f32_per_group_col_test();
 
 /** @fn run_lowoha_reorder_s8_to_f32_mixed_granularity_test
  *  @brief Demonstrates S8 to FP32 mixed granularity dequantization using LOWOHA reorder API.
  */
 int run_lowoha_reorder_s8_to_f32_mixed_granularity_test();
+
+/** @fn run_lowoha_reorder_s8_to_f32_mixed_row_group_test
+ *  @brief Demonstrates S8 to FP32 mixed granularity with per-channel-row scale
+ *         and per-group-row zero-point.
+ */
+int run_lowoha_reorder_s8_to_f32_mixed_row_group_test();
 
 //==============================================================================
 // FP32 Strided Memory Layout Tests
