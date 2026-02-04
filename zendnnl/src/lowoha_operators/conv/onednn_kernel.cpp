@@ -313,9 +313,6 @@ status_t conv_onednn_wrapper(
         cache_key.out_channels = dims.out_channels;
         cache_key.filter_height = dims.filter_height;
         cache_key.filter_width = dims.filter_width;
-        cache_key.is_depthwise = params.depthwise.is_depthwise;
-        cache_key.groups = params.depthwise.groups;
-        cache_key.depth_multiplier = params.depthwise.depth_multiplier;
         cache_key.dtype = (dtype == dnnl::memory::data_type::f32) ? 0 : 1;
         cache_key.blocking_hash = blocking_hash;
 

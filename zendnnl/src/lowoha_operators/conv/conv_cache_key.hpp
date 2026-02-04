@@ -17,8 +17,7 @@
 #ifndef _LOWOHA_CONV_CACHE_KEY_HPP
 #define _LOWOHA_CONV_CACHE_KEY_HPP
 
-#include <cstdint>
-#include <cstddef>
+#include "common/hash_object.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -43,11 +42,6 @@ struct Key_conv {
     uint64_t filter_height = 0;
     uint64_t filter_width = 0;
 
-    // Depthwise parameters affect channel grouping
-    bool is_depthwise = false;
-    uint32_t groups = 1;
-    uint32_t depth_multiplier = 1;
-
     // Data type affects memory layout (FP32 vs BF16)
     uint32_t dtype = 0;
 
@@ -64,9 +58,6 @@ struct Key_conv {
                out_channels == other.out_channels &&
                filter_height == other.filter_height &&
                filter_width == other.filter_width &&
-               is_depthwise == other.is_depthwise &&
-               groups == other.groups &&
-               depth_multiplier == other.depth_multiplier &&
                dtype == other.dtype &&
                blocking_hash == other.blocking_hash;
     }
@@ -81,28 +72,15 @@ namespace std {
     template<>
     struct hash<zendnnl::lowoha::conv::Key_conv> {
         size_t operator()(const zendnnl::lowoha::conv::Key_conv& key) const {
-            size_t h = 0;
-            const size_t prime = 31;
-
-            // Hash filter pointer
-            h = h * prime + std::hash<const void*>{}(key.filter_ptr);
-
-            // Hash dimensions
-            h = h * prime + std::hash<uint64_t>{}(key.in_channels);
-            h = h * prime + std::hash<uint64_t>{}(key.out_channels);
-            h = h * prime + std::hash<uint64_t>{}(key.filter_height);
-            h = h * prime + std::hash<uint64_t>{}(key.filter_width);
-
-            // Hash depthwise parameters
-            h = h * prime + std::hash<bool>{}(key.is_depthwise);
-            h = h * prime + std::hash<uint32_t>{}(key.groups);
-            h = h * prime + std::hash<uint32_t>{}(key.depth_multiplier);
-
-            // Hash dtype and blocking format
-            h = h * prime + std::hash<uint32_t>{}(key.dtype);
-            h = h * prime + std::hash<size_t>{}(key.blocking_hash);
-
-            return h;
+            std::size_t seed = 0;
+            seed = zendnnl::common::hash_combine(seed, key.filter_ptr);
+            seed = zendnnl::common::hash_combine(seed, key.in_channels);
+            seed = zendnnl::common::hash_combine(seed, key.out_channels);
+            seed = zendnnl::common::hash_combine(seed, key.filter_height);
+            seed = zendnnl::common::hash_combine(seed, key.filter_width);
+            seed = zendnnl::common::hash_combine(seed, key.dtype);
+            seed = zendnnl::common::hash_combine(seed, key.blocking_hash);
+            return seed;
         }
     };
 }
