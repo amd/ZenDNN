@@ -25,11 +25,11 @@ using matmul_algo_t = zendnnl::ops::matmul_algo_t;
 struct Key_matmul {
   bool transpose_inp = false;
   bool transpose_weights = false;
-  unsigned int m = 1;
-  unsigned int k = 1;
-  unsigned int n = 1;
-  unsigned int lda = 1;
-  unsigned int ldb = 1;
+  unsigned int m = 0;
+  unsigned int k = 0;
+  unsigned int n = 0;
+  unsigned int lda = 0;
+  unsigned int ldb = 0;
   const void *weights = nullptr;
   uint32_t algo = static_cast<uint32_t>(matmul_algo_t::none);
   size_t extra_input_hash = 0;

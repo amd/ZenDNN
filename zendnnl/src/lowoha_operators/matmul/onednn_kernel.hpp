@@ -54,23 +54,31 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            size_t weight_batch_stride=static_cast<size_t>(-1),
                            size_t dst_batch_stride=static_cast<size_t>(-1));
 /**
- * @brief Reorder weights to OneDNN's optimal format with caching
+ * @brief Gets or creates blocked weights with thread-safe caching
  *
- * Converts weight matrix to OneDNN's internal optimized memory layout
- * and caches the result to avoid redundant reordering operations.
+ * This function handles the weight blocking and caching logic for oneDNN matmul.
+ * It uses a two-level caching strategy:
+ * 1. hash_values: Maps full key to blocking format hash
+ * 2. matmul_weight_cache: LRU cache for actual blocked weight memory
  *
- * @param key Unique cache key for the weight tensor
- * @param dnnl_params OneDNN parameters containing weight memory info
- * @param weight_cache_type Type of caching mechanism to use
- * @param dnnl_weight_mem OneDNN weight memory
- * @param dnnl_blocked_weight_mem OneDNN blocked weight memory
- * @param eng OneDNN engine for memory operations
- * @return true if reordering was performed
+ * Thread safety is ensured by a mutex protecting all cache operations.
+ *
+ * @param transA Whether input A is transposed
+ * @param transB Whether input B (weights) is transposed
+ * @param M Number of rows in output
+ * @param K Inner dimension
+ * @param N Number of columns in output
+ * @param lda Leading dimension of A
+ * @param ldb Leading dimension of B
+ * @param dnnl_params OneDNN parameters (weights.mem will be set)
+ * @param eng OneDNN engine
+ * @param matmul_attr Primitive attributes
+ * @param weight_cache_type 0 = disabled, otherwise enabled
  */
-bool reorderAndCacheWeights(Key_matmul key,
-                            onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::memory &dnnl_weight_mem, dnnl::memory &dnnl_blocked_weight_mem,
-                            dnnl::engine &eng);
+void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
+                               int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
+                               const dnnl::engine &eng, const dnnl::primitive_attr &matmul_attr,
+                               int32_t weight_cache_type);
 #endif
 
 } // namespace matmul

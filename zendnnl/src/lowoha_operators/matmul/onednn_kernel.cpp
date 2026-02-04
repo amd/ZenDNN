@@ -65,6 +65,124 @@ dnnl::matmul::primitive_desc create_blocked_matmul_pd(
   }
 }
 
+/**
+ * @brief Computes hash value for blocked memory descriptor
+ *
+ * Creates a hash from the memory descriptor's strides and blocking info
+ * to uniquely identify the blocking format.
+ *
+ * @param mem_desc Memory descriptor to hash
+ * @return Hash value representing the blocking format
+ */
+static size_t hashBlockingDesc(const dnnl::memory::desc &mem_desc) {
+  size_t hash_value = 0;
+  // Mersenne prime number to avoid collisions
+  const size_t prime = 31;
+
+  // Hash strides
+  const auto strides = mem_desc.get_strides();
+  for (const auto &stride : strides) {
+    hash_value = hash_value * prime + std::hash<int64_t> {}(stride);
+  }
+
+  // Hash inner_nblks
+  const int inner_nblks = mem_desc.get_inner_nblks();
+  hash_value = hash_value * prime + std::hash<int> {}(inner_nblks);
+
+  // Hash inner_blks and inner_idxs
+  const auto inner_blks = mem_desc.get_inner_blks();
+  const auto inner_idxs = mem_desc.get_inner_idxs();
+  for (int i = 0; i < inner_nblks; ++i) {
+    hash_value = hash_value * prime + std::hash<int64_t> {}(inner_blks[i]);
+    hash_value = hash_value * prime + std::hash<int64_t> {}(inner_idxs[i]);
+  }
+
+  return hash_value;
+}
+
+void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
+                               int lda, int ldb, onednn_utils_t::onednn_matmul_params &dnnl_params,
+                               const dnnl::engine &eng, const dnnl::primitive_attr &matmul_attr,
+                               int32_t weight_cache_type) {
+
+  // Static containers with mutex for thread safety
+  static std::unordered_map<Key_matmul, size_t> hash_values;
+  static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
+  static std::mutex blocked_weight_mutex;
+
+  // Full key includes all parameters that affect blocking decision
+  Key_matmul full_key(transA, transB, M, K, N, lda, ldb,
+                      dnnl_params.weights.buffer,
+                      static_cast<uint32_t>(matmul_algo_t::onednn_blocked));
+
+  // Lock for thread-safe cache access
+  std::lock_guard<std::mutex> lock(blocked_weight_mutex);
+
+  // Check if we have a cached blocking hash for this configuration
+  auto hash_it = hash_values.find(full_key);
+  if (hash_it != hash_values.end()) {
+    size_t blocking_hash = hash_it->second;
+    Key_matmul cache_key(transB, K, N, ldb, dnnl_params.weights.buffer,
+                         static_cast<uint32_t>(matmul_algo_t::onednn_blocked),
+                         blocking_hash);
+
+    // Check if the weight is still in the LRU cache (may have been evicted)
+    if (matmul_weight_cache.find_key(cache_key)) {
+      apilog_info("Read onednn cached weights (cache hit)");
+      dnnl_params.weights.mem = matmul_weight_cache.get(cache_key);
+      return;
+    }
+    // Entry was evicted from LRU cache, remove stale hash_values entry
+    hash_values.erase(hash_it);
+  }
+
+  // Cache miss or stale entry - need to create primitive descriptor to get blocking format
+  dnnl::memory::desc dnnl_weight_desc = onednn_utils_t::to_dnnl_tensor(
+                                          dnnl_params.weights, eng);
+
+  // Create blocked matmul primitive descriptor to determine optimal blocking
+  dnnl::matmul::primitive_desc matmul_pd = create_blocked_matmul_pd(
+        dnnl_params, eng, matmul_attr);
+
+  // Compute blocking hash and check if already cached (by another full_key configuration)
+  size_t blocking_hash = hashBlockingDesc(matmul_pd.weights_desc());
+  Key_matmul cache_key(transB, K, N, ldb, dnnl_params.weights.buffer,
+                       static_cast<uint32_t>(matmul_algo_t::onednn_blocked),
+                       blocking_hash);
+
+  // Check if blocked weights already exist in cache (from different full_key with same blocking)
+  if (matmul_weight_cache.find_key(cache_key)) {
+    apilog_info("Read onednn cached weights (blocking hash match)");
+    dnnl_params.weights.mem = matmul_weight_cache.get(cache_key);
+    // Update hash_values for faster lookup next time
+    hash_values[full_key] = blocking_hash;
+    return;
+  }
+
+  // Not in cache - perform reorder
+  dnnl::memory dnnl_weight_mem = dnnl::memory(dnnl_weight_desc, eng,
+                                 dnnl_params.weights.buffer);
+  dnnl::memory dnnl_blocked_weight_mem = dnnl::memory(matmul_pd.weights_desc(),
+                                         eng);
+
+  dnnl::stream eng_stream(eng);
+  reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
+      dnnl_weight_mem, dnnl_blocked_weight_mem);
+  eng_stream.wait();  // Ensure reorder completes before using the memory
+
+  dnnl_params.weights.mem = dnnl_blocked_weight_mem;
+
+  if (weight_cache_type == 0) {
+    apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
+    return;
+  }
+
+  // Cache the blocked weights
+  apilog_info("onednn reorder weights (adding to cache)");
+  hash_values[full_key] = blocking_hash;
+  matmul_weight_cache.add(cache_key, dnnl_params.weights.mem);
+}
+
 void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, matmul_params &lowoha_params,
@@ -381,94 +499,13 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
   bool is_blocked = dnnl_params.algo == matmul_algo_t::onednn_blocked &&
                     is_weights_const;
   if (is_blocked) {
-    // Get actual weight descriptor and memory
-    dnnl::memory::desc dnnl_weight_desc = onednn_utils_t::to_dnnl_tensor(
-                                            dnnl_params.weights, eng);
-    dnnl::memory dnnl_weight_mem = dnnl::memory(dnnl_weight_desc, eng,
-                                   dnnl_params.weights.buffer);
-
-    // Create blocked matmul primitive descriptor
-    dnnl::matmul::primitive_desc matmul_pd = create_blocked_matmul_pd(
-          dnnl_params, eng, matmul_attr);
-
-    // Create blocked weight memory
-    dnnl::memory dnnl_blocked_weight_mem = dnnl::memory(matmul_pd.weights_desc(),
-                                           eng);
-
-    // Create a hash_value for format_tag using public API
-    auto hash_blocking_desc = [](const dnnl::memory::desc &mem_desc) -> size_t {
-      size_t hash_value = 0;
-      // Mersenne prime number to avoid collisions
-      const size_t prime = 31;
-
-      // Hash strides
-      const auto strides = mem_desc.get_strides();
-      for (const auto &stride : strides) {
-        hash_value = hash_value * prime + std::hash<int64_t> {}(stride);
-      }
-
-      // Hash inner_nblks
-      const int inner_nblks = mem_desc.get_inner_nblks();
-      hash_value = hash_value * prime + std::hash<int>{}(inner_nblks);
-
-      // Hash inner_blks and inner_idxs
-      const auto inner_blks = mem_desc.get_inner_blks();
-      const auto inner_idxs = mem_desc.get_inner_idxs();
-      for (int i = 0; i < inner_nblks; ++i) {
-        hash_value = hash_value * prime + std::hash<int64_t> {}(inner_blks[i]);
-        hash_value = hash_value * prime + std::hash<int64_t> {}(inner_idxs[i]);
-      }
-
-      return hash_value;
-    };
-
-    size_t blocking_hash = hash_blocking_desc(matmul_pd.weights_desc());
-
-    // Create cache key for blocked weights
-    Key_matmul key_(transB,
-                    K, N, ldb, dnnl_params.weights.buffer,
-                    static_cast<uint32_t>(matmul_algo_t::onednn_blocked), blocking_hash);
-    dnnl_params.is_blocked = reorderAndCacheWeights(key_, dnnl_params,
-                             weight_cache_type, dnnl_weight_mem,dnnl_blocked_weight_mem, eng);
+    getOrCreateBlockedWeights(transA == 't', transB == 't', M, K, N, lda, ldb,
+                              dnnl_params, eng, matmul_attr, weight_cache_type);
+    dnnl_params.is_blocked = true;
   }
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
                                          eng);
-}
-
-bool reorderAndCacheWeights(Key_matmul key,
-                            onednn_utils_t::onednn_matmul_params &dnnl_params, int weight_cache_type,
-                            dnnl::memory &dnnl_weight_mem, dnnl::memory &dnnl_blocked_weight_mem,
-                            dnnl::engine &eng) {
-  // Weight caching
-  static lru_cache_t<Key_matmul, dnnl::memory> matmul_weight_cache;
-  static std::mutex weight_cache_mutex;  // Mutex to prevent TOCTOU race
-
-  if (weight_cache_type == 0) {
-    apilog_info("onednn reorder weights (WEIGHT_CACHE_DISABLE)");
-    dnnl::stream eng_stream(eng);
-    reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
-        dnnl_weight_mem, dnnl_blocked_weight_mem);
-    dnnl_params.weights.mem  = dnnl_blocked_weight_mem;
-  }
-  else {
-    // Use lock guard to protect the entire check-compute-cache operation
-    std::lock_guard<std::mutex> lock(weight_cache_mutex);
-    auto found_obj = matmul_weight_cache.find_key(key);
-    if (!found_obj) {
-      apilog_info("onednn reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
-      dnnl::stream eng_stream(eng);
-      reorder(dnnl_weight_mem, dnnl_blocked_weight_mem).execute(eng_stream,
-          dnnl_weight_mem, dnnl_blocked_weight_mem);
-      dnnl_params.weights.mem  = dnnl_blocked_weight_mem;
-      matmul_weight_cache.add(key, dnnl_params.weights.mem);
-    }
-    else {
-      apilog_info("Read onednn cached weights WEIGHT_CACHE_OUT_OF_PLACE");
-      dnnl_params.weights.mem = matmul_weight_cache.get(key);
-    }
-  }
-  return true;
 }
 
 #endif
