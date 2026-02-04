@@ -16,6 +16,7 @@
 
 #include "lowoha_conv.hpp"
 #include "lowoha_operators/conv/onednn_kernel.hpp"
+#include "lowoha_operators/conv/reference_kernel.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -29,21 +30,36 @@ status_t conv_kernel_wrapper(
     const bool is_weights_const,
     conv_params &params
 ) {
+
 #if ZENDNNL_DEPENDS_ONEDNN
+    // Handle OneDNN implementation (when available)
     if (params.algo == conv_algo_t::onednn ||
         params.algo == conv_algo_t::onednn_blocked) {
         log_info("Using OneDNN kernel for Conv");
         status_t status = conv_onednn_wrapper(input, filter, bias, output, is_weights_const, params);
         if (status != status_t::success) {
             log_error("Conv: OneDNN kernel execution failed");
+            // Fallback to reference implementation
+            log_info("Conv: Falling back to reference implementation");
+            return conv_reference_wrapper(input, filter, bias, output, is_weights_const, params);
+        }
+        return status;
+    }
+#else
+    if (params.algo == conv_algo_t::reference) {
+        log_info("Using Reference kernel for Conv");
+        status_t status = conv_reference_wrapper(input, filter, bias, output, is_weights_const, params);
+        if (status != status_t::success) {
+            log_error("Conv: Reference kernel execution failed");
         }
         return status;
     }
 #endif
 
-    // Fallback to reference implementation (TODO)
-    log_error("Conv: No suitable backend available");
-    return status_t::failure;
+    // If we reach here, no backend was explicitly selected or available
+    // Use reference as universal fallback
+    log_info("Conv: Using reference implementation as fallback");
+    return conv_reference_wrapper(input, filter, bias, output, is_weights_const, params);
 }
 
 status_t conv_direct(
@@ -103,10 +119,9 @@ status_t conv_direct(
     apilog_info(ss.str());
 
     // Select kernel algorithm
-    // TODO: Remove this once we have a proper kernel selection logic
-    params.algo = conv_algo_t::onednn;
+    // If algo is not set (none), choose default based on available backends
     if (params.algo == conv_algo_t::none) {
-        // Default to OneDNN if available
+        // Default to OneDNN if available, otherwise reference
 #if ZENDNNL_DEPENDS_ONEDNN
         params.algo = conv_algo_t::onednn;
 #else

@@ -113,7 +113,7 @@ struct depthwise_params {
     aocl_dlp  = 4,         /*!< AOCL - Not implemented */
     onednn = 5,            /*!< OneDNN */
     auto_tuner = 8,        /*!< Auto Tuner - Not implemented */
-    reference = 9,         /*!< Reference - Not implemented */
+    reference = 9,         /*!< Reference implementation */
 };
 
 /**

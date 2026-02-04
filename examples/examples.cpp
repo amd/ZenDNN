@@ -22,6 +22,7 @@
 #include "compare_op_example.hpp"
 #include "embedding_bag_example.hpp"
 #include "lowoha_matmul_example.hpp"
+#include "lowoha_conv2d_example.hpp"
 #include "lowoha_reorder_example.hpp"
 #include "lowoha_softmax_example.hpp"
 #include "lowoha_pooling_example.hpp"
@@ -67,6 +68,21 @@ int main() {
     matmul_woq_bf16_kernel_example();
     run_lowoha_matmul_woq_bf16s4_test();
     run_lowoha_matmul_int8_caching_test();
+
+    /** LOWOHA Conv2D operator functionality examples.
+     *  Demonstrates 2D convolution with low-overhead API including:
+     *  - Basic FP32 and BF16 convolutions
+     *  - Depthwise convolution (MobileNet pattern)
+     *  - Strided convolution for downsampling
+     *  - Dilated convolution (atrous)
+     *  - Reference kernel implementation
+     *  - OneDNN vs Reference accuracy comparison
+     */
+    run_lowoha_conv2d_fp32_test();
+    run_lowoha_conv2d_bf16_test();
+    run_lowoha_depthwise_conv2d_test();
+    run_lowoha_strided_conv2d_test();
+    run_lowoha_dilated_conv2d_test();
 
     /** LOWOHA Reorder operator functionality examples.
      *  Demonstrates data type conversion between BF16 and INT8/UINT8 using

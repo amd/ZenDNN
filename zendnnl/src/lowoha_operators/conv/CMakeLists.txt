@@ -17,7 +17,8 @@
 set(lowoha_conv_sources
   lowoha_conv.cpp
   lowoha_conv_utils.cpp
-  onednn_kernel.cpp)
+  onednn_kernel.cpp
+  reference_kernel.cpp)
 
 set(lowoha_conv_public_headers
   lowoha_conv.hpp
@@ -26,7 +27,8 @@ set(lowoha_conv_public_headers
 
 set(lowoha_conv_private_headers
   onednn_kernel.hpp
-  conv_cache_key.hpp)
+  conv_cache_key.hpp
+  reference_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
