@@ -106,13 +106,17 @@ function parse_args() {
             --help )
                 echo " usage   : source zendnnl_build.sh <options>"
                 echo
+                echo " IMPORTANT: use --zendnnl to build the library along with other targets."
+                echo "            Components like --zendnnl-gtest, --examples, --benchdnn depend on"
+                echo "            the zendnnl library. Use --all to build all targets."
+                echo
                 echo " build targets :"
-                echo " --all              : build and install all targets."
-                echo " --zendnnl          : build and install zendnnl lib."
-                echo " --zendnnl-gtest    : build and install zendnnl gtest."
-                echo " --examples         : build and install examples."
-                echo " --benchdnn         : build and install benchdnn."
-                echo " --doxygen          : build and install doxygen docs."
+                echo " --all              : build all targets."
+                echo " --zendnnl          : build zendnnl library (required for other components)."
+                echo " --zendnnl-gtest    : build zendnnl gtests (requires --zendnnl)."
+                echo " --examples         : build examples (requires --zendnnl)."
+                echo " --benchdnn         : build benchdnn (requires --zendnnl)."
+                echo " --doxygen          : build doxygen docs (standalone, no library required)."
                 echo
                 echo " clean options :"
                 echo " --clean            : clean all targets."
@@ -140,17 +144,23 @@ function parse_args() {
                 echo "   # build all targets including dependencies"
                 echo "   source zendnnl_build.sh --all"
                 echo
-                echo "   # build all with parallel jobs"
+                echo "   # build all targets with parallel jobs"
                 echo "   source zendnnl_build.sh --all --nproc 8"
                 echo
-                echo "   # build with gtest"
+                echo "   # build library only"
+                echo "   source zendnnl_build.sh --zendnnl"
+                echo
+                echo "   # build library + gtests"
                 echo "   source zendnnl_build.sh --zendnnl --zendnnl-gtest"
                 echo
-                echo "   # build only zendnnl lib"
-                echo "   source zendnnl_build.sh --zendnnl"
+                echo "   # build library + gtests + examples"
+                echo "   source zendnnl_build.sh --zendnnl --zendnnl-gtest --examples"
                 echo
                 echo "   # rebuild without re-downloading dependencies"
                 echo "   source zendnnl_build.sh --no-deps --all"
+                echo
+                echo "   # use local onednn source"
+                echo "   source zendnnl_build.sh --zendnnl --local-onednn"
                 echo
                 return 1
                 ;;

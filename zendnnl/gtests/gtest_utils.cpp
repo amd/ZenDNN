@@ -1413,9 +1413,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                        wei_data_type == data_type_t::s4);
 
         // Check if this is INT8 quantization
-        bool is_int8 = (src_data_type == data_type_t::u8 ||
-                        src_data_type == data_type_t::s8) &&
-                       wei_data_type == data_type_t::s8;
+        bool is_int8 = wei_data_type == data_type_t::s8;
 
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
                  batchB, " M:", M, " N:", N, " K:", K,

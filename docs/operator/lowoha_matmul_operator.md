@@ -92,6 +92,7 @@ struct matmul_params {
   char mem_format_b;                       // Memory format for B ('n'=non-reordered, 'r'=reordered)
   matmul_algo_t lowoha_algo;               // Preferred backend algorithm
   uint64_t num_threads;                    // Number of threads (0 = auto)
+  std::string plugin_op;                   // Plugin op name
 };
 ```
 
@@ -205,7 +206,7 @@ struct matmul_quantization_params_t {
 
 ```cpp
 int lowoha_matmul_bf16_fused_ops_example() {
-  using namespace zendnnl::lowoha;
+  using namespace zendnnl::lowoha::matmul;
   
   int M = 64, N = 128, K = 256;
   int lda = K, ldb = N, ldc = N;

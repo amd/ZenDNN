@@ -99,10 +99,8 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   const bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                       (params.dtypes.wei == data_type_t::s4);
 
-  // INT8 quantization: u8/s8 src with s8 weights
-  const bool is_int8 = (params.dtypes.src == data_type_t::u8 ||
-                        params.dtypes.src == data_type_t::s8) &&
-                       (params.dtypes.wei == data_type_t::s8);
+  // INT8 quantization: s8 weights
+  const bool is_int8 = params.dtypes.wei == data_type_t::s8;
 
   // WOQ and INT8 require constant weights for weight reordering/caching
   if (is_woq && !is_weights_const) {
@@ -630,6 +628,16 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
+
+  const bool is_non_qunat_int8 = (params.dtypes.src == data_type_t::bf16 ||
+                                  params.dtypes.src == data_type_t::f32) &&
+                                 (params.dtypes.wei == data_type_t::s8);
+
+  if (is_non_qunat_int8 && kernel != matmul_algo_t::aocl_dlp_blocked) {
+    log_info("Non-quantized INT8 detected, switching to aocl_dlp kernel");
+    kernel = matmul_algo_t::aocl_dlp;
+  }
+
   // TODO: Update the conditon once prepack supports other formats
   // Current prepack supports only AOCL blocked kernel
   if (params.mem_format_b == 'r') {

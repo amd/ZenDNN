@@ -149,7 +149,10 @@ bool tensor_t::is_transposed() const {
 
   // TODO: Add support for col stride > 1
   // Row-major check: col_stride should be 1, row_stride should be >= col_size
-  bool is_row_major = (col_stride == 1) && (row_stride >= col_size);
+  // A zero row_stride indicates broadcasting along the row dimension,
+  // which is compatible with row-major access (not transposed)
+  bool is_row_major = (col_stride == 1) &&
+                      (row_stride == 0 || row_stride >= col_size);
 
   return !is_row_major;
 }

@@ -300,7 +300,8 @@ status_t matmul_impl_t::validate() {
     }
   }
 
-  if (weights && weights->get_data_type() == data_type_t::s4) {
+  if (weights && weights->get_data_type() == data_type_t::s4 &&
+      forced_kernel != "reference") {
     apilog_info("Weight tensor is S4, forcing aocl_dlp_blocked kernel");
     forced_kernel = "aocl_dlp_blocked";
   }
@@ -374,12 +375,13 @@ status_t matmul_impl_t::validate_forced_kernel() {
     auto out_order   = output->get_order();
 
     if (wt_dtype == data_type_t::s8) {
-      if (!((in_dtype == data_type_t::s8) || (in_dtype  == data_type_t::u8)) ||
+      if (!((in_dtype == data_type_t::s8) || (in_dtype  == data_type_t::u8) ||
+            (in_dtype == data_type_t::bf16) || (in_dtype == data_type_t::f32)) ||
           !((out_dtype == data_type_t::s8) || (out_dtype == data_type_t::u8) ||
             (out_dtype == data_type_t::f32) || (out_dtype == data_type_t::bf16) ||
             (out_dtype == data_type_t::s32))) {
         log_error("<", get_name(),
-                  "> forced reference kernel needs s8/u8 input and output tensors.");
+                  "> forced reference kernel needs s8/u8/bf16/f32 input and output tensors.");
         return status_t::failure;
       }
     }

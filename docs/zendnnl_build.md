@@ -173,14 +173,18 @@ The standalone build can be done using command line CMake configuration and buil
 
 ##### Build Script Options
 
+> **Important**: Use `--all` to build everything, OR use `--zendnnl` with other targets.
+> Components like `--zendnnl-gtest`, `--examples`, and `--benchdnn` depend on the zendnnl library.
+> Always include `--zendnnl` when building these components individually.
+
 | Option | Description |
 |--------|-------------|
 | **Build Targets** | |
 | `--all` | Build and install all targets |
 | `--zendnnl` | Build and install zendnnl lib |
-| `--zendnnl-gtest` | Build and install zendnnl gtest |
-| `--examples` | Build and install examples |
-| `--benchdnn` | Build and install benchdnn |
+| `--zendnnl-gtest` | Build and install zendnnl gtest (requires --zendnnl) |
+| `--examples` | Build and install examples (requires --zendnnl) |
+| `--benchdnn` | Build and install benchdnn (requires --zendnnl) |
 | `--doxygen` | Build and install doxygen docs |
 | **Clean Options** | |
 | `--clean` | Clean all targets |
@@ -207,14 +211,23 @@ The standalone build can be done using command line CMake configuration and buil
 # Build all targets including dependencies
 source zendnnl_build.sh --all
 
-# Build all with parallel jobs
+# Build everything with parallel jobs
 source zendnnl_build.sh --all --nproc 8
 
-# Build only zendnnl lib
+# Build library only
 source zendnnl_build.sh --zendnnl
+
+# Build library + gtests
+source zendnnl_build.sh --zendnnl --zendnnl-gtest
+
+# Build library + gtests + examples
+source zendnnl_build.sh --zendnnl --zendnnl-gtest --examples
 
 # Rebuild without re-downloading dependencies
 source zendnnl_build.sh --no-deps --all
+
+# Use local onednn source
+source zendnnl_build.sh --zendnnl --local-onednn
 ```
 
 ### 4.3 Framework Integration Build

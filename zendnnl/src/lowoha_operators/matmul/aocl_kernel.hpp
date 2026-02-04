@@ -104,9 +104,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
 * object used in post-operations.
 *
 * @param aocl_po Pointer to the `dlp_metadata_t` object to be cleaned up.
-* @param post_op The parameters for the post-operation.
 */
-void cleanup_dlp_post_op(dlp_metadata_t *aocl_po, const matmul_params &post_op);
+void cleanup_dlp_post_op(dlp_metadata_t *aocl_po);
 
 #else
 /**
@@ -170,13 +169,13 @@ void cleanup_blis_post_op(aocl_post_op *aocl_po, const matmul_params &post_op);
  * @param is_weights_const Flag indicating if weights are constant (enables caching)
  */
 void run_dlp(char layout, char transA, char transB, int M, int N,
-              int K,
-              float alpha, float beta, int lda, int ldb, int ldc,
-              char mem_format_a, char mem_format_b, const void *A,
-              const void *B, void *C, const matmul_data_types &dtypes,
-              const matmul_params &lowoha_param, const void *bias,
-              zendnnl::ops::matmul_algo_t kernel,
-              bool is_weights_const);
+             int K,
+             float alpha, float beta, int lda, int ldb, int ldc,
+             char mem_format_a, char mem_format_b, const void *A,
+             const void *B, void *C, const matmul_data_types &dtypes,
+             const matmul_params &lowoha_param, const void *bias,
+             zendnnl::ops::matmul_algo_t kernel,
+             bool is_weights_const);
 
 /**
  * @brief Execute batched matrix multiplication using AOCL backend

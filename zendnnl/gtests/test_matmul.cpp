@@ -572,6 +572,110 @@ TEST_P(TestMatmul, INT8) {
   EXPECT_TRUE(is_test_successful);
 }
 
+/** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param BF16_INT8 user-defined name of test according to test
+ *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
+ */
+//  TEST_P(TestMatmul, BF16_INT8) {
+
+//   // if (true) {
+//   //   GTEST_SKIP();
+//   // }
+//   output_dtype = data_type_t::bf16;
+//   source_dtype = data_type_t::bf16;
+//   use_LOWOHA = true;
+//   algo = algo != matmul_algo_t::aocl_dlp ? matmul_algo_t::aocl_dlp_blocked : algo;
+
+//   bool is_u8_source       = false;// Currently, only s8 source conversion is supported by DLP
+//   auto wei_scale          = tensor_factory.uniform_dist_tensor({1, 1},
+//                             data_type_t::f32, 0.6);
+//   auto src_scale          = tensor_factory.uniform_tensor({1, 1},
+//                             data_type_t::f32, 0.2);
+//   auto src_zp             = is_u8_source ? tensor_factory.uniform_tensor({1, 1},
+//                             data_type_t::s32, 16) : tensor_t();
+
+//   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+//                             data_type_t::s8, 25.0, transB, wei_scale);
+//   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+//                             source_dtype, 2.0, transA, src_scale, src_zp);
+//   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, data_type_t::bf16, 1.0);
+//   auto binary_tensor      = is_binary_postop(po_type) ?
+//                             tensor_factory.uniform_dist_tensor({m, n},
+//                                 data_type_t::f32, 2.0) : tensor_t();
+//   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+//                             output_dtype, 2.0, false);
+//   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+//                             output_dtype, 2.0, false);
+//   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+//                             bias_tensor, output_tensor, po_type, binary_tensor,
+//                             use_LOWOHA, algo, 1.0, 0.0);
+//   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+//                             weight_tensor, bias_tensor, output_tensor_ref, po_type,
+//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+
+//   bool is_test_successful =
+//     (status == status_t::success && ref_status == status_t::success);
+//   if (is_test_successful) {
+//     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+//                              epsilon_bf16, is_test_successful);
+//   }
+
+//   EXPECT_TRUE(is_test_successful);
+// }
+
+// /** @fn TEST_P
+//  *  @param TestMatmul parameterized test class to initialize Matmul parameters
+//  *  @param F32_INT8 user-defined name of test according to test
+//  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
+//  */
+//  TEST_P(TestMatmul, F32_INT8) {
+
+//   // if (true) {
+//   //   GTEST_SKIP();
+//   // }
+//   output_dtype = data_type_t::f32;
+//   source_dtype = data_type_t::f32;
+//   use_LOWOHA = true;
+//   algo = algo != matmul_algo_t::aocl_dlp ? matmul_algo_t::aocl_dlp_blocked : algo;
+
+//   bool is_u8_source       = false;// Currently, only s8 source conversion is supported by DLP
+//   auto wei_scale          = tensor_factory.uniform_dist_tensor({1, n},
+//                             data_type_t::f32, 0.6);
+//   auto src_scale          = tensor_factory.uniform_tensor({1, 1},
+//                             data_type_t::f32, 0.2);
+//   auto src_zp             = is_u8_source ? tensor_factory.uniform_tensor({1, 1},
+//                             data_type_t::s32, 16) : tensor_t();
+
+//   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+//                             data_type_t::s8, 25.0, transB, wei_scale);
+//   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+//                             source_dtype, 2.0, transA, src_scale, src_zp);
+//   auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n}, data_type_t::bf16, 1.0);
+//   auto binary_tensor      = is_binary_postop(po_type) ?
+//                             tensor_factory.uniform_dist_tensor({m, n},
+//                                 data_type_t::f32, 2.0) : tensor_t();
+//   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+//                             output_dtype, 2.0, false);
+//   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+//                             output_dtype, 2.0, false);
+//   status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+//                             bias_tensor, output_tensor, po_type, binary_tensor,
+//                             use_LOWOHA, algo, 1.0, 0.0);
+//   status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+//                             weight_tensor, bias_tensor, output_tensor_ref, po_type,
+//                             binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+
+//   bool is_test_successful =
+//     (status == status_t::success && ref_status == status_t::success);
+//   if (is_test_successful) {
+//     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+//                              epsilon_bf16, is_test_successful);
+//   }
+
+//   EXPECT_TRUE(is_test_successful);
+// }
+
 /** @fn INSTANTIATE_TEST_SUITE_P
  *  @brief Triggers Matmul parameterized test suite
  */

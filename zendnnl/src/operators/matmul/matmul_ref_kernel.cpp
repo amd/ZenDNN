@@ -297,7 +297,9 @@ status_t matmul_ref_kernel_t::execute(const context_type &context_,
                                    weight_dim-3) : 0;
   unsigned int offset_out      = (output_dim == 3) ? M*N : 0;
   bool is_int8                 = (input_dtype == data_type_t::s8 ||
-                                  input_dtype == data_type_t::u8) &&
+                                  input_dtype == data_type_t::u8 ||
+                                  input_dtype == data_type_t::bf16 ||
+                                  input_dtype == data_type_t::f32) &&
                                  weight_dtype == data_type_t::s8;
   bool is_woq                  = input_dtype == data_type_t::bf16 &&
                                  weight_dtype == data_type_t::s4;
@@ -814,11 +816,11 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
 
   int32_t *zp_comp = nullptr;
   int zp_comp_size = 0;
-
+  int32_t src_zero_point = 0;
   if (quant_param.src_zp.buff || quant_param.wei_zp.buff) {
-    int32_t src_zero_point = quant_param.src_zp.buff != nullptr ?
-                             read_and_cast<int32_t>(quant_param.src_zp.buff,
-                                 quant_param.src_zp.dt) : 0;
+    src_zero_point = quant_param.src_zp.buff != nullptr ?
+                     read_and_cast<int32_t>(quant_param.src_zp.buff,
+                                            quant_param.src_zp.dt) : 0;
     int32_t wei_zero_point = quant_param.wei_zp.buff != nullptr ?
                              read_and_cast<int32_t>(quant_param.wei_zp.buff,
                                  quant_param.wei_zp.dt) : 0;
@@ -844,8 +846,19 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
                           (bs * offset_wei + k * ldb + j);
           size_t ip_idx = is_transpose_src ? (bs * offset_src + k * lda + i) :
                           (bs * offset_src + i * lda + k);
-          sum_s32 += read_and_cast<int32_t>(input, input_dtype, ip_idx) *
-                     read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+          if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
+            float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
+            float src_scale = read_and_cast<float>(quant_param.src_scale.buff,
+                                                   quant_param.src_scale.dt, 0);
+            int32_t ip_s32 = static_cast<int32_t>(std::nearbyint(ip_f32 / src_scale)) +
+                             src_zero_point;
+            sum_s32 += ip_s32 *
+                       read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+          }
+          else {
+            sum_s32 += read_and_cast<int32_t>(input, input_dtype, ip_idx) *
+                       read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+          }
         }
         float sum = static_cast<float>(sum_s32);
         if (alpha != 1.0f) {
