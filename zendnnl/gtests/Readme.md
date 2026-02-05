@@ -30,6 +30,63 @@ You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `MATMUL_BF16_TOL`: Tolerance for BF16 precision in tests (default: `0.01`).
 - `TEST_NUM`: Number of test cases to generate (default: `100`).
 
+## **Matrix Dimension Ranges**
+
+The following dimension ranges are used for randomly generated test cases (defined in `gtest_utils.hpp`):
+
+| Parameter | Min | Max | Description |
+|-----------|-----|-----|-------------|
+| **M** | 1 | 3000 | Number of rows in the output matrix |
+| **K** | 1 | 3000 | Inner dimension (columns of A / rows of B) |
+| **N** | 1 | 3000 | Number of columns in the output matrix |
+| **Batch Size** | 1 | 256 | Batch size for batch matrix multiplication |
+
+**Dimension Formula:**
+```
+dimension = MATMUL_SIZE_START + rand() % MATMUL_SIZE_END
+```
+Where `MATMUL_SIZE_START = 1` and `MATMUL_SIZE_END = 3000`.
+
+## **Buffer Value Distribution**
+
+Test tensors are initialized with uniformly distributed random values. The distribution ranges vary by data type and tensor role:
+
+### **Input and Weight Tensors**
+
+| Data Type | Distribution Range | Description |
+|-----------|-------------------|-------------|
+| **F32** | `[-2.0, 2.0]` | Standard floating-point tests |
+| **BF16** | `[-2.0, 2.0]` | BFloat16 tests |
+| **S8** (INT8 weights) | `[-25.0, 25.0]` | Signed 8-bit integer quantized weights |
+| **U8** (INT8 source) | `[0, 25.0]` | Unsigned 8-bit integer quantized input |
+| **S4** (WOQ weights) | `[-8, 7]` | 4-bit signed integer for weight-only quantization |
+
+### **Other Tensors**
+
+| Tensor Type | Distribution Range | Description |
+|-------------|-------------------|-------------|
+| **Bias** | `[-2.0, 2.0]` | Bias tensor (F32 or BF16) |
+| **Binary Post-op** | `[-2.0, 2.0]` | Binary add/mul tensors |
+| **Output** | `[-2.0, 2.0]` | Initial output buffer values |
+| **Quantization Scales** | `[-0.2, 0.2]` to `[-2.0, 2.0]` | Scale factors for quantized operations |
+| **Zero Points** | Integer values | Zero points for asymmetric quantization |
+
+### **Uniform Constant Value Tensors**
+
+Some tensors are initialized with a single constant value (all elements set to the same value) using `uniform_tensor()` instead of random distribution:
+
+| Tensor Type | Constant Value | Data Type | Description |
+|-------------|---------------|-----------|-------------|
+| **Weight Zero Point (WOQ)** | `0` | S8 | Zero point for S4 weight-only quantization |
+| **Source Zero Point (INT8)** | `16` | S32 | Zero point for U8 asymmetric quantization |
+| **Weight Zero Point (INT8)** | `16` | S32 | Zero point for per-tensor weight quantization |
+| **Destination Zero Point** | `53` | S32 | Zero point for U8 output quantization |
+
+### **Alpha and Beta Parameters**
+- **Alpha**: Uniformly distributed in `[0.0, 10.0]`
+- **Beta**: Uniformly distributed in `[0.0, 10.0]`
+- **Note**: For LIBXSMM backends, alpha is fixed to `1.0` and beta is `0` or `1`.
+
 ## **Accuracy Validation**
 
 ZenDNN GTest validates numerical accuracy by comparing optimized implementations against reference results using dynamic tolerance algorithms that adapt to matrix dimensions and data types.
