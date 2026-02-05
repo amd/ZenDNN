@@ -26,8 +26,8 @@
 #include <type_traits>
 
 #include "embag_avx2_kernels.hpp"
-#define ENABLE_PREFETCH
-#ifdef ENABLE_PREFETCH
+#define ENABLE_PREFETCH 0
+#if ENABLE_PREFETCH
   #include <xmmintrin.h>
 #endif
 
@@ -38,7 +38,7 @@ namespace ops {
 template <typename T>
 inline void maybe_prefetch_input(const T *input, int32_t idx, int64_t width,
                                  int32_t padidx) {
-#ifdef ENABLE_PREFETCH
+#if ENABLE_PREFETCH
   if (idx != padidx) {
     _mm_prefetch(reinterpret_cast<const char *>(&input[idx * width]), _MM_HINT_T0);
   }
@@ -48,7 +48,7 @@ inline void maybe_prefetch_input(const T *input, int32_t idx, int64_t width,
 // Prefetch helper for weights (same as AVX512 version)
 inline void maybe_prefetch_weight(const float *weights, int32_t i,
                                   int32_t end) {
-#ifdef ENABLE_PREFETCH
+#if ENABLE_PREFETCH
   const float *pf_wt_ptr = (i < end) ? &weights[i] : &weights[end - 1];
   _mm_prefetch(reinterpret_cast<const char *>(pf_wt_ptr), _MM_HINT_T0);
 #endif

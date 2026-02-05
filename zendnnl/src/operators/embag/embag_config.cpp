@@ -22,8 +22,7 @@ namespace ops {
 
 void embag_config_t::set_default_config() {
   // Set default configuration for embag
-  int32_t embag_kernel = static_cast<int32_t>(embag_kernel_t::none);
-  set_kernel(embag_kernel);
+  set_kernel(static_cast<int32_t>(embag_kernel_t::none));
   set_thread_algo(static_cast<int32_t>(eb_thread_algo_t::table_threaded));
 }
 
@@ -55,45 +54,68 @@ void embag_config_t::set_env_config() {
   char *kernel_env = std::getenv("ZENDNNL_EMBAG_ALGO");
   int32_t embag_kernel = static_cast<int32_t>(embag_kernel_t::none);
   if (kernel_env) {
-    try {
-      int32_t kernel = std::stoi(kernel_env);
-      if (kernel > static_cast<int32_t>(embag_kernel_t::none) &&
-          kernel < static_cast<int32_t>(embag_kernel_t::kernel_count)) {
-        embag_kernel = static_cast<int32_t>(embag_kernel_t(kernel));
+    std::string kernelStr(kernel_env);
+    std::transform(kernelStr.begin(), kernelStr.end(), kernelStr.begin(),
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
+    if (kernelStr == "auto") {
+      embag_kernel = static_cast<int32_t>(embag_kernel_t::fbgemm);
+    }
+    else {
+      try {
+        int32_t kernel = std::stoi(kernelStr);
+        if (kernel > static_cast<int32_t>(embag_kernel_t::none) &&
+            kernel < static_cast<int32_t>(embag_kernel_t::kernel_count)) {
+          embag_kernel = static_cast<int32_t>(embag_kernel_t(kernel));
+        }
+        else {
+          embag_kernel = static_cast<int32_t>(embag_kernel_t::kernel_count);
+        }
       }
-      else {
+      catch (const std::invalid_argument &e) {
         embag_kernel = static_cast<int32_t>(embag_kernel_t::kernel_count);
       }
-    }
-    catch (const std::invalid_argument &e) {
-      embag_kernel = static_cast<int32_t>(embag_kernel_t::kernel_count);
-    }
-    catch (const std::out_of_range &e) {
-      embag_kernel = static_cast<int32_t>(embag_kernel_t::kernel_count);
+      catch (const std::out_of_range &e) {
+        embag_kernel = static_cast<int32_t>(embag_kernel_t::kernel_count);
+      }
     }
   }
   set_kernel(embag_kernel);
 
   // Set thread algorithm from environment variable
-  char *thread_algo_env = std::getenv("ZENDNNL_EMBAG_THREAD_ALGO");
-  int32_t thread_algo_val = static_cast<int32_t>
-                            (eb_thread_algo_t::table_threaded);
-  if (thread_algo_env) {
-    try {
-      int32_t algo = std::stoi(thread_algo_env);
-      if (algo >= 0 && algo <= 5) {
-        thread_algo_val = algo;
+  char *thread_env = std::getenv("ZENDNNL_EMBAG_THREAD_ALGO");
+  int32_t thread_val = static_cast<int32_t>
+                       (eb_thread_algo_t::table_threaded);
+  if (thread_env) {
+    std::string threadStr(thread_env);
+    std::transform(threadStr.begin(), threadStr.end(), threadStr.begin(),
+    [](unsigned char c) {
+      return std::tolower(c);
+    });
+    if (threadStr == "auto") {
+      thread_val = static_cast<int32_t>(eb_thread_algo_t::auto_tuner);
+    }
+    else {
+      try {
+        int32_t algo = std::stoi(threadStr);
+        if (algo > static_cast<int32_t>(eb_thread_algo_t::none) &&
+            algo < static_cast<int32_t>(eb_thread_algo_t::thread_algo_count)) {
+          thread_val = static_cast<int32_t>(eb_thread_algo_t(algo));
+        }
+        else {
+          thread_val = static_cast<int32_t>(eb_thread_algo_t::thread_algo_count);
+        }
+      }
+      catch (const std::invalid_argument &e) {
+        thread_val = static_cast<int32_t>(eb_thread_algo_t::thread_algo_count);
+      }
+      catch (const std::out_of_range &e) {
+        thread_val = static_cast<int32_t>(eb_thread_algo_t::thread_algo_count);
       }
     }
-    catch (const std::invalid_argument &e) {
-      // Try string parsing
-      thread_algo_val = static_cast<int32_t>(str_to_thread_algo(thread_algo_env));
-    }
-    catch (const std::out_of_range &e) {
-      // Use default
-    }
   }
-  set_thread_algo(thread_algo_val);
+  set_thread_algo(thread_val);
 }
 
 void embag_config_t::set_kernel(int32_t kernel) {

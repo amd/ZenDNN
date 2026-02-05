@@ -57,8 +57,15 @@ status_t embedding_bag_direct(
 
   embag_threadlimit thread_guard(num_threads);
 
-  [[maybe_unused]] std::ostringstream ss;
-  if (apilog_info_enabled()) {
+  // Dispatch to the appropriate kernel
+  dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
+
+  if (is_profile) {
+    profiler.tbp_stop();
+  }
+
+  if (apilog_info_enabled() || is_profile) {
+    [[maybe_unused]] std::ostringstream ss;
     ss << "LOWOHA embedding_bag_direct: "
        << "num_embeddings=" << params.num_embeddings
        << ", embedding_dim=" << params.embedding_dim
@@ -69,19 +76,15 @@ status_t embedding_bag_direct(
        << ", output_dtype=" << dtype_to_string(params.dtypes.output)
        << ", num_threads=" << num_threads;
     apilog_info(ss.str());
-  }
-
-  // Dispatch to the appropriate kernel
-  dispatch_avx512_kernel(table, indices, offsets, weights, dst, params);
-
-  if (is_profile) {
-    profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
-                       profiler.get_res_str());
+    if (is_profile) {
+      profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
   }
   return status_t::success;
 }
 
+// Embedding bag direct implementation
 status_t embedding_direct(
   const void *table,
   const void *indices,
@@ -93,6 +96,7 @@ status_t embedding_direct(
   return embedding_bag_direct(table, indices, nullptr, weights, dst, params);
 }
 
+// Group embedding bag direct implementation
 status_t group_embedding_bag_direct(
   const std::vector<const void *> &tables,
   const std::vector<const void *> &indices,
@@ -127,17 +131,8 @@ status_t group_embedding_bag_direct(
 
   unsigned int eb_thread_qty = params[0].num_threads > 0 ? params[0].num_threads :
                                omp_get_max_threads();
-  eb_thread_algo_t thread_algo = embag_config.get_thread_algo();
+  eb_thread_algo_t thread_algo = thread_algo_select();
   const char *thread_type = thread_algo_to_string(thread_algo);
-
-  [[maybe_unused]] std::ostringstream ss;
-  if (apilog_info_enabled()) {
-    ss << "LOWOHA group_embedding_bag_direct: "
-       << "num_tables=" << num_tables
-       << ", eb_thread_qty=" << eb_thread_qty
-       << ", thread_algo=" << thread_type;
-    apilog_info(ss.str());
-  }
 
   // Make a mutable copy of params for dispatch
   std::vector<embag_params_t> mutable_params = params;
@@ -231,8 +226,19 @@ status_t group_embedding_bag_direct(
 
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
-                       profiler.get_res_str());
+  }
+
+  if (apilog_info_enabled() || is_profile) {
+    [[maybe_unused]] std::ostringstream ss;
+    ss << "LOWOHA group_embedding_bag_direct: "
+       << "num_tables=" << num_tables
+       << ", eb_thread_qty=" << eb_thread_qty
+       << ", thread_algo=" << thread_type;
+    apilog_info(ss.str());
+    if (is_profile) {
+      profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
   }
 
   return status_t::success;

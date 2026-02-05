@@ -115,13 +115,44 @@ inline static embag_kernel_t kernel_select(embag_params_t &params) {
                           embag_kernel_t::fbgemm : static_cast<embag_kernel_t>(algo);
 
   // TODO: Add auto_tuner kernel selection
-  if (kernel == embag_kernel_t::auto_tuner) {
+  if (kernel == embag_kernel_t::auto_tuner ||
+      kernel == embag_kernel_t::dynamic_dispatch) {
     kernel = embag_kernel_t::fbgemm;
   }
 
   // Update params with selected kernel
   params.kernel = kernel;
   return kernel;
+}
+
+/**
+ * @brief Select embedding bag thread algorithm based on parameters and environment variable
+ *
+ * This function selects the appropriate thread algorithm for embedding bag operation based on:
+ * 1. The thread algorithm specified in params (if not none)
+ * 2. The ZENDNNL_EMBAG_THREAD_ALGO environment variable
+ *
+ * @param params The embedding bag parameters
+ * @return eb_thread_algo_t The selected thread algorithm
+ */
+inline static eb_thread_algo_t thread_algo_select() {
+  using namespace zendnnl::ops;
+
+  // Get config instance and initialize from environment
+  embag_config_t &embag_config = embag_config_t::instance();
+  embag_config.set_env_config();
+
+  int32_t algo = static_cast<int32_t>(embag_config.get_thread_algo());
+
+  // Default algorithm is table_threaded
+  eb_thread_algo_t thread_algo = static_cast<eb_thread_algo_t>(algo);
+
+  // TODO: Add auto_tuner thread algorithm selection
+  if (thread_algo == eb_thread_algo_t::auto_tuner ||
+      thread_algo == eb_thread_algo_t::dynamic_dispatch) {
+    thread_algo = eb_thread_algo_t::table_threaded;
+  }
+  return thread_algo;
 }
 
 /**
@@ -224,6 +255,8 @@ inline static const char *kernel_to_string(embag_kernel_t kernel) {
   switch (kernel) {
   case embag_kernel_t::none:
     return "none";
+  case embag_kernel_t::dynamic_dispatch:
+    return "dynamic_dispatch";
   case embag_kernel_t::auto_tuner:
     return "auto_tuner";
   case embag_kernel_t::native:
@@ -245,14 +278,20 @@ inline static const char *kernel_to_string(embag_kernel_t kernel) {
  */
 inline static const char *thread_algo_to_string(eb_thread_algo_t algo) {
   switch (algo) {
-  case eb_thread_algo_t::batch_threaded:
-    return "batch_threaded";
+  case eb_thread_algo_t::none:
+    return "none";
+  case eb_thread_algo_t::dynamic_dispatch:
+    return "dynamic_dispatch";
+  case eb_thread_algo_t::auto_tuner:
+    return "auto_tuner";
   case eb_thread_algo_t::table_threaded:
     return "table_threaded";
-  case eb_thread_algo_t::hybrid_threaded:
-    return "hybrid_threaded";
+  case eb_thread_algo_t::batch_threaded:
+    return "batch_threaded";
   case eb_thread_algo_t::ccd_threaded:
     return "ccd_threaded";
+  case eb_thread_algo_t::hybrid_threaded:
+    return "hybrid_threaded";
   default:
     return "unknown";
   }

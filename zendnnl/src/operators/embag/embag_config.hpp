@@ -31,10 +31,11 @@ namespace ops {
  */
 enum class embag_kernel_t : int32_t {
   none = -1,             /*!< No kernel selected */
-  auto_tuner = 0,        /*!< TODO: Auto-tuner kernel */
+  dynamic_dispatch = 0,  /*!< Dynamic dispatch */
   native = 1,            /*!< Native kernel */
   fbgemm = 2,            /*!< FBGEMM kernel */
   reference = 3,         /*!< Reference kernel */
+  auto_tuner = 4,        /*!< Auto-tuner */
   kernel_count           /*!< Kernel count */
 };
 
@@ -45,10 +46,13 @@ enum class embag_kernel_t : int32_t {
  * processing multiple embedding tables in parallel.
  */
 enum class eb_thread_algo_t : int32_t {
-  batch_threaded = 0,      /*!< Sequential tables with batch-level threading */
+  none = -1,               /*!< No thread algorithm selected */
+  dynamic_dispatch = 0,    /*!< Dynamic dispatch */
   table_threaded = 1,      /*!< Thread-per-table parallelism */
-  ccd_threaded = 2,        /*!< CCD-aware threading with nested parallelism */
-  hybrid_threaded = 3,     /*!< Hybrid threading when tables < threads */
+  batch_threaded = 2,      /*!< Sequential tables with batch-level threading */
+  ccd_threaded = 3,        /*!< CCD-aware threading with nested parallelism */
+  hybrid_threaded = 4,     /*!< Hybrid threading when tables < threads */
+  auto_tuner = 5,          /*!< Auto-tuner thread algorithm */
   thread_algo_count        /*!< Thread algorithm count */
 };
 
