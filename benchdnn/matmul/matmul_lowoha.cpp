@@ -124,7 +124,8 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
         continue;
       }
       if (cfg.dt[1] != data_type_t::f32 && cfg.dt[1] != data_type_t::bf16 &&
-          cfg.dt[1] != data_type_t::u8 && cfg.dt[1] != data_type_t::s8) {
+          cfg.dt[1] != data_type_t::u8 && cfg.dt[1] != data_type_t::s8 &&
+          cfg.dt[1] != data_type_t::s4) {
         testlog_error("LOWOHA: Unsupported weight data type");
         log_benchmark_failure(cfg);
         continue;
@@ -141,6 +142,35 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       bool is_int8 = (cfg.dt[0] == data_type_t::u8 ||
                       cfg.dt[0] == data_type_t::s8) &&
                      cfg.dt[1] == data_type_t::s8;
+
+      // Check if this is WOQ (Weight-Only Quantization): BF16 src + S4 weights
+      bool is_woq = (cfg.dt[0] == data_type_t::bf16 &&
+                     cfg.dt[1] == data_type_t::s4);
+      if (is_woq) {
+        // Extract weight scale
+        const void *scale_buff = weight_tensor[0].get_quant_scale_raw_handle_const();
+        params.quant_params.wei_scale.buff = scale_buff;
+        params.quant_params.wei_scale.dt = weight_tensor[0].get_quant_scale_data_type();
+        auto scale_size = weight_tensor[0].get_quant_scale_size();
+        params.quant_params.wei_scale.dims.assign(scale_size.begin(), scale_size.end());
+        log_info("LOWOHA WOQ: Weight scale extracted, dims: [",
+                 params.quant_params.wei_scale.dims.size() > 0 ?
+                 params.quant_params.wei_scale.dims[0] : 0,
+                 params.quant_params.wei_scale.dims.size() > 1 ?
+                 params.quant_params.wei_scale.dims[1] : 0, "]");
+
+        // Extract weight zero point (if asymmetric quantization)
+        if (weight_tensor[0].get_quant_subtype() == quant_subtype_t::asymmetric) {
+          const void *zp_buff = weight_tensor[0].get_quant_zero_raw_handle_const();
+          if (zp_buff) {
+            params.quant_params.wei_zp.buff = zp_buff;
+            params.quant_params.wei_zp.dt = weight_tensor[0].get_quant_zero_data_type();
+            auto zp_size = weight_tensor[0].get_quant_zero_size();
+            params.quant_params.wei_zp.dims.assign(zp_size.begin(), zp_size.end());
+            log_info("LOWOHA WOQ: Weight zero point extracted");
+          }
+        }
+      }
 
       // For INT8: Extract quantization parameters from all tensors
       if (is_int8) {

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -62,12 +62,16 @@ struct global_options {
   bool isTransA; /**< Transpose flag for input matrix */
   bool isTransB; /**< Transpose flag for weight matrix */
   float alpha, beta; /**< Scaling factors for matmul operation. */
+  std::string scale_granularity; /**< Scale granularity for quantization. */
+  uint64_t group_size; /**< Group size for quantization. */
+  data_type_t scale_dt; /**< Datatype of scale. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
     ddt(data_type_t::f32), kernel_name("aocl_dlp"), bias_dt(data_type_t::f32),
-    isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f) {}
+    isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
+    scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32) {}
 };
 
 /**

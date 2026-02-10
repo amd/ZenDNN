@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
         "Invalid line (expected ", expected_fields_cnt, " fields): [",
         (options.ndims > 2) ? "bs, " : "",
         "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, ",
-        "kernel name, isTransA, isTransB, alpha, beta, warmup iterations (optional)]");
+        "kernel name, isTransA, isTransB, alpha, beta, weight_scale_granularity, weight_group_size, weight_scale_dt, warmup iterations (optional)]");
       continue;
     }
     MatmulConfig cfg;
@@ -199,6 +199,38 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       cfg.alpha = fields[id].empty() ? 1.0f : std::stof(fields[id]);
       id++;
       cfg.beta = fields[id].empty() ? 0.0f : std::stof(fields[id]);
+      id++;
+      if (!fields[id].empty()) {
+        std::string scale_gran = fields[id];
+        std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),
+                       ::tolower);
+        if (scale_gran == "per-channel" || scale_gran == "channel") {
+          cfg.scale_granularity = "channel";
+        }
+        else if (scale_gran == "per-group" || scale_gran == "group") {
+          cfg.scale_granularity = "group";
+        }
+        else if (scale_gran == "per-tensor" || scale_gran == "tensor") {
+          cfg.scale_granularity = "tensor";
+        }
+        else {
+          cfg.scale_granularity = "channel";
+          commonlog_warning(
+            "Invalid value for scale granularity. Defaulting to 'per-channel'.");
+        }
+      }
+      else {
+        // Default to per-channel if not specified
+        cfg.scale_granularity = "none";
+      }
+      id++;
+      if (cfg.scale_granularity == "group") {
+        cfg.group_size = fields[id].empty() ? 0 : std::stoul(fields[id]);
+      }
+      id++;
+      // Defaulting scale data type to f32 if not specified
+      cfg.scale_dt = fields[id].empty() ? zendnnl::common::data_type_t::f32 :
+                     strToDatatype(fields[id]);
       id++;
       // Parse warmup iterations if provided, otherwise use 20% of main iterations
       if (id < fields.size() && !(fields[id].empty())) {
@@ -392,6 +424,11 @@ void inputModelFileParser(std::ifstream &infile,
       cfg.isTransB = options.isTransB;
       cfg.alpha = options.alpha;
       cfg.beta = options.beta;
+      cfg.scale_granularity = ((options.wdt == data_type_t::s4 ||
+                                options.wdt == data_type_t::s8) &&
+                               options.scale_granularity == "none") ? "channel" : options.scale_granularity;
+      cfg.group_size = options.group_size;
+      cfg.scale_dt = options.scale_dt;
       cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
                          options.warmup_iters;
 
@@ -430,10 +467,27 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     cfg.dt.push_back(options.ddt);
     cfg.kernel_name = options.kernel_name;
     cfg.bias_dt = options.bias_dt;
+    if (options.post_ops.size() > 0) {
+      auto binary_post_op_pos = 0;
+      for (auto i = 0; i < options.post_ops.size(); i++) {
+        cfg.post_ops.push_back(options.post_ops[i]);
+        // Track positions of binary post-operations
+        if (options.post_ops[i] == post_op_type_t::binary_add ||
+            options.post_ops[i] == post_op_type_t::binary_mul) {
+          cfg.binary_post_ops_pos.push_back(binary_post_op_pos);
+        }
+        binary_post_op_pos++;
+      }
+    }
     cfg.isTransA = options.isTransA;
     cfg.isTransB = options.isTransB;
     cfg.alpha = options.alpha;
     cfg.beta = options.beta;
+    cfg.scale_granularity = ((options.wdt == data_type_t::s4 ||
+                              options.wdt == data_type_t::s8) &&
+                             options.scale_granularity == "none") ? "channel" : options.scale_granularity;
+    cfg.group_size = options.group_size;
+    cfg.scale_dt = options.scale_dt;
     cfg.warmup_iters = options.warmup_iters < 0 ? (cfg.iters) * 0.2 :
                        options.warmup_iters;
 
@@ -460,7 +514,8 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
                   datatypeToStr(cfg.dt[1]), ":", datatypeToStr(cfg.dt[2]), ", ",
                   cfg.isBiasEnabled, ", ", (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) :""),
                   ", ", post_op, ", ", cfg.kernel_name, ", ", cfg.isTransA, ", ", cfg.isTransB,
-                  ", ", cfg.alpha, ", ", cfg.beta, ", ", cfg.warmup_iters);
+                  ", ", cfg.alpha, ", ", cfg.beta, ", ", cfg.scale_granularity, ", ",
+                  cfg.group_size, ", ", datatypeToStr(cfg.scale_dt), ", ", cfg.warmup_iters);
 }
 
 void print_matmul_execution_summary(const MatmulConfig &cfg,
@@ -492,6 +547,9 @@ void print_matmul_execution_summary(const MatmulConfig &cfg,
             << cfg.isTransB << ", "
             << cfg.alpha << ", "
             << cfg.beta << ", "
+            << cfg.scale_granularity << ", "
+            << cfg.group_size << ", "
+            << datatypeToStr(cfg.scale_dt) << ", "
             << cfg.warmup_iters << ", "
             << total_time << std::endl;
 }
@@ -528,7 +586,11 @@ void write_each_config_result(const MatmulConfig &config,
           << config.isTransB << ", "
           << config.alpha << ", "
           << config.beta << ", "
+          << config.scale_granularity << ", "
+          << config.group_size << ", "
+          << datatypeToStr(config.scale_dt) << ", "
           << config.warmup_iters << ", " << stat[layer_num].total_time_ms
+          << ", " << (stat[layer_num].total_time_ms / config.iters)
           << ", " << gflops_val;
   if (isPipeline) {
     outfile << ", " << percentage;
@@ -596,9 +658,17 @@ void cal_column_width(const MatmulConfig &config,
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.beta).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
+                               config.scale_granularity.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.group_size).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               datatypeToStr(config.scale_dt).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.warmup_iters).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string((int)stat[0].total_time_ms).size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string((int)(stat[0].total_time_ms / config.iters)).size() + 2);
   std::ostringstream gflops_ss;
   gflops_ss << std::fixed << std::setprecision(2) << gflops_val;
   col_widths[col++] = std::max(col_widths[col], gflops_ss.str().size() + 2);
@@ -661,11 +731,18 @@ void fill_row(const MatmulConfig &config,
   row.push_back(std::to_string(config.isTransB));
   row.push_back(std::to_string(config.alpha));
   row.push_back(std::to_string(config.beta));
+  row.push_back(config.scale_granularity);
+  row.push_back(std::to_string(config.group_size));
+  row.push_back(datatypeToStr(config.scale_dt));
   row.push_back(std::to_string(config.warmup_iters));
   std::ostringstream total_time_ss;
   total_time_ss << std::fixed << std::setprecision(2) <<
                 stat[layer_num].total_time_ms;
   row.push_back(total_time_ss.str());
+  std::ostringstream avg_time_ss;
+  avg_time_ss << std::fixed << std::setprecision(2) <<
+              (stat[layer_num].total_time_ms / config.iters);
+  row.push_back(avg_time_ss.str());
   std::ostringstream gflops_ss;
   gflops_ss << std::fixed << std::setprecision(2) << gflops_val;
   row.push_back(gflops_ss.str());
@@ -713,7 +790,8 @@ void log_pipeline_results(
     outfile << "BS, ";
   }
   outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, Warmup iterations, Total time (ms) (all iters), GFLOPS, % of Total";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, "
+          << "Alpha, Beta, Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, Total time (ms) (all iters), Avg time (ms), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
@@ -762,6 +840,9 @@ void log_pipeline_results(
             << config. isTransB << ", "
             << config.alpha << ", "
             << config.beta << ", "
+            << config.scale_granularity << ", "
+            << config.group_size << ", "
+            << datatypeToStr(config.scale_dt) << ", "
             << config.warmup_iters << ", " << total_time;
     outfile << std::endl;
 
@@ -794,8 +875,8 @@ void print_pipeline_results(
   }
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB", "Alpha", "Beta",
-    "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS", "%_of_Total"
+    "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
+    "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS", "%_of_Total"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
   headers.push_back("Ctx_Creation(ms_%)");
@@ -868,9 +949,17 @@ void print_pipeline_results(
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.beta).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
+                                 config.scale_granularity.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.group_size).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 datatypeToStr(config.scale_dt).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.warmup_iters).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string((int)total_time).size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string((int)(total_time / config.iters)).size() + 2);
     col_widths[col++] = std::max(col_widths[col], std::string("GFLOPS").size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::string("%_of_Total").size() + 2);
@@ -965,10 +1054,17 @@ void print_pipeline_results(
     summary_row.push_back(std::to_string(config.isTransB));
     summary_row.push_back(std::to_string(config.alpha));
     summary_row.push_back(std::to_string(config.beta));
+    summary_row.push_back(config.scale_granularity);
+    summary_row.push_back(std::to_string(config.group_size));
+    summary_row.push_back(datatypeToStr(config.scale_dt));
     summary_row.push_back(std::to_string(config.warmup_iters));
     std::ostringstream total_time_oss;
     total_time_oss << std::fixed << std::setprecision(2) << total_time;
     summary_row.push_back(total_time_oss.str());
+    std::ostringstream avg_time_oss;
+    avg_time_oss << std::fixed << std::setprecision(2) << (total_time /
+                 config.iters);
+    summary_row.push_back(avg_time_oss.str());
     summary_row.push_back("");
     summary_row.push_back("");
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -1008,7 +1104,8 @@ void log_results(
     outfile << "BS, ";
   }
   outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, Warmup iterations, Total time (ms) (all iters), GFLOPS";
+          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, "
+          << "Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, Total time (ms) (all iters),  Avg time (ms), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {
     outfile <<
@@ -1046,8 +1143,8 @@ void print_results(
   }
   headers.insert(headers.end(), {
     "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB", "Alpha", "Beta",
-    "Warmup_iters", "Total_time(ms, all iters)", "GFLOPS"
+    "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
+    "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {

@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -417,6 +417,43 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.beta = std::stof(arg.substr(7));
+  }
+  else if (arg.find("--scale_granularity=") == 0) {
+    if (arg.substr(20).empty()) {
+      commonlog_error("Scale granularity value cannot be empty. Please provide a valid value.");
+      return NOT_OK;
+    }
+    std::string scale_gran = arg.substr(20);
+    std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),
+                   ::tolower);
+    if (scale_gran == "per-channel" || scale_gran == "channel") {
+      options.scale_granularity = "channel";
+    }
+    else if (scale_gran == "per-group" || scale_gran == "group") {
+      options.scale_granularity = "group";
+    }
+    else if (scale_gran == "per-tensor" || scale_gran == "tensor") {
+      options.scale_granularity = "tensor";
+    }
+    else {
+      options.scale_granularity = "channel";
+      commonlog_warning(
+        "Invalid value for scale granularity. Defaulting to 'per-channel'.");
+    }
+  }
+  else if (arg.find("--group_size=") == 0) {
+    if (arg.substr(13).empty()) {
+      commonlog_error("Group size value cannot be empty. Please provide a valid number.");
+      return NOT_OK;
+    }
+    options.group_size = std::stoul(arg.substr(13));
+  }
+  else if (arg.find("--scale_dt=") == 0) {
+    if (arg.substr(11).empty()) {
+      commonlog_error("Scale data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.scale_dt = strToDatatype(arg.substr(11));
   }
   else if (arg.find("--warmup_iters=") == 0) {
     if (arg.substr(15).empty()) {

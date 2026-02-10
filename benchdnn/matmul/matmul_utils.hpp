@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
 #include "benchdnn.hpp"
 
 // Number of extra fields in each matmul input line (beyond ndims)
-#define MATMUL_EXTRA_INPUT_FIELD_COUNT 10
+#define MATMUL_EXTRA_INPUT_FIELD_COUNT 13
 
 namespace zendnnl {
 namespace benchdnn {
@@ -71,6 +71,11 @@ struct MatmulConfig {
   bool isTransA; /** Transpose flag for input matrix */
   bool isTransB; /** Transpose flag for weight matrix */
   float alpha, beta; /**< Scaling factors for the matrix multiplication. */
+  std::string scale_granularity; /**< Granularity
+                                  for scaling (e.g., per-tensor, per-channel, per-group). */
+  uint64_t group_size; /**< Group size for per-group scaling granularity. */
+  zendnnl::common::data_type_t scale_dt; /**< Data type
+                                         for scaling factors (e.g., f32, bf16). */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 };
 

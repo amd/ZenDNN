@@ -31,10 +31,50 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
     size_t n = cfg.n_values[i];
     tensor_t weights_tensor;
 
+    std::vector<uint64_t> scale_size;
+    uint64_t group_size = 0;
+    uint64_t num_groups = 1;
+
+    if (dt == data_type_t::s4) {
+      // If no even divisors found, fall back to K only if K is even
+      // Otherwise, fall back to per-channel for per-group cases
+      cfg.group_size = cfg.group_size ? cfg.group_size : cfg.k;
+      if (cfg.scale_granularity == "group" && cfg.group_size % 2 != 0) {
+        cfg.scale_granularity = "channel";  // Fall back to per-channel
+        commonlog_warning("Defaulting to 'per-channel'.");
+      }
+      std::string scale_granularity = cfg.scale_granularity;
+
+      if (scale_granularity == "tensor") {
+        scale_size = {1, 1};
+      }
+      else if (scale_granularity == "channel") {
+        // scale=per-channel
+        scale_size = {1, n};
+      }
+      else if (scale_granularity == "group") {
+        group_size = cfg.group_size;
+        num_groups = k / group_size;
+        scale_size = {num_groups, n};
+      }
+    }
+    else if (dt == data_type_t::s8) {
+      std::string scale_granularity = cfg.scale_granularity;
+      if (scale_granularity == "tensor") {
+        scale_size = {1, 1};
+      }
+      else {
+        scale_size = {1, n};
+      }
+    }
+
+    auto scale_dtype = cfg.scale_dt;
+
     // Apply reorder for regular API, not for LOWOHA
     if (cfg.kernel_name == "aocl_dlp_blocked" && !isLOWOHA) {
-      auto wei_scale = (dt == data_type_t::s8) ? tensor_factory.uniform_dist_tensor({1, n},
-                       data_type_t::f32, 0.2) : tensor_t();
+      auto wei_scale = (dt == data_type_t::s8 || dt == data_type_t::s4) ?
+                       tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 0.2) :
+                       tensor_t();
 
       // Create input tensor with contigious layout.
       auto input_tensor = tensor_factory.uniform_dist_tensor({k, n},
@@ -102,8 +142,9 @@ int create_weights_tensor(tensor_factory_t &tensor_factory, MatmulConfig cfg,
                          1.0, "weights_" + std::to_string(i), cfg.isTransB);
       }
       else {
-        auto wei_scale = (dt == data_type_t::s8) ? tensor_factory.uniform_dist_tensor({1, n},
-                         data_type_t::f32, 0.2) : tensor_t();
+        auto wei_scale = (dt == data_type_t::s8 || dt == data_type_t::s4) ?
+                         tensor_factory.uniform_dist_tensor(scale_size, scale_dtype, 0.2) :
+                         tensor_t();
         weights_tensor = tensor_factory.uniform_dist_tensor({k, n},
                          dt,
                          1.0, "weights_" + std::to_string(i), cfg.isTransB, wei_scale);
