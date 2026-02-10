@@ -366,7 +366,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
         << ", Batch_A=" << batch_params.Batch_A << ", Batch_B=" << batch_params.Batch_B
         << ", plugin_op=" << params.plugin_op;
 
-    if (kernel == matmul_algo_t::auto_tuner) {
+    if (api_log_kernel == matmul_algo_t::auto_tuner) {
       apilog_info(ss.str(), ", kernel=", kernel_to_string(api_log_kernel),
                   ", auto_tuner version=", auto_version);
     }
@@ -374,7 +374,7 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
       apilog_info(ss.str(), ", kernel=", kernel_to_string(api_log_kernel));
     }
     if (is_profile) {
-      profilelog_verbose(ss.str(), ", kernel=", kernel_to_string(api_log_kernel),
+      profilelog_verbose(ss.str(), ", kernel=", kernel_to_string(kernel),
                          ", weight_address=", static_cast<const void *>(weight),
                          ", time=", profiler.tbp_elapsedtime(), profiler.get_res_str());
     }
