@@ -19,7 +19,7 @@ This document lists all environment variables available for configuring ZenDNNL 
 | Variable | Description | Default | Valid Values |
 |----------|-------------|---------|--------------|
 | `ZENDNNL_MATMUL_ALGO` | Selects the MatMul algorithm/kernel to use for 2D matrix multiplication | `none` (auto-select) | `-1` (none)<br>`auto` (auto_tuner)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`3` (libxsmm_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`8` (auto_tuner)<br>`9` (reference) |
-| `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `none` (uses `ZENDNNL_MATMUL_ALGO` value) | `-1` (none, falls back to ZENDNNL_MATMUL_ALGO)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
+| `ZENDNNL_BMM_ALGO` | Selects the Batch MatMul algorithm/kernel to use for 3D batch matrix multiplication | `4` (aocl_dlp) | Integer ID or name. `-1` (none, falls back to default 4)<br>`0` (dynamic_dispatch)<br>`1` (aocl_dlp_blocked)<br>`2` (onednn_blocked)<br>`4` (aocl_dlp)<br>`5` (onednn)<br>`6` (libxsmm)<br>`7` (batched_sgemm) |
 | `ZENDNNL_MATMUL_WEIGHT_CACHE` | Enable/disable weight caching for blocked algorithms | `0` (disabled), `1` for blocked/auto-tuner algos | `0` (disabled)<br>`1` (enabled) |
 | `ZENDNNL_ZP_COMP_CACHE` | Enable/disable zero-point compensation caching for quantized operations | `0` (disabled) | `0` (disabled)<br>non-zero (enabled) |
 
