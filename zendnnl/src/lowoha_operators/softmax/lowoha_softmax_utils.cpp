@@ -92,11 +92,14 @@ status_t setup_softmax_shape(
     params.batch = (normalized_axis > 0) ? shape[0] : 1;
     params.axis_dim = shape[normalized_axis];
 
-    log_info("Softmax: Setup ", ndims, "D tensor with shape=[", shape[0]);
+    // Build shape string for logging
+    std::ostringstream shape_str;
+    shape_str << shape[0];
     for (int i = 1; i < ndims; ++i) {
-        log_info(",", shape[i]);
+        shape_str << "," << shape[i];
     }
-    log_info("], axis=", normalized_axis,
+    log_info("Softmax: Setup ", ndims, "D tensor with shape=[", shape_str.str(),
+             "], axis=", normalized_axis,
              " -> batch=", params.batch,
              ", axis_dim=", params.axis_dim);
 

@@ -17,6 +17,7 @@
 #include "onednn_kernel.hpp"
 #include "common/logging.hpp"
 #include "common/profiler.hpp"
+#include <sstream>
 
 #if ZENDNNL_DEPENDS_ONEDNN
 #include "dnnl.hpp"
@@ -80,11 +81,14 @@ status_t softmax_onednn_wrapper(
                 return status_t::failure;
         }
 
-        log_info("Softmax OneDNN: ", params.ndims, "D tensor (shape=[", params.shape[0]);
+        // Build shape string for logging
+        std::ostringstream shape_str;
+        shape_str << params.shape[0];
         for (int i = 1; i < params.ndims; ++i) {
-            log_info(",", params.shape[i]);
+            shape_str << "," << params.shape[i];
         }
-        log_info("]), softmax on axis ", softmax_axis);
+        log_info("Softmax OneDNN: ", params.ndims, "D tensor (shape=[", shape_str.str(),
+                 "]), softmax on axis ", softmax_axis);
 
         // Create memory descriptors
         auto src_md = dnnl::memory::desc(src_dims, dtype, format);
