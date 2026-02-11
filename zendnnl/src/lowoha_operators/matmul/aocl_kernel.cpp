@@ -558,10 +558,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->scale = static_cast<dlp_scale_t *>(calloc(scale_count,
                           sizeof(dlp_scale_t)));
     if (!dlp_metadata->scale) {
-      if (dlp_metadata->seq_vector) {
-        free(dlp_metadata->seq_vector);
-      }
-      free(dlp_metadata);
+      cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
     // Allocate nested sf and zp structures for each scale
@@ -571,7 +568,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       dlp_metadata->scale[i].zp = static_cast<dlp_zp_t *>(calloc(1,
                                   sizeof(dlp_zp_t)));
       if (!dlp_metadata->scale[i].sf || !dlp_metadata->scale[i].zp) {
-        // Cleanup on failure
+        // seq_vector not populated yet; free scale nested allocations manually
         for (int j = 0; j <= i; ++j) {
           if (dlp_metadata->scale[j].sf) {
             free(dlp_metadata->scale[j].sf);
@@ -581,10 +578,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
           }
         }
         free(dlp_metadata->scale);
-        if (dlp_metadata->seq_vector) {
-          free(dlp_metadata->seq_vector);
-        }
-        free(dlp_metadata);
+        dlp_metadata->scale = nullptr;
+        cleanup_dlp_post_op(dlp_metadata);
         return nullptr;
       }
     }
@@ -595,6 +590,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->bias = static_cast<dlp_post_op_bias *>(calloc(bias_count,
                          sizeof(dlp_post_op_bias)));
     if (!dlp_metadata->bias) {
+      // seq_vector not populated yet; free scale nested allocations manually
       if (dlp_metadata->scale) {
         for (int i = 0; i < scale_count; ++i) {
           if (dlp_metadata->scale[i].sf) {
@@ -605,11 +601,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
           }
         }
         free(dlp_metadata->scale);
+        dlp_metadata->scale = nullptr;
       }
-      if (dlp_metadata->seq_vector) {
-        free(dlp_metadata->seq_vector);
-      }
-      free(dlp_metadata);
+      cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
   }
@@ -618,11 +612,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->eltwise = static_cast<dlp_post_op_eltwise *>(calloc(eltwise_count,
                             sizeof(dlp_post_op_eltwise)));
     if (!dlp_metadata->eltwise) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
+      cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
   }
@@ -631,38 +621,25 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->matrix_add = static_cast<dlp_post_op_matrix_add *>(calloc(
                                  matrix_add_count, sizeof(dlp_post_op_matrix_add)));
     if (!dlp_metadata->matrix_add) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
+      cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
     // Allocate sf structures for matrix_add operations
     for (int i = 0; i < matrix_add_count; ++i) {
       dlp_metadata->matrix_add[i].sf = static_cast<dlp_sf_t *>(calloc(1,
                                        sizeof(dlp_sf_t)));
-      dlp_metadata->matrix_add[i].sf->scale_factor_type = to_dlp_type(
-            data_type_t::f32);
       if (!dlp_metadata->matrix_add[i].sf) {
-        // Clean up partially allocated sf structures
+        // Clean up partially allocated sf structures, then full cleanup
         for (int j = 0; j < i; ++j) {
           free(dlp_metadata->matrix_add[j].sf);
         }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
         free(dlp_metadata->matrix_add);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
+        dlp_metadata->matrix_add = nullptr;
+        cleanup_dlp_post_op(dlp_metadata);
         return nullptr;
       }
+      dlp_metadata->matrix_add[i].sf->scale_factor_type = to_dlp_type(
+            data_type_t::f32);
     }
   }
 
@@ -670,12 +647,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->matrix_mul = static_cast<dlp_post_op_matrix_mul *>(calloc(
                                  matrix_mul_count, sizeof(dlp_post_op_matrix_mul)));
     if (!dlp_metadata->matrix_mul) {
-      if (dlp_metadata->bias) {
-        free(dlp_metadata->bias);
-      }
-      if (dlp_metadata->eltwise) {
-        free(dlp_metadata->eltwise);
-      }
+      // seq_vector not populated yet; free matrix_add[i].sf manually
       if (dlp_metadata->matrix_add) {
         for (int i = 0; i < matrix_add_count; ++i) {
           if (dlp_metadata->matrix_add[i].sf) {
@@ -683,28 +655,23 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
           }
         }
         free(dlp_metadata->matrix_add);
+        dlp_metadata->matrix_add = nullptr;
       }
-      free(dlp_metadata->seq_vector);
-      free(dlp_metadata);
+      cleanup_dlp_post_op(dlp_metadata);
       return nullptr;
     }
     // Allocate sf structures for matrix_mul operations
     for (int i = 0; i < matrix_mul_count; ++i) {
       dlp_metadata->matrix_mul[i].sf = static_cast<dlp_sf_t *>(calloc(1,
                                        sizeof(dlp_sf_t)));
-      dlp_metadata->matrix_mul[i].sf->scale_factor_type = to_dlp_type(
-            data_type_t::f32);
       if (!dlp_metadata->matrix_mul[i].sf) {
-        // Clean up partially allocated sf structures
+        // Clean up partially allocated sf structures, then full cleanup
         for (int j = 0; j < i; ++j) {
           free(dlp_metadata->matrix_mul[j].sf);
         }
-        if (dlp_metadata->bias) {
-          free(dlp_metadata->bias);
-        }
-        if (dlp_metadata->eltwise) {
-          free(dlp_metadata->eltwise);
-        }
+        free(dlp_metadata->matrix_mul);
+        dlp_metadata->matrix_mul = nullptr;
+        // seq_vector not populated yet; free matrix_add[i].sf manually
         if (dlp_metadata->matrix_add) {
           for (int k = 0; k < matrix_add_count; ++k) {
             if (dlp_metadata->matrix_add[k].sf) {
@@ -712,12 +679,13 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
             }
           }
           free(dlp_metadata->matrix_add);
+          dlp_metadata->matrix_add = nullptr;
         }
-        free(dlp_metadata->matrix_mul);
-        free(dlp_metadata->seq_vector);
-        free(dlp_metadata);
+        cleanup_dlp_post_op(dlp_metadata);
         return nullptr;
       }
+      dlp_metadata->matrix_mul[i].sf->scale_factor_type = to_dlp_type(
+            data_type_t::f32);
     }
   }
 

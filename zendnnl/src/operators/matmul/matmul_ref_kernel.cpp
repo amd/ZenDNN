@@ -850,6 +850,9 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
             float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
             float src_scale = read_and_cast<float>(quant_param.src_scale.buff,
                                                    quant_param.src_scale.dt, 0);
+            if (src_scale == 0.f) {
+              src_scale = 1.f;
+            }
             int32_t ip_s32 = static_cast<int32_t>(std::nearbyint(ip_f32 / src_scale)) +
                              src_zero_point;
             sum_s32 += ip_s32 *

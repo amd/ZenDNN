@@ -413,7 +413,7 @@ void matmul_onednn_kernel_t::execute_matmul(const
     float scale_val = (params.dst_quant.scale_dtype == data_type_t::bf16)
                       ? static_cast<float>(*static_cast<const bfloat16_t *>(params.dst_quant.scales))
                       : *static_cast<const float *>(params.dst_quant.scales);
-    dst_inv_scale = 1.0f / scale_val;
+    dst_inv_scale = (scale_val != 0.f) ? (1.0f / scale_val) : 0.f;
     dnnl::memory dst_scale_mem = dnnl::memory(dst_scale_desc, eng, &dst_inv_scale);
 
     matmul_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem});
