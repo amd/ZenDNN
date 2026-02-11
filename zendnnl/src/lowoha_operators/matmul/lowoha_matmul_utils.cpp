@@ -67,6 +67,134 @@ void apply_bmm_postop_offsets(matmul_params &params, int batch_idx,
   }
 }
 
+status_t validate_parallel_gemm_inputs(
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  const std::vector<matmul_params> &params) {
+
+  const size_t num_ops = M.size();
+
+  if (num_ops == 0) {
+    log_error("group_gemm parallel: num_ops is 0");
+    return status_t::failure;
+  }
+
+  // Validate all vector sizes match num_ops
+  if (layout.size() != num_ops || transA.size() != num_ops ||
+      transB.size() != num_ops || N.size() != num_ops ||
+      K.size() != num_ops || alpha.size() != num_ops ||
+      src.size() != num_ops || lda.size() != num_ops ||
+      weight.size() != num_ops || ldb.size() != num_ops ||
+      bias.size() != num_ops || beta.size() != num_ops ||
+      dst.size() != num_ops || ldc.size() != num_ops ||
+      is_weights_const.size() != num_ops || params.size() != num_ops) {
+    log_error("group_gemm parallel: vector size mismatch, num_ops=", num_ops);
+    return status_t::failure;
+  }
+
+  // Validate each operation's pointers and dimensions
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (!src[i] || !weight[i] || !dst[i]) {
+      log_error("group_gemm parallel: null pointer at operation ", i);
+      return status_t::failure;
+    }
+    if (M[i] <= 0 || N[i] <= 0 || K[i] <= 0) {
+      log_error("group_gemm parallel: invalid dimensions at operation ", i,
+                ": M=", M[i], ", N=", N[i], ", K=", K[i]);
+      return status_t::failure;
+    }
+  }
+
+  return status_t::success;
+}
+
+status_t validate_sequential_gemm_inputs(
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  const std::vector<matmul_params> &params) {
+
+  const size_t num_ops = M.size();
+
+  if (num_ops == 0) {
+    log_error("group_gemm sequential: num_ops is 0");
+    return status_t::failure;
+  }
+
+  // In sequential mode, src.size() must be 1 (single input chained through ops)
+  if (src.size() != 1) {
+    log_error("group_gemm sequential: src.size() must be 1, got ", src.size());
+    return status_t::failure;
+  }
+
+  // Validate all other vector sizes match num_ops
+  if (layout.size() != num_ops || transA.size() != num_ops ||
+      transB.size() != num_ops || N.size() != num_ops ||
+      K.size() != num_ops || alpha.size() != num_ops ||
+      lda.size() != num_ops || weight.size() != num_ops ||
+      ldb.size() != num_ops || bias.size() != num_ops ||
+      beta.size() != num_ops || dst.size() != num_ops ||
+      ldc.size() != num_ops || is_weights_const.size() != num_ops ||
+      params.size() != num_ops) {
+    log_error("group_gemm sequential: vector size mismatch, num_ops=", num_ops);
+    return status_t::failure;
+  }
+
+  // Validate src[0] is not null
+  if (!src[0]) {
+    log_error("group_gemm sequential: null src pointer");
+    return status_t::failure;
+  }
+
+  // Validate each operation's pointers and dimensions
+  for (size_t i = 0; i < num_ops; ++i) {
+    if (!weight[i] || !dst[i]) {
+      log_error("group_gemm sequential: null pointer at operation ", i);
+      return status_t::failure;
+    }
+    if (M[i] <= 0 || N[i] <= 0 || K[i] <= 0) {
+      log_error("group_gemm sequential: invalid dimensions at operation ", i,
+                ": M=", M[i], ", N=", N[i], ", K=", K[i]);
+      return status_t::failure;
+    }
+  }
+
+  // Check M is constant across all operations (same batch size)
+  for (size_t i = 1; i < num_ops; ++i) {
+    if (M[i] != M[0]) {
+      log_error("group_gemm sequential: M must be constant across layers, "
+                "M[0]=", M[0], ", M[", i, "]=", M[i]);
+      return status_t::failure;
+    }
+  }
+
+  // Check dimension compatibility: K[i] must equal N[i-1] for chaining
+  for (size_t i = 1; i < num_ops; ++i) {
+    if (K[i] != N[i - 1]) {
+      log_error("group_gemm sequential: dimension mismatch at layer ", i,
+                ": K[", i, "]=", K[i], " != N[", i - 1, "]=", N[i - 1]);
+      return status_t::failure;
+    }
+  }
+
+  return status_t::success;
+}
+
 status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const void *dst,
                                        const int M, const int N, const int K,

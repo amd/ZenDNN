@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_example.hpp"
+#include <vector>
 
 namespace zendnnl {
 namespace examples {
@@ -162,15 +163,15 @@ int run_lowoha_matmul_woq_bf16s4_test() {
     // ========== Execute LOWOHA WOQ Kernel ==========
     log_info("Executing LOWOHA WOQ kernel with per-group quantization...");
     status_t status = matmul_direct(
-                          'r',  // layout: row-major
-                          false, false,  // transA, transB
-                          M, N, K,
-                          1.0f, input.data(), K,
-                          weights.data(), N,
-                          nullptr,  // no bias
-                          0.0f, output.data(), N,
-                          true,  // is_weights_const
-                          batch_params, params);
+                        'r',  // layout: row-major
+                        false, false,  // transA, transB
+                        M, N, K,
+                        1.0f, input.data(), K,
+                        weights.data(), N,
+                        nullptr,  // no bias
+                        0.0f, output.data(), N,
+                        true,  // is_weights_const
+                        batch_params, params);
 
     if (status != status_t::success) {
       log_error("LOWOHA WOQ kernel execution failed.");
@@ -191,16 +192,16 @@ int run_lowoha_matmul_woq_bf16s4_test() {
 
 /**
  * @brief Test INT8 matmul with zero-point compensation caching
- * 
+ *
  * This example demonstrates:
  * 1. INT8 (u8 x s8 -> s32/f32) matmul with source zero-point
  * 2. Zero-point compensation caching (1D case is cached)
  * 3. Running multiple iterations to show cache hits
- * 
+ *
  * Environment variables to control caching:
  *   ZENDNNL_ZP_COMP_CACHE=1  (enable, default)
  *   ZENDNNL_ZP_COMP_CACHE=0  (disable)
- * 
+ *
  */
 int run_lowoha_matmul_int8_caching_test() {
   try {
@@ -219,11 +220,12 @@ int run_lowoha_matmul_int8_caching_test() {
     log_info("");
 
     // ========== Check Cache Configuration ==========
-    const char* zp_cache_env = std::getenv("ZENDNNL_ZP_COMP_CACHE");
+    const char *zp_cache_env = std::getenv("ZENDNNL_ZP_COMP_CACHE");
     bool zp_cache_disabled = !zp_cache_env || std::atoi(zp_cache_env) != 1;
-    
+
     log_info("Cache configuration:");
-    log_info("  ZP compensation cache: ", (zp_cache_disabled ? "DISABLED" : "ENABLED"));
+    log_info("  ZP compensation cache: ",
+             (zp_cache_disabled ? "DISABLED" : "ENABLED"));
     log_info("");
 
     // ========== Create INT8 Weights (s8) ==========
@@ -235,20 +237,20 @@ int run_lowoha_matmul_int8_caching_test() {
     // ========== Create Quantization Parameters ==========
     // Source scale: per-tensor
     float src_scale_val = 0.05f;  // Typical scale for activations
-    
+
     // Weight scale: per-channel (one scale per output column)
     std::vector<float> wei_scale(N);
     for (int n = 0; n < N; ++n) {
       wei_scale[n] = 0.01f + 0.0001f * (n % 100);  // Small variations
     }
-    
+
     // Destination scale: per-tensor
     float dst_scale_val = 0.1f;
-    
+
     // Source zero-point (asymmetric quantization for activations)
     // This triggers 1D compensation which IS cached
     int32_t src_zp_val = 128;  // Typical for u8 with range [0, 255] centered
-    
+
     // Weight zero-point = 0 (symmetric quantization for weights)
     // This ensures we get 1D compensation (cacheable)
     // If wei_zp != 0, we'd get 2D compensation (not cacheable)
@@ -258,7 +260,8 @@ int run_lowoha_matmul_int8_caching_test() {
     log_info("  src_scale = ", src_scale_val);
     log_info("  wei_scale = per-channel (", N, " values)");
     log_info("  dst_scale = ", dst_scale_val);
-    log_info("  src_zp = ", src_zp_val, " (asymmetric -> 1D compensation, CACHEABLE)");
+    log_info("  src_zp = ", src_zp_val,
+             " (asymmetric -> 1D compensation, CACHEABLE)");
     log_info("  wei_zp = ", wei_zp_val, " (symmetric -> no 2D term)");
     log_info("");
 
@@ -355,6 +358,222 @@ int run_lowoha_matmul_int8_caching_test() {
     log_info("- Subsequent iterations reused the cached compensation");
     log_info("- Different input data each iteration proved cache works correctly");
 
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+int group_gemm_f32_kernel_example() {
+  testlog_info("**group_gemm f32 kernel example with multiple operations.");
+
+  try {
+
+    // Define dimensions for 3 different GEMM operations
+    const int NUM_OPS = 3;
+
+    // Operation 0: 64x128 = 64x32 * 32x128
+    // Operation 1: 128x64 = 128x64 * 64x64
+    // Operation 2: 32x256 = 32x128 * 128x256
+    std::vector<int> Ms = {64, 128, 32};
+    std::vector<int> Ns = {128, 64, 256};
+    std::vector<int> Ks = {32, 64, 128};
+
+    // Allocate memory for all matrices
+    std::vector<std::vector<float>> src_buffers(NUM_OPS);
+    std::vector<std::vector<float>> weight_buffers(NUM_OPS);
+    std::vector<std::vector<float>> dst_buffers(NUM_OPS);
+
+    for (int i = 0; i < NUM_OPS; ++i) {
+      src_buffers[i].resize(Ms[i] * Ks[i], 1.0f);
+      weight_buffers[i].resize(Ks[i] * Ns[i], 1.0f);
+      dst_buffers[i].resize(Ms[i] * Ns[i], 0.0f);
+    }
+
+    // Prepare vectors for group_gemm API
+    std::vector<char> layouts(NUM_OPS, 'r');  // Row-major layout
+    std::vector<bool> transA(NUM_OPS, false);
+    std::vector<bool> transB(NUM_OPS, false);
+    std::vector<float> alphas(NUM_OPS, 1.0f);
+    std::vector<float> betas(NUM_OPS, 0.0f);
+    std::vector<bool> is_weights_const(NUM_OPS, false);
+
+    // Set up leading dimensions (for row-major: lda=K, ldb=N, ldc=N)
+    std::vector<int> ldas = Ks;
+    std::vector<int> ldbs = Ns;
+    std::vector<int> ldcs = Ns;
+
+    // Set up pointers
+    std::vector<const void *> src_ptrs(NUM_OPS);
+    std::vector<const void *> weight_ptrs(NUM_OPS);
+    std::vector<const void *> bias_ptrs(NUM_OPS, nullptr); // No bias
+    std::vector<void *> dst_ptrs(NUM_OPS);
+
+    for (int i = 0; i < NUM_OPS; ++i) {
+      src_ptrs[i] = src_buffers[i].data();
+      weight_ptrs[i] = weight_buffers[i].data();
+      dst_ptrs[i] = dst_buffers[i].data();
+    }
+
+    // Set up matmul params with f32 data types
+    std::vector<matmul_params> params(NUM_OPS);
+    for (int i = 0; i < NUM_OPS; ++i) {
+      params[i].dtypes.src = data_type_t::f32;
+      params[i].dtypes.wei = data_type_t::f32;
+      params[i].dtypes.dst = data_type_t::f32;
+      params[i].dtypes.compute = data_type_t::f32;
+      params[i].mem_format_a = 'n';
+      params[i].mem_format_b = 'n';
+    }
+
+    // Execute group_gemm
+    status_t status = group_gemm_direct(
+                        layouts, transA, transB,
+                        Ms, Ns, Ks, alphas,
+                        src_ptrs, ldas,
+                        weight_ptrs, ldbs,
+                        bias_ptrs, betas,
+                        dst_ptrs, ldcs,
+                        is_weights_const,
+                        params);
+
+    if (status == status_t::success) {
+      testlog_info("group_gemm execution successful for ", NUM_OPS, " operations.");
+
+      // Verify results: C = A * B where A is all 1s and B is all 1s
+      // Each element of C should be K (sum of K ones)
+      bool results_valid = true;
+      for (int i = 0; i < NUM_OPS && results_valid; ++i) {
+        float expected = static_cast<float>(Ks[i]);
+        for (int j = 0; j < Ms[i] * Ns[i] && results_valid; ++j) {
+          if (std::abs(dst_buffers[i][j] - expected) > 1e-3f) {
+            testlog_error("Verification failed for operation ", i,
+                          " at index ", j, ": expected ", expected,
+                          " got ", dst_buffers[i][j]);
+            results_valid = false;
+          }
+        }
+      }
+
+      if (results_valid) {
+        testlog_info("group_gemm results verified successfully.");
+      }
+      else {
+        return NOT_OK;
+      }
+    }
+    else {
+      testlog_error("group_gemm execution failed.");
+      return NOT_OK;
+    }
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+
+  return OK;
+}
+
+// This example demonstrates the sequential (linear) GEMM mode of group_gemm_direct.
+// When src.size() == 1, operations are chained: dst[i-1] feeds as input to op[i].
+// This simulates a multi-layer perceptron: Input -> Linear1 -> Linear2 -> Linear3
+//
+// Dimensions:
+//   Layer 1: [M, K0] x [K0, N0] -> [M, N0]   (Input x W0 -> hidden1)
+//   Layer 2: [M, N0] x [N0, N1] -> [M, N1]   (hidden1 x W1 -> hidden2)
+//   Layer 3: [M, N1] x [N1, N2] -> [M, N2]   (hidden2 x W2 -> output)
+//
+// Note: K[i] must equal N[i-1] for chaining to work correctly.
+int sequential_gemm_f32_kernel_example() {
+  testlog_info("**sequential GEMM f32 kernel example (chained operations).");
+
+  try {
+    const int NUM_OPS = 3;
+    const int M = 64;    // Batch size (constant across layers)
+
+    // Layer dimensions: Input(M,128) -> Hidden1(M,256) -> Hidden2(M,128) -> Output(M,64)
+    // K[0]=128, N[0]=256 (Layer 1)
+    // K[1]=256, N[1]=128 (Layer 2: K[1] == N[0])
+    // K[2]=128, N[2]=64  (Layer 3: K[2] == N[1])
+    std::vector<int> Ms = {M, M, M};
+    std::vector<int> Ks = {128, 256, 128};
+    std::vector<int> Ns = {256, 128, 64};
+
+    // Allocate input buffer (only one, since src.size() == 1 triggers sequential mode)
+    std::vector<float> input_buffer(M * Ks[0], 1.0f);
+
+    // Allocate weight buffers for each layer
+    std::vector<std::vector<float>> weight_buffers(NUM_OPS);
+    for (int i = 0; i < NUM_OPS; ++i) {
+      weight_buffers[i].resize(Ks[i] * Ns[i], 0.5f);
+    }
+
+    // Allocate output buffers for each layer
+    std::vector<std::vector<float>> dst_buffers(NUM_OPS);
+    for (int i = 0; i < NUM_OPS; ++i) {
+      dst_buffers[i].resize(Ms[i] * Ns[i], 0.0f);
+    }
+
+    // Prepare API vectors
+    std::vector<char> layouts(NUM_OPS, 'r');
+    std::vector<bool> transA(NUM_OPS, false);
+    std::vector<bool> transB(NUM_OPS, false);
+    std::vector<float> alphas(NUM_OPS, 1.0f);
+    std::vector<float> betas(NUM_OPS, 0.0f);
+    std::vector<bool> is_weights_const(NUM_OPS, false);
+
+    // Leading dimensions (row-major, no transpose)
+    std::vector<int> ldas = Ks;
+    std::vector<int> ldbs = Ns;
+    std::vector<int> ldcs = Ns;
+
+    // src has only 1 entry -> triggers sequential GEMM mode
+    std::vector<const void *> src_ptrs = {input_buffer.data()};
+
+    // Weight and bias pointers for each layer
+    std::vector<const void *> weight_ptrs(NUM_OPS);
+    std::vector<const void *> bias_ptrs(NUM_OPS, nullptr);
+    std::vector<void *> dst_ptrs(NUM_OPS);
+
+    for (int i = 0; i < NUM_OPS; ++i) {
+      weight_ptrs[i] = weight_buffers[i].data();
+      dst_ptrs[i] = dst_buffers[i].data();
+    }
+
+    // Configure matmul params with f32 data types for each layer
+    std::vector<matmul_params> params(NUM_OPS);
+    for (int i = 0; i < NUM_OPS; ++i) {
+      params[i].dtypes.src = data_type_t::f32;
+      params[i].dtypes.wei = data_type_t::f32;
+      params[i].dtypes.dst = data_type_t::f32;
+      params[i].dtypes.compute = data_type_t::f32;
+      params[i].mem_format_a = 'n';
+      params[i].mem_format_b = 'n';
+    }
+
+    // Execute sequential MLP via group_gemm_direct
+    status_t status = group_gemm_direct(
+                        layouts, transA, transB,
+                        Ms, Ns, Ks, alphas,
+                        src_ptrs, ldas,
+                        weight_ptrs, ldbs,
+                        bias_ptrs, betas,
+                        dst_ptrs, ldcs,
+                        is_weights_const,
+                        params);
+
+    if (status == status_t::success) {
+      testlog_info("Sequential GEMM execution successful for ", NUM_OPS, " layers.");
+    }
+    else {
+      testlog_error("Sequential GEMM execution failed.");
+      return NOT_OK;
+    }
   }
   catch (const exception_t &ex) {
     std::cout << ex.what() << std::endl;

@@ -162,6 +162,49 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
                                        const bool is_weights_const);
 
 /**
+ * @brief Validate inputs for parallel GEMM mode
+ *
+ * Validates that all input vectors have consistent sizes (num_ops),
+ * non-null pointers, and positive dimensions.
+ *
+ * @return status_t::success if all validations pass, status_t::failure otherwise
+ */
+status_t validate_parallel_gemm_inputs(
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  const std::vector<matmul_params> &params);
+
+/**
+ * @brief Validate dimension compatibility for sequential GEMM mode
+ *
+ * In sequential mode, the output of op[i] feeds as input to op[i+1].
+ * This requires: K[i+1] == N[i], M is constant across all ops,
+ * and src.size() == 1. All other vectors must have size num_ops.
+ *
+ * @return status_t::success if dimensions are compatible, status_t::failure otherwise
+ */
+status_t validate_sequential_gemm_inputs(
+  const std::vector<char> &layout,
+  const std::vector<bool> &transA, const std::vector<bool> &transB,
+  const std::vector<int> &M, const std::vector<int> &N,
+  const std::vector<int> &K,
+  const std::vector<float> &alpha,
+  const std::vector<const void *> &src, const std::vector<int> &lda,
+  const std::vector<const void *> &weight, const std::vector<int> &ldb,
+  const std::vector<const void *> &bias, const std::vector<float> &beta,
+  const std::vector<void *> &dst, const std::vector<int> &ldc,
+  const std::vector<bool> &is_weights_const,
+  const std::vector<matmul_params> &params);
+
+/**
  * @brief Convert post-op names to a comma-separated string.
  *
  * This function takes a matmul_params structure and converts all post-op types

@@ -71,6 +71,31 @@ int run_lowoha_matmul_woq_bf16s4_test();
  */
 int run_lowoha_matmul_int8_caching_test();
 
+/** @fn group_gemm_f32_kernel_example
+ *  @brief Demonstrates group GEMM API for multiple independent matmul operations.
+ *
+ *  group_gemm executes multiple independent matrix multiplications in sequence.
+ *  Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i]
+ *
+ *  This example demonstrates how to use the group_gemm API with multiple
+ *  f32 matmul operations of varying dimensions.
+ */
+int group_gemm_f32_kernel_example();
+
+/** @fn sequential_gemm_f32_kernel_example
+ *  @brief Demonstrates sequential GEMM using group_gemm_direct API.
+ *
+ *  Sequential GEMM chains multiple matmul operations where the output of each
+ *  operation feeds as input to the next, simulating a multi-layer perceptron.
+ *  Triggered by passing src with size 1 (single input).
+ *
+ *  Chain: Input -> Linear1 -> Linear2 -> Linear3 -> Output
+ *
+ *  This example demonstrates the sequential execution mode where each
+ *  operation uses all available threads for maximum throughput.
+ */
+int sequential_gemm_f32_kernel_example();
+
 } // examples
 } // zendnnl
 

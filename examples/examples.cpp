@@ -69,6 +69,16 @@ int main() {
     run_lowoha_matmul_woq_bf16s4_test();
     run_lowoha_matmul_int8_caching_test();
 
+    /** Group GEMM operator functionality examples.
+     *  Demonstrates group GEMM API for multiple independent matmul operations.
+     */
+    group_gemm_f32_kernel_example();
+
+    /** Sequential GEMM operator functionality examples.
+     *  Demonstrates sequential (linear) GEMM using group_gemm_direct API.
+     */
+    sequential_gemm_f32_kernel_example();
+
     /** LOWOHA Conv2D operator functionality examples.
      *  Demonstrates 2D convolution with low-overhead API including:
      *  - Basic FP32 and BF16 convolutions

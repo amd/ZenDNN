@@ -65,7 +65,7 @@ struct matmul_post_op {
 struct matmul_quantization_params_t {
   /**
    * @brief Individual quantization parameter (scale or zero-point)
-   * 
+   *
    * Dimensions determine quantization granularity for weight matrix [K, N]:
    *   - Per-tensor:  dims = {} or {1}     → single scale for all weights
    *   - Per-channel: dims = {1, N}        → one scale per output channel
@@ -104,7 +104,7 @@ struct matmul_quantization_params_t {
  * for source, weight, and destination tensors. The batch strides specify the
  * byte offset between consecutive batches in memory.
  */
- struct matmul_batch_params_t {
+struct matmul_batch_params_t {
   int Batch_A = 1;              /**< Batch size for source tensor. */
   int Batch_B = 1;              /**< Batch size for weight tensor. */
   size_t batch_stride_src =
@@ -127,19 +127,20 @@ struct matmul_quantization_params_t {
  * @brief Main parameter structure for LOWOHA matrix multiplication
  */
 struct matmul_params {
-  matmul_data_types dtypes;                              ///< Data types for operands
-  std::vector<matmul_post_op> postop_;                    ///< Post-operation chain
-  matmul_quantization_params_t quant_params;     ///< Quantization parameters
-  char mem_format_a;                              ///< Memory format for matrix A
-  char mem_format_b;                              ///< Memory format for matrix B
-  matmul_algo_t lowoha_algo;                      ///< Selected algorithm
-  uint64_t num_threads;                            ///< Number of threads
+  matmul_data_types dtypes;                    ///< Data types for operands
+  std::vector<matmul_post_op> postop_;         ///< Post-operation chain
+  matmul_quantization_params_t quant_params;   ///< Quantization parameters
+  char mem_format_a;                           ///< Memory format for matrix A
+  char mem_format_b;                           ///< Memory format for matrix B
+  matmul_algo_t lowoha_algo;                   ///< Selected algorithm
+  uint64_t num_threads;                        ///< Number of threads
   std::string plugin_op;                       ///< Plugin op name
   /**
    * @brief Default constructor for matmul_params
    */
   matmul_params() : dtypes(), postop_(), quant_params(), mem_format_a('n'),
-    mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0), plugin_op("") {}
+    mem_format_b('n'), lowoha_algo(matmul_algo_t::none), num_threads(0),
+    plugin_op("") {}
 };
 
 } // namespace matmul

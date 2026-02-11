@@ -81,7 +81,7 @@ TEST_P(TestMatmul,F32_F32) {
 
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -180,7 +180,7 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
     // scale=per-group, zp=per-group
     // Randomly select one of the valid group sizes (safe here since we checked has_valid_group_size)
     uint64_t valid_group_size = valid_group_sizes[rand() %
-                                       valid_group_sizes.size()];
+                                valid_group_sizes.size()];
     group_size = valid_group_size;
     num_groups = k / group_size;
     scale_size = {num_groups, n};
@@ -222,7 +222,7 @@ TEST_P(TestMatmul, WOQ_BF16_S4) {
   // Binary tensor for post-ops if needed
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
 
   auto output_dtype       = rand() % 2 == 0 ? data_type_t::bf16 :
                             data_type_t::f32;
@@ -266,7 +266,7 @@ TEST_P(TestMatmul, BF16_F32) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -305,7 +305,7 @@ TEST_P(TestMatmul, BF16_BF16) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -361,7 +361,7 @@ TEST_P(TestMatmul,F32_F32_Stride) {
                             data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -423,7 +423,7 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::f32, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -486,7 +486,7 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
                             stride_dst, data_type_t::bf16, 2.0);
   auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
@@ -530,17 +530,17 @@ TEST_P(TestMatmul, INT8) {
                             data_type_t::f32, 0.3);
   auto dst_scale          = !(output_dtype == data_type_t::f32 ||
                               output_dtype == data_type_t::bf16) ? tensor_factory.uniform_dist_tensor({1, 1},
-                                  data_type_t::f32, 2) : tensor_t();
+                                data_type_t::f32, 2) : tensor_t();
 
   auto src_zp             = (source_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 16) : tensor_t();
+                              data_type_t::s32, 16) : tensor_t();
   auto wei_zp             = (weight_granularity == quant_granularity_t::tensor) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 16) : tensor_t();
+                              data_type_t::s32, 16) : tensor_t();
   auto dst_zp             = (output_dtype == data_type_t::u8) ?
                             tensor_factory.uniform_tensor({1, 1},
-                                data_type_t::s32, 53) : tensor_t();
+                              data_type_t::s32, 53) : tensor_t();
   auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
                             data_type_t::s8, 25.0, transB, wei_scale, wei_zp);
   auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
@@ -549,7 +549,7 @@ TEST_P(TestMatmul, INT8) {
                             == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
   auto binary_tensor      = is_binary_postop(po_type) ?
                             tensor_factory.uniform_dist_tensor({m, n},
-                                data_type_t::f32, 2.0) : tensor_t();
+                              data_type_t::f32, 2.0) : tensor_t();
   auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
                             output_dtype, 2.0, false, dst_scale, dst_zp);
   auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
@@ -680,4 +680,354 @@ TEST_P(TestMatmul, INT8) {
  *  @brief Triggers Matmul parameterized test suite
  */
 INSTANTIATE_TEST_SUITE_P(Matmul, TestMatmul,
+                         ::testing::ValuesIn(matmul_test));
+
+/** @brief TestGroupGemm is a test class for group_gemm_direct API */
+class TestGroupGemm : public ::testing::TestWithParam<MatmulType> {
+ protected:
+  virtual void SetUp() {
+    MatmulType params = GetParam();
+    srand(static_cast<unsigned int>(seed));
+    m            = params.matmul_m;
+    k            = params.matmul_k;
+    n            = params.matmul_n;
+    transA       = params.transA;
+    transB       = params.transB;
+    alpha        = params.alpha;
+    beta         = params.beta;
+    algo         = params.algo;
+    num_threads  = params.num_threads;
+    omp_set_num_threads(num_threads);
+    // Generate random number of operations (2-5)
+    num_ops = 2 + (rand() % 4);
+    log_info("GroupGemm Test: m=", m, " k=", k, " n=", n,
+             " transA=", transA, " transB=", transB,
+             " alpha=", alpha, " beta=", beta,
+             " num_ops=", num_ops, " num_threads=", num_threads);
+  }
+
+  virtual void TearDown() {}
+
+  uint64_t m, k, n;
+  bool transA, transB;
+  tensor_factory_t tensor_factory{};
+  float alpha, beta;
+  matmul_algo_t algo;
+  uint32_t num_threads;
+  size_t num_ops;
+};
+
+/** @fn TEST_P
+ *  @param TestGroupGemm parameterized test class
+ *  @param F32_F32 user-defined name of test
+ *  @brief Test to validate group_gemm_direct F32 kernel support
+ */
+TEST_P(TestGroupGemm, F32_F32) {
+  // Create vectors for group_gemm_direct parameters
+  std::vector<char> layouts(num_ops, 'r');
+  std::vector<bool> transAs(num_ops, transA);
+  std::vector<bool> transBs(num_ops, transB);
+  std::vector<int> Ms(num_ops, static_cast<int>(m));
+  std::vector<int> Ns(num_ops, static_cast<int>(n));
+  std::vector<int> Ks(num_ops, static_cast<int>(k));
+  std::vector<float> alphas(num_ops, alpha);
+  std::vector<float> betas(num_ops, beta);
+  std::vector<int> ldas(num_ops);
+  std::vector<int> ldbs(num_ops);
+  std::vector<int> ldcs(num_ops);
+  std::vector<bool> is_weights_consts(num_ops, false);
+
+  // Create tensors for each operation
+  std::vector<tensor_t> input_tensors(num_ops);
+  std::vector<tensor_t> weight_tensors(num_ops);
+  std::vector<tensor_t> bias_tensors(num_ops);
+  std::vector<tensor_t> output_tensors(num_ops);
+  std::vector<tensor_t> output_tensors_ref(num_ops);
+
+  std::vector<const void *> srcs(num_ops);
+  std::vector<const void *> weights(num_ops);
+  std::vector<const void *> biases(num_ops);
+  std::vector<void *> dsts(num_ops);
+  std::vector<matmul_params> params(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    input_tensors[i] = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::f32, 2.0, transA);
+    weight_tensors[i] = tensor_factory.uniform_dist_tensor({k, n},
+                        data_type_t::f32, 2.0, transB);
+    bias_tensors[i] = tensor_factory.uniform_dist_tensor({1, n},
+                      data_type_t::f32, 2.0);
+    output_tensors[i] = tensor_factory.uniform_dist_tensor({m, n},
+                        data_type_t::f32, 2.0);
+    output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f32, 2.0);
+
+    // Set leading dimensions
+    ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
+    ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
+    ldcs[i] = static_cast<int>(n);
+
+    // Set pointers
+    srcs[i] = input_tensors[i].get_raw_handle_unsafe();
+    weights[i] = weight_tensors[i].get_raw_handle_unsafe();
+    biases[i] = bias_tensors[i].get_raw_handle_unsafe();
+    dsts[i] = output_tensors[i].get_raw_handle_unsafe();
+
+    // Set matmul params
+    params[i].dtypes.src = data_type_t::f32;
+    params[i].dtypes.wei = data_type_t::f32;
+    params[i].dtypes.dst = data_type_t::f32;
+    params[i].dtypes.bias = data_type_t::f32;
+    params[i].num_threads = num_threads;
+  }
+
+  // Execute group_gemm_direct
+  status_t status = group_gemm_direct(
+                      layouts, transAs, transBs,
+                      Ms, Ns, Ks, alphas,
+                      srcs, ldas,
+                      weights, ldbs,
+                      biases, betas,
+                      dsts, ldcs,
+                      is_weights_consts,
+                      params);
+
+  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  post_op_type_t po_type = post_op_type_t::none;
+  bool use_LOWOHA = false;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    tensor_t binary_tensor = tensor_factory.zero_tensor({1, 1}, data_type_t::f32);
+    ref_status = matmul_forced_ref_kernel_test(input_tensors[i],
+                 weight_tensors[i], bias_tensors[i], output_tensors_ref[i],
+                 po_type, binary_tensor, use_LOWOHA, algo, alphas[i], betas[i]);
+  }
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  // Compare outputs
+  if (is_test_successful) {
+    for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
+      compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
+                               m, n, k, rtol_f32, epsilon_f32,
+                               is_test_successful, false, alpha);
+    }
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupGemm parameterized test class
+ *  @param BF16_F32 user-defined name of test
+ *  @brief Test to validate group_gemm_direct BF16 input F32 output kernel support
+ */
+TEST_P(TestGroupGemm, BF16_F32) {
+  // Create vectors for group_gemm_direct parameters
+  std::vector<char> layouts(num_ops, 'r');
+  std::vector<bool> transAs(num_ops, transA);
+  std::vector<bool> transBs(num_ops, transB);
+  std::vector<int> Ms(num_ops, static_cast<int>(m));
+  std::vector<int> Ns(num_ops, static_cast<int>(n));
+  std::vector<int> Ks(num_ops, static_cast<int>(k));
+  std::vector<float> alphas(num_ops, alpha);
+  std::vector<float> betas(num_ops, beta);
+  std::vector<int> ldas(num_ops);
+  std::vector<int> ldbs(num_ops);
+  std::vector<int> ldcs(num_ops);
+  std::vector<bool> is_weights_consts(num_ops, false);
+
+  // Create tensors for each operation
+  std::vector<tensor_t> input_tensors(num_ops);
+  std::vector<tensor_t> weight_tensors(num_ops);
+  std::vector<tensor_t> bias_tensors(num_ops);
+  std::vector<tensor_t> output_tensors(num_ops);
+  std::vector<tensor_t> output_tensors_ref(num_ops);
+
+  std::vector<const void *> srcs(num_ops);
+  std::vector<const void *> weights_vec(num_ops);
+  std::vector<const void *> biases(num_ops);
+  std::vector<void *> dsts(num_ops);
+  std::vector<matmul_params> params(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    input_tensors[i] = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::bf16, 2.0, transA);
+    weight_tensors[i] = tensor_factory.uniform_dist_tensor({k, n},
+                        data_type_t::bf16, 2.0, transB);
+    bias_tensors[i] = tensor_factory.uniform_dist_tensor({1, n},
+                      data_type_t::f32, 2.0);
+    output_tensors[i] = tensor_factory.uniform_dist_tensor({m, n},
+                        data_type_t::f32, 2.0);
+    output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f32, 2.0);
+
+    // Set leading dimensions
+    ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
+    ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
+    ldcs[i] = static_cast<int>(n);
+
+    // Set pointers
+    srcs[i] = input_tensors[i].get_raw_handle_unsafe();
+    weights_vec[i] = weight_tensors[i].get_raw_handle_unsafe();
+    biases[i] = bias_tensors[i].get_raw_handle_unsafe();
+    dsts[i] = output_tensors[i].get_raw_handle_unsafe();
+
+    // Set matmul params
+    params[i].dtypes.src = data_type_t::bf16;
+    params[i].dtypes.wei = data_type_t::bf16;
+    params[i].dtypes.dst = data_type_t::f32;
+    params[i].dtypes.bias = data_type_t::f32;
+    params[i].num_threads = num_threads;
+  }
+
+  // Execute group_gemm_direct
+  status_t status = group_gemm_direct(
+                      layouts, transAs, transBs,
+                      Ms, Ns, Ks, alphas,
+                      srcs, ldas,
+                      weights_vec, ldbs,
+                      biases, betas,
+                      dsts, ldcs,
+                      is_weights_consts,
+                      params);
+
+  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  post_op_type_t po_type = post_op_type_t::none;
+  bool use_LOWOHA = false;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    tensor_t binary_tensor = tensor_factory.zero_tensor({1, 1}, data_type_t::f32);
+    ref_status = matmul_forced_ref_kernel_test(input_tensors[i],
+                 weight_tensors[i], bias_tensors[i], output_tensors_ref[i],
+                 po_type, binary_tensor, use_LOWOHA, algo, alphas[i], betas[i]);
+  }
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  // Compare outputs
+  if (is_test_successful) {
+    for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
+      compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
+                               m, n, k, rtol_f32, epsilon_f32,
+                               is_test_successful, false, alpha);
+    }
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestGroupGemm parameterized test class
+ *  @param BF16_BF16 user-defined name of test
+ *  @brief Test to validate group_gemm_direct BF16 input BF16 output kernel support
+ */
+TEST_P(TestGroupGemm, BF16_BF16) {
+  // Create vectors for group_gemm_direct parameters
+  std::vector<char> layouts(num_ops, 'r');
+  std::vector<bool> transAs(num_ops, transA);
+  std::vector<bool> transBs(num_ops, transB);
+  std::vector<int> Ms(num_ops, static_cast<int>(m));
+  std::vector<int> Ns(num_ops, static_cast<int>(n));
+  std::vector<int> Ks(num_ops, static_cast<int>(k));
+  std::vector<float> alphas(num_ops, alpha);
+  std::vector<float> betas(num_ops, beta);
+  std::vector<int> ldas(num_ops);
+  std::vector<int> ldbs(num_ops);
+  std::vector<int> ldcs(num_ops);
+  std::vector<bool> is_weights_consts(num_ops, false);
+
+  // Create tensors for each operation
+  std::vector<tensor_t> input_tensors(num_ops);
+  std::vector<tensor_t> weight_tensors(num_ops);
+  std::vector<tensor_t> bias_tensors(num_ops);
+  std::vector<tensor_t> output_tensors(num_ops);
+  std::vector<tensor_t> output_tensors_ref(num_ops);
+
+  std::vector<const void *> srcs(num_ops);
+  std::vector<const void *> weights_vec(num_ops);
+  std::vector<const void *> biases(num_ops);
+  std::vector<void *> dsts(num_ops);
+  std::vector<matmul_params> params(num_ops);
+
+  for (size_t i = 0; i < num_ops; ++i) {
+    input_tensors[i] = tensor_factory.uniform_dist_tensor({m, k},
+                       data_type_t::bf16, 2.0, transA);
+    weight_tensors[i] = tensor_factory.uniform_dist_tensor({k, n},
+                        data_type_t::bf16, 2.0, transB);
+    bias_tensors[i] = tensor_factory.uniform_dist_tensor({1, n},
+                      data_type_t::bf16, 2.0);
+    output_tensors[i] = tensor_factory.uniform_dist_tensor({m, n},
+                        data_type_t::bf16, 2.0);
+    output_tensors_ref[i] = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::bf16, 2.0);
+
+    // Set leading dimensions
+    ldas[i] = transA ? static_cast<int>(m) : static_cast<int>(k);
+    ldbs[i] = transB ? static_cast<int>(k) : static_cast<int>(n);
+    ldcs[i] = static_cast<int>(n);
+
+    // Set pointers
+    srcs[i] = input_tensors[i].get_raw_handle_unsafe();
+    weights_vec[i] = weight_tensors[i].get_raw_handle_unsafe();
+    if (algo == matmul_algo_t::libxsmm ||
+        algo == matmul_algo_t::libxsmm_blocked) {
+      biases[i] = nullptr;
+    }
+    else {
+      biases[i] = bias_tensors[i].get_raw_handle_unsafe();
+    }
+    dsts[i] = output_tensors[i].get_raw_handle_unsafe();
+
+    // Set matmul params
+    params[i].dtypes.src = data_type_t::bf16;
+    params[i].dtypes.wei = data_type_t::bf16;
+    params[i].dtypes.dst = data_type_t::bf16;
+    params[i].dtypes.bias = data_type_t::bf16;
+    params[i].num_threads = num_threads;
+  }
+
+  // Execute group_gemm_direct
+  status_t status = group_gemm_direct(
+                      layouts, transAs, transBs,
+                      Ms, Ns, Ks, alphas,
+                      srcs, ldas,
+                      weights_vec, ldbs,
+                      biases, betas,
+                      dsts, ldcs,
+                      is_weights_consts,
+                      params);
+
+  // Execute reference (individual matmul_forced_ref_kernel_test calls)
+  post_op_type_t po_type = post_op_type_t::none;
+  bool use_LOWOHA = false;
+  status_t ref_status = status_t::success;
+  for (size_t i = 0; i < num_ops && ref_status == status_t::success; ++i) {
+    tensor_t binary_tensor = tensor_factory.zero_tensor({1, 1}, data_type_t::bf16);
+    ref_status = matmul_forced_ref_kernel_test(input_tensors[i],
+                 weight_tensors[i], bias_tensors[i], output_tensors_ref[i],
+                 po_type, binary_tensor, use_LOWOHA, algo, alphas[i], betas[i]);
+  }
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  // Compare outputs
+  if (is_test_successful) {
+    for (size_t i = 0; i < num_ops && is_test_successful; ++i) {
+      compare_tensor_2D_matrix(output_tensors[i], output_tensors_ref[i],
+                               m, n, k, rtol_bf16, epsilon_bf16,
+                               is_test_successful, false, alpha);
+    }
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn INSTANTIATE_TEST_SUITE_P
+ *  @brief Triggers GroupGemm parameterized test suite
+ */
+INSTANTIATE_TEST_SUITE_P(GroupGemm, TestGroupGemm,
                          ::testing::ValuesIn(matmul_test));

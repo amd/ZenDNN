@@ -20,6 +20,7 @@
 #include <omp.h>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include "lowoha_operators/matmul/lowoha_common.hpp"
 #include "operators/matmul/matmul_context.hpp"
@@ -171,6 +172,51 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
                        const int lda, const void *weight, const int ldb, const void *bias,
                        const float beta, void *dst, const int ldc, const bool is_weights_const,
                        matmul_batch_params_t batch_params, matmul_params params);
+
+/**
+ * @brief Execute group GEMM operations where each operation calls matmul_direct
+ *
+ * This function performs multiple independent matrix multiplications in sequence.
+ * Each operation computes: C[i] = alpha[i] * op(A[i]) * op(B[i]) + beta[i] * C[i] + fused post-ops
+ *
+ * @param layout           Vector of memory layouts ('r' for row-major, 'c' for column-major)
+ * @param transA           Vector of transpose flags for matrix A
+ * @param transB           Vector of transpose flags for matrix B
+ * @param M                Vector of row counts for A and C
+ * @param N                Vector of column counts for B and C
+ * @param K                Vector of column counts for A and row counts for B
+ * @param alpha            Vector of scaling factors for A*B
+ * @param src              Vector of pointers to matrix A data
+ * @param lda              Vector of leading dimensions for A
+ * @param weight           Vector of pointers to matrix B data
+ * @param ldb              Vector of leading dimensions for B
+ * @param bias             Vector of optional bias pointers (can contain nullptr)
+ * @param beta             Vector of scaling factors for existing C values
+ * @param dst              Vector of pointers to matrix C data
+ * @param ldc              Vector of leading dimensions for C
+ * @param is_weights_const Vector of flags indicating if weights are constant (enables caching)
+ * @param batch_params     Vector of batch parameters including batch sizes and strides
+ * @param params           Vector of additional parameters including post-ops and data types
+ *
+ * @return status_t::success if all operations succeed, status_t::failure if any operation fails
+ */
+status_t group_gemm_direct(const std::vector<char> &layout,
+                           const std::vector<bool> &transA,
+                           const std::vector<bool> &transB,
+                           const std::vector<int> &M,
+                           const std::vector<int> &N,
+                           const std::vector<int> &K,
+                           const std::vector<float> &alpha,
+                           const std::vector<const void *> &src,
+                           const std::vector<int> &lda,
+                           const std::vector<const void *> &weight,
+                           const std::vector<int> &ldb,
+                           const std::vector<const void *> &bias,
+                           const std::vector<float> &beta,
+                           const std::vector<void *> &dst,
+                           const std::vector<int> &ldc,
+                           const std::vector<bool> &is_weights_const,
+                           std::vector<matmul_params> &params);
 
 } // namespace matmul
 } // namespace lowoha

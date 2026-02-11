@@ -383,6 +383,159 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   return status_t::success;
 }
 
+status_t group_gemm_direct(const std::vector<char> &layout,
+                           const std::vector<bool> &transA,
+                           const std::vector<bool> &transB,
+                           const std::vector<int> &M,
+                           const std::vector<int> &N,
+                           const std::vector<int> &K,
+                           const std::vector<float> &alpha,
+                           const std::vector<const void *> &src,
+                           const std::vector<int> &lda,
+                           const std::vector<const void *> &weight,
+                           const std::vector<int> &ldb,
+                           const std::vector<const void *> &bias,
+                           const std::vector<float> &beta,
+                           const std::vector<void *> &dst,
+                           const std::vector<int> &ldc,
+                           const std::vector<bool> &is_weights_const,
+                           std::vector<matmul_params> &params) {
+
+  // Validate vectors are non-empty
+  if (M.empty() || N.empty() || K.empty() || params.empty() || src.empty() ||
+      weight.empty() || dst.empty() || bias.empty() || is_weights_const.empty() ||
+      lda.empty() || ldb.empty() || ldc.empty()) {
+    log_error("group_gemm_direct: empty input vectors");
+    return status_t::failure;
+  }
+
+  // Create profiler instance
+  profiler_t profiler;
+  bool is_profile = is_profile_enabled();
+  if (is_profile) {
+    profiler.tbp_start();
+  }
+
+  // Get the number of GEMM operations from the size of any vector
+  const size_t num_ops = M.size();
+  const char *gemm_mode;
+  static unsigned int auto_version = get_auto_tuner_ver();
+
+  const int num_threads = params[0].num_threads > 0 ? params[0].num_threads :
+                          omp_get_max_threads();
+  matmul_threadlimit thread_guard(num_threads);
+
+  if (src.size() == 1) {
+    // Sequential GEMM: chained operations where output[i-1] feeds as input[i]
+    // First op uses src[0], subsequent ops use dst[i-1] as input
+    gemm_mode = "sequential";
+
+    // Validate inputs for sequential mode
+    if (validate_sequential_gemm_inputs(layout, transA, transB, M, N, K,
+                                        alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                                        is_weights_const, params) != status_t::success) {
+      return status_t::failure;
+    }
+
+    for (size_t i = 0; i < num_ops; ++i) {
+      matmul_batch_params_t batch_params;
+      batch_params.Batch_A = 1;
+      batch_params.Batch_B = 1;
+
+      size_t src_type_size = size_of(params[i].dtypes.src);
+      size_t out_type_size = size_of(params[i].dtypes.dst);
+
+      // For first iteration use original src, for subsequent use previous dst
+      const void *current_src = (i == 0) ? src[i] : dst[i - 1];
+      int current_lda = (i == 0) ? lda[i] : ldc[i - 1];
+
+      // Select kernel for the operation
+      matmul_algo_t kernel = kernel_select(params[i],
+                                           batch_params.Batch_A,
+                                           batch_params.Batch_B,
+                                           1, M[i], N[i], K[i],
+                                           num_threads, bias[i],
+                                           is_weights_const[i]);
+
+      params[i].num_threads = num_threads;
+      matmul_execute(layout[i], transA[i], transB[i],
+                     M[i], N[i], K[i], alpha[i],
+                     current_src, current_lda,
+                     weight[i], ldb[i],
+                     bias[i], beta[i],
+                     dst[i], ldc[i],
+                     is_weights_const[i],
+                     src_type_size, out_type_size,
+                     num_threads, kernel, params[i],
+                     batch_params, auto_version);
+    }
+  }
+  else {
+    // Parallel GEMM: independent operations with nested parallelism
+    gemm_mode = "parallel";
+
+    // Validate inputs for parallel mode
+    if (validate_parallel_gemm_inputs(layout, transA, transB, M, N, K,
+                                      alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                                      is_weights_const, params) != status_t::success) {
+      return status_t::failure;
+    }
+
+    // Execute with automatic strategy selection
+    matmul_active_levels active_levels_guard(1);
+
+    #pragma omp parallel for num_threads(num_threads)
+    for (size_t i = 0; i < num_ops; ++i) {
+
+      // Create batch params (single batch per operation)
+      matmul_batch_params_t batch_params;
+      batch_params.Batch_A = 1;
+      batch_params.Batch_B = 1;
+
+      // Compute required parameters
+      size_t src_type_size = size_of(params[i].dtypes.src);
+      size_t out_type_size = size_of(params[i].dtypes.dst);
+
+      matmul_algo_t kernel = kernel_select(params[i],
+                                           batch_params.Batch_A,
+                                           batch_params.Batch_B,
+                                           1, M[i], N[i], K[i],
+                                           1, bias[i],
+                                           is_weights_const[i]);
+
+      matmul_execute(layout[i], transA[i], transB[i],
+                     M[i], N[i], K[i], alpha[i],
+                     src[i], lda[i],
+                     weight[i], ldb[i],
+                     bias[i], beta[i],
+                     dst[i], ldc[i],
+                     is_weights_const[i],
+                     src_type_size, out_type_size,
+                     1, kernel, params[i],
+                     batch_params, auto_version);
+    }
+  }
+
+  if (is_profile) {
+    profiler.tbp_stop();
+  }
+
+  if (apilog_info_enabled() || is_profile) {
+    [[maybe_unused]] std::ostringstream ss;
+    ss << "LOWOHA group_gemm_direct: "
+       << "num_ops=" << num_ops
+       << ", mode=" << gemm_mode
+       << ", num_threads=" << num_threads;
+    apilog_info(ss.str());
+    if (is_profile) {
+      profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
+  }
+
+  return status_t::success;
+}
+
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
