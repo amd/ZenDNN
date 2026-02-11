@@ -1,8 +1,8 @@
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
-# ZenDNN* AutoTuner
+# ZenDNN AutoTuner
 
-The **ZenDNN* AutoTuner** is an intelligent performance optimization component that automatically selects the best-performing algorithm for operations at runtime. It dynamically evaluates multiple backend implementations and caches the optimal choice for specific workload characteristics, eliminating the need for manual algorithm selection and tuning.
+The **ZenDNN AutoTuner** is an intelligent performance optimization component that automatically selects the best-performing algorithm for operations at runtime. It dynamically evaluates multiple backend implementations and caches the optimal choice for specific workload characteristics, eliminating the need for manual algorithm selection and tuning.
 
 ## Overview
 
@@ -10,7 +10,7 @@ Modern deep learning inference and training workloads present a complex optimiza
 
 ### The AutoTuner Solution
 
-The ZenDNN* AutoTuner addresses these challenges through an intelligent, adaptive approach:
+The ZenDNN AutoTuner addresses these challenges through an intelligent, adaptive approach:
 
 - **Automatic Algorithm Selection**: Evaluates multiple backend algorithms using time-based profiling and selects the fastest for each unique workload without requiring manual intervention or domain expertise.
 
@@ -185,7 +185,7 @@ The AutoTuner operates in three distinct phases:
 
 ## AutoTuner Versions
 
-ZenDNN* provides two implementations of the AutoTuner with different caching strategies and performance characteristics.
+ZenDNN provides two implementations of the AutoTuner with different caching strategies and performance characteristics.
 
 ### Version 1: Layer-based Algorithm Caching (`auto_compute_matmul_v1`)
 
@@ -310,5 +310,3 @@ export ZENDNNL_MATMUL_EVAL_ITER=<number>
 ```
 ---
 **Note**: The AutoTuner for MatMul operation is currently in development.
-
->ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

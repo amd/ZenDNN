@@ -1,5 +1,5 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # Reorder Operator
 
@@ -392,6 +392,4 @@ Each example includes error checking where the operator creation and execution s
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors, respectively, in the operation flow.
 
-These examples demonstrate the versatility and composability of reorder operations, showcasing the use of different data types and memory formats in the `ZenDNN*` library.
-
->ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.
+These examples demonstrate the versatility and composability of reorder operations, showcasing the use of different data types and memory formats in the `ZenDNN` library.

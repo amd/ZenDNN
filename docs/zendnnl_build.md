@@ -78,12 +78,12 @@ In order to configure the build according to dependencies, components, and stand
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
 | ZENDNNL_BUILD_DEPS | Download and build the dependencies. This is generally used during development to avoid repeated download and build the dependencies. If dependencies are not built at least once before this option is turned off, the build will fail.| BOOL |ON |
-| ZENDNNL_BUILD_EXAMPLES | Build zendnnl examples. These examples illustrate API and library usage in different contexts. | BOOL | ON |
-| ZENDNNL_BUILD_GTESTS | Build zendnnl gtests. This is a comprehensive test suite to test all operators and features functionality of the library. | BOOL | ON |
+| ZENDNNL_BUILD_EXAMPLES | Build ZenDNN examples. These examples illustrate API and library usage in different contexts. | BOOL | ON |
+| ZENDNNL_BUILD_GTESTS | Build ZenDNN gtests. This is a comprehensive test suite to test all operators and features functionality of the library. | BOOL | ON |
 | ZENDNNL_BUILD_DOXYGEN | Build doxygen documentation. | BOOL |OFF |
 | ZENDNNL_BUILD_BENCHDNN | Build benchdnn benchmarking tool. This tool is used to benchmark individual operators for different workloads. | BOOL |ON |
-| ZENDNNL_LIB_BUILD_ARCHIVE | Build zendnnl archive (static) library | BOOL |ON |
-| ZENDNNL_LIB_BUILD_SHARED | Build zendnnl shared library. Build should be configure to build at least one of the archive or shared library.| BOOL |OFF |
+| ZENDNNL_LIB_BUILD_ARCHIVE | Build ZenDNN archive (static) library | BOOL |ON |
+| ZENDNNL_LIB_BUILD_SHARED | Build ZenDNN shared library. Build should be configure to build at least one of the archive or shared library.| BOOL |OFF |
 
 ### 3.3 Framework Integration Options
 
@@ -182,7 +182,7 @@ The standalone build can be done using command line CMake configuration and buil
 | **Build Targets** | |
 | `--all` | Build and install all targets |
 | `--zendnnl` | Build and install zendnnl lib |
-| `--zendnnl-gtest` | Build and install zendnnl gtest (requires --zendnnl) |
+| `--zendnnl-gtest` | Build and install ZenDNN gtest (requires --zendnnl) |
 | `--examples` | Build and install examples (requires --zendnnl) |
 | `--benchdnn` | Build and install benchdnn (requires --zendnnl) |
 | `--doxygen` | Build and install doxygen docs |

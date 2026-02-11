@@ -1,16 +1,16 @@
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
-# ZENDNN* Decision Tree
+# ZenDNN Decision Tree
 
-The **Decision Tree Algorithm** is a kernel selection mechanism in the ZenDNN* framework derived using machine learning techniques. During development, an ML pipeline analyzes performance data to automatically generate optimal decision logic, which is then converted into native C++ conditional statements. At runtime, these precomputed if-else conditions select the best-performing kernel for matrix multiplication operations based on input dimensions, ensuring maximum performance with zero ML overhead.
+The **Decision Tree Algorithm** is a kernel selection mechanism in the ZenDNN framework derived using machine learning techniques. During development, an ML pipeline analyzes performance data to automatically generate optimal decision logic, which is then converted into native C++ conditional statements. At runtime, these precomputed if-else conditions select the best-performing kernel for matrix multiplication operations based on input dimensions, ensuring maximum performance with zero ML overhead.
 
 ---
 
-## 1. Decision Tree in ZENDNN*
+## 1. Decision Tree in ZenDNN
 
 ### Overview
 
-In ZENDNN*, multiple kernels are available for executing matrix multiplication (matmul) operations. Each kernel exhibits different performance characteristics depending on the metadata of the matmul operation.
+In ZenDNN, multiple kernels are available for executing matrix multiplication (matmul) operations. Each kernel exhibits different performance characteristics depending on the metadata of the matmul operation.
 
 ### Decision Tree solution
 
@@ -18,13 +18,13 @@ In ZENDNN*, multiple kernels are available for executing matrix multiplication (
 
 A decision tree is a hierarchical structure of conditional rules that evaluates input parameters (such as matrix dimensions) through a series of comparisons to arrive at an optimal decision.
 
-**Usage in ZENDNN***: The decision tree is used to internally select the optimal kernel for execution based on the input dimensions. The decision logic is precomputed during the training phase, and the generated conditional statements are directly integrated into the library.
+**Usage in ZenDNN**: The decision tree is used to internally select the optimal kernel for execution based on the input dimensions. The decision logic is precomputed during the training phase, and the generated conditional statements are directly integrated into the library.
 
 ### Runtime Execution Flowchart
 
 ```text
               ┌──────────────────────────────────────────────┐
-              │         Runtime Execution (ZenDNN*)          │
+              │         Runtime Execution (ZenDNN)           │
               │         Input: M, N, K, BS                   │
               └──────────────────────────────────────────────┘
                                      │
@@ -148,7 +148,7 @@ The ML pipeline transforms raw performance data into optimized C++ decision logi
 
 ### Code Generation
 
-The trained decision tree is automatically converted to C++ conditional statements and integrated directly into ZENDNN* source files.
+The trained decision tree is automatically converted to C++ conditional statements and integrated directly into ZenDNN source files.
 
 ### Key Characteristics
 
@@ -225,20 +225,20 @@ The trained decision tree is automatically converted to C++ conditional statemen
                                      │
                                      ▼
               ┌──────────────────────────────────────────────┐
-              │    Plug the Function to ZenDNN*              │
+              │    Plug the Function to ZenDNN               │
               │  ┌────────────────────────────────────────┐  │
               │  │ - Integrate C++ code into source       │  │
               │  │ - Zero runtime ML overhead             │  │
               │  └────────────────────────────────────────┘  │
               └──────────────────────────────────────────────┘
 ```
-**Note**: This entire process is performed offline during development. The final C++ code is integrated into ZenDNN* for runtime use.
+**Note**: This entire process is performed offline during development. The final C++ code is integrated into ZenDNN for runtime use.
 
 ---
 
 ## 6. Current Status and Future Work
 
-The pipeline successfully generates and evaluates multiple decision tree candidates using the ML framework. The user manually selects the best-performing model, which is then converted to C++ and integrated into ZENDNN* for runtime algorithm selection with zero ML overhead.
+The pipeline successfully generates and evaluates multiple decision tree candidates using the ML framework. The user manually selects the best-performing model, which is then converted to C++ and integrated into ZenDNN for runtime algorithm selection with zero ML overhead.
 
 **Current Achievements**: Automated decision tree generation from performance data, stratified train/test split with instance weighting, and custom error metric accounting for performance impact.
 
@@ -249,5 +249,3 @@ The pipeline successfully generates and evaluates multiple decision tree candida
 ---
 
 **Note**: The ML pipeline used for decision tree generation is currently in development.
-
->ZENDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.

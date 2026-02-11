@@ -518,6 +518,4 @@ Each example includes error checking where the operator creation and execution s
 
 Utility functions such as `testlog_info` and `testlog_error` are used for logging information and errors, respectively, in the operation flow.
 
-These examples demonstrate the versatility and composability of embedding bag operations within the `ZenDNN*` library.
-
->ZenDNN* : ZenDNN is currently undergoing a strategic re-architecture and refactoring to enhance performance, maintainability, and scalability.
+These examples demonstrate the versatility and composability of embedding bag operations within the `ZenDNN` library.

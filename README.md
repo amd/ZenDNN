@@ -115,13 +115,13 @@ GTests are found in `install/gtests`, and can be executed as follows:
 ./install/gtests/gtests
 ```
 
-For detailed usage instructions, refer to the [zendnn* gtests documentation](zendnnl/gtests/Readme.md).
+For detailed usage instructions, refer to the [zendnn gtests documentation](zendnnl/gtests/Readme.md).
 
 ## 3.3. BenchDNN
 
 ZenDNN includes `benchdnn`, a high-performance benchmarking utility designed to rigorously assess the efficiency of deep learning operators within the ZenDNN library. BenchDNN provides detailed performance analysis capabilities for primitives like matrix multiplication (matmul) and reorder operations.
 
-For detailed usage instructions and configuration options, refer to the [zendnn* benchdnn documentation](benchdnn/README.md).
+For detailed usage instructions and configuration options, refer to the [zendnn benchdnn documentation](benchdnn/README.md).
 
 ## 3.4. Logging
 

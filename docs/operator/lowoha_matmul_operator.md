@@ -1,5 +1,5 @@
 
-(Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.)
+(Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.)
 
 # LowOHA MatMul Operator
 
@@ -276,7 +276,7 @@ int lowoha_matmul_bf16_fused_ops_example() {
 
 ```cpp
 int lowoha_batched_matmul_example() {
-  using namespace zendnnl::lowoha;
+  using namespace zendnnl::lowoha::matmul;
   
   int batch_size = 16;
   int M = 32, N = 64, K = 128;
@@ -329,7 +329,7 @@ This example demonstrates Weight-Only Quantization (WOQ) with per-group quantiza
 
 ```cpp
 int lowoha_woq_bf16s4_matmul_example() {
-  using namespace zendnnl::lowoha;
+  using namespace zendnnl::lowoha::matmul;
   
   // Matrix dimensions
   constexpr int M = 16, K = 128, N = 64;
@@ -423,7 +423,7 @@ This example demonstrates INT8 matmul with asymmetric quantization and automatic
 
 ```cpp
 int lowoha_int8_matmul_example() {
-  using namespace zendnnl::lowoha;
+  using namespace zendnnl::lowoha::matmul;
   
   // Matrix dimensions (realistic sizes for LLM inference)
   constexpr int M = 32;    // Batch size / sequence length
