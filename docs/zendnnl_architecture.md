@@ -10,13 +10,16 @@ ZenDNN is a high-performance CPU inference library designed to accelerate deep l
 <img src="images/zendnnl_architecture.png" alt="ZenDNN Architecture" width="500" height="600"/>
 
 
-## 1. Framework Layer
-This is where model developers define their neural networks using high-level APIs provided by frameworks like PyTorch, TensorFlow, or ONNX. These frameworks handle model construction, training, and inference logic. When a model is executed, the framework translates operations into a format that ZenDNN can understand.
+## 1. Frontend Layer
+The **Frontend** is where model developers define their neural networks using high-level APIs provided by frameworks such as **PyTorch**, **TensorFlow**, **Llama.cpp**. These frameworks handle model construction, training, and inference logic. ML operators (e.g. MatMul, EmbeddingBag, Reorder) are defined at this layer. When a model is executed, the frontend translates these operations into a format that ZenDNN can understand and dispatches them to the ZenDNN Library below.
 
-## 2. ZenDNN User APIs
-The **ZenDNN User API layer** is a critical interface that connects high-level deep learning frameworks (like PyTorch or TensorFlow) with the optimized computational backend of ZenDNN. The User API layer is designed to be **lightweight, extensible, and framework-agnostic**. It ensures that ZenDNN can be easily integrated into various ecosystems without requiring deep changes in the framework internals. It also enables rapid experimentation and deployment of new operators and optimizations.
+## 2. Regular and Low Overhead API Layer
+The **Regular and Low Overhead API Layer** is the critical interface that connects the frontend (PyTorch, TensorFlow, Llama.cpp, etc.) with the optimized computational backend of ZenDNN. It exposes two paths:
 
-### Features
+- **Regular API path:** A **modularized, object-oriented approach** that is extensible and framework-agnostic. It ensures that ZenDNN can be easily integrated into various ecosystems without requiring deep changes in the framework internals, and enables rapid experimentation and deployment of new operators and optimizations.
+- **Low Overhead API (LowOHA) path:** **Lightweight** and minimal; it minimizes API overhead and is **critical for small GEMM-heavy workloads** such as Scaled Dot-Product Attention (SDPA) and Batched Matrix Multiply (BMM), where per-call overhead can dominate runtime.
+
+### Regular API: Features
 
 #### 2.1. Tensor Creation and Management
 - Accepts input and output buffers from the framework.
@@ -33,23 +36,55 @@ The **ZenDNN User API layer** is a critical interface that connects high-level d
 - Allows frameworks to specify the desired precision for inference:
   - **FP32**: Full precision for accuracy-sensitive tasks.
   - **BF16**: Balanced precision for performance and accuracy.
+  - **INT8**: Quantized precision for reduced memory and faster inference.
 
 #### 2.4. Execution Context Management
 - Initializes and manages execution contexts (Example: constant buffers, post ops, etc. )
 - Provides hooks for profiling and logging.
 
+### Low Overhead API (LowOHA)
+The Low Overhead API path provides direct, function-based APIs that bypass the regular operator factory and context setup. It is optimized for latency-sensitive inference and small GEMM-heavy workloads (e.g. SDPA, BMM), where minimizing per-call overhead is essential. Supported operations and their documentation are listed in [Low Overhead API (LowOHA): Supported Operations](#low-overhead-api-lowoha-supported-operations).
 
-## 3. ZenDNN Core
-The core is the computational heart of ZenDNN. It includes:
-- **Tensor**: Manages data layout, memory, and shape transformations.
-- **Context**: Maintains constant model parameters, post op operation, runtime settings like threading and logging and profiling information.
-- **Operator**: Defines high-level operations like MatMul, Reorder, etc.
-- **Kernel**: Implements low-level, hardware-optimized routines for each operator.
+
+## 3. ZenDNN Library
+The ZenDNN Library is the core layer that implements the APIs and orchestrates execution. It is built around the following:
+
+### Multi-Backend Approach
+ZenDNN uses a **multi-backend approach** that **dynamically selects the best backend based on problem size**. The Decision Tree, Auto Tuner, and runtime heuristics work together to choose among native kernels and third-party libraries (AOCL, OneDNN, LibXSMM, FBGEMM) for each operation.
+
+### Core Modules
+- **Decision Tree (DT):** Drives backend and kernel selection based on problem characteristics and heuristics.
+- **AutoTuner:** Automatically selects the best algorithm and backend for the current workload and hardware, based on TBP (Time Based Profiling).
+- **Caching (LRU + Reorder):** LRU cache and cached reorder operations reduce redundant work and improve data locality.
+- **Threading Strategies:**
+  - Batch, Table and Hybrid for EmbeddingBag Operation.
+- **Parallel Primitive:** Enables scalable parallel execution.
+
+## 4. Third Party Libraries
+ZenDNN leverages several low-level libraries to provide foundational building blocks for performance-critical operations:
+
+- **AOCL DLP:** Optimized GEMM for AMD CPUs.
+- **FBGEMM:** A low-precision, high-performance matrix multiplication and embedding bag library.
+- **OneDNN:** Intel's deep learning primitives for x86 CPUs.
+- **LibXSMM:** Specialized in small matrix multiplications (Example: 64x64 or smaller).
+
+---
+
+The following sections describe the design and execution model in more detail: the core building blocks of the Regular API, the supported Low Overhead API operations, the hardware layer, execution flows for both API paths, and design principles.
+
+
+## Core Design Principles: Regular API
+The **Regular API** is built on four core building blocks. These are the design elements of the ZenDNN core used by the regular path:
+
+- **Tensor:** Manages data layout, memory, and shape transformations.
+- **Context:** Maintains constant model parameters, post op operation, runtime settings like threading and logging and profiling information.
+- **Operator:** Defines high-level operations like MatMul, Reorder, etc.
+- **Kernel:** Implements low-level, hardware-optimized routines for each operator.
 
 
 <img src="images/basic_concepts.png" alt="ZenDNN Basic Modules" width="800"/>
 
-## 3.1 Tensor
+### Tensor
 A **Tensor** is a fundamental building block in deep learning libraries. It represents multi-dimensional arrays of data. In the context of CPU inference, tensors are used to store and manipulate data efficiently.
 
 ### Key Components of a Tensor:
@@ -71,8 +106,8 @@ A **Tensor** is a fundamental building block in deep learning libraries. It repr
 - **Intermediate Results**: During computation, tensors store intermediate results.
 - **Output Data**: The final output of the neural network is stored in tensors.
 
-## 3.2 Context
-The **Context** of an operator encompasses all the necessary information required to perform computations. Given an operator its parameter tensors (for example: weight and bias), and any other parameter (for example: element-wise post-ops, or embedding bag algorithm like add, mean, or max), needed to implement operator computation are called operator context of the operator.
+### Context
+The **Context** of an operator encompasses all the information required to perform its computations. Given an operator, its parameter tensors (for example, weight and bias) and any other parameters (for example, element-wise post-ops or an embedding bag algorithm such as add, mean, or max) together form the operator context.
 
 ### Key Components of Context:
 1. **Parameter Tensors**:
@@ -87,7 +122,7 @@ The **Context** of an operator encompasses all the necessary information require
 - **Operator Computation**: Context provides all the necessary data for an operator to perform its computation.
 - **Optimization**: Context helps in optimizing the computation by providing relevant parameters.
 
-## 3.3 Operator
+### Operator
 An **Operator** is a function or a set of functions that perform computations on tensors. An operator in a computational graph is a node that takes input tensors, performs some computations on them, and produces output tensors. An operator can implement a simple computation on input tensors (add, concat...), computations involving other tensors acting as operator parameters (matrix multiplication with weight and bias as operator parameters), or a complex subgraph (attention layer in LLMs).
 
 ### Key Components of an Operator:
@@ -98,9 +133,9 @@ An **Operator** is a function or a set of functions that perform computations on
 2. **Complex Subgraphs**:
    - **Attention Layer**: Implements attention mechanisms used in large language models (LLMs).
 
-### 3.4 Operator Type
+### Operator Type
 
-#### 3.4.1 Fused MatMul
+#### Fused MatMul
 Fused Matrix Multiplication (Fused MatMul) is an optimized operation that combines multiple matrix multiplications and element-wise operations into a single kernel. This reduces memory bandwidth requirements and improves computational efficiency.
 
 ##### Key Components:
@@ -111,7 +146,7 @@ Fused Matrix Multiplication (Fused MatMul) is an optimized operation that combin
 - **Neural Network Layers**: Commonly used in fully connected layers and transformer models.
 - **Performance Optimization**: Reduces the number of memory accesses and improves cache utilization.
 
-#### 3.4.2 Reorder
+#### Reorder
 Reorder operation changes the memory layout of a tensor to improve data locality and access patterns. This is crucial for optimizing performance on different hardware architectures.
 
 ##### Key Components:
@@ -122,7 +157,7 @@ Reorder operation changes the memory layout of a tensor to improve data locality
 - **Data Preprocessing**: Reorders data to match the expected input format of specific kernels.
 - **Performance Optimization**: Enhances cache utilization and reduces memory access latency.
 
-#### 3.4.3 Embedding Bag
+#### Embedding Bag
 Embedding Bag operation is used to look up embeddings for a set of indices and combine them using a specified reduction algorithm (Example: sum, mean, max).
 
 ##### Key Components:
@@ -133,7 +168,7 @@ Embedding Bag operation is used to look up embeddings for a set of indices and c
 - **Natural Language Processing**: Commonly used in models for handling categorical data, such as word embeddings.
 - **Recommendation Systems**: Utilized for representing user and item features.
 
-## 3.5 Kernel
+### Kernel
 A **Kernel** is an implementation of an operator. Kernels ensure efficient execution of operators on different architectures. An operator can have multiple kernels depending on machine ISA, problem size, backend and quantization level.
 
 ### Key Components of a Kernel:
@@ -151,7 +186,7 @@ A **Kernel** is an implementation of an operator. Kernels ensure efficient execu
 - **Performance Optimization**: Kernels ensure that operators run efficiently on the target hardware.
 - **Scalability**: Kernels allow operators to scale across different problem sizes and hardware configurations.
 
-## Interaction Between Main Classes
+### Interaction Between Main Classes
 
 Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact is essential for designing efficient and modular deep learning systems.
 
@@ -174,12 +209,18 @@ Understanding how **Tensor**, **Context**, **Operator**, and **Kernel** interact
 
 
 
-## 4. Low-Level Libraries
-ZenDNN leverages several low-level libraries to provide foundational building blocks for performance-critical operations:
-- **AOCL (AMD Optimized CPU Libraries)**: Optimized BLAS, FFT, and RNG for AMD CPUs.
-- **FBGEMM**: A low-precision, high-performance matrix multiplication and embedding bag library.
-- **OneDNN**: Intel’s deep learning primitives for x86 CPUs.
-- **LibXSMM**: Specialized in small matrix multiplications (Example: 64x64 or smaller).
+## Low Overhead API (LowOHA): Supported Operations
+The Low Overhead API path exposes direct, Low Overhead APIs for specific operations. Each operation has dedicated documentation:
+
+| Operation | Description | Documentation |
+|-----------|-------------|---------------|
+| **Group GEMM** | Multiple GEMMs in a single call; sequential or parallel execution for MLP layers, multi-head attention, MoE. | [lowoha_group_gemm_operator.md](operator/lowoha_group_gemm_operator.md) |
+| **MatMul / Batched MatMul** | Direct matrix multiplication and batched matmul with weight caching, fused post-ops; latency-sensitive inference. | [lowoha_matmul_operator.md](operator/lowoha_matmul_operator.md) |
+| **Reorder** | Data type conversion and reorder (e.g. BF16/FP32/INT8); quantization and dequantization. | [lowoha_reorder_operator.md](operator/lowoha_reorder_operator.md) |
+| **Embedding Bag** | Low overhead embedding bag and group embedding bag. | [embedding_bag_operator.md](operator/embedding_bag_operator.md) |
+| **Conv2D** | Low overhead 2D convolution. | [lowoha_conv2d_operator.md](operator/lowoha_conv2d_operator.md) |
+| **Pooling** | Low overhead pooling operations. | [lowoha_pooling_operator.md](operator/lowoha_pooling_operator.md) |
+| **Softmax** | Low overhead softmax. | [lowoha_softmax_operator.md](operator/lowoha_softmax_operator.md) |
 
 ## 5. Hardware Layer
 ZenDNN is engineered to extract maximum performance from **general-purpose CPUs**, making it ideal for server-side inference, edge computing, and CPU-only environments. This layer is where all computations are ultimately executed, and its efficiency directly impacts the overall throughput and latency of deep learning models.
@@ -207,32 +248,58 @@ ZenDNN kernels are designed to:
 
 
 ## Execution Flow
-Here's a simplified flow of how a tensor moves through the ZenDNN stack:
+ZenDNN supports two execution paths. The flow differs depending on whether the frontend uses the **Regular API** or the **Low Overhead API (LowOHA)**.
 
-1. **Input Tensor** is passed from the framework (Example: PyTorch).
-2. The **User API** receives the tensor and determines the appropriate operator.
-3. The **Core** processes the tensor using the selected operator and kernel.
-4. The **Kernel** invokes routines from **Low-Level Libraries** (Example: AOCL, OneDNN).
+### Regular API path
+For the regular path, a tensor moves through the ZenDNN stack as follows:
+
+1. **Input Tensor** is passed from the frontend (Example: PyTorch).
+2. The **Regular API** receives the tensor and determines the appropriate operator (creates context and operator).
+3. **ZenDNN Core** processes the tensor using the selected operator and kernel.
+4. The **Kernel** invokes routines from **Third Party Libraries** (Example: AOCL, OneDNN).
 5. Computation is executed on the **CPU**.
-6. The **Output Tensor** is returned back to the framework.
+6. The **Output Tensor** is returned back to the frontend.
 
 ```
-Input Tensor (from Framework)
+Input Tensor (from Frontend)
           ↓
-   ZenDNN User API
-(Receives tensor, create context and operator)
+   Regular API
+(Receives tensor, creates context and operator)
           ↓
       ZenDNN Core
 (Processes tensor using operator & kernel)
           ↓
-   Low-Level Libraries
+   Third Party Libraries
 (Invokes optimized routines: AOCL, OneDNN, etc.)
           ↓
          CPU
 (Performs computation)
           ↓
      Output Tensor
-(Returned to Framework)
+(Returned to Frontend)
+```
+
+### Low Overhead API (LowOHA) path
+For the Low Overhead API path, execution is more direct to minimize per-call overhead:
+
+1. **Input** is passed from the frontend to a **direct Low Overhead API** (e.g. `matmul_direct`, `group_gemm_direct`).
+2. **Backend selection** (e.g. via Auto Tuner or Decision Tree) chooses the best backend and native kernel for the problem size.
+3. **Native kernel** or **Third Party Libraries** (AOCL, LibXSMM, OneDNN, FBGEMM) perform the computation.
+4. Computation is executed on the **CPU**.
+5. **Output** is returned to the frontend.
+
+```
+Input (from Frontend)
+          ↓
+   Low Overhead API (direct call)
+          ↓
+   Backend selection (Auto Tuner / Decision Tree)
+          ↓
+   Native Kernel or Third Party Libraries
+          ↓
+         CPU
+          ↓
+     Output (to Frontend)
 ```
 
 
