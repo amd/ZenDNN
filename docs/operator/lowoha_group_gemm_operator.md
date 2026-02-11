@@ -41,6 +41,38 @@ status_t group_gemm_direct(
 );
 ```
 
+### `matmul_params`
+
+The main configuration structure for LowOHA MatMul:
+
+```cpp
+struct matmul_params {
+  matmul_data_types dtypes;                  // Data types for tensors
+  std::vector<matmul_post_op> postop_;       // Post-operations
+  matmul_quantization_params_t quant_params; // Quantization parameters
+  char mem_format_a;                         // Memory format for A ('n'=non-reordered, 'r'=reordered)
+  char mem_format_b;                         // Memory format for B ('n'=non-reordered, 'r'=reordered)
+  matmul_algo_t lowoha_algo;                 // Preferred backend algorithm
+  uint64_t num_threads;                      // Number of threads (0 = auto)
+  std::string plugin_op;                     // Plugin op name
+};
+```
+
+
+### `matmul_data_types`
+
+Specifies the data types for each tensor:
+
+```cpp
+struct matmul_data_types {
+  data_type_t src;      // Input data type
+  data_type_t wei;      // Weight data type
+  data_type_t dst;      // Output data type
+  data_type_t bias;     // Bias data type
+  data_type_t compute;  // Computation type
+};
+```
+
 ## Parameters
 
 All parameters are vectors where each element corresponds to one matrix multiplication operation. All vectors must have the same size (number of operations).
@@ -69,6 +101,97 @@ All parameters are vectors where each element corresponds to one matrix multipli
 
 - `status_t::success` - All operations completed successfully
 - `status_t::failure` - One or more operations failed
+
+## Execution Modes
+
+### Mode Selection
+
+The execution mode is determined by `src.size()`:
+
+| Condition | Mode | Description |
+|-----------|------|-------------|
+| `src.size() == 1` | Sequential | Chained execution: `dst[i-1]` → `src[i]` |
+| `src.size() > 1` | Parallel | Independent operations in parallel |
+
+### Sequential (Linear)
+
+When `src.size() == 1`, operations are executed **sequentially** in a chain. The output of each operation becomes the input for the next:
+
+- **Op 0**: Uses `src[0]` as input
+- **Op 1**: Uses `dst[0]` (output of Op 0) as input
+- **Op 2**: Uses `dst[1]` (output of Op 1) as input
+- ...and so on
+
+Each operation uses **all available threads** for maximum throughput.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│              group_gemm_direct (Sequential GEMM)         │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  src[0] ──► ┌──────────┐                                 │
+│             │  Op 0    │ (all T threads)                 │
+│             │ M₀×K₀×N₀ │                                 │
+│             └────┬─────┘                                 │
+│                  │ dst[0]                                │
+│                  ▼                                       │
+│             ┌──────────┐                                 │
+│             │  Op 1    │ (all T threads)                 │
+│             │ M₁×K₁×N₁ │                                 │
+│             └────┬─────┘                                 │
+│                  │ dst[1]                                │
+│                  ▼                                       │
+│             ┌──────────┐                                 │
+│             │  Op 2    │ (all T threads)                 │
+│             │ M₂×K₂×N₂ │                                 │
+│             └────┬─────┘                                 │
+│                  │ dst[2]                                │
+│                  ▼                                       │
+│              (output)                                    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Parallel
+
+When `src.size() > 1`, operations are executed **in parallel** using OpenMP, with each operation assigned to its own thread:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              group_gemm_direct (Parallel GEMM)             │
+├────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │           OpenMP Parallel Execution                 │   │
+│  │    #pragma omp parallel for num_threads(T)          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│       │           │           │                 │          │
+│       ▼           ▼           ▼                 ▼          │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐     │
+│  │ Thread 0│ │ Thread 1│ │ Thread 2│  ...  │Thread T-1│    │
+│  └────┬────┘ └────┬────┘ └────┬────┘       └────┬────┘     │
+│       │           │           │                 │          │
+│       ▼           ▼           ▼                 ▼          │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐     │
+│  │  Op 0   │ │  Op 1   │ │  Op 2   │  ...  │  Op N-1 │     │
+│  │ M₀×K₀×N₀│ │ M₁×K₁×N₁│ │ M₂×K₂×N₂│       │ Mₙ×Kₙ×Nₙ │     │
+│  └─────────┘ └─────────┘ └─────────┘       └─────────┘     │
+└────────────────────────────────────────────────────────────┘
+```
+
+## Thread Configuration
+
+The number of threads used for execution can be controlled via:
+
+1. **Environment Variable:**
+   ```bash
+   export OMP_NUM_THREADS=8
+   ```
+
+2. **Execution Mode Thread Behavior:**
+
+| Mode | Thread Usage |
+|------|-------------|
+| Sequential | Each operation uses all `T` threads |
+| Parallel | Operations distributed across `T` threads, each op uses 1 thread |
 
 ## Usage Example
 
@@ -235,97 +358,6 @@ int lowoha_sequential_gemm_example() {
   return (status == status_t::success) ? 0 : -1;
 }
 ```
-
-## Execution Modes
-
-### Mode Selection
-
-The execution mode is determined by `src.size()`:
-
-| Condition | Mode | Description |
-|-----------|------|-------------|
-| `src.size() == 1` | Sequential | Chained execution: `dst[i-1]` → `src[i]` |
-| `src.size() > 1` | Parallel | Independent operations in parallel |
-
-### Sequential (Linear)
-
-When `src.size() == 1`, operations are executed **sequentially** in a chain. The output of each operation becomes the input for the next:
-
-- **Op 0**: Uses `src[0]` as input
-- **Op 1**: Uses `dst[0]` (output of Op 0) as input
-- **Op 2**: Uses `dst[1]` (output of Op 1) as input
-- ...and so on
-
-Each operation uses **all available threads** for maximum throughput.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│              group_gemm_direct (Sequential GEMM)         │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  src[0] ──► ┌──────────┐                                 │
-│             │  Op 0    │ (all T threads)                 │
-│             │ M₀×K₀×N₀ │                                 │
-│             └────┬─────┘                                 │
-│                  │ dst[0]                                │
-│                  ▼                                       │
-│             ┌──────────┐                                 │
-│             │  Op 1    │ (all T threads)                 │
-│             │ M₁×K₁×N₁ │                                 │
-│             └────┬─────┘                                 │
-│                  │ dst[1]                                │
-│                  ▼                                       │
-│             ┌──────────┐                                 │
-│             │  Op 2    │ (all T threads)                 │
-│             │ M₂×K₂×N₂ │                                 │
-│             └────┬─────┘                                 │
-│                  │ dst[2]                                │
-│                  ▼                                       │
-│              (output)                                    │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Parallel
-
-When `src.size() > 1`, operations are executed **in parallel** using OpenMP, with each operation assigned to its own thread:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│              group_gemm_direct (Parallel GEMM)             │
-├────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           OpenMP Parallel Execution                 │   │
-│  │    #pragma omp parallel for num_threads(T)          │   │
-│  └─────────────────────────────────────────────────────┘   │
-│       │           │           │                 │          │
-│       ▼           ▼           ▼                 ▼          │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐     │
-│  │ Thread 0│ │ Thread 1│ │ Thread 2│  ...  │Thread T-1│    │
-│  └────┬────┘ └────┬────┘ └────┬────┘       └────┬────┘     │
-│       │           │           │                 │          │
-│       ▼           ▼           ▼                 ▼          │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐     │
-│  │  Op 0   │ │  Op 1   │ │  Op 2   │  ...  │  Op N-1 │     │
-│  │ M₀×K₀×N₀│ │ M₁×K₁×N₁│ │ M₂×K₂×N₂│       │ Mₙ×Kₙ×Nₙ │     │
-│  └─────────┘ └─────────┘ └─────────┘       └─────────┘     │
-└────────────────────────────────────────────────────────────┘
-```
-
-## Thread Configuration
-
-The number of threads used for execution can be controlled via:
-
-1. **Environment Variable:**
-   ```bash
-   export OMP_NUM_THREADS=8
-   ```
-
-2. **Execution Mode Thread Behavior:**
-
-| Mode | Thread Usage |
-|------|-------------|
-| Sequential | Each operation uses all `T` threads |
-| Parallel | Operations distributed across `T` threads, each op uses 1 thread |
 
 ## Notes and Best Practices
 
