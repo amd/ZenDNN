@@ -45,7 +45,7 @@ dnnl::matmul::primitive_desc create_blocked_matmul_pd(
 
   dnnl_params.weights.format_tag = "any";
   dnnl::memory::desc dnnl_blocked_weight_desc = onednn_utils_t::to_dnnl_tensor(
-        dnnl_params.weights, eng);
+      dnnl_params.weights, eng);
 
   dnnl::memory::desc dnnl_output_desc = onednn_utils_t::to_dnnl_tensor(
                                           dnnl_params.dst, eng);
@@ -142,7 +142,7 @@ void getOrCreateBlockedWeights(bool transA, bool transB, int M, int K, int N,
 
   // Create blocked matmul primitive descriptor to determine optimal blocking
   dnnl::matmul::primitive_desc matmul_pd = create_blocked_matmul_pd(
-        dnnl_params, eng, matmul_attr);
+      dnnl_params, eng, matmul_attr);
 
   // Compute blocking hash and check if already cached (by another full_key configuration)
   size_t blocking_hash = hashBlockingDesc(matmul_pd.weights_desc());
@@ -187,7 +187,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                            int K, float alpha, const void *A, int lda, const void *B, int ldb, float beta,
                            void *C, int ldc, matmul_params &lowoha_params,
                            matmul_batch_params_t &batch_params,
-                           const void *bias, zendnnl::ops::matmul_algo_t kernel, bool is_weights_const,
+                           const void *bias, zendnnl::ops::matmul_algo_t &kernel, bool is_weights_const,
                            size_t src_batch_stride, size_t weight_batch_stride, size_t dst_batch_stride) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
@@ -222,7 +222,6 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
 
   dnnl_params.src.is_transposed = (transA == 'n') ? false : true;
   dnnl_params.weights.is_transposed = (transB == 'n') ? false : true;
-  dnnl_params.algo = kernel;
 
   if (batch_count == 1) {
     dnnl_params.src.format_tag = (transA == 'n') ? "ab" : "ba";
@@ -503,6 +502,10 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
                               dnnl_params, eng, matmul_attr, weight_cache_type);
     dnnl_params.is_blocked = true;
   }
+  else {
+    kernel = zendnnl::ops::matmul_algo_t::onednn;
+  }
+  dnnl_params.algo = kernel;
 
   matmul_onednn_kernel_t::execute_matmul(dnnl_params, matmul_args, matmul_attr,
                                          eng);

@@ -37,7 +37,7 @@ void matmul_kernel_wrapper(char layout, char transA, char transB,
                            float beta,
                            void *C, int ldc,
                            matmul_data_types &dtypes,
-                           zendnnl::ops::matmul_algo_t kernel,
+                           zendnnl::ops::matmul_algo_t &kernel,
                            char mem_format_a, char mem_format_b,
                            matmul_params &lowoha_param, matmul_batch_params_t &batch_params,
                            const void *bias, bool is_weights_const) {
@@ -87,7 +87,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
                  matmul_batch_params_t &batch_params,
                  const size_t src_type_size, const size_t out_type_size,
                  const int num_threads,
-                 matmul_algo_t kernel, matmul_params &params) {
+                 matmul_algo_t &kernel, matmul_params &params) {
 
   const int batch_count = std::max(batch_params.Batch_A, batch_params.Batch_B);
   const char trans_input  = transA ? 't' : 'n';

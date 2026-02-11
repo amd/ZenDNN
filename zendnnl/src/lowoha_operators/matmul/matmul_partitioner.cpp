@@ -184,6 +184,9 @@ static tile_kernel_invoker_t create_tile_callback(
       }
     }
 
+    // Create a local copy of kernel since matmul_kernel_wrapper takes a non-const ref
+    matmul_algo_t tile_kernel = config.kernel;
+
     // Call standard kernel wrapper
     matmul_kernel_wrapper(
       layout, trans_input, trans_weight,
@@ -191,7 +194,7 @@ static tile_kernel_invoker_t create_tile_callback(
       A_tile, config.lda,
       B_tile, config.ldb,
       beta, C_tile, config.ldc,
-      tile_params.dtypes, config.kernel,
+      tile_params.dtypes, tile_kernel,
       tile_params.mem_format_a, tile_params.mem_format_b,
       tile_params, batch_params, tile_bias, is_weights_const
     );

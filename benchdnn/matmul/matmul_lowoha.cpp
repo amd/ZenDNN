@@ -88,6 +88,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                                     weight_tensor[0].get_stride(weight_dim-1):
                                     weight_tensor[0].get_stride(weight_dim-2);
       const int   ldc             = output_tensor[0].get_stride(output_dim-2);
+      bool is_weights_const       = true;
 
       const int batchA = cfg.bs;
       const int batchB = cfg.bs;
@@ -115,6 +116,10 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       matmul_batch_params_t batch_params;
       batch_params.Batch_A = batchA;
       batch_params.Batch_B = batchB;
+
+      if (batchA > 1 || batchB > 1) {
+        is_weights_const = false;
+      }
 
       // Validate data types
       if (cfg.dt[0] != data_type_t::f32 && cfg.dt[0] != data_type_t::bf16 &&
@@ -182,7 +187,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
             params.quant_params.src_scale.dt = input_tensor.get_quant_scale_data_type();
             auto src_scale_size = input_tensor.get_quant_scale_size();
             params.quant_params.src_scale.dims.assign(src_scale_size.begin(),
-                src_scale_size.end());
+                                              src_scale_size.end());
             log_info("LOWOHA INT8: Source scale extracted");
           }
           // Extract source zero point (for asymmetric quantization)
@@ -207,7 +212,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
             params.quant_params.wei_scale.dt = weight_tensor[0].get_quant_scale_data_type();
             auto wei_scale_size = weight_tensor[0].get_quant_scale_size();
             params.quant_params.wei_scale.dims.assign(wei_scale_size.begin(),
-                wei_scale_size.end());
+                                              wei_scale_size.end());
             log_info("LOWOHA INT8: Weight scale extracted");
           }
           // Extract weight zero point (for asymmetric quantization)
@@ -232,7 +237,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
             params.quant_params.dst_scale.dt = output_tensor[0].get_quant_scale_data_type();
             auto dst_scale_size = output_tensor[0].get_quant_scale_size();
             params.quant_params.dst_scale.dims.assign(dst_scale_size.begin(),
-                dst_scale_size.end());
+                                              dst_scale_size.end());
             log_info("LOWOHA INT8: Destination scale extracted");
           }
           // Extract destination zero point (for asymmetric quantization)
@@ -285,7 +290,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                               alpha, A_data, lda, B_data, ldb, bias_data,
-                              beta, C_data, ldc, true,
+                              beta, C_data, ldc, is_weights_const,
                               batch_params, params);
           if (status != status_t::success) {
             testlog_error("LOWOHA: Matmul execution failed.");
@@ -326,7 +331,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                               alpha, A_data, lda, B_data, ldb, bias_data,
-                              beta, C_data, ldc, true,
+                              beta, C_data, ldc, is_weights_const,
                               batch_params, params);
           if (status != status_t::success) {
             testlog_error("LOWOHA: Matmul execution failed.");

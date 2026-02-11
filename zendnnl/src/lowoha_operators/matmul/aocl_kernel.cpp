@@ -236,10 +236,10 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       dlp_metadata->matrix_add[matrix_add_index].matrix = po.buff;
       dlp_metadata->matrix_add[matrix_add_index].ldm = po.leading_dim;
       dlp_metadata->matrix_add[matrix_add_index].stor_type = po.dtype ==
-          data_type_t::bf16 ? DLP_BF16 : DLP_F32;
+        data_type_t::bf16 ? DLP_BF16 : DLP_F32;
       // sf structure is already allocated, initialize with default values
       dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(
-            float));
+          float));
       if (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) {
         *static_cast<float *>
         (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
@@ -255,10 +255,10 @@ static void setup_dlp_postops(dlp_metadata_t *dlp_metadata,
       dlp_metadata->matrix_mul[matrix_mul_index].matrix = po.buff;
       dlp_metadata->matrix_mul[matrix_mul_index].ldm = po.leading_dim;
       dlp_metadata->matrix_mul[matrix_mul_index].stor_type = po.dtype ==
-          data_type_t::bf16 ? DLP_BF16 : DLP_F32;
+        data_type_t::bf16 ? DLP_BF16 : DLP_F32;
       // sf structure is already allocated, initialize with default values
       dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor = malloc(sizeof(
-            float));
+          float));
       if (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) {
         *static_cast<float *>
         (dlp_metadata->matrix_mul[matrix_mul_index].sf->scale_factor) = 1.0f;
@@ -301,7 +301,7 @@ static void setup_woq_pre_ops(dlp_metadata_t *dlp_metadata,
   if (dlp_metadata->pre_ops->b_zp) {
     dlp_metadata->pre_ops->b_zp->zero_point = const_cast<void *>(wei_zp.buff);
     dlp_metadata->pre_ops->b_zp->zero_point_len = wei_zp.buff != nullptr ?
-        get_num_elements(wei_zp.dims) : 0;
+      get_num_elements(wei_zp.dims) : 0;
     dlp_metadata->pre_ops->b_zp->zero_point_type = DLP_S8;
   }
 
@@ -507,10 +507,10 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
       }
       // Set zp for pre-quantization
       dlp_metadata->a_pre_quant->zp->zero_point = const_cast<void *>
-          (lowoha_param.quant_params.src_zp.buff);
+        (lowoha_param.quant_params.src_zp.buff);
       dlp_metadata->a_pre_quant->zp->zero_point_len = 1;
       dlp_metadata->a_pre_quant->zp->zero_point_type = to_dlp_type(
-            lowoha_param.quant_params.src_zp.dt);
+          lowoha_param.quant_params.src_zp.dt);
       dlp_metadata->a_pre_quant->symmetric = false;
       // Set zp for post-quantization
       dlp_metadata->a_post_quant->symmetric = false;
@@ -549,7 +549,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->a_post_quant->src_type = to_dlp_type(dtypes.src);
     dlp_metadata->a_post_quant->dst_type = DLP_S8;
     dlp_metadata->a_post_quant->scl->scale_factor = const_cast<void *>
-        (lowoha_param.quant_params.src_scale.buff);
+      (lowoha_param.quant_params.src_scale.buff);
     dlp_metadata->a_post_quant->scl->scale_factor_len = 1;
     dlp_metadata->a_post_quant->scl->scale_factor_type = DLP_F32;
   }
@@ -712,7 +712,7 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->matrix_add[matrix_add_index].ldm = N;
     // Allocate and set scale factor to 1.0
     dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor = malloc(sizeof(
-          float));
+        float));
     *static_cast<float *>
     (dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor) = 1.0f;
     dlp_metadata->matrix_add[matrix_add_index].sf->scale_factor_len = 1;
@@ -1047,7 +1047,7 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
       aocl_po->matrix_add[matrix_add_index].scale_factor_len = 1;
       aocl_po->matrix_add[matrix_add_index].ldm = po.leading_dim;
       aocl_po->matrix_add[matrix_add_index].stor_type = po.dtype == data_type_t::bf16
-          ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
+        ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
       matrix_add_index++;
       break;
     case post_op_type_t::binary_mul:
@@ -1059,7 +1059,7 @@ aocl_post_op *create_blis_post_op(const matmul_params &lowoha_param,
       aocl_po->matrix_mul[matrix_mul_index].scale_factor_len = 1;
       aocl_po->matrix_mul[matrix_mul_index].ldm = N; // Set leading dimension to N
       aocl_po->matrix_mul[matrix_mul_index].stor_type = po.dtype == data_type_t::bf16
-          ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
+        ? AOCL_GEMM_BF16 : AOCL_GEMM_F32;
       matrix_mul_index++;
       break;
     default:
