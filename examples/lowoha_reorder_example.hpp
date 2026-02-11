@@ -426,6 +426,109 @@ int run_lowoha_reorder_f32_to_bf16_strided_2d_test();
  */
 int run_lowoha_reorder_f32_to_bf16_batched_test();
 
+//==============================================================================
+// Dynamic Quantization Tests
+//
+// Validation Strategy: Quantize -> Dequantize -> Compare with original
+// 
+// Symmetric (s8): scale = max(abs(A)) / 127, zp = 0
+//   Quantize:   Q = round(A / scale)
+//   Dequantize: A' = Q * scale
+//
+// Asymmetric (u8): scale = (max - min) / 255, zp = round(-min / scale)
+//   Quantize:   Q = round(A / scale) + zp
+//   Dequantize: A' = (Q - zp) * scale
+//==============================================================================
+
+// ---- BF16 -> S8 Symmetric Tests ----
+
+/** @fn run_lowoha_reorder_dynamic_quant_per_tensor_test
+ *  @brief BF16 -> S8 symmetric dynamic quantization (per-tensor).
+ */
+int run_lowoha_reorder_dynamic_quant_per_tensor_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_per_channel_row_test
+ *  @brief BF16 -> S8 symmetric dynamic quantization (per-token/per-row).
+ */
+int run_lowoha_reorder_dynamic_quant_per_channel_row_test();
+
+// ---- F32 -> S8 Symmetric Tests ----
+
+/** @fn run_lowoha_reorder_dynamic_quant_per_channel_col_test
+ *  @brief F32 -> S8 symmetric dynamic quantization (per-column).
+ */
+int run_lowoha_reorder_dynamic_quant_per_channel_col_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_per_group_row_test
+ *  @brief F32 -> S8 symmetric dynamic quantization (per-group-row).
+ */
+int run_lowoha_reorder_dynamic_quant_per_group_row_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_f32_to_s8_test
+ *  @brief F32 -> S8 symmetric dynamic quantization (per-tensor).
+ */
+int run_lowoha_reorder_dynamic_quant_f32_to_s8_test();
+
+// ---- Compute-Only Mode ----
+
+/** @fn run_lowoha_reorder_dynamic_quant_compute_only_test
+ *  @brief Compute scale/zp only without quantization (dst=nullptr).
+ */
+int run_lowoha_reorder_dynamic_quant_compute_only_test();
+
+// ---- F32 -> U8 Asymmetric Tests ----
+
+/** @fn run_lowoha_reorder_dynamic_quant_f32_to_u8_test
+ *  @brief F32 -> U8 asymmetric dynamic quantization (per-tensor).
+ */
+int run_lowoha_reorder_dynamic_quant_f32_to_u8_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test
+ *  @brief F32 -> U8 asymmetric dynamic quantization (per-column).
+ */
+int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test();
+
+// ---- BF16 -> U8 Asymmetric Tests ----
+
+/** @fn run_lowoha_reorder_dynamic_quant_bf16_to_u8_test
+ *  @brief BF16 -> U8 asymmetric dynamic quantization (per-tensor).
+ */
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test
+ *  @brief BF16 -> U8 asymmetric dynamic quantization (per-token/per-row).
+ */
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test();
+
+/** @fn run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test
+ *  @brief BF16 -> U8 asymmetric dynamic quantization (per-group-row).
+ */
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test();
+
+//==============================================================================
+// BF16 Scale Tests
+//==============================================================================
+
+/** @fn run_lowoha_reorder_bf16_scale_per_tensor_quant_test
+ *  @brief BF16 to S8 per-tensor quantization with scale provided as bf16.
+ */
+int run_lowoha_reorder_bf16_scale_per_tensor_quant_test();
+
+/** @fn run_lowoha_reorder_bf16_scale_per_channel_dequant_test
+ *  @brief S8 to BF16 per-channel dequantization with scales provided as bf16.
+ */
+int run_lowoha_reorder_bf16_scale_per_channel_dequant_test();
+
+/** @fn run_lowoha_reorder_bf16_scale_f32_to_s8_test
+ *  @brief FP32 to S8 per-tensor quantization with scale provided as bf16.
+ */
+int run_lowoha_reorder_bf16_scale_f32_to_s8_test();
+
+/** @fn run_lowoha_reorder_bf16_scale_dynamic_quant_test
+ *  @brief Dynamic quantization (F32 → S8) with bf16 scale output buffer.
+ */
+int run_lowoha_reorder_bf16_scale_dynamic_quant_test();
+
 } // namespace examples
 } // namespace zendnnl
 

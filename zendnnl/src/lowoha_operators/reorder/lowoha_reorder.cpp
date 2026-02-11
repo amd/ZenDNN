@@ -766,6 +766,76 @@ status_t reorder_direct(const void *src, void *dst,
   // Compute nelems from shape
   const size_t nelems = static_cast<size_t>(params.nelems());
 
+  //============================================================================
+  // Dynamic Quantization Mode
+  //============================================================================
+  if (params.dynamic_quant) {
+    // Validate dynamic quantization parameters
+    if (validate_dynamic_quant_params(src, params) != status_t::success) {
+      return status_t::failure;
+    }
+
+    // Validate shape
+    if (validate_reorder_shape(params) != status_t::success) {
+      return status_t::failure;
+    }
+
+    // Create profiler instance for timing
+    profiler_t profiler;
+    bool is_profile = is_profile_enabled();
+
+    // Determine quantization mode based on zp buffer presence
+    const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+
+    // Build log string for API and profile logging
+    [[maybe_unused]] std::ostringstream ss_dq;
+    if (apilog_info_enabled() || is_profile) {
+      ss_dq << "LOWOHA reorder_direct (dynamic_quant): nelems=" << nelems
+            << ", mode=" << (is_symmetric ? "symmetric" : "asymmetric")
+            << ", src_dtype=" << reorder_data_type_to_string(params.src_dtype)
+            << ", dst_dtype=" << reorder_data_type_to_string(params.dst_dtype)
+            << ", granularity=" << granularity_to_string(
+                   get_single_granularity(params.quant_params.scale.dims, params.src_shape))
+            << ", dst=" << (dst == nullptr ? "nullptr (compute only)" : "valid");
+
+      if (apilog_info_enabled()) {
+        apilog_info(ss_dq.str());
+      }
+    }
+
+    // Start profiling timer
+    if (is_profile) {
+      profiler.tbp_start();
+    }
+
+    params.num_threads = params.num_threads > 0 ? params.num_threads :
+                         omp_get_max_threads();
+
+    reorder_threadlimit thread_guard(params.num_threads);
+
+    // Compute dynamic quantization parameters (scale and zero_point)
+    status_t status = compute_dynamic_quant_params(src, params);
+    if (status != status_t::success) {
+      return status;
+    }
+
+    if (is_profile) {
+      profiler.tbp_stop();
+      profilelog_verbose(ss_dq.str(), ", time=", profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
+    // If dst is nullptr, only compute scale/zp and return
+    if (dst == nullptr) {
+      return status_t::success;
+    }
+
+    // Fall through to standard path with computed parameters
+  }
+
+  //============================================================================
+  // Standard Reorder Mode (static quantization parameters)
+  //============================================================================
+
   // Validate inputs and parameters
   if (validate_reorder_inputs(src, dst, nelems, params) != status_t::success) {
     return status_t::failure;

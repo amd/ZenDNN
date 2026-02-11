@@ -157,6 +157,34 @@ int main() {
     run_lowoha_reorder_f32_to_bf16_strided_2d_test();
     run_lowoha_reorder_f32_to_bf16_batched_test();
 
+    // Dynamic quantization tests
+    // ---- BF16 -> S8 Symmetric Tests ----
+    run_lowoha_reorder_dynamic_quant_per_tensor_test();       // BF16->S8 per-tensor
+    run_lowoha_reorder_dynamic_quant_per_channel_row_test();  // BF16->S8 per-token
+    
+    // ---- F32 -> S8 Symmetric Tests ----
+    run_lowoha_reorder_dynamic_quant_per_channel_col_test();  // F32->S8 per-column
+    run_lowoha_reorder_dynamic_quant_per_group_row_test();    // F32->S8 per-group
+    run_lowoha_reorder_dynamic_quant_f32_to_s8_test();        // F32->S8 per-tensor
+    
+    // ---- Compute-Only Mode ----
+    run_lowoha_reorder_dynamic_quant_compute_only_test();     // Compute scale only
+    
+    // ---- F32 -> U8 Asymmetric Tests ----
+    run_lowoha_reorder_dynamic_quant_f32_to_u8_test();        // F32->U8 per-tensor
+    run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test();// F32->U8 per-column
+    
+    // ---- BF16 -> U8 Asymmetric Tests ----
+    run_lowoha_reorder_dynamic_quant_bf16_to_u8_test();          // BF16->U8 per-tensor
+    run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test();// BF16->U8 per-token
+    run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test();// BF16->U8 per-group
+
+    // BF16 scale tests (scale buffer stored as bf16 instead of f32)
+    run_lowoha_reorder_bf16_scale_per_tensor_quant_test();     // BF16->S8 with bf16 scale
+    run_lowoha_reorder_bf16_scale_per_channel_dequant_test();  // S8->BF16 with bf16 scales
+    run_lowoha_reorder_bf16_scale_f32_to_s8_test();            // FP32->S8 with bf16 scale
+    run_lowoha_reorder_bf16_scale_dynamic_quant_test();        // Dynamic quant with bf16 scale output
+
     /** LOWOHA Softmax operator functionality examples.
      *  Demonstrates softmax and log-softmax operations using the low-overhead
      *  LOWOHA API with support for multi-dimensional tensors.

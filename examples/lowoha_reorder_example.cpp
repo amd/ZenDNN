@@ -16,6 +16,7 @@
 
 #include "lowoha_reorder_example.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <iomanip>
@@ -4994,6 +4995,1246 @@ int run_lowoha_reorder_f32_to_bf16_batched_test() {
     return NOT_OK;
   }
 
+  return OK;
+}
+
+//==============================================================================
+// Dynamic Quantization Examples
+// 
+// Validation Strategy: Quantize -> Dequantize -> Compare with original
+// If dequantized values are close to original, quantization is correct.
+//
+// Symmetric (s8): scale = max(abs(A)) / 127, zp = 0
+//   Quantize:   Q = round(A / scale)
+//   Dequantize: A' = Q * scale
+//
+// Asymmetric (u8): scale = (max - min) / 255, zp = round(-min / scale)
+//   Quantize:   Q = round(A / scale) + zp
+//   Dequantize: A' = (Q - zp) * scale
+//==============================================================================
+
+//------------------------------------------------------------------------------
+// BF16 -> S8 Symmetric Dynamic Quantization (Per-Tensor)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_per_tensor_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: BF16 -> S8 Symmetric Per-Tensor");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Input data with mixed positive/negative values
+    std::vector<float> input_f32_ref = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Source: BF16, Dest: S8 (symmetric)");
+    log_info("Shape: [", M, ", ", N, "], Range: [", -2.0f, ", ", 5.5f, "]");
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    float computed_scale = 0.0f;
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = &computed_scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, 1};
+    // zp buffer = nullptr for symmetric
+
+    status_t status = reorder_direct(input_bf16.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Computed scale: ", computed_scale, " (zp = 0 implicit)");
+
+    // VALIDATION: Dequantize and compare with original
+    // Dequantize: A' = Q * scale (symmetric, zp = 0)
+    float max_error = 0.0f;
+    for (size_t i = 0; i < nelems; ++i) {
+      float dequant = static_cast<float>(output_s8[i]) * computed_scale;
+      float original = bf16_to_float(input_bf16[i]);
+      float error = std::abs(dequant - original);
+      max_error = std::max(max_error, error);
+    }
+
+    // Quantization error should be within scale/2 (half a quantization step)
+    float tolerance = computed_scale / 2.0f + 0.01f;
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// BF16 -> S8 Symmetric Dynamic Quantization (Per-Token / Per-Row)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_per_channel_row_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: BF16 -> S8 Symmetric Per-Token (Per-Row)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;  // 4 tokens
+    constexpr int64_t N = 8;
+    constexpr size_t nelems = M * N;
+
+    // Different range per row to test per-token quantization
+    std::vector<float> input_f32_ref = {
+      // Row 0: range [-1, 1]
+      -1.0f, -0.5f, 0.0f, 0.25f, 0.5f, 0.75f, 0.9f, 1.0f,
+      // Row 1: range [-5, 5]  
+      -5.0f, -3.0f, -1.0f, 0.0f, 1.0f, 3.0f, 4.0f, 5.0f,
+      // Row 2: range [0, 10]
+      0.0f, 1.0f, 2.0f, 3.5f, 5.0f, 7.0f, 8.5f, 10.0f,
+      // Row 3: range [-2, 2]
+      -2.0f, -1.5f, -1.0f, -0.5f, 0.5f, 1.0f, 1.5f, 2.0f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Source: BF16, Dest: S8 (symmetric per-token)");
+    log_info("Shape: [", M, ", ", N, "] (", M, " tokens)");
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    std::vector<float> computed_scales(M, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {M, 1};  // Per-row
+
+    status_t status = reorder_direct(input_bf16.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+
+    // VALIDATION: Dequantize per-row and compare
+    float max_error = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+      float scale = computed_scales[m];
+      for (int64_t n = 0; n < N; ++n) {
+        size_t idx = m * N + n;
+        float dequant = static_cast<float>(output_s8[idx]) * scale;
+        float original = bf16_to_float(input_bf16[idx]);
+        float error = std::abs(dequant - original);
+        max_error = std::max(max_error, error);
+      }
+    }
+
+    // Max scale determines worst case tolerance
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.01f;
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// F32 -> S8 Symmetric Dynamic Quantization (Per-Column)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_per_channel_col_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: F32 -> S8 Symmetric Per-Column");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Different range per column
+    std::vector<float> input_f32 = {
+      // Col 0: [-2, 8], Col 1: [-1, 4], Col 2: [0, 6], Col 3: [-4, 2]
+      -2.0f, -1.0f,  0.0f, -4.0f,
+       0.0f,  1.0f,  2.0f, -2.0f,
+       4.0f,  2.0f,  4.0f,  0.0f,
+       8.0f,  4.0f,  6.0f,  2.0f
+    };
+
+    log_info("Source: F32, Dest: S8 (symmetric per-col)");
+    log_info("Shape: [", M, ", ", N, "]");
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    std::vector<float> computed_scales(N, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, N};  // Per-column
+
+    status_t status = reorder_direct(input_f32.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Per-column scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+
+    // VALIDATION: Dequantize per-column and compare
+    float max_error = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+      for (int64_t n = 0; n < N; ++n) {
+        size_t idx = m * N + n;
+        float scale = computed_scales[n];
+        float dequant = static_cast<float>(output_s8[idx]) * scale;
+        float error = std::abs(dequant - input_f32[idx]);
+        max_error = std::max(max_error, error);
+      }
+    }
+
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.01f;
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// F32 -> S8 Symmetric Dynamic Quantization (Per-Group-Row)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_per_group_row_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: F32 -> S8 Symmetric Per-Group-Row");
+    log_info("========================================");
+
+    constexpr int64_t M = 8;
+    constexpr int64_t N = 4;
+    constexpr int64_t G = 2;  // 2 groups of 4 rows each
+    constexpr size_t nelems = M * N;
+
+    // Group 0: smaller range, Group 1: larger range
+    std::vector<float> input_f32 = {
+      // Group 0 (rows 0-3)
+      -2.0f, -1.0f, 0.0f, 1.0f,
+      -1.0f,  0.0f, 1.0f, 2.0f,
+       0.0f,  1.0f, 2.0f, 3.0f,
+       1.0f,  2.0f, 3.0f, 4.0f,
+      // Group 1 (rows 4-7): larger values
+      -8.0f, -4.0f, 0.0f, 4.0f,
+      -6.0f, -2.0f, 2.0f, 6.0f,
+      -4.0f,  0.0f, 4.0f, 8.0f,
+      -2.0f,  2.0f, 6.0f, 10.0f
+    };
+
+    log_info("Source: F32, Dest: S8 (symmetric per-group)");
+    log_info("Shape: [", M, ", ", N, "], Groups: ", G);
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    std::vector<float> computed_scales(G * N, 0.0f);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {G, N};  // Per-group-row
+
+    status_t status = reorder_direct(input_f32.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5], 
+             ", ", computed_scales[6], ", ", computed_scales[7], "]");
+
+    // VALIDATION: Dequantize per-group and compare
+    int64_t group_size = M / G;
+    float max_error = 0.0f;
+    for (int64_t g = 0; g < G; ++g) {
+      for (int64_t m_local = 0; m_local < group_size; ++m_local) {
+        int64_t m = g * group_size + m_local;
+        for (int64_t n = 0; n < N; ++n) {
+          size_t idx = m * N + n;
+          float scale = computed_scales[g * N + n];
+          float dequant = static_cast<float>(output_s8[idx]) * scale;
+          float error = std::abs(dequant - input_f32[idx]);
+          max_error = std::max(max_error, error);
+        }
+      }
+    }
+
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.01f;
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// Compute-Only Mode (dst = nullptr)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_compute_only_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: Compute-Only Mode (dst=nullptr)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+
+    std::vector<float> input_f32 = {
+      -3.0f, -2.0f, -1.0f, 0.0f,
+       1.0f,  2.0f,  3.0f, 4.0f,
+       5.0f,  6.0f,  7.0f, 8.0f,
+       9.0f, 10.0f, 11.0f, 12.0f
+    };
+
+    log_info("Source: F32, Dest: S8 (compute scale only, no quantization)");
+
+    float computed_scale = 0.0f;
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = &computed_scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, 1};
+
+    // dst = nullptr: only compute scale, don't quantize
+    status_t status = reorder_direct(input_f32.data(), nullptr, params);
+    if (status != status_t::success) {
+      log_error("Compute-only mode failed!");
+      return NOT_OK;
+    }
+
+    // Expected: scale = max(|-3|, |12|) / 127 = 12/127
+    float expected_scale = 12.0f / 127.0f;
+    
+    log_info("Computed scale: ", computed_scale);
+    log_info("Expected scale: ", expected_scale);
+
+    if (std::abs(computed_scale - expected_scale) < 0.001f) {
+      log_info("PASSED! Scale computed correctly without quantization.");
+    } else {
+      log_error("FAILED! Scale mismatch.");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// F32 -> U8 Asymmetric Dynamic Quantization (Per-Tensor)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_f32_to_u8_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: F32 -> U8 Asymmetric Per-Tensor");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Asymmetric data (not centered around 0)
+    std::vector<float> input_f32 = {
+      -4.0f, -3.0f, -2.0f, -1.0f,
+       0.0f,  1.0f,  2.0f,  3.0f,
+       4.0f,  5.0f,  6.0f,  7.0f,
+       8.0f,  9.0f, 10.0f, 11.0f
+    };
+
+    log_info("Source: F32, Dest: U8 (asymmetric)");
+    log_info("Shape: [", M, ", ", N, "], Range: [-4.0, 11.0]");
+
+    std::vector<uint8_t> output_u8(nelems, 0);
+    float computed_scale = 0.0f;
+    int32_t computed_zp = 0;
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::u8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = &computed_scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, 1};
+    
+    // MUST provide zp buffer for asymmetric u8
+    params.quant_params.zero_point.buff = &computed_zp;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, 1};
+
+    status_t status = reorder_direct(input_f32.data(), output_u8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Computed scale: ", computed_scale, ", zp: ", computed_zp);
+
+    // VALIDATION: Dequantize and compare with original
+    // Dequantize: A' = (Q - zp) * scale
+    float max_error = 0.0f;
+    for (size_t i = 0; i < nelems; ++i) {
+      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) * computed_scale;
+      float error = std::abs(dequant - input_f32[i]);
+      max_error = std::max(max_error, error);
+    }
+
+    float tolerance = computed_scale / 2.0f + 0.01f;
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// BF16 -> U8 Asymmetric Dynamic Quantization (Per-Token)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_token_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: BF16 -> U8 Asymmetric Per-Token");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;  // 4 tokens
+    constexpr int64_t N = 8;
+    constexpr size_t nelems = M * N;
+
+    // Each row has different range (spans negative to positive for proper asymmetric)
+    std::vector<float> input_f32_ref = {
+      // Row 0: range [0, 2] - includes 0
+      0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f,
+      // Row 1: range [1, 5]
+      1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f, 5.0f,
+      // Row 2: range [5, 15]
+      5.0f, 6.0f, 7.5f, 9.0f, 10.0f, 12.0f, 13.5f, 15.0f,
+      // Row 3: range [-1, 3]
+      -1.0f, 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Source: BF16, Dest: U8 (asymmetric per-token)");
+    log_info("Shape: [", M, ", ", N, "] (", M, " tokens)");
+
+    std::vector<uint8_t> output_u8(nelems, 0);
+    std::vector<float> computed_scales(M, 0.0f);
+    std::vector<int32_t> computed_zps(M, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::u8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {M, 1};
+    
+    params.quant_params.zero_point.buff = computed_zps.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {M, 1};
+
+    status_t status = reorder_direct(input_bf16.data(), output_u8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Per-token scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+    log_info("Per-token zps: [", computed_zps[0], ", ", computed_zps[1], 
+             ", ", computed_zps[2], ", ", computed_zps[3], "]");
+
+    // VALIDATION: Dequantize per-token and compare
+    float max_error = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+      float scale = computed_scales[m];
+      int32_t zp = computed_zps[m];
+      for (int64_t n = 0; n < N; ++n) {
+        size_t idx = m * N + n;
+        float dequant = (static_cast<float>(output_u8[idx]) - zp) * scale;
+        float original = bf16_to_float(input_bf16[idx]);
+        float error = std::abs(dequant - original);
+        max_error = std::max(max_error, error);
+      }
+    }
+
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.05f;  // Slightly larger for BF16 rounding
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// F32 -> U8 Asymmetric Dynamic Quantization (Per-Column)  
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_f32_to_u8_per_col_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: F32 -> U8 Asymmetric Per-Column");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Each column has different range
+    std::vector<float> input_f32 = {
+      // Col 0: [0, 3], Col 1: [2, 8], Col 2: [1, 5], Col 3: [0, 10]
+       0.0f,  2.0f,  1.0f,  0.0f,
+       1.0f,  4.0f,  2.0f,  3.0f,
+       2.0f,  6.0f,  3.5f,  6.0f,
+       3.0f,  8.0f,  5.0f, 10.0f
+    };
+
+    log_info("Source: F32, Dest: U8 (asymmetric per-col)");
+    log_info("Shape: [", M, ", ", N, "]");
+
+    std::vector<uint8_t> output_u8(nelems, 0);
+    std::vector<float> computed_scales(N, 0.0f);
+    std::vector<int32_t> computed_zps(N, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::u8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, N};
+    
+    params.quant_params.zero_point.buff = computed_zps.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, N};
+
+    status_t status = reorder_direct(input_f32.data(), output_u8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Per-col scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+    log_info("Per-col zps: [", computed_zps[0], ", ", computed_zps[1], 
+             ", ", computed_zps[2], ", ", computed_zps[3], "]");
+
+    // VALIDATION: Dequantize per-column and compare
+    float max_error = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+      for (int64_t n = 0; n < N; ++n) {
+        size_t idx = m * N + n;
+        float scale = computed_scales[n];
+        int32_t zp = computed_zps[n];
+        float dequant = (static_cast<float>(output_u8[idx]) - zp) * scale;
+        float error = std::abs(dequant - input_f32[idx]);
+        max_error = std::max(max_error, error);
+      }
+    }
+
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.01f;
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// BF16 -> U8 Asymmetric Dynamic Quantization (Per-Group)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_per_group_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: BF16 -> U8 Asymmetric Per-Group");
+    log_info("========================================");
+
+    constexpr int64_t M = 8;
+    constexpr int64_t N = 4;
+    constexpr int64_t G = 2;  // 2 groups
+    constexpr size_t nelems = M * N;
+
+    // Group 0: smaller positive values, Group 1: larger range including negative
+    std::vector<float> input_f32_ref = {
+      // Group 0 (rows 0-3): range [0, 4]
+      0.0f, 1.0f, 2.0f, 3.0f,
+      0.5f, 1.5f, 2.5f, 3.5f,
+      1.0f, 2.0f, 3.0f, 4.0f,
+      0.0f, 0.5f, 1.0f, 1.5f,
+      // Group 1 (rows 4-7): range [-2, 10]
+      -2.0f, 0.0f, 2.0f, 4.0f,
+      -1.0f, 2.0f, 5.0f, 7.0f,
+       0.0f, 3.0f, 6.0f, 8.0f,
+       1.0f, 4.0f, 8.0f, 10.0f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Source: BF16, Dest: U8 (asymmetric per-group)");
+    log_info("Shape: [", M, ", ", N, "], Groups: ", G);
+
+    std::vector<uint8_t> output_u8(nelems, 0);
+    std::vector<float> computed_scales(G * N, 0.0f);
+    std::vector<int32_t> computed_zps(G * N, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::u8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = computed_scales.data();
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {G, N};
+    
+    params.quant_params.zero_point.buff = computed_zps.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {G, N};
+
+    status_t status = reorder_direct(input_bf16.data(), output_u8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Group 0 scales: [", computed_scales[0], ", ", computed_scales[1], 
+             ", ", computed_scales[2], ", ", computed_scales[3], "]");
+    log_info("Group 1 scales: [", computed_scales[4], ", ", computed_scales[5], 
+             ", ", computed_scales[6], ", ", computed_scales[7], "]");
+
+    // VALIDATION: Dequantize per-group and compare
+    int64_t group_size = M / G;
+    float max_error = 0.0f;
+    for (int64_t g = 0; g < G; ++g) {
+      for (int64_t m_local = 0; m_local < group_size; ++m_local) {
+        int64_t m = g * group_size + m_local;
+        for (int64_t n = 0; n < N; ++n) {
+          size_t idx = m * N + n;
+          size_t param_idx = g * N + n;
+          float scale = computed_scales[param_idx];
+          int32_t zp = computed_zps[param_idx];
+          float dequant = (static_cast<float>(output_u8[idx]) - zp) * scale;
+          float original = bf16_to_float(input_bf16[idx]);
+          float error = std::abs(dequant - original);
+          max_error = std::max(max_error, error);
+        }
+      }
+    }
+
+    float max_scale = *std::max_element(computed_scales.begin(), computed_scales.end());
+    float tolerance = max_scale / 2.0f + 0.05f;
+    
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// F32 -> S8 Symmetric Dynamic Quantization (Per-Tensor) - Additional test
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_f32_to_s8_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: F32 -> S8 Symmetric Per-Tensor");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> input_f32 = {
+      -5.0f, -3.0f, -1.0f, 0.0f,
+       1.0f,  2.0f,  3.0f, 4.0f,
+       5.0f,  6.0f,  7.0f, 8.0f,
+      -8.0f, -6.0f, -4.0f, -2.0f
+    };
+
+    log_info("Source: F32, Dest: S8 (symmetric)");
+    log_info("Shape: [", M, ", ", N, "], Range: [-8, 8]");
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    float computed_scale = 0.0f;
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = &computed_scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, 1};
+
+    status_t status = reorder_direct(input_f32.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Computed scale: ", computed_scale, " (zp = 0 implicit)");
+
+    // VALIDATION: Dequantize and compare
+    float max_error = 0.0f;
+    for (size_t i = 0; i < nelems; ++i) {
+      float dequant = static_cast<float>(output_s8[i]) * computed_scale;
+      float error = std::abs(dequant - input_f32[i]);
+      max_error = std::max(max_error, error);
+    }
+
+    float tolerance = computed_scale / 2.0f + 0.01f;
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// BF16 -> U8 Asymmetric Dynamic Quantization (Per-Tensor)
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_dynamic_quant_bf16_to_u8_test() {
+  try {
+    log_info("========================================");
+    log_info("Dynamic Quant: BF16 -> U8 Asymmetric Per-Tensor");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Asymmetric data (range [0.5, 10.5])
+    std::vector<float> input_f32_ref = {
+      0.5f, 1.0f, 1.5f, 2.0f,
+      3.0f, 4.0f, 5.0f, 6.0f,
+      7.0f, 7.5f, 8.0f, 8.5f,
+      9.0f, 9.5f, 10.0f, 10.5f
+    };
+    
+    std::vector<uint16_t> input_bf16(nelems);
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Source: BF16, Dest: U8 (asymmetric)");
+    log_info("Shape: [", M, ", ", N, "], Range: [0.5, 10.5]");
+
+    std::vector<uint8_t> output_u8(nelems, 0);
+    float computed_scale = 0.0f;
+    int32_t computed_zp = 0;
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::u8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+    
+    params.quant_params.scale.buff = &computed_scale;
+    params.quant_params.scale.dt = data_type_t::f32;
+    params.quant_params.scale.dims = {1, 1};
+    
+    params.quant_params.zero_point.buff = &computed_zp;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, 1};
+
+    status_t status = reorder_direct(input_bf16.data(), output_u8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    log_info("Computed scale: ", computed_scale, ", zp: ", computed_zp);
+
+    // VALIDATION: Dequantize and compare
+    float max_error = 0.0f;
+    for (size_t i = 0; i < nelems; ++i) {
+      float dequant = (static_cast<float>(output_u8[i]) - computed_zp) * computed_scale;
+      float original = bf16_to_float(input_bf16[i]);
+      float error = std::abs(dequant - original);
+      max_error = std::max(max_error, error);
+    }
+
+    float tolerance = computed_scale / 2.0f + 0.05f;
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error, " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error, " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//==============================================================================
+// BF16 Scale Tests
+//==============================================================================
+
+//------------------------------------------------------------------------------
+// Test: BF16 to S8 Per-Tensor Quantization with BF16 Scale
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_bf16_scale_per_tensor_quant_test() {
+  try {
+    log_info("========================================");
+    log_info("BF16 Scale: BF16 -> S8 Per-Tensor Quantization");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Scale stored as bf16 (0.5f converted to bf16)
+    uint16_t scale_bf16 = float_to_bf16(0.5f);
+    float scale_f32_ref = bf16_to_float(scale_bf16);  // back-convert for verification
+    int32_t zero_point = 0;
+
+    std::vector<uint16_t> input_bf16(nelems);
+    std::vector<float> input_f32_ref = {
+      -2.0f, -1.5f, -1.0f, -0.5f,
+       0.0f,  0.5f,  1.0f,  1.5f,
+       2.0f,  2.5f,  3.0f,  3.5f,
+       4.0f,  4.5f,  5.0f,  5.5f
+    };
+
+    for (size_t i = 0; i < nelems; ++i) {
+      input_bf16[i] = float_to_bf16(input_f32_ref[i]);
+    }
+
+    log_info("Scale stored as bf16: 0x", std::hex, scale_bf16, std::dec,
+             " (≈", scale_f32_ref, ")");
+
+    std::vector<int8_t> output_int8(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::bf16;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.quant_params.scale.buff = &scale_bf16;
+    params.quant_params.scale.dt = data_type_t::bf16;  // <-- bf16 scale
+    params.quant_params.scale.dims = {1, 1};
+    params.quant_params.zero_point.buff = &zero_point;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, 1};
+
+    status_t status = reorder_direct(input_bf16.data(), output_int8.data(), params);
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      int32_t expected = static_cast<int32_t>(
+          std::round(input_f32_ref[i] / scale_f32_ref) + zero_point);
+      expected = std::max(-128, std::min(127, expected));
+      if (output_int8[i] != static_cast<int8_t>(expected)) {
+        log_error("Mismatch at index ", i, ": expected ", expected,
+                  ", got ", static_cast<int>(output_int8[i]));
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 scale per-tensor quantization test PASSED!");
+    } else {
+      log_error("BF16 scale per-tensor quantization test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// Test: S8 to BF16 Per-Channel Dequantization with BF16 Scales
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_bf16_scale_per_channel_dequant_test() {
+  try {
+    log_info("========================================");
+    log_info("BF16 Scale: S8 -> BF16 Per-Channel Dequantization");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    // Per-channel scales stored as bf16
+    std::vector<float> scales_f32 = {0.25f, 0.5f, 0.75f, 1.0f};
+    std::vector<uint16_t> scales_bf16(N);
+    std::vector<float> scales_f32_ref(N);
+    for (int64_t j = 0; j < N; ++j) {
+      scales_bf16[j] = float_to_bf16(scales_f32[j]);
+      scales_f32_ref[j] = bf16_to_float(scales_bf16[j]);
+    }
+
+    std::vector<int32_t> zero_points = {0, 10, -10, 5};
+
+    std::vector<int8_t> input_int8 = {
+      -8, -3,  0,  5,
+       0,  1, -2,  6,
+       4,  5,  4,  7,
+       8, 15, 10, 10
+    };
+
+    log_info("Per-channel bf16 scales: [", scales_f32_ref[0], ", ",
+             scales_f32_ref[1], ", ", scales_f32_ref[2], ", ",
+             scales_f32_ref[3], "]");
+
+    std::vector<uint16_t> output_bf16(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::s8;
+    params.dst_dtype = data_type_t::bf16;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.quant_params.scale.buff = scales_bf16.data();
+    params.quant_params.scale.dt = data_type_t::bf16;  // <-- bf16 scales
+    params.quant_params.scale.dims = {1, N};
+    params.quant_params.zero_point.buff = zero_points.data();
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, N};
+
+    status_t status = reorder_direct(input_int8.data(), output_bf16.data(), params);
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (int64_t i = 0; i < M; ++i) {
+      for (int64_t j = 0; j < N; ++j) {
+        size_t idx = i * N + j;
+        float expected = (static_cast<float>(input_int8[idx]) - zero_points[j])
+                         * scales_f32_ref[j];
+        float actual = bf16_to_float(output_bf16[idx]);
+        if (std::abs(actual - expected) > 0.1f) {
+          log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
+                    ", got ", actual);
+          all_correct = false;
+        }
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 scale per-channel dequantization test PASSED!");
+    } else {
+      log_error("BF16 scale per-channel dequantization test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// Test: FP32 to S8 Per-Tensor Quantization with BF16 Scale
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_bf16_scale_f32_to_s8_test() {
+  try {
+    log_info("========================================");
+    log_info("BF16 Scale: FP32 -> S8 Per-Tensor Quantization");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    uint16_t scale_bf16 = float_to_bf16(0.75f);
+    float scale_f32_ref = bf16_to_float(scale_bf16);
+    int32_t zero_point = 5;
+
+    std::vector<float> input_f32 = {
+      -3.0f, -2.0f, -1.0f,  0.0f,
+       1.0f,  2.0f,  3.0f,  4.0f,
+       5.0f,  6.0f,  7.0f,  8.0f,
+      -4.0f, -5.0f, -6.0f, -7.0f
+    };
+
+    log_info("Scale as bf16: ≈", scale_f32_ref, ", zero_point=", zero_point);
+
+    std::vector<int8_t> output_int8(nelems, 0);
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.quant_params.scale.buff = &scale_bf16;
+    params.quant_params.scale.dt = data_type_t::bf16;  // <-- bf16 scale
+    params.quant_params.scale.dims = {1, 1};
+    params.quant_params.zero_point.buff = &zero_point;
+    params.quant_params.zero_point.dt = data_type_t::s32;
+    params.quant_params.zero_point.dims = {1, 1};
+
+    status_t status = reorder_direct(input_f32.data(), output_int8.data(), params);
+    if (status != status_t::success) {
+      log_error("LOWOHA reorder failed!");
+      return NOT_OK;
+    }
+
+    bool all_correct = true;
+    for (size_t i = 0; i < nelems; ++i) {
+      int32_t expected = static_cast<int32_t>(
+          std::round(input_f32[i] / scale_f32_ref) + zero_point);
+      expected = std::max(-128, std::min(127, expected));
+      if (output_int8[i] != static_cast<int8_t>(expected)) {
+        log_error("Mismatch at index ", i, ": expected ", expected,
+                  ", got ", static_cast<int>(output_int8[i]));
+        all_correct = false;
+      }
+    }
+
+    if (all_correct) {
+      log_info("BF16 scale FP32->S8 quantization test PASSED!");
+    } else {
+      log_error("BF16 scale FP32->S8 quantization test FAILED!");
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
+//------------------------------------------------------------------------------
+// Test: Dynamic Quantization (F32 → S8) with BF16 Scale Output Buffer
+//------------------------------------------------------------------------------
+int run_lowoha_reorder_bf16_scale_dynamic_quant_test() {
+  try {
+    log_info("========================================");
+    log_info("BF16 Scale: F32 -> S8 Dynamic Quant (bf16 scale output)");
+    log_info("========================================");
+
+    constexpr int64_t M = 4;
+    constexpr int64_t N = 4;
+    constexpr size_t nelems = M * N;
+
+    std::vector<float> input_f32 = {
+      -5.0f, -3.0f, -1.0f, 0.0f,
+       1.0f,  2.0f,  3.0f, 4.0f,
+       5.0f,  6.0f,  7.0f, 8.0f,
+      -8.0f, -6.0f, -4.0f, -2.0f
+    };
+
+    log_info("Source: F32, Dest: S8 (symmetric), Scale output: bf16");
+    log_info("Shape: [", M, ", ", N, "], Range: [-8, 8]");
+
+    std::vector<int8_t> output_s8(nelems, 0);
+    uint16_t computed_scale_bf16 = 0;  // bf16 output buffer
+
+    reorder_params_t params;
+    params.src_dtype = data_type_t::f32;
+    params.dst_dtype = data_type_t::s8;
+    params.src_shape = {M, N};
+    params.dst_shape = {M, N};
+    params.dynamic_quant = true;
+
+    params.quant_params.scale.buff = &computed_scale_bf16;
+    params.quant_params.scale.dt = data_type_t::bf16;  // <-- bf16 output
+    params.quant_params.scale.dims = {1, 1};
+    // zp = nullptr → symmetric
+
+    status_t status = reorder_direct(input_f32.data(), output_s8.data(), params);
+    if (status != status_t::success) {
+      log_error("Quantization failed!");
+      return NOT_OK;
+    }
+
+    float computed_scale_f32 = bf16_to_float(computed_scale_bf16);
+    log_info("Computed scale (bf16 → f32): ", computed_scale_f32,
+             " (raw bf16: 0x", std::hex, computed_scale_bf16, std::dec, ")");
+
+    // Expected: scale = max(|-8|, |8|) / 127 = 8/127 ≈ 0.063
+    float expected_scale = 8.0f / 127.0f;
+    float expected_scale_bf16 = bf16_to_float(float_to_bf16(expected_scale));
+
+    log_info("Expected scale (bf16-rounded): ", expected_scale_bf16);
+
+    // Validate scale was computed and stored correctly as bf16
+    if (std::abs(computed_scale_f32 - expected_scale_bf16) < 0.01f) {
+      log_info("Scale value correct.");
+    } else {
+      log_error("Scale mismatch: expected ≈", expected_scale_bf16,
+                ", got ", computed_scale_f32);
+      return NOT_OK;
+    }
+
+    // Validate quantized values via dequant round-trip
+    float max_error = 0.0f;
+    for (size_t i = 0; i < nelems; ++i) {
+      float dequant = static_cast<float>(output_s8[i]) * computed_scale_f32;
+      float error = std::abs(dequant - input_f32[i]);
+      max_error = std::max(max_error, error);
+    }
+
+    // Tolerance is slightly larger because bf16 scale loses precision
+    float tolerance = computed_scale_f32 / 2.0f + 0.05f;
+    if (max_error <= tolerance) {
+      log_info("PASSED! Max dequant error: ", max_error,
+               " <= tolerance: ", tolerance);
+    } else {
+      log_error("FAILED! Max dequant error: ", max_error,
+                " > tolerance: ", tolerance);
+      return NOT_OK;
+    }
+
+  } catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
   return OK;
 }
 

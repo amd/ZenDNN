@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace zendnnl {
 namespace lowoha {
@@ -76,14 +77,22 @@ static inline uint16_t float_to_bf16(float val) {
 
 /**
  * @brief Extract scale value from quant_t at given index
+ * 
+ * Supports both f32 and bf16 scale buffers.  When the buffer is bf16 the
+ * value is transparently converted to f32 so that all downstream arithmetic
+ * operates in full precision.
+ * 
  * @param scale_param The scale quant_t parameter
  * @param index Index into the scale array (0 for per-tensor)
- * @return Scale value (default 1.0f if buffer is null)
+ * @return Scale value as f32 (default 1.0f if buffer is null)
  */
 static inline float get_scale_value(const reorder_quant_params_t::quant_t &scale_param, 
                                      size_t index = 0) {
   if (scale_param.buff == nullptr) {
     return 1.0f;
+  }
+  if (scale_param.dt == data_type_t::bf16) {
+    return bf16_to_float(static_cast<const uint16_t *>(scale_param.buff)[index]);
   }
   return static_cast<const float *>(scale_param.buff)[index];
 }
@@ -599,6 +608,74 @@ bool is_stride_contiguous(const reorder_params_t &params);
  * @brief Convert granularity_type_t to string for logging
  */
 const char *granularity_to_string(granularity_type_t granularity);
+
+//==============================================================================
+// Dynamic Quantization Functions
+//==============================================================================
+
+/**
+ * @brief Validate dynamic quantization parameters
+ * 
+ * Checks that:
+ * - Source data type is bf16 or f32 (float types for quantization)
+ * - Destination data type is s8 or u8 (int8 types)
+ * - Output buffers (buff) are provided for scale and zero_point
+ * - Dims are valid for the given shape
+ * 
+ * @param src Source data buffer
+ * @param params Reorder parameters with dynamic_quant = true
+ * @return status_t::success if valid, status_t::failure otherwise
+ */
+status_t validate_dynamic_quant_params(const void *src, const reorder_params_t &params);
+
+/**
+ * @brief Compute dynamic quantization parameters from source data
+ * 
+ * Computes scale and zero_point based on the source data's min/max values
+ * and fills the user-provided output buffers.
+ * 
+ * Granularity is determined from quant_params.scale.dims:
+ *   - per-tensor:      Single scale/zp for all elements
+ *   - per-channel-row: One scale/zp per row (M values)
+ *   - per-channel-col: One scale/zp per column (N values)
+ *   - per-group-row:   G*N values (G groups across rows)
+ *   - per-group-col:   M*G values (G groups across columns)
+ * 
+ * Formulas (for asymmetric quantization with u8):
+ *   scale = (max - min) / 255.0
+ *   zero_point = -round(min / scale)
+ * 
+ * Formulas (for symmetric quantization with s8):
+ *   scale = max(|min|, |max|) / 127.0
+ *   zero_point = 0
+ * 
+ * @param src Source data buffer
+ * @param params Reorder parameters (modified: scale/zp buffers filled)
+ * @return status_t::success on success, status_t::failure on error
+ */
+status_t compute_dynamic_quant_params(const void *src, reorder_params_t &params);
+
+/**
+ * @brief Helper to get the number of quantization parameter elements
+ * 
+ * Computes the total number of scale/zero_point values based on dims.
+ * Uses checked multiplication to detect overflow of user-provided dims.
+ * 
+ * @param dims Quantization parameter dimensions
+ * @return Number of elements (product of all dims), or -1 on overflow
+ */
+static inline int64_t get_quant_param_nelems(const std::vector<int64_t> &dims) {
+  if (dims.empty()) return 1;
+  int64_t nelems = 1;
+  for (int64_t d : dims) {
+    if (d <= 0) return -1;
+    if (nelems > std::numeric_limits<int64_t>::max() / d) {
+      return -1;  // overflow
+    }
+    nelems *= d;
+  }
+  return nelems;
+}
 
 } // namespace reorder
 } // namespace lowoha

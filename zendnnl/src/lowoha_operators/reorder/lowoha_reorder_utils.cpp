@@ -18,6 +18,7 @@
 #include "common/zendnnl_global.hpp"
 
 #include <cmath>
+#include <limits>
 
 namespace zendnnl {
 namespace lowoha {
@@ -51,13 +52,14 @@ status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
 
   // Validate scale parameter
   if (params.quant_params.scale.buff != nullptr) {
-    // Currently only f32 scale is supported
-    if (params.quant_params.scale.dt != data_type_t::f32) {
-      log_error("Invalid scale data type: only f32 is currently supported. Got: ",
+    // Supported scale data types: f32 and bf16 (bf16 is converted to f32 internally)
+    if (params.quant_params.scale.dt != data_type_t::f32 &&
+        params.quant_params.scale.dt != data_type_t::bf16) {
+      log_error("Invalid scale data type: f32 or bf16 expected. Got: ",
                 reorder_data_type_to_string(params.quant_params.scale.dt));
       return status_t::failure;
     }
-    float scale_val = *static_cast<const float *>(params.quant_params.scale.buff);
+    float scale_val = get_scale_value(params.quant_params.scale);
     if (!std::isfinite(scale_val)) {
       log_error("Invalid scale parameter: scale must be finite. Got: ",
                 scale_val);
@@ -72,28 +74,6 @@ status_t validate_reorder_inputs(const void *src, void *dst, size_t nelems,
       log_error("Invalid zero_point data type: only s32 is currently supported. Got: ",
                 reorder_data_type_to_string(params.quant_params.zero_point.dt));
       return status_t::failure;
-    }
-
-    // For bf16/f32->int8 quantization, check zero_point is within valid range
-    if ((params.src_dtype == data_type_t::bf16 || params.src_dtype == data_type_t::f32) && 
-        params.dst_dtype == data_type_t::s8) {
-      int32_t zp_val = *static_cast<const int32_t *>(params.quant_params.zero_point.buff);
-      if (zp_val < -128 || zp_val > 127) {
-        log_error("Invalid zero_point for int8 quantization. Must be in [-128, 127]. Got: ",
-                  zp_val);
-        return status_t::failure;
-      }
-    }
-
-    // For bf16/f32->uint8 quantization, check zero_point is within valid range
-    if ((params.src_dtype == data_type_t::bf16 || params.src_dtype == data_type_t::f32) && 
-        params.dst_dtype == data_type_t::u8) {
-      int32_t zp_val = *static_cast<const int32_t *>(params.quant_params.zero_point.buff);
-      if (zp_val < 0 || zp_val > 255) {
-        log_error("Invalid zero_point for uint8 quantization. Must be in [0, 255]. Got: ",
-                  zp_val);
-        return status_t::failure;
-      }
     }
   }
 
@@ -255,16 +235,21 @@ status_t validate_reorder_quant_params(const reorder_params_t &params) {
     return status_t::success;
   };
   
-  // Validate scale dims
-  status_t status = validate_quant_dims(scale.dims, "scale");
-  if (status != status_t::success) {
-    return status;
+  // Validate scale dims (only if scale buffer is provided)
+  if (scale.buff != nullptr) {
+    status_t status = validate_quant_dims(scale.dims, "scale");
+    if (status != status_t::success) {
+      return status;
+    }
   }
   
-  // Validate zero_point dims
-  status = validate_quant_dims(zp.dims, "zero_point");
-  if (status != status_t::success) {
-    return status;
+  // Validate zero_point dims (only if zero_point buffer is provided)
+  // For symmetric quantization, zp.buff can be nullptr and dims can be empty
+  if (zp.buff != nullptr) {
+    status_t status = validate_quant_dims(zp.dims, "zero_point");
+    if (status != status_t::success) {
+      return status;
+    }
   }
   
   return status_t::success;
@@ -439,6 +424,433 @@ const char *granularity_to_string(granularity_type_t granularity) {
     case granularity_type_t::mixed: return "mixed";
     default: return "unknown";
   }
+}
+
+//==============================================================================
+// Dynamic Quantization Implementation
+//==============================================================================
+
+status_t validate_dynamic_quant_params(const void *src, const reorder_params_t &params) {
+  // Check source pointer
+  if (src == nullptr) {
+    log_error("Dynamic quantization requires non-null source buffer");
+    return status_t::failure;
+  }
+
+  // Check source data type (must be floating point for quantization)
+  if (params.src_dtype != data_type_t::bf16 && params.src_dtype != data_type_t::f32) {
+    log_error("Dynamic quantization only supports bf16 or f32 source. Got: ",
+              reorder_data_type_to_string(params.src_dtype));
+    return status_t::failure;
+  }
+
+  // Check destination data type (must be int8 for quantization)
+  if (params.dst_dtype != data_type_t::s8 && params.dst_dtype != data_type_t::u8) {
+    log_error("Dynamic quantization only supports s8 or u8 destination. Got: ",
+              reorder_data_type_to_string(params.dst_dtype));
+    return status_t::failure;
+  }
+
+  // Check that scale buffer is provided (required for both symmetric and asymmetric)
+  if (params.quant_params.scale.buff == nullptr) {
+    log_error("Dynamic quantization requires scale buffer");
+    return status_t::failure;
+  }
+
+  // Check that scale dims are provided
+  if (params.quant_params.scale.dims.empty()) {
+    log_error("Dynamic quantization requires scale dims to be specified");
+    return status_t::failure;
+  }
+
+  // Validate scale data type — dynamic quantization writes computed scale
+  // values into the user-provided buffer.  Both f32 and bf16 are accepted;
+  // the output is written in the same data type as the buffer.
+  if (params.quant_params.scale.dt != data_type_t::f32 &&
+      params.quant_params.scale.dt != data_type_t::bf16) {
+    log_error("Dynamic quantization scale output buffer must be f32 or bf16. Got: ",
+              reorder_data_type_to_string(params.quant_params.scale.dt));
+    return status_t::failure;
+  }
+
+  // Determine quantization mode based on zero_point buffer presence
+  // - If zp buffer is nullptr -> symmetric quantization (scale only, zp=0)
+  // - If zp buffer is provided -> asymmetric quantization (scale and zp)
+  const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+  
+  if (is_symmetric) {
+    // Symmetric quantization: destination must be s8
+    if (params.dst_dtype != data_type_t::s8) {
+      log_error("Symmetric dynamic quantization (zp=nullptr) requires s8 destination. Got: ",
+                reorder_data_type_to_string(params.dst_dtype));
+      return status_t::failure;
+    }
+  } else {
+    // Asymmetric quantization: validate zp dims and data type
+    if (params.quant_params.zero_point.dims.empty()) {
+      log_error("Asymmetric dynamic quantization requires zero_point dims to be specified");
+      return status_t::failure;
+    }
+    
+    if (params.quant_params.zero_point.dt != data_type_t::s32) {
+      log_error("Dynamic quantization zero_point must be s32. Got: ",
+                reorder_data_type_to_string(params.quant_params.zero_point.dt));
+      return status_t::failure;
+    }
+    
+    // Asymmetric quantization: destination must be u8
+    if (params.dst_dtype != data_type_t::u8) {
+      log_error("Asymmetric dynamic quantization (zp provided) requires u8 destination. Got: ",
+                reorder_data_type_to_string(params.dst_dtype));
+      return status_t::failure;
+    }
+  }
+
+  // Validate shape is provided
+  if (!params.is_shaped()) {
+    log_error("Dynamic quantization requires shape to be specified");
+    return status_t::failure;
+  }
+
+  return status_t::success;
+}
+
+status_t compute_dynamic_quant_params(const void *src, reorder_params_t &params) {
+  const auto &scale_dims = params.quant_params.scale.dims;
+  const auto &shape = params.src_shape;
+  
+  const int64_t M = params.M();
+  const int64_t N = params.N();
+  const int64_t batch = params.batch();
+
+  int32_t *zp_out = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+
+  // Write helper that stores the computed f32 scale in the user-provided
+  // buffer, converting to bf16 when the output buffer is bf16.
+  const bool scale_out_bf16 = (params.quant_params.scale.dt == data_type_t::bf16);
+  float    *scale_out_f32  = scale_out_bf16 ? nullptr
+                                            : static_cast<float *>(params.quant_params.scale.buff);
+  uint16_t *scale_out_bf16p = scale_out_bf16
+                                  ? static_cast<uint16_t *>(params.quant_params.scale.buff)
+                                  : nullptr;
+
+  auto write_scale = [scale_out_bf16, scale_out_f32, scale_out_bf16p](int64_t idx, float val) {
+    if (scale_out_bf16) {
+      scale_out_bf16p[idx] = float_to_bf16(val);
+    } else {
+      scale_out_f32[idx] = val;
+    }
+  };
+
+  // Determine quantization mode based on zero_point buffer presence
+  // - Symmetric: zp_out == nullptr -> scale = max(abs) / 127, zp = 0, dst = s8
+  // - Asymmetric: zp_out != nullptr -> scale = (max-min) / 255, zp = round(-min/scale), dst = u8
+  const bool is_symmetric = (zp_out == nullptr);
+  const int nthreads = static_cast<int>(params.num_threads);
+
+  // Determine granularity type from scale dims
+  granularity_type_t granularity = get_single_granularity(scale_dims, shape);
+  
+  if (granularity == granularity_type_t::invalid) {
+    log_error("Invalid granularity dims for dynamic quantization");
+    return status_t::failure;
+  }
+
+  // For asymmetric quantization, validate zero_point dims are valid and match scale dims
+  if (!is_symmetric) {
+    const auto &zp_dims = params.quant_params.zero_point.dims;
+    const int64_t scale_nelems = get_quant_param_nelems(scale_dims);
+    const int64_t zp_nelems = get_quant_param_nelems(zp_dims);
+    // get_quant_param_nelems() returns -1 on overflow/invalid dims; reject early
+    if (scale_nelems < 0 || zp_nelems < 0) {
+      log_error("Asymmetric dynamic quantization received invalid scale/zero_point dims");
+      return status_t::failure;
+    }
+    // Require same number of elements and identical dims mapping for scale and zero_point
+    if (scale_nelems != zp_nelems || scale_dims != zp_dims) {
+      log_error("Asymmetric dynamic quantization requires scale and zero_point to have the same granularity and dims mapping");
+      return status_t::failure;
+    }
+  }
+
+  // Precompute typed source pointer and dtype flag once so the inner loops
+  // never re-check params.src_dtype or re-cast the pointer.
+  const bool is_bf16_src = (params.src_dtype == data_type_t::bf16);
+  const uint16_t *src_bf16 = static_cast<const uint16_t *>(src);
+  const float *src_f32 = static_cast<const float *>(src);
+
+  auto read_src_value = [is_bf16_src, src_bf16, src_f32](int64_t idx) -> float {
+    return is_bf16_src ? bf16_to_float(src_bf16[idx]) : src_f32[idx];
+  };
+
+  // Precompute stride values once to avoid per-element branching inside hot
+  // loops.  When source strides are provided we capture the scalar stride
+  // values; otherwise we fall back to the contiguous row-major strides
+  // (batch_stride = M*N, row_stride = N, col_stride = 1).
+  const bool has_strides = params.has_src_strides();
+  const int64_t stride_b = has_strides && params.src_strides.size() == 3
+                               ? params.src_strides[0]
+                               : M * N;
+  const int64_t stride_m = has_strides
+                               ? (params.src_strides.size() == 3
+                                      ? params.src_strides[1]
+                                      : (params.src_strides.size() == 2
+                                             ? params.src_strides[0]
+                                             : 0))
+                               : N;
+  const int64_t stride_n = has_strides
+                               ? params.src_strides.back()
+                               : 1;
+
+  // Branchless source-index computation using the precomputed strides.
+  auto compute_src_idx = [=](int64_t b, int64_t m, int64_t n) -> int64_t {
+    return b * stride_b + m * stride_m + n * stride_n;
+  };
+
+  // Helper lambda to compute scale and zero_point from min/max
+  // Based on image formulas:
+  // Symmetric:  scale = max(abs(A)) / 127, zp = 0
+  // Asymmetric: scale = (max - min) / 255, zp = round(-min / scale)
+  auto compute_scale_zp = [is_symmetric](float min_val, float max_val) 
+      -> std::pair<float, int32_t> {
+    float scale;
+    int32_t zp;
+    
+    // If no finite values were observed in the scanned range, fall back to a
+    // deterministic min/max (both zero). This avoids propagating sentinel
+    // extremes into scale/zp computation, which would otherwise produce
+    // nonsensical quantization parameters. The downstream logic already
+    // treats the "all zeros" case robustly.
+    if (min_val == std::numeric_limits<float>::max()
+        && max_val == std::numeric_limits<float>::lowest()) {
+      min_val = 0.0f;
+      max_val = 0.0f;
+    }
+    
+    if (is_symmetric) {
+      // Symmetric quantization: scale = max(abs(A)) / 127, zp = 0
+      float abs_max = std::max(std::abs(min_val), std::abs(max_val));
+      // Handle edge case where all values are zero
+      if (abs_max < 1e-10f) {
+        abs_max = 1e-10f;
+      }
+      scale = abs_max / 127.0f;
+      zp = 0;
+    } else {
+      // Asymmetric quantization: scale = (max - min) / 255, zp = round(-min / scale)
+      // Handle edge case where min == max
+      if (max_val <= min_val) {
+        max_val = min_val + 1.0f;
+      }
+      scale = (max_val - min_val) / 255.0f;
+      // zp = round(-min / scale), with clamping to int32_t range to avoid UB
+      {
+        double zp_double = std::round(static_cast<double>(-min_val) /
+                                      static_cast<double>(scale));
+        double int32_min = static_cast<double>(std::numeric_limits<int32_t>::min());
+        double int32_max = static_cast<double>(std::numeric_limits<int32_t>::max());
+        if (zp_double < int32_min) {
+          zp = std::numeric_limits<int32_t>::min();
+        } else if (zp_double > int32_max) {
+          zp = std::numeric_limits<int32_t>::max();
+        } else {
+          zp = static_cast<int32_t>(zp_double);
+        }
+      }
+    }
+    
+    // Ensure scale is not zero or denormal
+    if (scale < 1e-10f) {
+      scale = 1e-10f;
+    }
+    
+    return {scale, zp};
+  };
+
+  //============================================================================
+  // Per-Tensor Quantization
+  //============================================================================
+  if (granularity == granularity_type_t::per_tensor) {
+    float min_val = std::numeric_limits<float>::max();
+    float max_val = std::numeric_limits<float>::lowest();
+    
+    const bool is_contiguous = (stride_n == 1 && stride_m == N
+                                && stride_b == M * N);
+    
+    if (is_contiguous) {
+      // Fast path: contiguous memory — flat scan avoids per-element index
+      // arithmetic and enables the best possible OpenMP work distribution.
+      const int64_t total = batch * M * N;
+      #pragma omp parallel for num_threads(nthreads) reduction(min:min_val) reduction(max:max_val)
+      for (int64_t i = 0; i < total; ++i) {
+        float val = read_src_value(i);
+        if (std::isfinite(val)) {
+          min_val = std::min(min_val, val);
+          max_val = std::max(max_val, val);
+        }
+      }
+    } else {
+      // Strided path: collapse(2) on (batch, M) gives good parallelism
+      // while keeping the inner N loop sequential for cache locality.
+      #pragma omp parallel for num_threads(nthreads) collapse(2) reduction(min:min_val) reduction(max:max_val)
+      for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t m = 0; m < M; ++m) {
+          for (int64_t n = 0; n < N; ++n) {
+            float val = read_src_value(compute_src_idx(b, m, n));
+            if (std::isfinite(val)) {
+              min_val = std::min(min_val, val);
+              max_val = std::max(max_val, val);
+            }
+          }
+        }
+      }
+    }
+    
+    auto [scale, zp] = compute_scale_zp(min_val, max_val);
+    
+    write_scale(0, scale);
+    if (!is_symmetric) {
+      zp_out[0] = zp;
+    }
+    
+    return status_t::success;
+  }
+
+  //============================================================================
+  // Per-Channel Quantization (Row or Column)
+  //============================================================================
+  if (granularity == granularity_type_t::per_channel) {
+    bool is_per_row = is_per_channel_row_dims(scale_dims, shape);
+    
+    if (is_per_row) {
+      // Per-channel-row (per-token): M values, one per row
+      // This matches the "per-token" quantization from the spec
+      #pragma omp parallel for num_threads(nthreads)
+      for (int64_t m = 0; m < M; ++m) {
+        float min_val = std::numeric_limits<float>::max();
+        float max_val = std::numeric_limits<float>::lowest();
+        
+        for (int64_t b = 0; b < batch; ++b) {
+          for (int64_t n = 0; n < N; ++n) {
+            int64_t idx = compute_src_idx(b, m, n);
+            float val = read_src_value(idx);
+            if (std::isfinite(val)) {
+              min_val = std::min(min_val, val);
+              max_val = std::max(max_val, val);
+            }
+          }
+        }
+        
+        auto [scale, zp] = compute_scale_zp(min_val, max_val);
+        write_scale(m, scale);
+        if (!is_symmetric) {
+          zp_out[m] = zp;
+        }
+      }
+    } else {
+      // Per-channel-col: N values, one per column
+      #pragma omp parallel for num_threads(nthreads)
+      for (int64_t n = 0; n < N; ++n) {
+        float min_val = std::numeric_limits<float>::max();
+        float max_val = std::numeric_limits<float>::lowest();
+        
+        for (int64_t b = 0; b < batch; ++b) {
+          for (int64_t m = 0; m < M; ++m) {
+            int64_t idx = compute_src_idx(b, m, n);
+            float val = read_src_value(idx);
+            if (std::isfinite(val)) {
+              min_val = std::min(min_val, val);
+              max_val = std::max(max_val, val);
+            }
+          }
+        }
+        
+        auto [scale, zp] = compute_scale_zp(min_val, max_val);
+        write_scale(n, scale);
+        if (!is_symmetric) {
+          zp_out[n] = zp;
+        }
+      }
+    }
+    
+    return status_t::success;
+  }
+
+  //============================================================================
+  // Per-Group Quantization (Row or Column groups)
+  //============================================================================
+  if (granularity == granularity_type_t::per_group) {
+    bool is_per_group_row = is_per_group_row_dims(scale_dims, shape);
+    
+    if (is_per_group_row) {
+      // Per-group-row: G groups across rows, each group has N values
+      int64_t G = get_num_groups_row(scale_dims);
+      int64_t group_size = M / G;
+      
+      #pragma omp parallel for num_threads(nthreads) collapse(2)
+      for (int64_t g = 0; g < G; ++g) {
+        for (int64_t n = 0; n < N; ++n) {
+          float min_val = std::numeric_limits<float>::max();
+          float max_val = std::numeric_limits<float>::lowest();
+          
+          for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t m_local = 0; m_local < group_size; ++m_local) {
+              int64_t m = g * group_size + m_local;
+              int64_t idx = compute_src_idx(b, m, n);
+              float val = read_src_value(idx);
+              if (std::isfinite(val)) {
+                min_val = std::min(min_val, val);
+                max_val = std::max(max_val, val);
+              }
+            }
+          }
+          
+          auto [scale, zp] = compute_scale_zp(min_val, max_val);
+          int64_t param_idx = g * N + n;
+          write_scale(param_idx, scale);
+          if (!is_symmetric) {
+            zp_out[param_idx] = zp;
+          }
+        }
+      }
+    } else {
+      // Per-group-col: G groups across columns, each row has G values
+      int64_t G = get_num_groups_col(scale_dims);
+      int64_t group_size = N / G;
+      
+      #pragma omp parallel for num_threads(nthreads) collapse(2)
+      for (int64_t m = 0; m < M; ++m) {
+        for (int64_t g = 0; g < G; ++g) {
+          float min_val = std::numeric_limits<float>::max();
+          float max_val = std::numeric_limits<float>::lowest();
+          
+          for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t n_local = 0; n_local < group_size; ++n_local) {
+              int64_t n = g * group_size + n_local;
+              int64_t idx = compute_src_idx(b, m, n);
+              float val = read_src_value(idx);
+              if (std::isfinite(val)) {
+                min_val = std::min(min_val, val);
+                max_val = std::max(max_val, val);
+              }
+            }
+          }
+          
+          auto [scale, zp] = compute_scale_zp(min_val, max_val);
+          int64_t param_idx = m * G + g;
+          write_scale(param_idx, scale);
+          if (!is_symmetric) {
+            zp_out[param_idx] = zp;
+          }
+        }
+      }
+    }
+    
+    return status_t::success;
+  }
+
+  log_error("Unsupported granularity for dynamic quantization");
+  return status_t::failure;
 }
 
 } // namespace reorder

@@ -79,18 +79,26 @@ enum class reorder_algo_t : int {
  * Per-group-col indexing: index = row * G + group_idx, where group_idx = col / (N / G)
  *
  * Currently supported:
- *   - scale: f32 only
+ *   - scale: f32 or bf16 (bf16 is converted to f32 internally on read)
  *   - zero_point: s32 only
+ *
+ * Dynamic Quantization Mode (when reorder_params_t::dynamic_quant = true):
+ *   - User provides mutable buffers (via buff) for scale and zero_point
+ *   - dims specifies the desired granularity
+ *   - The API computes min/max from source data and fills the buffers
+ *   - If dst is nullptr, only computes scale/zp without performing quantization
  */
 struct reorder_quant_params_t {
   /**
    * @brief Individual quantization parameter (scale or zero-point)
    *
    * Supports different data types and quantization granularities.
+   * For static quantization: user provides pre-computed values (read).
+   * For dynamic quantization: user provides buffer to be filled (write).
    */
   struct quant_t {
-    const void *buff;              ///< Pointer to quantization data buffer
-    data_type_t dt;                ///< Data type of the buffer (f32 for scale, s32 for zp)
+    void *buff;                    ///< Pointer to quantization data buffer (read for static, write for dynamic)
+    data_type_t dt;                ///< Data type of the buffer (f32 or bf16 for scale, s32 for zp)
     std::vector<int64_t> dims;     ///< Dimensions matching tensor dimensionality
 
     /**
@@ -99,7 +107,7 @@ struct reorder_quant_params_t {
     quant_t() : buff(nullptr), dt(data_type_t::none), dims() {}
   };
 
-  quant_t scale;                              ///< Scale factor (currently f32 only)
+  quant_t scale;                              ///< Scale factor (f32 or bf16; bf16 converted to f32 on read)
   quant_t zero_point;                         ///< Zero point offset (currently s32 only)
 
   /**
@@ -122,6 +130,14 @@ struct reorder_quant_params_t {
  *   - Size 2: 2D matrix with strides [stride_M, stride_N]
  *   - Size 3: 3D batched with strides [stride_batch, stride_M, stride_N]
  *
+ * Dynamic Quantization Mode (dynamic_quant = true):
+ *   - Computes quantization parameters (scale, zero_point) from source data at runtime
+ *   - User provides output buffers via quant_params.scale.buff and quant_params.zero_point.buff
+ *   - Granularity is determined from quant_params.scale.dims and quant_params.zero_point.dims
+ *   - Supported granularities: per-tensor, per-channel-row, per-channel-col, per-group-row, per-group-col
+ *   - If dst is nullptr, only computes and fills scale/zp buffers without performing quantization
+ *   - Formula: scale = (max - min) / (qmax - qmin), zero_point = qmin - round(min / scale)
+ *
  * @note src_shape and dst_shape must be identical. An error will be thrown if they differ.
  * @note dst_strides is reserved for future implementation and is currently not supported.
  *       The destination is always written in contiguous format.
@@ -136,6 +152,7 @@ struct reorder_params_t {
   std::vector<int64_t> dst_shape;         ///< Destination shape: must match src_shape
   std::vector<int64_t> src_strides;       ///< Source strides for non-contiguous memory access
   std::vector<int64_t> dst_strides;       ///< Destination strides (reserved for future, not currently supported)
+  bool dynamic_quant;                     ///< Enable dynamic quantization (compute scale/zp from source data)
 
   /**
    * @brief Default constructor
@@ -143,7 +160,8 @@ struct reorder_params_t {
   reorder_params_t()
       : src_dtype(data_type_t::none), dst_dtype(data_type_t::none),
         quant_params(), algo(reorder_algo_t::DT), num_threads(0),
-        src_shape(), dst_shape(), src_strides(), dst_strides() {}
+        src_shape(), dst_shape(), src_strides(), dst_strides(),
+        dynamic_quant(false) {}
   
   /**
    * @brief Check if this is a 1D shape

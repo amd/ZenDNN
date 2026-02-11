@@ -12,7 +12,8 @@ Unlike the standard Reorder operator which uses the operator factory pattern, Lo
 - Quantization (BF16/FP32 → INT8/UINT8)
 - Dequantization (INT8/UINT8 → BF16/FP32)
 - Data type conversion (FP32 ⇔ BF16)
-- Per-tensor, per-channel, and per-group quantization granularities
+- **Dynamic quantization** (compute scale/zero-point from source data at runtime)
+- Per-tensor, per-channel (row and column), and per-group (row and column) quantization granularities
 - Strided (non-contiguous) source memory support
 
 
@@ -64,6 +65,32 @@ $$
 \mathrm{f32} = (\mathrm{f32}(\mathrm{bf16}) - \mathrm{zp}) \times \mathrm{scale}
 $$
 
+### Dynamic Quantization Parameter Computation
+
+When `dynamic_quant = true`, scale and zero-point are computed from the source data at runtime.
+
+**Symmetric quantization (S8 destination, zero_point buffer = nullptr):**
+
+$$
+\mathrm{scale} = \frac{\max(|\min(A)|, |\max(A)|)}{127}
+$$
+
+$$
+\mathrm{zp} = 0
+$$
+
+**Asymmetric quantization (U8 destination, zero_point buffer provided):**
+
+$$
+\mathrm{scale} = \frac{\max(A) - \min(A)}{255}
+$$
+
+$$
+\mathrm{zp} = \mathrm{round}(\frac{-\min(A)}{\mathrm{scale}})
+$$
+
+Where $A$ is the set of source values within the quantization scope (per-tensor, per-channel, or per-group).
+
 
 ## Core API: `reorder_direct`
 
@@ -72,7 +99,7 @@ The primary interface for LowOHA Reorder is the `reorder_direct` function:
 ```cpp
 status_t reorder_direct(
   const void *src,                      // Pointer to source data buffer
-  void *dst,                            // Pointer to destination data buffer
+  void *dst,                            // Pointer to destination data buffer (nullptr allowed for dynamic quant compute-only)
   reorder_params_t params        // Reorder parameters
 );
 ```
@@ -83,6 +110,8 @@ status_t reorder_direct(
 |-------|-------------|
 | `status_t::success` | Operation completed successfully |
 | `status_t::failure` | Operation failed (invalid parameters, null pointers, etc.) |
+
+**Note:** When `dynamic_quant = true` and `dst = nullptr`, the function computes and fills the scale/zero-point output buffers without performing quantization. This is useful for pre-computing quantization parameters.
 
 
 ## Parameters Structure
@@ -102,6 +131,7 @@ struct reorder_params_t {
   std::vector<int64_t> dst_shape;         // Destination shape: must match src_shape (mandatory)
   std::vector<int64_t> src_strides;       // Source strides for non-contiguous memory (optional)
   std::vector<int64_t> dst_strides;       // Destination strides (reserved for future, not currently supported)
+  bool dynamic_quant;                     // Enable dynamic quantization (default: false)
 };
 ```
 
@@ -160,12 +190,12 @@ Quantization parameters for scale and zero-point:
 ```cpp
 struct reorder_quant_params_t {
   struct quant_t {
-    const void *buff;              // Pointer to quantization data buffer
+    void *buff;                    // Pointer to quantization data buffer (read for static, write for dynamic)
     data_type_t dt;                // Data type of the buffer
     std::vector<int64_t> dims;     // Dimensions (mandatory, must match tensor dims)
   };
 
-  quant_t scale;        // Scale factor (f32 only)
+  quant_t scale;        // Scale factor (f32 or bf16)
   quant_t zero_point;   // Zero point offset (s32 only)
 };
 ```
@@ -174,8 +204,15 @@ struct reorder_quant_params_t {
 
 | Parameter | Supported Type | Description |
 |-----------|---------------|-------------|
-| `scale` | `f32` | Scale factor (must be positive and finite) |
+| `scale` | `f32` or `bf16` | Scale factor (must be finite; bf16 is converted to f32 internally) |
 | `zero_point` | `s32` | Zero point offset |
+
+**Buffer Semantics:**
+
+| Mode | `buff` Usage | Description |
+|------|--------------|-------------|
+| Static quantization (`dynamic_quant = false`) | **Read** | User provides pre-computed scale/zero-point values |
+| Dynamic quantization (`dynamic_quant = true`) | **Write** | User provides output buffer; API fills it with computed values |
 
 **Note on FP32 ↔ BF16 Conversion:**
 - For FP32 ↔ BF16 data type conversion, the `quant_params` are **optional**
@@ -199,27 +236,40 @@ The `dims` field determines the quantization granularity. **dims is mandatory** 
 | Granularity | dims | Total Values | Description |
 |-------------|------|--------------|-------------|
 | Per-tensor | `{1, 1}` | 1 | Single scale/zp for entire matrix |
-| Per-channel | `{1, N}` | N | Different scale/zp for each column |
-| Per-group | `{G, N}` | G × N | G groups across rows, each with N values |
+| Per-col | `{1, N}` | N | Different scale/zp for each column |
+| Per-row | `{M, 1}` | M | Different scale/zp for each row (per-token) |
+| Per-group-row | `{G, N}` | G × N | G groups across rows, each with N values |
+| Per-group-col | `{M, G}` | M × G | G groups across columns, each row has G values |
 
-**Per-group constraint:** M must be divisible by G (M % G == 0)
+**Per-group-row constraint:** M must be divisible by G (M % G == 0)
+
+**Per-group-col constraint:** N must be divisible by G (N % G == 0)
 
 ### 3D Tensor (shape = [batch, M, N])
 
 | Granularity | dims | Total Values | Description |
 |-------------|------|--------------|-------------|
 | Per-tensor | `{1, 1, 1}` | 1 | Single scale/zp for entire tensor |
-| Per-channel | `{1, 1, N}` | N | Different scale/zp for each column |
-| Per-group | `{1, G, N}` | G × N | G groups across rows, each with N values |
+| Per-col | `{1, 1, N}` | N | Different scale/zp for each column |
+| Per-row | `{1, M, 1}` | M | Different scale/zp for each row (per-token) |
+| Per-group-row | `{1, G, N}` | G × N | G groups across rows, each with N values |
+| Per-group-col | `{1, M, G}` | M × G | G groups across columns, each row has G values |
 
-**Per-group constraint:** M must be divisible by G (M % G == 0)
+**Per-group-row constraint:** M must be divisible by G (M % G == 0)
 
-### Per-Group Index Calculation
+**Per-group-col constraint:** N must be divisible by G (N % G == 0)
 
-For per-group quantization with dims `{G, N}`:
+### Index Calculation
+
+**Per-group-row** (dims `{G, N}`):
 - `group_size = M / G`
 - `group_idx = row / group_size`
 - `index = group_idx * N + col`
+
+**Per-group-col** (dims `{M, G}`):
+- `group_size = N / G`
+- `group_idx = col / group_size`
+- `index = row * G + group_idx`
 
 
 ### `reorder_algo_t`
@@ -243,6 +293,65 @@ enum class reorder_algo_t : int {
 | `native` | AVX512 vectorized implementation | Large buffers (≥64 elements) |
 | `reference` | Scalar implementation | Small buffers or debugging |
 | `DT` | Decision tree based selection | General use (recommended) |
+
+
+## Dynamic Quantization Mode
+
+Dynamic quantization computes the quantization parameters (scale and zero-point) **at runtime from the source data**, rather than requiring pre-computed values. This is enabled by setting `dynamic_quant = true` in `reorder_params_t`.
+
+### How It Works
+
+1. The API scans the source data to find min/max values (respecting the configured granularity)
+2. Scale and zero-point are computed from min/max and written to the user-provided output buffers
+3. If `dst` is not `nullptr`, the quantization is then performed using the computed parameters
+4. If `dst` is `nullptr`, only the scale/zero-point computation is performed (compute-only mode)
+
+### Quantization Modes
+
+The quantization mode is determined by the presence of the `zero_point` buffer:
+
+| zero_point.buff | Mode | Destination Type | Formula |
+|-----------------|------|------------------|---------|
+| `nullptr` | **Symmetric** | S8 (INT8) | scale = max(\|min\|, \|max\|) / 127, zp = 0 |
+| Provided | **Asymmetric** | U8 (UINT8) | scale = (max - min) / 255, zp = round(-min / scale) |
+
+### Supported Configurations
+
+| Source Type | Destination Type | Mode |
+|-------------|------------------|------|
+| BF16 | S8 (INT8) | Symmetric |
+| FP32 | S8 (INT8) | Symmetric |
+| BF16 | U8 (UINT8) | Asymmetric |
+| FP32 | U8 (UINT8) | Asymmetric |
+
+### Supported Granularities
+
+All granularities are supported for dynamic quantization:
+
+| Granularity | dims (2D) | Output Values | Description |
+|-------------|-----------|---------------|-------------|
+| Per-tensor | `{1, 1}` | 1 | Single scale/zp for all elements |
+| Per-row (per-token) | `{M, 1}` | M | One scale/zp per row |
+| Per-col | `{1, N}` | N | One scale/zp per column |
+| Per-group-row | `{G, N}` | G × N | G groups across rows |
+| Per-group-col | `{M, G}` | M × G | G groups across columns |
+
+### Buffer Requirements
+
+| Parameter | Required | Data Type | Buffer Size |
+|-----------|----------|-----------|-------------|
+| `scale.buff` | **Always** | `f32` or `bf16` | Product of `scale.dims` |
+| `zero_point.buff` | Asymmetric only | `s32` | Product of `zero_point.dims` |
+
+- For **symmetric** mode: leave `zero_point.buff = nullptr` (zero-point is implicitly 0)
+- For **asymmetric** mode: `zero_point.dims` must have the same granularity as `scale.dims`
+
+### Compute-Only Mode
+
+When `dst = nullptr`, the API only computes scale and zero-point values without performing quantization. This is useful for:
+- Pre-computing quantization parameters for later use
+- Profiling the parameter computation overhead separately
+- Using the computed parameters with a different quantization implementation
 
 
 ## Usage Examples
@@ -827,33 +936,325 @@ int bf16_to_f32_with_scale_example() {
 }
 ```
 
+### Example 14: Dynamic Quantization — Symmetric Per-Tensor (BF16 → S8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_symmetric_per_tensor_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_s8(M * N);
+  
+  // Initialize input...
+  
+  // Output buffer for computed scale (API will fill this)
+  float computed_scale = 0.0f;
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;  // Enable dynamic quantization
+  
+  // Provide output buffer for scale
+  params.quant_params.scale.buff = &computed_scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};  // per-tensor
+  // zero_point.buff = nullptr → symmetric mode (zp = 0 implicitly)
+  
+  // Execute: computes scale from data, then quantizes
+  status_t status = reorder_direct(input_bf16.data(), output_s8.data(), params);
+  
+  // computed_scale is now filled with: max(|min|, |max|) / 127
+  // Dequantize: original ≈ output_s8[i] * computed_scale
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 15: Dynamic Quantization — Asymmetric Per-Tensor (FP32 → U8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_asymmetric_per_tensor_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers
+  std::vector<float> input_f32(M * N);
+  std::vector<uint8_t> output_u8(M * N);
+  
+  // Initialize input...
+  
+  // Output buffers for computed scale and zero_point (API will fill these)
+  float computed_scale = 0.0f;
+  int32_t computed_zp = 0;
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::u8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;  // Enable dynamic quantization
+  
+  // Provide output buffer for scale
+  params.quant_params.scale.buff = &computed_scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};  // per-tensor
+  
+  // Provide output buffer for zero_point → asymmetric mode
+  params.quant_params.zero_point.buff = &computed_zp;
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {1, 1};  // per-tensor
+  
+  // Execute: computes scale/zp from data, then quantizes
+  status_t status = reorder_direct(input_f32.data(), output_u8.data(), params);
+  
+  // computed_scale = (max - min) / 255
+  // computed_zp = round(-min / scale)
+  // Dequantize: original ≈ (output_u8[i] - computed_zp) * computed_scale
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 16: Dynamic Quantization — Per-Token / Per-Row (BF16 → S8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_per_token_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 4;   // 4 tokens (rows)
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_s8(M * N);
+  
+  // Initialize input (each row may have different value ranges)...
+  
+  // Output buffer: M scales, one per row
+  std::vector<float> computed_scales(M, 0.0f);
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+  
+  // Per-row (per-token): dims = {M, 1}
+  params.quant_params.scale.buff = computed_scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {M, 1};  // per-row (per-token)
+  // zero_point.buff = nullptr → symmetric mode
+  
+  // Execute: computes M separate scales (one per row), then quantizes
+  status_t status = reorder_direct(input_bf16.data(), output_s8.data(), params);
+  
+  // Each computed_scales[i] = max(|min_row_i|, |max_row_i|) / 127
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 17: Dynamic Quantization — Compute-Only Mode (dst = nullptr)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_compute_only_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 128;
+  constexpr int64_t N = 256;
+  
+  // Allocate source buffer
+  std::vector<float> input_f32(M * N);
+  
+  // Initialize input...
+  
+  // Output buffer for computed scale
+  float computed_scale = 0.0f;
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::f32;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+  
+  params.quant_params.scale.buff = &computed_scale;
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {1, 1};  // per-tensor
+  
+  // dst = nullptr: ONLY compute scale, do NOT perform quantization
+  status_t status = reorder_direct(input_f32.data(), nullptr, params);
+  
+  // computed_scale is now filled; no quantized output was produced
+  // Use computed_scale later for actual quantization if needed
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 18: Dynamic Quantization — Asymmetric Per-Token (BF16 → U8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_asymmetric_per_token_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 4;   // 4 tokens (rows)
+  constexpr int64_t N = 256;
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<uint8_t> output_u8(M * N);
+  
+  // Initialize input...
+  
+  // Output buffers: M values each, one per row
+  std::vector<float> computed_scales(M, 0.0f);
+  std::vector<int32_t> computed_zps(M, 0);
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::u8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+  
+  // Per-row (per-token): dims = {M, 1}
+  params.quant_params.scale.buff = computed_scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {M, 1};
+  
+  // Providing zp buffer → asymmetric mode
+  params.quant_params.zero_point.buff = computed_zps.data();
+  params.quant_params.zero_point.dt = data_type_t::s32;
+  params.quant_params.zero_point.dims = {M, 1};
+  
+  // Execute: computes per-row scale/zp, then quantizes
+  status_t status = reorder_direct(input_bf16.data(), output_u8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+### Example 19: Dynamic Quantization — Per-Group-Row (BF16 → S8)
+
+```cpp
+#include "lowoha_operators/reorder/lowoha_reorder.hpp"
+
+int dynamic_quant_per_group_row_example() {
+  using namespace zendnnl::lowoha::reorder;
+  
+  constexpr int64_t M = 8;   // Rows
+  constexpr int64_t N = 4;   // Columns
+  constexpr int64_t G = 2;   // Number of groups (M % G == 0)
+  // group_size = M / G = 4 rows per group
+  
+  // Allocate buffers
+  std::vector<uint16_t> input_bf16(M * N);
+  std::vector<int8_t> output_s8(M * N);
+  
+  // Initialize input...
+  
+  // Output buffer: G × N scales
+  std::vector<float> computed_scales(G * N, 0.0f);
+  
+  // Configure reorder parameters
+  reorder_params_t params;
+  params.src_dtype = data_type_t::bf16;
+  params.dst_dtype = data_type_t::s8;
+  params.src_shape = {M, N};
+  params.dst_shape = {M, N};
+  params.dynamic_quant = true;
+  
+  // Per-group-row: dims = {G, N}
+  params.quant_params.scale.buff = computed_scales.data();
+  params.quant_params.scale.dt = data_type_t::f32;
+  params.quant_params.scale.dims = {G, N};  // per-group-row
+  // zero_point.buff = nullptr → symmetric mode
+  
+  // Execute: computes G×N separate scales, then quantizes
+  status_t status = reorder_direct(input_bf16.data(), output_s8.data(), params);
+  
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
 
 ## Validation
 
 The operator performs the following validations:
 
+### Standard Reorder Validation
+
 1. **Null pointer checks:** Source and destination buffers must not be null
 2. **Shape validation:** src_shape and dst_shape must be non-empty with all positive dimensions
 3. **Shape matching:** src_shape and dst_shape must be identical (error thrown if different)
 4. **Data type validation:** Source/destination type combination must be supported
-5. **Scale validation:** Must be finite (for f32)
-6. **Zero-point validation:** Must be within valid range for target type
+5. **Scale validation:** Must be finite (for f32 or bf16)
+6. **Zero-point validation:** Zero-point values may be any `int32`; during quantization they are clamped to the valid range of the destination type, which can increase saturation and reduce dequantization accuracy if the specified zero-point lies outside that range.
 7. **Dims validation:** Must match tensor dimensionality and follow granularity rules
-8. **Per-group validation:** M must be divisible by G
+8. **Per-group validation:** M must be divisible by G (row groups) or N must be divisible by G (column groups)
 9. **Destination strides:** dst_strides must be empty (strided destination not currently supported)
+
+### Dynamic Quantization Validation (when `dynamic_quant = true`)
+
+10. **Source data type:** Must be BF16 or FP32
+11. **Destination data type:** Must be S8 (symmetric) or U8 (asymmetric)
+12. **Scale buffer:** Must be non-null (output buffer required)
+13. **Scale dims:** Must be specified and valid for the tensor shape
+14. **Scale data type:** Must be f32 or bf16
+15. **Symmetric mode:** If zero_point.buff is nullptr, destination must be S8
+16. **Asymmetric mode:** If zero_point.buff is provided, destination must be U8, and zero_point dims must match scale granularity
+17. **Zero-point data type:** Must be s32 (when provided)
 
 
 ## Implementation Support Matrix
 
 The following table shows which combinations have optimized (AVX512) vs reference implementations:
 
-### BF16/FP32 ↔ S8/U8 and FP32 ↔ BF16
+### Static Reorder: BF16/FP32 ↔ S8/U8 and FP32 ↔ BF16
 
 | Granularity | Source Contiguous | Source Strided (last_stride=1) | Source Strided (other) |
 |-------------|-------------------|--------------------------------|------------------------|
 | Per-tensor | ✅ Optimal | ✅ Optimal | ⚙️ Reference |
 | Per-channel | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
 | Per-group | ⚙️ Reference | ⚙️ Reference | ⚙️ Reference |
+
+### Dynamic Quantization: Parameter Computation
+
+| Granularity | Implementation |
+|-------------|---------------|
+| Per-tensor | ⚙️ Reference (sequential scan) |
+| Per-row | ⚙️ Reference (OpenMP parallelized) |
+| Per-col | ⚙️ Reference (OpenMP parallelized) |
+| Per-group-row | ⚙️ Reference (OpenMP parallelized, collapse(2)) |
+| Per-group-col | ⚙️ Reference (OpenMP parallelized, collapse(2)) |
+
+After computing dynamic quantization parameters, the standard reorder path is used for the actual quantization step, following the static reorder support matrix above.
 
 **Legend:**
 - ✅ **Optimal:** AVX512 vectorized implementation for best performance
@@ -865,6 +1266,7 @@ The following table shows which combinations have optimized (AVX512) vs referenc
 - The `DT` algorithm automatically selects the best available implementation
 - Destination memory is always written contiguously (strided destination not currently supported)
 - FP32 ↔ BF16 conversion supports both simple (no scale/zp) and scaled conversions
+- Dynamic quantization parameter computation uses OpenMP for parallelism across rows/columns/groups
 
 
 ## Performance Considerations
@@ -876,3 +1278,4 @@ The following table shows which combinations have optimized (AVX512) vs referenc
 - **Destination Memory:** Always written contiguously (strided destination not currently supported)
 - **Granularity:** Per-tensor is fastest with optimal support; per-channel/per-group use reference implementation
 - **FP32 ↔ BF16 Conversion:** Simple conversion (no scale/zp) is fastest; scaled conversion follows the same granularity performance characteristics as quantization/dequantization
+- **Dynamic Quantization:** Adds a min/max scan pass over the source data before quantization. For per-tensor, this scans all elements sequentially. For per-channel and per-group, the scan is parallelized with OpenMP. The compute-only mode (`dst = nullptr`) can be used to separate the parameter computation from the quantization step.
