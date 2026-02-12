@@ -495,7 +495,7 @@ void matmul_onednn_wrapper(char transA, char transB, int M, int N,
     matmul_attr.set_post_ops(matmul_pops);
   }
 
-  bool is_blocked = dnnl_params.algo == matmul_algo_t::onednn_blocked &&
+  bool is_blocked = kernel == matmul_algo_t::onednn_blocked &&
                     is_weights_const;
   if (is_blocked) {
     getOrCreateBlockedWeights(transA == 't', transB == 't', M, K, N, lda, ldb,
