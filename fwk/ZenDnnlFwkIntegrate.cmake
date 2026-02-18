@@ -213,8 +213,10 @@ if(zendnnl_FOUND)
   if(TARGET zendnnl::zendnnl_archive)
     set_target_properties(zendnnl::zendnnl_archive
       PROPERTIES IMPORTED_GLOBAL ON)
-  else()
-    message(FATAL_ERROR "(ZENDNNL) zendnnl installation does not have imported target zendnnl::zendnnl_archive")
+  endif()
+  if(TARGET zendnnl::zendnnl)
+    set_target_properties(zendnnl::zendnnl
+      PROPERTIES IMPORTED_GLOBAL ON)
   endif()
 else()
   message(STATUS "(ZENDNNL) ZENDNNL NOT FOUND, will be built as an external project.")
@@ -227,24 +229,48 @@ else()
     file(MAKE_DIRECTORY ${ZENDNNL_LIBRARY_INC_DIR})
   endif()
 
-  add_library(zendnnl_library STATIC IMPORTED GLOBAL)
-  add_dependencies(zendnnl_library fwk_zendnnl)
-  set_target_properties(zendnnl_library
-    PROPERTIES
-    IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
-    INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    add_library(zendnnl_library STATIC IMPORTED GLOBAL)
+    add_dependencies(zendnnl_library fwk_zendnnl)
+    set_target_properties(zendnnl_library
+      PROPERTIES
+      IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a"
+      INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}"
+      INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
 
-  target_link_options(zendnnl_library INTERFACE "-fopenmp")
-  target_link_libraries(zendnnl_library
-    INTERFACE OpenMP::OpenMP_CXX
-    INTERFACE ${CMAKE_DL_LIBS})
+    target_link_options(zendnnl_library INTERFACE "-fopenmp")
+    target_link_libraries(zendnnl_library
+      INTERFACE OpenMP::OpenMP_CXX
+      INTERFACE ${CMAKE_DL_LIBS})
 
-  add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
+    add_library(zendnnl::zendnnl_archive ALIAS zendnnl_library)
 
-  list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
+    list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/libzendnnl_archive.a")
+  endif()
 
-  # decalre all dependencies
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    add_library(zendnnl_shared_library SHARED IMPORTED GLOBAL)
+    add_dependencies(zendnnl_shared_library fwk_zendnnl)
+    set_target_properties(zendnnl_shared_library
+      PROPERTIES
+      IMPORTED_LOCATION "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      INTERFACE_INCLUDE_DIRECTORIES "${ZENDNNL_LIBRARY_INC_DIR}")
+
+    target_link_options(zendnnl_shared_library INTERFACE "-fopenmp")
+    target_link_libraries(zendnnl_shared_library
+      INTERFACE OpenMP::OpenMP_CXX
+      INTERFACE ${CMAKE_DL_LIBS})
+
+    add_library(zendnnl::zendnnl ALIAS zendnnl_shared_library)
+
+    list(APPEND ZNL_BYPRODUCTS "${ZENDNNL_LIBRARY_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  endif()
+
+  if(NOT ZENDNNL_LIB_BUILD_ARCHIVE AND NOT ZENDNNL_LIB_BUILD_SHARED)
+    message(FATAL_ERROR "At least one of ZENDNNL_LIB_BUILD_ARCHIVE or ZENDNNL_LIB_BUILD_SHARED must be ON")
+  endif()
+
+  # declare all dependencies
 
   # json dependency
   zendnnl_add_dependency(NAME json
@@ -252,7 +278,12 @@ else()
     ALIAS "nlohmann_json::nlohmann_json"
     INCLUDE_ONLY)
 
-  target_link_libraries(zendnnl_library INTERFACE nlohmann_json::nlohmann_json)
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    target_link_libraries(zendnnl_library INTERFACE nlohmann_json::nlohmann_json)
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    target_link_libraries(zendnnl_shared_library INTERFACE nlohmann_json::nlohmann_json)
+  endif()
 
   # aoclutils dependency
   if (DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
@@ -263,7 +294,12 @@ else()
       ARCHIVE_FILE "libaoclutils.a"
       ALIAS "au::aoclutils")
 
-    target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
+    endif()
 
     zendnnl_add_dependency(NAME aucpuid
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
@@ -271,7 +307,12 @@ else()
       ARCHIVE_FILE "libau_cpuid.a"
       ALIAS "au::au_cpuid")
 
-    target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
+    endif()
 
     zendnnl_add_dependency(NAME onednn
         PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
@@ -279,7 +320,12 @@ else()
         ARCHIVE_FILE "libdnnl.a"
         ALIAS "DNNL::dnnl")
 
-    target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+    endif()
 
   else()
     zendnnl_add_dependency(NAME aoclutils
@@ -287,21 +333,36 @@ else()
       ARCHIVE_FILE "libaoclutils.a"
       ALIAS "au::aoclutils")
 
-    target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
+    endif()
 
     zendnnl_add_dependency(NAME aucpuid
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
       ARCHIVE_FILE "libau_cpuid.a"
       ALIAS "au::au_cpuid")
 
-    target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
+    endif()
 
     zendnnl_add_dependency(NAME onednn
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
       ARCHIVE_FILE "libdnnl.a"
       ALIAS "DNNL::dnnl")
 
-    target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+    endif()
 
   endif()
 
@@ -312,7 +373,12 @@ else()
         ARCHIVE_FILE "libblis-mt.a"
         ALIAS "amdblis::amdblis_archive")
 
-      target_link_libraries(zendnnl_library INTERFACE amdblis::amdblis_archive)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE amdblis::amdblis_archive)
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE amdblis::amdblis_archive)
+      endif()
   endif()
 
   if (ZENDNNL_DEPENDS_AOCLDLP)
@@ -321,7 +387,12 @@ else()
         ARCHIVE_FILE "libaocl-dlp.a"
         ALIAS "aocldlp::aocl_dlp_static")
 
-      target_link_libraries(zendnnl_library INTERFACE aocldlp::aocl_dlp_static)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE aocldlp::aocl_dlp_static)
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE aocldlp::aocl_dlp_static)
+      endif()
   endif()
 
   # libxsmm dependency
@@ -331,7 +402,12 @@ else()
         ARCHIVE_FILE "libxsmm.a"
         ALIAS "libxsmm::libxsmm_archive")
 
-      target_link_libraries(zendnnl_library INTERFACE libxsmm::libxsmm_archive)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE libxsmm::libxsmm_archive)
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE libxsmm::libxsmm_archive)
+      endif()
   endif()
 
   # parlooper dependency
@@ -341,7 +417,12 @@ else()
         ARCHIVE_FILE "libparlooper.a"
         ALIAS "parlooper::parlooper_archive")
 
-      target_link_libraries(zendnnl_library INTERFACE parlooper::parlooper_archive)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE parlooper::parlooper_archive)
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE parlooper::parlooper_archive)
+      endif()
   endif()
 
   # fbgemm dependency
@@ -351,7 +432,12 @@ else()
         ARCHIVE_FILE "libfbgemm.a"
         ALIAS "fbgemm::fbgemm_archive")
 
-      target_link_libraries(zendnnl_library INTERFACE fbgemm::fbgemm_archive)
+      if(ZENDNNL_LIB_BUILD_ARCHIVE)
+        target_link_libraries(zendnnl_library INTERFACE fbgemm::fbgemm_archive)
+      endif()
+      if(ZENDNNL_LIB_BUILD_SHARED)
+        target_link_libraries(zendnnl_shared_library INTERFACE fbgemm::fbgemm_archive)
+      endif()
   endif()
 
   message(STATUS "(ZENDNNL) ZNL_BYPRODUCTS=${ZNL_BYPRODUCTS}")
@@ -381,7 +467,12 @@ else()
   endif()
 
   # make library and its dependencies depend on fwk_zendnnl
-  add_dependencies(zendnnl_library fwk_zendnnl)
+  if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    add_dependencies(zendnnl_library fwk_zendnnl)
+  endif()
+  if(ZENDNNL_LIB_BUILD_SHARED)
+    add_dependencies(zendnnl_shared_library fwk_zendnnl)
+  endif()
   add_dependencies(zendnnl_json_deps fwk_zendnnl)
   add_dependencies(zendnnl_aoclutils_deps fwk_zendnnl)
   add_dependencies(zendnnl_aucpuid_deps fwk_zendnnl)

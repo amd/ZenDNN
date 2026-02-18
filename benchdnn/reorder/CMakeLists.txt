@@ -20,5 +20,11 @@ reorder_parser.cpp)
 
 add_library(reorder_benchdnn STATIC ${reorder_sources})
 
-target_link_libraries(reorder_benchdnn
-  zendnnl::zendnnl_archive)
+# Link to whichever zendnnl library variant was built
+if(TARGET zendnnl::zendnnl_archive)
+  target_link_libraries(reorder_benchdnn zendnnl::zendnnl_archive)
+elseif(TARGET zendnnl::zendnnl)
+  target_link_libraries(reorder_benchdnn zendnnl::zendnnl)
+else()
+  message(FATAL_ERROR "No zendnnl library target found for reorder_benchdnn!")
+endif()

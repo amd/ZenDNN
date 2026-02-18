@@ -86,13 +86,27 @@ endif()
    sdpa_example.hpp)
 
 add_executable(examples ${examples_sources})
+
+# Link to OpenMP
+target_link_libraries(examples PUBLIC OpenMP::OpenMP_CXX)
 # target_link_libraries(examples
 #   OpenMP::OpenMP_CXX
 #   zendnnl::zendnnl_archive)
 
-target_link_libraries(examples
-  PUBLIC  OpenMP::OpenMP_CXX
-  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,zendnnl::zendnnl_archive>")
+# Link to whichever zendnnl library variant was built
+if(TARGET zendnnl::zendnnl_archive)
+  # Prefer static library if available
+  target_link_libraries(examples
+    PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,zendnnl::zendnnl_archive>")
+  message(STATUS "Examples linking to static library (zendnnl_archive)")
+elseif(TARGET zendnnl::zendnnl)
+  # Fall back to shared library
+  target_link_libraries(examples
+    PRIVATE zendnnl::zendnnl)
+  message(STATUS "Examples linking to shared library (zendnnl)")
+else()
+  message(FATAL_ERROR "No zendnnl library target found! Build with at least one of ZENDNNL_LIB_BUILD_ARCHIVE=ON or ZENDNNL_LIB_BUILD_SHARED=ON")
+endif()
 
 if(ZENDNNL_CODE_COVERAGE)
   message(STATUS "code-coverage enabled for zendnnl examples")

@@ -64,6 +64,13 @@ message(DEBUG "${ZENDNNL_MSG_PREFIX}ZENDNNL_LIB_CMAKE_ARGS = ${ZL_CMAKE_ARGS}")
 
 set(ZENDNNL_ROOT ${ZENDNNL_SOURCE_DIR}/zendnnl)
 set(NPROC ${ZENDNNL_BUILD_SYS_NPROC})
+set(ZL_BUILD_BYPRODUCTS "")
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  list(APPEND ZL_BUILD_BYPRODUCTS "<INSTALL_DIR>/zendnnl/lib/libzendnnl_archive.a")
+endif()
+if(ZENDNNL_LIB_BUILD_SHARED)
+  list(APPEND ZL_BUILD_BYPRODUCTS "<INSTALL_DIR>/zendnnl/lib/${CMAKE_SHARED_LIBRARY_PREFIX}zendnnl${CMAKE_SHARED_LIBRARY_SUFFIX}")
+endif()
 ExternalProject_ADD(zendnnl
   DEPENDS "zendnnl-deps"
   SOURCE_DIR "${ZENDNNL_ROOT}"
@@ -72,7 +79,7 @@ ExternalProject_ADD(zendnnl
   CMAKE_ARGS "${ZL_CMAKE_ARGS}"
   BUILD_COMMAND cmake --build . --target all -- -j${NPROC}
   INSTALL_COMMAND cmake --build .  --target install
-  BUILD_BYPRODUCTS <INSTALL_DIR>/zendnnl/lib/libzendnnl_archive.a
+  BUILD_BYPRODUCTS ${ZL_BUILD_BYPRODUCTS}
   BUILD_ALWAYS TRUE
   CONFIGURE_HANDLED_BY_BUILD TRUE)
 

@@ -58,11 +58,24 @@ if(ZENDNNL_BUILD_GTEST)
 
   add_executable(gtests ${gtests_sources})
 
+  # Link to OpenMP and GTest
   target_link_libraries(gtests
-    PRIVATE zendnnl_archive
     PRIVATE OpenMP::OpenMP_CXX
     PRIVATE GTest::gtest
     PRIVATE GTest::gtest_main)
+
+  # Link to whichever zendnnl library variant was built
+  if(TARGET zendnnl_archive)
+    # Prefer static library if available
+    target_link_libraries(gtests PRIVATE zendnnl_archive)
+    message(STATUS "Gtests linking to static library (zendnnl_archive)")
+  elseif(TARGET zendnnl)
+    # Fall back to shared library
+    target_link_libraries(gtests PRIVATE zendnnl)
+    message(STATUS "Gtests linking to shared library (zendnnl)")
+  else()
+    message(FATAL_ERROR "No zendnnl library target found for gtests!")
+  endif()
 
   # Link correct AOCL backend and add matching compile defs
   if(ZENDNNL_DEPENDS_AOCLDLP AND ZENDNNL_AOCLDLP_INJECTED)

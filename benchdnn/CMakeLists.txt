@@ -60,13 +60,26 @@ add_subdirectory(utils)
 
 add_executable(benchdnn ${benchdnn_sources})
 
+# Link to OpenMP and benchdnn modules
 target_link_libraries(benchdnn
   OpenMP::OpenMP_CXX
-  zendnnl::zendnnl_archive
   matmul_benchdnn
   reorder_benchdnn
   embag_benchdnn
   benchdnn_utils)
+
+# Link to whichever zendnnl library variant was built
+if(TARGET zendnnl::zendnnl_archive)
+  # Prefer static library if available
+  target_link_libraries(benchdnn zendnnl::zendnnl_archive)
+  message(STATUS "Benchdnn linking to static library (zendnnl_archive)")
+elseif(TARGET zendnnl::zendnnl)
+  # Fall back to shared library
+  target_link_libraries(benchdnn zendnnl::zendnnl)
+  message(STATUS "Benchdnn linking to shared library (zendnnl)")
+else()
+  message(FATAL_ERROR "No zendnnl library target found for benchdnn!")
+endif()
 
 if(ZENDNNL_CODE_COVERAGE)
   message(STATUS "code-coverage enabled for zendnnl benchdnn")

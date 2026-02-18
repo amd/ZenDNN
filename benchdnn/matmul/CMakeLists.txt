@@ -22,5 +22,11 @@ matmul_lowoha.cpp)
 
 add_library(matmul_benchdnn STATIC ${matmul_sources})
 
-target_link_libraries(matmul_benchdnn
-  zendnnl::zendnnl_archive)
+# Link to whichever zendnnl library variant was built
+if(TARGET zendnnl::zendnnl_archive)
+  target_link_libraries(matmul_benchdnn zendnnl::zendnnl_archive)
+elseif(TARGET zendnnl::zendnnl)
+  target_link_libraries(matmul_benchdnn zendnnl::zendnnl)
+else()
+  message(FATAL_ERROR "No zendnnl library target found for matmul_benchdnn!")
+endif()

@@ -34,7 +34,7 @@ ZenDNN builds the following components
 | Component | Description | Mandatory |
 |-----------|-------------|-----------|
 | zendnnl-deps | All dependencies listed above. If these are not built at least once (or provided by embedding inference framework) the library build will fail. | Mandatory |
-| zendnnl-lib-archive and zendnnl-lib-shared | Archive (static) or shared library. At least one of these two needs to be built. | Mandatory |
+| zendnnl-lib-archive and zendnnl-lib-shared | Archive (static) or shared library. At least one of these two needs to be built; both can be built in the same tree when both options are ON. | Mandatory |
 | zendnnl-gtests | GTests for the library. | Optional |
 | zendnnl-examples | Examples illustrating the library API usage. | Optional |
 | zendnnl-benchdnn | A benchmarking framework for ZenDNN. | Optional |

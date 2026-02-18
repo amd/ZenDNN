@@ -18,5 +18,11 @@ set(util_sources benchdnn_utils.cpp)
 
 add_library(benchdnn_utils STATIC ${util_sources})
 
-target_link_libraries(benchdnn_utils
-  zendnnl::zendnnl_archive)
+# Link to whichever zendnnl library variant was built
+if(TARGET zendnnl::zendnnl_archive)
+  target_link_libraries(benchdnn_utils zendnnl::zendnnl_archive)
+elseif(TARGET zendnnl::zendnnl)
+  target_link_libraries(benchdnn_utils zendnnl::zendnnl)
+else()
+  message(FATAL_ERROR "No zendnnl library target found for benchdnn_utils!")
+endif()
