@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -52,6 +52,8 @@ dnnl::memory::data_type onednn_utils_t::to_dnnl_datatype(
     return dnnl::memory::data_type::f32;
   case data_type_t::bf16:
     return dnnl::memory::data_type::bf16;
+  case data_type_t::f16:
+    return dnnl::memory::data_type::f16;
   case data_type_t::u8:
     return dnnl::memory::data_type::u8;
   case data_type_t::s8:

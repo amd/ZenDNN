@@ -299,10 +299,11 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   if (is_profile) {
     profiler.tbp_start();
   }
-  if (validate_matmul_direct_inputs(src, weight, dst, M, N, K,
-                                    batch_params.Batch_A, batch_params.Batch_B,
-                                    params, is_weights_const) != status_t::success) {
-    return status_t::failure;
+  status_t status = validate_matmul_direct_inputs(src, weight, dst, M, N, K,
+                    batch_params.Batch_A, batch_params.Batch_B,
+                    params, is_weights_const);
+  if (status != status_t::success) {
+    return status;
   }
 
   size_t src_type_size = size_of(params.dtypes.src);

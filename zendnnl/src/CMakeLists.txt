@@ -54,6 +54,21 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     PUBLIC ${CMAKE_DL_LIBS}
     PUBLIC nlohmann_json::nlohmann_json)
 
+  # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
+  # CPU detection symbols take priority.
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+    if(ZENDNNL_ONEDNN_INJECTED)
+      target_link_libraries(zendnnl_archive
+        PRIVATE "$<COMPILE_ONLY:DNNL::dnnl>")
+    else()
+      target_link_libraries(zendnnl_archive
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+  endif()
+
   target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl_archive
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
@@ -84,19 +99,6 @@ if(ZENDNNL_LIB_BUILD_ARCHIVE)
     endif()
   else()
     target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
-  endif()
-
-  if(ZENDNNL_DEPENDS_ONEDNN)
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-    if(ZENDNNL_ONEDNN_INJECTED)
-      target_link_libraries(zendnnl_archive
-        PRIVATE "$<COMPILE_ONLY:DNNL::dnnl>")
-    else()
-      target_link_libraries(zendnnl_archive
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-    endif()
-  else()
-    target_compile_definitions(zendnnl_archive PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   endif()
 
 
@@ -175,6 +177,21 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     PUBLIC ${CMAKE_DL_LIBS}
     PUBLIC nlohmann_json::nlohmann_json)
 
+  # NOTE: OneDNN (DNNL) MUST be linked BEFORE aoclutils to ensure OneDNN's
+  # CPU detection symbols take priority. See archive target comment above.
+  if(ZENDNNL_DEPENDS_ONEDNN)
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
+    if(ZENDNNL_ONEDNN_INJECTED)
+      target_link_libraries(zendnnl
+        PUBLIC DNNL::dnnl)
+    else()
+      target_link_libraries(zendnnl
+        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
+    endif()
+  else()
+    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
+  endif()
+
   target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AOCLUTILS=1)
   target_link_libraries(zendnnl
     PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,au::aoclutils>")
@@ -204,19 +221,6 @@ if(ZENDNNL_LIB_BUILD_SHARED)
     endif()
   else()
     target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_AMDBLIS=0)
-  endif()
-
-  if(ZENDNNL_DEPENDS_ONEDNN)
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=1)
-    if(ZENDNNL_ONEDNN_INJECTED)
-      target_link_libraries(zendnnl
-        PUBLIC DNNL::dnnl)
-    else()
-      target_link_libraries(zendnnl
-        PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,DNNL::dnnl>")
-    endif()
-  else()
-    target_compile_definitions(zendnnl PUBLIC ZENDNNL_DEPENDS_ONEDNN=0)
   endif()
 
   if(ZENDNNL_DEPENDS_LIBXSMM)

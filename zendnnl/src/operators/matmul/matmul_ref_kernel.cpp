@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "matmul_ref_kernel.hpp"
+#include "memory/memory_utils.hpp"
 #include <cstring>
 #include <vector>
 
@@ -22,6 +23,7 @@ namespace zendnnl {
 namespace ops {
 using namespace zendnnl::error_handling;
 using namespace zendnnl::common;
+using namespace zendnnl::memory;
 
 inline void read_quant_params(const tensor_t &tensor,
                               scale_and_zero_point_t::quant_t &scale, scale_and_zero_point_t::quant_t &zp) {
@@ -207,6 +209,18 @@ void matmul_ref_kernel_t::store_output(int BS, int M, int N, int ldc,
       for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
           out_bf16[bs * output_batch_stride + i * ldc + j] = bfloat16_t(
+                accum_buff_f32[bs * accum_batch_stride + i * N + j]);
+        }
+      }
+    }
+  }
+  else if (output_dtype == data_type_t::f16) {
+    float16_t *out_f16 = static_cast<float16_t *>(output);
+    #pragma omp parallel for collapse(3) if(BS * M * N > 10000)
+    for (int bs = 0; bs < BS; ++bs) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          out_f16[bs * output_batch_stride + i * ldc + j] = float16_t(
                 accum_buff_f32[bs * accum_batch_stride + i * N + j]);
         }
       }

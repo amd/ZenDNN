@@ -349,6 +349,22 @@ status_t matmul_impl_t::validate() {
 
   }
 
+  if (input->get_data_type() == data_type_t::f16 ||
+      weights->get_data_type() == data_type_t::f16 ||
+      output->get_data_type() == data_type_t::f16) {
+    // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+    if (!platform_info.get_f16_status()) {
+      apilog_error("F16 data type is not supported on this platform "
+                   "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+      return status_t::isa_unsupported;
+    }
+    if (forced_kernel != "reference" &&
+        forced_kernel != "onednn_blocked" && forced_kernel != "onednn") {
+      forced_kernel = "onednn_blocked";
+      log_info("F16 data type detected, forcing onednn_blocked kernel");
+    }
+  }
+
   // validate post-ops
   auto post_ops = context.get_post_op();
   return validate_buffer_post_op(output_size, post_ops, inputs);
@@ -398,6 +414,14 @@ status_t matmul_impl_t::validate_forced_kernel() {
       if (!weights->is_quantized()) {
         log_error("<", get_name(),
                   "> forced reference kernel for WOQ requires quantized weights with scales.");
+        return status_t::failure;
+      }
+    }
+    else if (wt_dtype == data_type_t::f16) {
+      if (!(in_dtype == data_type_t::f16) ||
+          !((out_dtype == data_type_t::f16) || (out_dtype == data_type_t::f32))) {
+        log_error("<", get_name(),
+                  "> forced reference kernel for F16 needs f16 input and f16/f32 output.");
         return status_t::failure;
       }
     }

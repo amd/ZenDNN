@@ -17,6 +17,7 @@
 #define  _MEMORY_UTILS_HPP_
 
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <vector>
 #include "common/data_types.hpp"
@@ -63,8 +64,13 @@ T read_and_cast(const void *value, data_type_t data_type, size_t index = 0) {
   case data_type_t::f32:
     return static_cast<T>(reinterpret_cast<const float *>(value)[index]);
   case data_type_t::bf16:
-    return static_cast<T>(bfloat16_t::bf16_to_f32_val(reinterpret_cast<const int16_t *>
-                                         (value)[index]));
+    return static_cast<T>(bfloat16_t::bf16_to_f32_val(
+                            reinterpret_cast<const int16_t *>
+                            (value)[index]));
+  case data_type_t::f16:
+    return static_cast<T>(float16_t::f16_to_f32_val(
+                            reinterpret_cast<const uint16_t *>
+                            (value)[index]));
   default:
     log_error("Unsupported data type for casting");
     return static_cast<T>(0); // Return 0 as a fallback for unsupported types

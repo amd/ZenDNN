@@ -38,6 +38,19 @@ using namespace zendnnl::lowoha::matmul;
  */
 int run_lowoha_matmul_fp32_test();
 
+/** @fn run_lowoha_matmul_f16_test
+ *  @brief Demonstrates F16 (half precision) matmul using OneDNN backend.
+ *
+ *  This example demonstrates matmul with all F16 tensors.
+ *  F16 matmul is only supported via OneDNN backend.
+ *
+ *  Configuration:
+ *    - Input: F16 [M, K]
+ *    - Weights: F16 [K, N]
+ *    - Output: F16 [M, N]
+ */
+int run_lowoha_matmul_f16_test();
+
 /** @fn run_lowoha_matmul_woq_bf16s4_test
  *  @brief Demonstrates LOWOHA WOQ matmul with BF16 input and S4 weights.
  *

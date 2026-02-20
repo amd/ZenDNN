@@ -117,9 +117,12 @@ struct matmul_data_types {
 |----------|-------------|-----------|-------------|-------|
 | FP32 | FP32 | FP32 | FP32 | Standard floating-point |
 | BF16 | BF16 | FP32/BF16 | FP32/BF16 | Mixed-precision BFloat16 |
+| F16 | F16 | FP32 | F16/FP32 | Half-precision (requires AVX512-FP16 or AVX-NE-CONVERT ISA) |
 | BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ) |
 | U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 | S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
+
+> **Note:** F16 matmul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16 or AVX-NE-CONVERT ISA, F16 operations return `status_t::isa_unsupported`.
 
 
 ### `matmul_post_op`
@@ -523,6 +526,66 @@ int lowoha_int8_matmul_example() {
 }
 ```
 
+
+### Example 5: F16 (Half-Precision) MatMul
+
+This example demonstrates F16 matmul where all tensors (source, weights, destination) use half-precision floating point. F16 matmul is only supported via the OneDNN backend and requires AVX512-FP16 or AVX-NE-CONVERT ISA.
+
+```cpp
+int lowoha_matmul_f16_example() {
+  using namespace zendnnl::lowoha::matmul;
+
+  // Matrix dimensions
+  constexpr int M = 64, N = 128, K = 256;
+
+  // F16 is represented as uint16_t (IEEE 754 half-precision format)
+  std::vector<uint16_t> src(M * K);
+  std::vector<uint16_t> wei(K * N);
+  std::vector<uint16_t> dst(M * N, 0);
+
+  // Initialize with simple pattern using float16_t conversion
+  std::fill(src.begin(), src.end(), float16_t(1.0f).raw());
+  std::fill(wei.begin(), wei.end(), float16_t(1.0f).raw());
+
+  // Setup data types - all F16
+  matmul_data_types matmul_dtype;
+  matmul_dtype.src = data_type_t::f16;
+  matmul_dtype.wei = data_type_t::f16;
+  matmul_dtype.dst = data_type_t::f16;
+  matmul_dtype.bias = data_type_t::none;
+  matmul_dtype.compute = data_type_t::none;
+
+  matmul_params params;
+  params.dtypes = matmul_dtype;
+
+  matmul_batch_params_t batch_params;
+  batch_params.Batch_A = 1;
+  batch_params.Batch_B = 1;
+
+  // Execute F16 matmul (automatically routed to OneDNN backend)
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f, src.data(), K,
+    wei.data(), N,
+    nullptr,  // no bias
+    0.0f, dst.data(), N,
+    true,  // is_weights_const
+    batch_params, params);
+
+  // Handle ISA-unsupported gracefully
+  if (status == status_t::isa_unsupported) {
+    // F16 not supported on this platform - skip gracefully
+    return 0;
+  }
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+**Key Points for F16:**
+- **ISA Requirement**: F16 requires AVX512-FP16 or AVX-NE-CONVERT instruction set support. The check is performed via CPUID (leaf 7, subleaf 0, EDX bit 23 for AVX512-FP16; leaf 7, subleaf 1, EDX bit 5 for AVX-NE-CONVERT).
+- **Backend**: F16 is only supported via OneDNN backend. Kernel selection automatically routes to `onednn_blocked`.
 
 ## Weight Caching and Reordering
 

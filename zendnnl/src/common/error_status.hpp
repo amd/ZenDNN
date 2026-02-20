@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -52,7 +52,8 @@ enum class status_t : int32_t {
   memory_bad_quant         = -17, /*!< bad quantization input to tensor */
   lru_node_not_found       = -18, /*!< LRU node not found */
   lru_node_exists          = -19, /*!< LRU node not found */
-  bad_hash_object          = -20  /*!< Bad or ill formed hashable object */
+  bad_hash_object          = -20, /*!< Bad or ill formed hashable object */
+  isa_unsupported          = -21 /*!< ISA not supported on this platform */
 };
 
 } //error_handling

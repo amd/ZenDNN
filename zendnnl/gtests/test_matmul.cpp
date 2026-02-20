@@ -328,6 +328,85 @@ TEST_P(TestMatmul, BF16_BF16) {
 }
 
 /** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param F16_F16 user-defined name of test according to test
+ *  @brief Test to validate matmul F16 input/weight/output support wrt OneDNN kernel
+ *         F16 operations are routed to OneDNN backend as AOCL-DLP doesn't support F16.
+ */
+TEST_P(TestMatmul, F16_F16) {
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+                            data_type_t::f16, 2.0, transB);
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+                            data_type_t::f16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 2.0);
+  auto binary_tensor      = is_binary_postop(po_type) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f16, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f16, 2.0);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            beta);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            use_LOWOHA, algo, alpha, beta);
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_bf16,
+                             epsilon_bf16, is_test_successful, false, alpha);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestMatmul parameterized test class to initialize Matmul parameters
+ *  @param F16_F32 user-defined name of test according to test
+ *  @brief Test to validate matmul F16 input/weight with F32 output support wrt OneDNN kernel
+ */
+TEST_P(TestMatmul, F16_F32) {
+  auto weight_tensor      = tensor_factory.uniform_dist_tensor({k, n},
+                            data_type_t::f16, 2.0, transB);
+  auto input_tensor       = tensor_factory.uniform_dist_tensor({m, k},
+                            data_type_t::f16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 2.0);
+  auto binary_tensor      = is_binary_postop(po_type) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+  auto output_tensor      = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f32, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_tensor({m, n},
+                            data_type_t::f32, 2.0);
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            beta);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            use_LOWOHA, algo, alpha, beta);
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_f32,
+                             epsilon_f32, is_test_successful, false, alpha);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
  *  @param TestMatmulStride parameterized test class to initialize parameters
  *  @param F32_F32 user-defined name of test
  *  @brief Test to validate matmul F32 aocl kernel support wrt Reference kernel
@@ -507,6 +586,70 @@ TEST_P(TestMatmul,BF16_BF16_Stride) {
 
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_bf16,
+                             epsilon_bf16, is_test_successful, false, alpha);
+  }
+
+  EXPECT_TRUE(is_test_successful);
+}
+
+/** @fn TEST_P
+ *  @param TestMatmulStride parameterized test class to initialize parameters
+ *  @param F16_F16_Stride user-defined name of test
+ *  @brief Test to validate matmul F16 input, F16 output kernel support
+ *  wrt Reference kernel with strided tensors.
+ *
+ */
+TEST_P(TestMatmul, F16_F16_Stride) {
+  size_t stride_in_inc           = rand() % 50;
+  size_t stride_wt_inc           = rand() % 50;
+  size_t stride_dst_inc          = rand() % 50;
+  std::vector<size_t> stride_in  = {m,k};
+  std::vector<size_t> stride_wt  = {k,n};
+  std::vector<size_t> stride_dst = {m,n + stride_dst_inc};
+  if (transB) {
+    stride_wt[0] += stride_wt_inc;
+  }
+  else {
+    stride_wt[1] += stride_wt_inc;
+  }
+  if (transA) {
+    stride_in[0] += stride_in_inc;
+  }
+  else {
+    stride_in[1] += stride_in_inc;
+  }
+  auto weight_tensor      = tensor_factory.uniform_dist_strided_tensor({k, n},
+                            stride_wt, data_type_t::f16, 2.0, transB);
+  auto input_tensor       = tensor_factory.uniform_dist_strided_tensor({m, k},
+                            stride_in, data_type_t::f16, 2.0, transA);
+  auto bias_tensor        = tensor_factory.uniform_dist_tensor({1, n},
+                            data_type_t::f32, 2.0);
+  auto binary_tensor      = is_binary_postop(po_type) ?
+                            tensor_factory.uniform_dist_tensor({m, n},
+                                data_type_t::f32, 2.0) : tensor_t();
+  auto output_tensor      = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f16, 2.0);
+  auto output_tensor_ref  = tensor_factory.uniform_dist_strided_tensor({m, n},
+                            stride_dst, data_type_t::f16, 2.0);
+
+  log_info("transA:", transA, " transB:", transB, " strided_inp:{", stride_in[0],
+           ",", stride_in[1], "} strided_wt:{", stride_wt[0], ",", stride_wt[1],"}");
+
+  status_t status         = matmul_kernel_test(input_tensor, weight_tensor,
+                            bias_tensor, output_tensor, po_type, binary_tensor, use_LOWOHA, algo, alpha,
+                            beta);
+  if (status == status_t::isa_unsupported) {
+    GTEST_SKIP() << "F16 not supported: requires F16-capable ISA";
+  }
+  status_t ref_status     = matmul_forced_ref_kernel_test(input_tensor,
+                            weight_tensor, bias_tensor, output_tensor_ref, po_type, binary_tensor,
+                            use_LOWOHA, algo, alpha, beta);
+
+  bool is_test_successful =
+    (status == status_t::success && ref_status == status_t::success);
+
+  if (is_test_successful) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, k, rtol_bf16,
                              epsilon_bf16, is_test_successful, false, alpha);
   }
 

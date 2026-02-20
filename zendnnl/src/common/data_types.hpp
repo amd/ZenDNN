@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <string>
 #include "bfloat16.hpp"
+#include "float16.hpp"
 
 /** @namespace zendnnl
  *  @brief ZenDNNL top level namespace.
@@ -63,79 +64,79 @@ struct prec_traits {};
 /** @brief none to void */
 template <>
 struct prec_traits<data_type_t::none> {
-    typedef void type;
+  typedef void type;
 };
 
 /** @brief f32 to float */
 template <>
 struct prec_traits<data_type_t::f32> {
-    typedef float type;
+  typedef float type;
 };
 
-/** @brief f16 to float */
+/** @brief f16 to float16_t */
 template <>
 struct prec_traits<data_type_t::f16> {
-    typedef float type;
+  typedef float16_t type;
 };
 
 /** @brief bf16 to bfloat16_t */
 template <>
 struct prec_traits<data_type_t::bf16> {
-    typedef bfloat16_t type;
+  typedef bfloat16_t type;
 };
 
 /** @brief s32 to int32_t */
 template <>
 struct prec_traits<data_type_t::s32> {
-    typedef int32_t type;
+  typedef int32_t type;
 };
 
 /** @brief s64 to int64_t */
 template <>
 struct prec_traits<data_type_t::s64> {
-    typedef int64_t type;
+  typedef int64_t type;
 };
 
 /** @brief s16 to int16_t */
 template <>
 struct prec_traits<data_type_t::s16> {
-    typedef int16_t type;
+  typedef int16_t type;
 };
 
 /** @brief s8 to int8_t */
 template <>
 struct prec_traits<data_type_t::s8> {
-    typedef int8_t type;
+  typedef int8_t type;
 };
 
 /** @brief s4 to uint8_t */
 template <>
 struct prec_traits<data_type_t::s4> {
-    typedef uint8_t type;
+  typedef uint8_t type;
 };
 
 /** @brief u32 to uint32_t */
 template <>
 struct prec_traits<data_type_t::u32> {
-    typedef uint32_t type;
+  typedef uint32_t type;
 };
 
 /** @brief u16 to uint16_t */
 template <>
 struct prec_traits<data_type_t::u16> {
-    typedef uint16_t type;
+  typedef uint16_t type;
 };
 
 /** @brief u8 to uint8_t */
 template <>
 struct prec_traits<data_type_t::u8> {
-    typedef uint8_t type;
+  typedef uint8_t type;
 };
 
 /** @brief u4 to uint8_t */
 template <>
 struct prec_traits<data_type_t::u4> {
-    typedef uint8_t type;
+  typedef uint8_t type;
 };
 
 /** @brief Conversion from C++ types to data_type_t */
@@ -145,60 +146,61 @@ struct data_traits {};
 /** @brief void to none */
 template <>
 struct data_traits<void> {
-    static constexpr data_type_t data_type = data_type_t::none;
+  static constexpr data_type_t data_type = data_type_t::none;
 };
 
 /** @brief float to f32 */
 template <>
 struct data_traits<float> {
-    static constexpr data_type_t data_type = data_type_t::f32;
+  static constexpr data_type_t data_type = data_type_t::f32;
 };
 
-// template <>
-// struct data_traits<float16_t> {
-//     static constexpr data_type_t data_type = data_type_t::f16;
-// };
+/** @brief float16_t to f16 */
+template <>
+struct data_traits<float16_t> {
+  static constexpr data_type_t data_type = data_type_t::f16;
+};
 
 /** @brief bfloat16_t to bf16 */
 template <>
 struct data_traits<bfloat16_t> {
-    static constexpr data_type_t data_type = data_type_t::bf16;
+  static constexpr data_type_t data_type = data_type_t::bf16;
 };
 
 /** @brief int32_t to s32 */
 template <>
 struct data_traits<int32_t> {
-    static constexpr data_type_t data_type = data_type_t::s32;
+  static constexpr data_type_t data_type = data_type_t::s32;
 };
 
 /** @brief int16_t to s16 */
 template <>
 struct data_traits<int16_t> {
-    static constexpr data_type_t data_type = data_type_t::s16;
+  static constexpr data_type_t data_type = data_type_t::s16;
 };
 
 /** @brief int8_t to s8 */
 template <>
 struct data_traits<int8_t> {
-    static constexpr data_type_t data_type = data_type_t::s8;
+  static constexpr data_type_t data_type = data_type_t::s8;
 };
 
 /** @brief uint32_t to u32 */
 template <>
 struct data_traits<uint32_t> {
-    static constexpr data_type_t data_type = data_type_t::u32;
+  static constexpr data_type_t data_type = data_type_t::u32;
 };
 
 /** @brief uint16_t to u16 */
 template <>
 struct data_traits<uint16_t> {
-    static constexpr data_type_t data_type = data_type_t::u16;
+  static constexpr data_type_t data_type = data_type_t::u16;
 };
 
 /** @brief uint8_t to u8 */
 template <>
 struct data_traits<uint8_t> {
-    static constexpr data_type_t data_type = data_type_t::u8;
+  static constexpr data_type_t data_type = data_type_t::u8;
 };
 
 // template <>

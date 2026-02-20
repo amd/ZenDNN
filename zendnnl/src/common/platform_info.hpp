@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ using namespace zendnnl::error_handling;
  */
 
 class platform_info_t final {
-public:
+ public:
   /** @name Constructors, Destructors and Assignments */
   /**@{*/
   /** @brief Default constrcutor */
@@ -60,6 +60,18 @@ public:
    *  @return true if platform supports avx512 else false.
    */
   bool get_avx512f_status() const;
+
+  /** @brief Get F16 (half-precision) ISA support status.
+   *
+   *  F16 is supported if any of the following ISA levels are available:
+   *    - avx512_core_fp16
+   *        Detected via AVX512-FP16: CPUID leaf 7, subleaf 0, EDX bit 23.
+   *    - avx2_vnni_2
+   *        Detected via AVX-NE-CONVERT: CPUID leaf 7, subleaf 1, EDX bit 5.
+   *
+   *  @return true if platform supports F16 compute, false otherwise.
+   */
+  bool get_f16_status() const;
 
   /** @brief Get isa version
    *  @return isa version.
@@ -87,9 +99,19 @@ public:
   uint32_t get_cpu_uarch() const;
   /**@}*/
 
-private:
+ private:
+  /** @brief Detect F16 ISA support via raw CPUID queries.
+   *
+   *  Checks for AVX512-FP16 (leaf 7, sub 0, EDX bit 23) and
+   *  AVX-NE-CONVERT (leaf 7, sub 1, EDX bit 5).
+   *
+   *  @return true if any F16-capable ISA is detected, false otherwise.
+   */
+  static bool detect_f16_isa();
+
   bool          is_avx2;
   bool          is_avx512f;
+  bool          is_avx512f16;
   uint32_t      isa_version;
   uint32_t      cpu_family;
   uint32_t      cpu_model;

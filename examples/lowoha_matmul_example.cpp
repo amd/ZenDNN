@@ -91,6 +91,81 @@ int run_lowoha_matmul_fp32_test() {
   return OK;
 }
 
+/**
+ * @brief Test F16 matmul using OneDNN backend
+ *
+ * This example demonstrates F16 (half precision) matmul where all tensors
+ * (source, weights, destination) are in F16 format.
+ *
+ * Note: F16 matmul is only supported via OneDNN backend.
+ */
+int run_lowoha_matmul_f16_test() {
+  try {
+    // Matrix dimensions
+    constexpr int M = 64, N = 128, K = 256;
+
+    log_info("LOWOHA F16 matmul example");
+    log_info("Matrix dimensions: M=", M, " K=", K, " N=", N);
+
+    // F16 is represented as uint16_t (IEEE 754 half-precision format)
+    // For simplicity, we initialize with zeros and let OneDNN handle the computation
+    std::vector<uint16_t> src(M * K);
+    std::vector<uint16_t> wei(K * N);
+    std::vector<uint16_t> dst(M * N, 0);
+
+    // Initialize with simple pattern using F16 conversion.
+    std::fill(src.begin(), src.end(), float16_t(1.0f).raw());
+    std::fill(wei.begin(), wei.end(), float16_t(1.0f).raw());
+
+    // Setup data types - all F16
+    matmul_data_types matmul_dtype;
+    matmul_dtype.src = data_type_t::f16;
+    matmul_dtype.wei = data_type_t::f16;
+    matmul_dtype.dst = data_type_t::f16;
+    matmul_dtype.bias = data_type_t::none;
+    matmul_dtype.compute = data_type_t::none;
+
+    matmul_params params;
+    params.dtypes = matmul_dtype;
+
+    matmul_batch_params_t batch_params;
+    batch_params.Batch_A = 1;
+    batch_params.Batch_B = 1;
+
+    // Execute F16 matmul (will be routed to OneDNN automatically)
+    log_info("Executing F16 matmul via OneDNN...");
+    status_t status = matmul_direct(
+                        'r',  // layout: row-major
+                        false, false,  // transA, transB
+                        M, N, K,
+                        1.0f, src.data(), K,
+                        wei.data(), N,
+                        nullptr,  // no bias
+                        0.0f, dst.data(), N,
+                        true,  // is_weights_const
+                        batch_params, params);
+
+    if (status == status_t::isa_unsupported) {
+      return OK;
+    }
+    if (status != status_t::success) {
+      log_error("F16 matmul execution failed");
+      return NOT_OK;
+    }
+
+    log_info("F16 matmul executed successfully!");
+    // With 1.0 * 1.0 summed K times, expected result is K = 256 in F16
+    // 0x5C00 = 256.0 in F16
+    log_info("Output[0,0] (F16 raw): ", dst[0]);
+
+  }
+  catch (const exception_t &ex) {
+    std::cout << ex.what() << std::endl;
+    return NOT_OK;
+  }
+  return OK;
+}
+
 int run_lowoha_matmul_woq_bf16s4_test() {
   try {
     // ========== Matrix Dimensions ==========

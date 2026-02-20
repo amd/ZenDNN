@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 set(common_sources
   bfloat16.cpp
+  float16.cpp
   data_types.cpp
   dynamic_module.cpp
   zendnnl_exceptions.cpp
@@ -30,6 +31,7 @@ set(common_sources
 
 set(common_headers
   bfloat16.hpp
+  float16.hpp
   data_types.hpp
   dynamic_module.hpp
   zendnnl_exceptions.hpp

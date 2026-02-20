@@ -1,5 +1,5 @@
 /********************************************************************************
-# * Copyright (c) 2025-2028 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ using namespace zendnnl::error_handling;
 
 template<typename OP_CONTEXT_T>
 class operator_impl_t : public hashable_object_t {
-public:
+ public:
   /** @brief Parent type */
   using   parent_type                =  hashable_object_t;
   /** @brief Context type */
@@ -55,34 +55,34 @@ public:
   /** @brief dynamic module handle type */
   using   dynamic_module_sptr_type  =  std::shared_ptr<dynamic_module_t>;
 
-public:
+ public:
   /** @brief default constructor */
   operator_impl_t();
 
   /** @brief virtual destructor */
   virtual ~operator_impl_t() = default;
 
-public:
+ public:
   /** @brief set context */
-  void set_context(const context_type& context_);
+  void set_context(const context_type &context_);
 
   /** @brief get context */
-  const context_type&  get_context() const;
+  const context_type  &get_context() const;
 
   /** @brief set an input tensor. */
-  void set_input(const std::string& key_, const tensor_t& input_tensor_);
+  void set_input(const std::string &key_, const tensor_t &input_tensor_);
 
   /** @brief set an input tensor. */
-  std::optional<tensor_t> get_input(const std::string& key_) const;
+  std::optional<tensor_t> get_input(const std::string &key_) const;
 
   /** @brief set an output tensor. */
-  void set_output(const std::string& key_, const tensor_t& input_tensor_);
+  void set_output(const std::string &key_, const tensor_t &input_tensor_);
 
   /** @brief get an output tensor. */
-  std::optional<tensor_t> get_output(const std::string& key_) const;
+  std::optional<tensor_t> get_output(const std::string &key_) const;
 
   /** @brief set forced kernel. */
-  void set_forced_kernel(const std::string& forced_kernel_name_);
+  void set_forced_kernel(const std::string &forced_kernel_name_);
 
   /** @brief get forced kernel. */
   std::string get_forced_kernel() const;
@@ -99,7 +99,7 @@ public:
   /** @brief execute an operator */
   virtual status_t    execute();
 
-protected:
+ protected:
   /** @brief Load dynamic module
    *
    * This is useful only if the operator is loading
@@ -108,7 +108,7 @@ protected:
    * @param module_ : module name.
    * @return status_t::success for success.
    */
-  status_t load_module(const std::string& module_);
+  status_t load_module(const std::string &module_);
 
   /** @brief Load a kernel from a dynamic module.
    *
@@ -119,7 +119,7 @@ protected:
    * @param module_ : module name.
    * @return status_t::success for success.
    */
-  status_t load_kernel(const std::string& symbol_);
+  status_t load_kernel(const std::string &symbol_);
 
   /** @brief Validate input and output tensors.
    *
@@ -161,7 +161,7 @@ protected:
   /** @brief override hash */
   std::size_t hash() override;
 
-protected:
+ protected:
   tensor_map_type           inputs; /**< Input tensors. */
   tensor_map_type           outputs; /**< Output tensors. */
   context_type              context; /**< Operator context. */
@@ -183,21 +183,21 @@ operator_impl_t<OP_CONTEXT_T>::operator_impl_t():
 }
 
 template<typename OP_CONTEXT_T>
-void operator_impl_t<OP_CONTEXT_T>::set_context(const context_type& context_) {
+void operator_impl_t<OP_CONTEXT_T>::set_context(const context_type &context_) {
   if (status != status_t::success) {
     context = context_;
   }
 }
 
 template<typename OP_CONTEXT_T>
-const typename operator_impl_t<OP_CONTEXT_T>::context_type&
+const typename operator_impl_t<OP_CONTEXT_T>::context_type &
 operator_impl_t<OP_CONTEXT_T>::get_context()  const {
   return context;
 }
 
 template<typename OP_CONTEXT_T>
-void operator_impl_t<OP_CONTEXT_T>::set_input(const std::string& key_,
-                                              const tensor_t& input_tensor_) {
+void operator_impl_t<OP_CONTEXT_T>::set_input(const std::string &key_,
+    const tensor_t &input_tensor_) {
   if (status == status_t::success) {
     inputs[key_] = input_tensor_;
   }
@@ -205,7 +205,7 @@ void operator_impl_t<OP_CONTEXT_T>::set_input(const std::string& key_,
 
 template<typename OP_CONTEXT_T>
 std::optional<tensor_t>
-operator_impl_t<OP_CONTEXT_T>::get_input(const std::string& key_) const {
+operator_impl_t<OP_CONTEXT_T>::get_input(const std::string &key_) const {
   if (status == status_t::success) {
     auto search_ptr = inputs.find(key_);
     if (search_ptr != inputs.end()) {
@@ -217,8 +217,8 @@ operator_impl_t<OP_CONTEXT_T>::get_input(const std::string& key_) const {
 }
 
 template<typename OP_CONTEXT_T>
-void operator_impl_t<OP_CONTEXT_T>::set_output(const std::string& key_,
-                                              const tensor_t& output_tensor_) {
+void operator_impl_t<OP_CONTEXT_T>::set_output(const std::string &key_,
+    const tensor_t &output_tensor_) {
   if (status == status_t::success) {
     outputs[key_] = output_tensor_;
   }
@@ -226,7 +226,7 @@ void operator_impl_t<OP_CONTEXT_T>::set_output(const std::string& key_,
 
 template<typename OP_CONTEXT_T>
 std::optional<tensor_t>
-operator_impl_t<OP_CONTEXT_T>::get_output(const std::string& key_) const {
+operator_impl_t<OP_CONTEXT_T>::get_output(const std::string &key_) const {
   if (status == status_t::success) {
     auto search_ptr = outputs.find(key_);
     if (search_ptr != outputs.end()) {
@@ -238,7 +238,8 @@ operator_impl_t<OP_CONTEXT_T>::get_output(const std::string& key_) const {
 }
 
 template<typename OP_CONTEXT_T>
-void operator_impl_t<OP_CONTEXT_T>::set_forced_kernel(const std::string& forced_kernel_) {
+void operator_impl_t<OP_CONTEXT_T>::set_forced_kernel(const std::string
+    &forced_kernel_) {
   if (status == status_t::success) {
     forced_kernel = forced_kernel_;
   }
@@ -258,15 +259,16 @@ void operator_impl_t<OP_CONTEXT_T>::set_validation(bool validation_flag_) {
 
 template<typename OP_CONTEXT_T>
 bool operator_impl_t<OP_CONTEXT_T>::get_validation() const {
-    return validation_flag;
+  return validation_flag;
 }
 
 template<typename OP_CONTEXT_T>
 void operator_impl_t<OP_CONTEXT_T>::create() {
 
-  /* return if alread created */
-  if (status == status_t::success)
+  /* return if already created */
+  if (status == status_t::success) {
     return;
+  }
 
   /* enable time based profiling */
   profiler_t profiler;
@@ -308,7 +310,7 @@ void operator_impl_t<OP_CONTEXT_T>::create() {
   if (profile_enabled) {
     profiler.tbp_stop();
 
-    if(profilelog_verbose_enabled()) {
+    if (profilelog_verbose_enabled()) {
       profilelog_verbose(op_create_info(),
                          ",:time:",
                          profiler.tbp_elapsedtime(),
@@ -323,8 +325,8 @@ status_t operator_impl_t<OP_CONTEXT_T>::execute() {
   profiler_t profiler;
   bool profile_enabled = is_profile_enabled();
   if (profile_enabled) {
-      profiler.tbp_start();
-    }
+    profiler.tbp_start();
+  }
 
   /* check if the operator is a valid operator */
   if (status != status_t::success) {
@@ -334,7 +336,11 @@ status_t operator_impl_t<OP_CONTEXT_T>::execute() {
 
   /* check if io is valid */
   if (validation_flag) {
-    if (validate() != status_t::success) {
+    status_t validate_status = validate();
+    if (validate_status == status_t::isa_unsupported) {
+      return status_t::isa_unsupported;
+    }
+    if (validate_status != status_t::success) {
       apilog_error("<", obj_name, "> bad input or output");
       return status_t::op_bad_io;
     }
@@ -378,20 +384,21 @@ status_t operator_impl_t<OP_CONTEXT_T>::execute() {
   }
 
   if (profile_enabled) {
-      profiler.tbp_stop();
-      if (profilelog_verbose_enabled()) {
-        profilelog_verbose(execution_info,
-                           ",time:",
-                           profiler.tbp_elapsedtime(),
-                           profiler.get_res_str());
-      }
+    profiler.tbp_stop();
+    if (profilelog_verbose_enabled()) {
+      profilelog_verbose(execution_info,
+                         ",time:",
+                         profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
   }
 
   return status_t::success;
 }
 
 template<typename OP_CONTEXT_T>
-status_t operator_impl_t<OP_CONTEXT_T>::load_module(const std::string& module_) {
+status_t operator_impl_t<OP_CONTEXT_T>::load_module(const std::string
+    &module_) {
   try {
     if ((*dynamic_module).set_name(module_).load() != status_t::success) {
       EXCEPTION_WITH_LOC("dynamic module load failed.");
@@ -405,7 +412,8 @@ status_t operator_impl_t<OP_CONTEXT_T>::load_module(const std::string& module_) 
 }
 
 template<typename OP_CONTEXT_T>
-status_t operator_impl_t<OP_CONTEXT_T>::load_kernel(const std::string& symbol_) {
+status_t operator_impl_t<OP_CONTEXT_T>::load_kernel(const std::string
+    &symbol_) {
   try {
     create_kernel_handle_type create_kernel_handle =
       reinterpret_cast<create_kernel_handle_type>(dynamic_module->get_symbol(

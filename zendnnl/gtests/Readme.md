@@ -28,6 +28,7 @@ ZenDNN GTest provides flexibility in configuring tests through command-line argu
 You can modify the following parameters in the source code (`gtest_main.cpp`):
 - `MATMUL_F32_TOL`: Tolerance for floating-point precision in tests (default: `0.001`).
 - `MATMUL_BF16_TOL`: Tolerance for BF16 precision in tests (default: `0.01`).
+- F16 tests use the same tolerance as BF16 (`MATMUL_BF16_TOL`).
 - `TEST_NUM`: Number of test cases to generate (default: `100`).
 
 ## **Matrix Dimension Ranges**
@@ -57,6 +58,7 @@ Test tensors are initialized with uniformly distributed random values. The distr
 |-----------|-------------------|-------------|
 | **F32** | `[-2.0, 2.0]` | Standard floating-point tests |
 | **BF16** | `[-2.0, 2.0]` | BFloat16 tests |
+| **F16** | `[-2.0, 2.0]` | Half-precision (IEEE 754) tests |
 | **S8** (INT8 weights) | `[-25.0, 25.0]` | Signed 8-bit integer quantized weights |
 | **U8** (INT8 source) | `[0, 25.0]` | Unsigned 8-bit integer quantized input |
 | **S4** (WOQ weights) | `[-8, 7]` | 4-bit signed integer for weight-only quantization |
@@ -93,11 +95,12 @@ ZenDNN GTest validates numerical accuracy by comparing optimized implementations
 
 ### **Tolerance Calculation**
 
-**BF16 Operations:**
+**BF16/F16 Operations:**
 ```
 abs_bound = k * epsilon_bf16
 allowed_error = abs_bound + rtol_bf16 * |reference_value|
 ```
+> **Note:** F16 uses the same tolerance bounds as BF16 since both are low-precision 16-bit formats.
 
 **F32 Operations:**
 ```
@@ -367,7 +370,10 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 ```
 
 ### Matmul Tests
- - Matmul TestSuite has six testcases(F32_F32, BF16_F32, BF16_BF16, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride)
+ - Matmul TestSuite has nine testcases (F32_F32, BF16_F32, BF16_BF16, F16_F16, F16_F32, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride, F16_F16_Stride)
+
+> **Note:** F16 tests (F16_F16, F16_F32, F16_F16_Stride) require **AVX512-FP16** or **AVX-NE-CONVERT** ISA support. On unsupported platforms, these tests are automatically skipped via `GTEST_SKIP()` with an informative message.
+
 1. Run all BF16 Input, F32 Output matmul tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_F32/*
@@ -383,6 +389,18 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 4. Run F32_F32_Stride matmul tests:
 ``` bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F32_F32_Stride/*
+```
+5. Run all F16 Input, F16 Output matmul tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F16_F16/*
+```
+6. Run all F16 Input, F32 Output matmul tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F16_F32/*
+```
+7. Run F16_F16_Stride matmul tests:
+``` bash
+./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.F16_F16_Stride/*
 ```
 
 ### Embedding Bag Tests

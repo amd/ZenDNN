@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "tensor.hpp"
+#include "memory_utils.hpp"
 #include <sstream>
 
 namespace zendnnl {
@@ -500,6 +501,12 @@ float tensor_t::at(const index_vec_type &index_) const {
       return float(handle[offset]);
       break;
     }
+    case data_type_t::f16 : {
+      using cpptype   = prec_traits<data_type_t::f16>::type;
+      const cpptype *handle = static_cast<const cpptype *>(raw_handle);
+      return float(handle[offset]);
+      break;
+    }
     case data_type_t::s8 : {
       using cpptype = prec_traits<data_type_t::s8>::type;
       const cpptype *handle = static_cast<const cpptype *>(raw_handle);
@@ -938,7 +945,7 @@ status_t tensor_t::stride_sanity_check_with_order() {
     char ch            = 'a' + i -1;
     auto loc           = option.order.find(ch);
 
-        if (loc == std::string::npos) {
+    if (loc == std::string::npos) {
       std::string message = "Invalid order: character '";
       message += ch;
       message += "' not found in order string '";

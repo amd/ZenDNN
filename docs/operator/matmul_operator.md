@@ -5,7 +5,9 @@
 
 ## Overview
 
-This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32, BF16, INT8 data types, and Weight-Only Quantization (WOQ) with S4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (FP32 2D-matmul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
+This section provides a high-level overview of matrix multiplication (`matmul`) operations with support for FP32, BF16, F16 (half-precision), INT8 data types, and Weight-Only Quantization (WOQ) with S4 weights. The operator supports optional bias addition and a flexible sequence of post-processing operations such as activation functions (ReLU, GELU, etc.) and binary operations (Add, Mul). The support matrix summarizes valid combinations of source, weight, and output data types along with supported operations. Practical examples from `matmul_example.cpp` and `batchmatmul_example.cpp` demonstrate these configurations, such as `matmul_relu_f32_kernel_example`, `matmul_mul_silu_mul_f32_kernel_example` (FP32 2D-matmul with activation and binary post-op), `matmul_woq_bf16_kernel_example` (Weight-Only Quantization with BF16 input and S4 weights), and `batch_matmul_relu_bf16_kernel_example` and `batch_matmul_inp2d_relu_f32_kernel_example` which perform batched matmul with activation.
+
+> **Note:** F16 (half-precision) matmul requires specific ISA support on the CPU. It is supported only on platforms with **AVX512-FP16** or **AVX-NE-CONVERT** instructions. On unsupported hardware, F16 operations will return `status_t::isa_unsupported` and tests/examples will be gracefully skipped.
 
 
 # General MatMul Operation
@@ -284,12 +286,13 @@ auto weights_asym = tensor_factory.uniform_tensor({MATMUL_K, MATMUL_N},
 ## Supported Configurations
 This table provides a detailed overview of supported configurations for matrix multiplication (MatMul) operations across various data types, including bias application, activation functions, and binary post-processing options.
 
-| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type            | Scale | ZeroPoint |
-|------------------|---------------------|--------------------|--------------------------------|-------|-----------|
-| FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       |
-| BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       |
-| UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       |
-| BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Optional  |
+| Src<br>Data Type | Weight<br>Data Type | Bias<br> Data Type | Output<br>Data Type            | Scale | ZeroPoint | ISA Requirement |
+|------------------|---------------------|--------------------|--------------------------------|-------|-----------|-----------------|
+| FP32             | FP32                | FP32               | FP32                           | N/A   | N/A       | AVX2+           |
+| BF16             | BF16                | FP32, BF16         | FP32, BF16                     | N/A   | N/A       | AVX512+         |
+| F16              | F16                 | FP32               | F16, FP32                      | N/A   | N/A       | AVX512-FP16 or AVX-NE-CONVERT |
+| UINT8/INT8       | INT8                | FP32, BF16, INT8   | FP32, BF16, INT32, UINT8, INT8 | Yes   | Yes       | AVX2+           |
+| BF16             | S4 (WOQ)            | FP32, BF16         | FP32, BF16                     | Yes   | Optional  | AVX512+         |
 ---
 | Activation     | Description                     |
 |----------------|---------------------------------|
@@ -339,10 +342,12 @@ Indicates the precision of the values stored in the tensor.
 
 - **FP32**:*(Default)* 32-bit floating point
 - **BF16**: 16-bit Brain Floating Point
+- **F16**: 16-bit IEEE 754 Half-Precision Floating Point (requires AVX512-FP16 or AVX-NE-CONVERT ISA)
 - **INT8/S8/U8**: 8-bit signed/unsigned integer (for quantization)
 - **S4**: 4-bit signed integer (for WOQ, packed 2 values per byte)
 ```cpp
 tensor.set_data_type(data_type_t::f32);
+tensor.set_data_type(data_type_t::f16);  // For F16 half-precision
 tensor.set_data_type(data_type_t::s4);  // For WOQ weights
 ```
 ---
@@ -1001,6 +1006,12 @@ Example: `export ZENDNNL_MATMUL_ALGO = 1` (for aocl_dlp_blocked)
 ## Error Handling
 
 Each example includes error checking where the operator creation and execution status is checked, and relevant logging is provided.
+
+### ISA-Unsupported Status
+When F16 (half-precision) data types are used on a platform that lacks the required ISA (AVX512-FP16 or AVX-NE-CONVERT), the operator returns `status_t::isa_unsupported`. Callers should handle this status gracefully:
+- **GTests**: Use `GTEST_SKIP()` to skip the test with an informative message.
+- **Examples**: Log an informational message and return success to indicate a graceful skip.
+- **Applications**: Check for `status_t::isa_unsupported` before logging errors.
 
 
 ## Logger

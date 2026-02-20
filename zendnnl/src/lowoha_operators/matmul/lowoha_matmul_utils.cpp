@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include "common/zendnnl_global.hpp"
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -284,26 +285,48 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
   const bool is_bf16_src = (params.dtypes.src == data_type_t::bf16);
   const bool is_u8_src   = (params.dtypes.src == data_type_t::u8);
   const bool is_s8_src   = (params.dtypes.src == data_type_t::s8);
+  const bool is_f16_src  = (params.dtypes.src == data_type_t::f16);
+  const bool is_f16_wei  = (params.dtypes.wei == data_type_t::f16);
   const bool is_f32_out  = (params.dtypes.dst == data_type_t::f32);
   const bool is_bf16_out = (params.dtypes.dst == data_type_t::bf16);
   const bool is_u8_out   = (params.dtypes.dst == data_type_t::u8);
   const bool is_s8_out   = (params.dtypes.dst == data_type_t::s8);
   const bool is_s32_out  = (params.dtypes.dst == data_type_t::s32);
+  const bool is_f16_out  = (params.dtypes.dst == data_type_t::f16);
 
-  if ((!is_f32_src && !is_bf16_src && !is_u8_src && !is_s8_src)) {
+  // F16 requires AVX512-FP16 or AVX-NE-CONVERT ISA support
+  if ((is_f16_src || is_f16_wei || is_f16_out) &&
+      !zendnnl_platform_info().get_f16_status()) {
+    log_error("F16 data type is not supported on this platform "
+              "(requires AVX512-FP16 or AVX-NE-CONVERT ISA).");
+    return status_t::isa_unsupported;
+  }
+
+  if ((!is_f32_src && !is_bf16_src && !is_u8_src && !is_s8_src && !is_f16_src)) {
     log_error("Unsupported source data type: ",
               data_type_to_string(params.dtypes.src));
     return status_t::failure;
   }
 
-  if ((!is_f32_out && !is_bf16_out && !is_u8_out && !is_s8_out && !is_s32_out)) {
+  if ((!is_f32_out && !is_bf16_out && !is_u8_out && !is_s8_out && !is_s32_out &&
+       !is_f16_out)) {
     log_error("Unsupported destination data type: ",
               data_type_to_string(params.dtypes.dst));
     return status_t::failure;
   }
-  // F32 src and dst BF16 is not supported
-  if (is_f32_src && is_bf16_out) {
-    log_error("Unsupported GEMM configuration: F32 source with BF16 destination");
+  // F32 src with dst BF16/F16 is not supported
+  if (is_f32_src && (is_bf16_out || is_f16_out)) {
+    log_error("Unsupported GEMM configuration: F32 source with BF16/F16 destination");
+    return status_t::failure;
+  }
+
+  if (is_bf16_src && is_f16_out) {
+    log_error("Unsupported GEMM configuration: BF16 source with F16 destination");
+    return status_t::failure;
+  }
+
+  if (is_f16_src && is_bf16_out) {
+    log_error("Unsupported GEMM configuration: F16 source with BF16 destination");
     return status_t::failure;
   }
 
@@ -421,6 +444,8 @@ const char *data_type_to_string(data_type_t dtype) {
     return "u8";
   case data_type_t::s32:
     return "s32";
+  case data_type_t::f16:
+    return "f16";
   default:
     return "unknown";
   }
@@ -696,6 +721,10 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
                          matmul_algo_t::aocl_dlp_blocked : static_cast<matmul_algo_t>(algo);
   bool is_woq = (params.dtypes.src == data_type_t::bf16) &&
                 (params.dtypes.wei == data_type_t::s4);
+  bool is_f16 = (params.dtypes.src == data_type_t::f16) &&
+                (params.dtypes.wei == data_type_t::f16) &&
+                (params.dtypes.dst == data_type_t::f16 ||
+                 params.dtypes.dst == data_type_t::f32);
 
   // TODO: Fallback to reference/supported kernel
   if (kernel == matmul_algo_t::auto_tuner && (Batch_A != 1 || Batch_B != 1 ||
@@ -760,6 +789,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
     kernel = matmul_algo_t::aocl_dlp;
   }
 
+  // Force OneDNN for F16 (only OneDNN supports F16 on CPU)
+  if (is_f16 && (kernel != matmul_algo_t::onednn &&
+                 kernel != matmul_algo_t::onednn_blocked)) {
+    log_info("F16 detected, switching to onednn blocked kernel");
+    kernel = matmul_algo_t::onednn_blocked;
+  }
   // TODO: Update the conditon once prepack supports other formats
   // Current prepack supports only AOCL blocked kernel
   if (params.mem_format_b == 'r') {

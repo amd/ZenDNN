@@ -173,6 +173,13 @@ status_t matmul_onednn_kernel_t::preprocess(const context_type &context_,
   }
   else {
     params.algo = static_cast<matmul_algo_t>(matmul_config.get_algo());
+    if ((params.src.dtype == data_type_t::f16 ||
+         params.weights.dtype == data_type_t::f16 ||
+         params.dst.dtype == data_type_t::f16) &&
+        ((params.algo != matmul_algo_t::onednn_blocked) ||
+         (params.algo != matmul_algo_t::onednn))) {
+      params.algo = matmul_algo_t::onednn_blocked;
+    }
   }
 
   if (params.beta != 0.0f) {

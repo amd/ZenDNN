@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "gtest_utils.hpp"
+#include "memory/memory_utils.hpp"
 #include <cstring>
 #include <cmath>
 
@@ -429,6 +430,10 @@ tensor_t tensor_factory_t::uniform_dist_tensor(const std::vector<index_type>
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist2(gen));});
     }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return float16_t(dist2(gen));});
+    }
     else if (dtype_ == data_type::s8) {
       std::uniform_int_distribution<int> dist_s8(-1*val, val);
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
@@ -512,6 +517,12 @@ tensor_t tensor_factory_t::uniform_tensor(const std::vector<index_type> size_,
         buf_ptr[i] = bfloat16_t(val_);
       }
     }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      for (index_type i = 0; i < buf_nelem; ++i) {
+        buf_ptr[i] = float16_t(val_);
+      }
+    }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       for (index_type i = 0; i < buf_nelem; ++i) {
@@ -585,6 +596,10 @@ tensor_t tensor_factory_t::uniform_dist_strided_tensor(const
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return bfloat16_t(dist(gen));});
     }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr + buf_nelem, [&] {return float16_t(dist(gen));});
+    }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr + buf_nelem, [&] { return static_cast<int8_t>(dist(gen)); });
@@ -629,6 +644,10 @@ tensor_t tensor_factory_t::blocked_tensor(const std::vector<index_type> size_,
     else if (dtype_ == data_type::bf16) {
       bfloat16_t *buf_ptr = static_cast<bfloat16_t *>(buf_vptr);
       std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return bfloat16_t(dist(gen));});
+    }
+    else if (dtype_ == data_type::f16) {
+      float16_t *buf_ptr = static_cast<float16_t *>(buf_vptr);
+      std::generate(buf_ptr, buf_ptr+buf_nelem, [&] {return float16_t(dist(gen));});
     }
     else if (dtype_ == data_type::s8) {
       int8_t *buf_ptr = static_cast<int8_t *>(buf_vptr);
@@ -764,30 +783,6 @@ tensor_t tensor_factory_t::random_offsets_tensor(const std::vector<index_type>
   return tensor;
 }
 
-// Convert float32 to float16 (stored as uint16_t)
-uint16_t float_to_half(float f) {
-  uint32_t x;
-  std::memcpy(&x, &f, sizeof(x));
-
-  uint32_t sign = (x >> 31) & 0x1;
-  int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
-  uint32_t mantissa = (x >> 13) & 0x3FF;
-
-  if (exponent <= 0) {
-    if (exponent < -10) {
-      return static_cast<uint16_t>(sign << 15);
-    }
-    mantissa = (x & 0x7FFFFF) | 0x800000;
-    mantissa >>= (1 - exponent + 13);
-    return static_cast<uint16_t>((sign << 15) | mantissa);
-  }
-  else if (exponent >= 31) {
-    return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
-  }
-
-  return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
-}
-
 tensor_t tensor_factory_t::quantized_embedding_tensor_random(
   const std::vector<index_type> size_,
   data_type dtype_,
@@ -880,12 +875,12 @@ tensor_t tensor_factory_t::quantized_embedding_tensor_random(
 
       // Append scale and bias
       if (fp16_scale_bias) {
-        uint16_t scale_fp16 = float_to_half(scale);
-        uint16_t bias_fp16 = float_to_half(bias);
+        float16_t scale_fp16 = float16_t(scale);
+        float16_t bias_fp16 = float16_t(bias);
         std::memcpy(&input[row_base + quantized_size], &scale_fp16,
-                    sizeof(uint16_t));
+                    sizeof(float16_t));
         std::memcpy(&input[row_base + quantized_size + 2], &bias_fp16,
-                    sizeof(uint16_t));
+                    sizeof(float16_t));
       }
       else {
         std::memcpy(&input[row_base + quantized_size], &scale, sizeof(float));
@@ -1506,13 +1501,14 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
 
         // Validate data types
         if (src_data_type != data_type_t::f32 && src_data_type != data_type_t::bf16 &&
-            src_data_type != data_type_t::u8 && src_data_type != data_type_t::s8) {
+            src_data_type != data_type_t::u8 && src_data_type != data_type_t::s8 &&
+            src_data_type != data_type_t::f16) {
           log_error("LOWOHA: Unsupported source data type");
           return status_t::failure;
         }
         if (out_data_type != data_type_t::f32 && out_data_type != data_type_t::bf16 &&
             out_data_type != data_type_t::u8 && out_data_type != data_type_t::s8 &&
-            out_data_type != data_type_t::s32) {
+            out_data_type != data_type_t::s32 && out_data_type != data_type_t::f16) {
           log_error("LOWOHA: Unsupported output data type");
           return status_t::failure;
         }
@@ -1692,8 +1688,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             beta, C_data, ldc, (is_woq || is_int8) ? true : rand() % 2 == 0 ? true : false,
                             batch_params, params);
         if (status != status_t::success) {
-          log_error("LOWOHA matmul_direct execution failed.");
-          return status_t::failure;
+          if (status != status_t::isa_unsupported) {
+            log_error("LOWOHA matmul_direct execution failed.");
+          }
+          return status;
         }
       }
       catch (const std::exception &e) {
@@ -1758,8 +1756,10 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
       status_t status = matmul_operator.execute();
 
       if (status != status_t::success) {
-        log_info("operator ", matmul_operator.get_name(), " execution failed.");
-        return status_t::failure;
+        if (status != status_t::isa_unsupported) {
+          log_error("operator ", matmul_operator.get_name(), " execution failed.");
+        }
+        return status;
       }
 
     }
@@ -2496,10 +2496,12 @@ void compare_tensor_2D_matrix(tensor_t &output_tensor,
 
   // Accumulation-based absolute bound, scaled by alpha
   // abs_bound = alpha * (C*k+P)*epsilon
-  const float abs_bound =
-    (output_tensor.get_data_type() == data_type_t::bf16) || is_woq
-    ? (alpha * k * epsilon)
-    : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
+  const bool is_low_precision = (output_tensor.get_data_type() ==
+                                 data_type_t::bf16) ||
+                                (output_tensor.get_data_type() == data_type_t::f16) || is_woq;
+  const float abs_bound = is_low_precision
+                          ? (alpha * k * epsilon)
+                          : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
@@ -2569,10 +2571,12 @@ void compare_tensor_3D_matrix(tensor_t &output_tensor,
   // Accumulation-based absolute bound, scaled by alpha
   //float abs_bound = alpha * ((20 + log2(k)/4) * k + 15) * epsilon;
   //(alpha*C*K+P)*epsilon
-  const float abs_bound =
-    (output_tensor.get_data_type() == data_type_t::bf16)
-    ? (alpha * k * epsilon)
-    : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
+  const bool is_low_precision = (output_tensor.get_data_type() ==
+                                 data_type_t::bf16) ||
+                                (output_tensor.get_data_type() == data_type_t::f16);
+  const float abs_bound = is_low_precision
+                          ? (alpha * k * epsilon)
+                          : (alpha * ((C + log2(k) / scale_factor) * k + P) * epsilon);
 
   // F32 zero-reference handling tolerances (controlled by bool flag) for libxsmm backends
   constexpr float ABS_ZERO_TOL_F32 = 8e-4f;
