@@ -54,6 +54,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t algo_ = is_bmm ? matmul_config.get_bmm_algo()
                   : matmul_config.get_algo();
+  matmul_config.set_weight_cache(0);
+  matmul_config.set_zp_comp_cache(false);
   algo = static_cast<matmul_algo_t>(algo_);
 
   if (algo == matmul_algo_t::none) {

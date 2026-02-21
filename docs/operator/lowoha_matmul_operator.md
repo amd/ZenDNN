@@ -93,6 +93,7 @@ struct matmul_params {
   matmul_algo_t lowoha_algo;               // Preferred backend algorithm
   uint64_t num_threads;                    // Number of threads (0 = auto)
   std::string plugin_op;                   // Plugin op name
+  bool dynamic_quant;                      // Enable dynamic quantization of source (default: false)
 };
 ```
 
@@ -121,6 +122,8 @@ struct matmul_data_types {
 | BF16 | S4 | FP32/BF16 | FP32/BF16 | Weight-Only Quantization (WOQ) |
 | U8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 | S8 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
+| BF16 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
+| FP32 | S8 | FP32/BF16/S8/U8/S32 | FP32/BF16/S8/U8/S32 | INT8 Quantization |
 
 > **Note:** F16 matmul is only supported via the **OneDNN backend**. On platforms without AVX512-FP16 or AVX-NE-CONVERT ISA, F16 operations return `status_t::isa_unsupported`.
 
@@ -578,7 +581,6 @@ int lowoha_matmul_f16_example() {
     // F16 not supported on this platform - skip gracefully
     return 0;
   }
-
   return (status == status_t::success) ? 0 : -1;
 }
 ```
@@ -586,6 +588,124 @@ int lowoha_matmul_f16_example() {
 **Key Points for F16:**
 - **ISA Requirement**: F16 requires AVX512-FP16 or AVX-NE-CONVERT instruction set support. The check is performed via CPUID (leaf 7, subleaf 0, EDX bit 23 for AVX512-FP16; leaf 7, subleaf 1, EDX bit 5 for AVX-NE-CONVERT).
 - **Backend**: F16 is only supported via OneDNN backend. Kernel selection automatically routes to `onednn_blocked`.
+
+## Reorder Quantization (Source Quantization via Reorder)
+
+Reorder quantization enables **BF16 or F32 source tensors to be quantized to S8/U8 on-the-fly** before dispatching to INT8 matmul kernels. This is useful when the model provides floating-point activations but the weights are already in INT8 format.
+
+To enable reorder quantization, `dtypes.compute` must be set to the target quantization type (`s8` for symmetric or `u8` for asymmetric), `dynamic_quant` must be enabled, and the source type must be BF16 or FP32.
+
+### How It Works
+
+When eligible (src is BF16/F32, weight is S8, `dtypes.compute` is S8 or U8, and `dynamic_quant` is true), `matmul_direct` automatically invokes the reorder quantization path before the matmul dispatch:
+
+1. **Quantize source**: Converts the BF16/F32 source tensor to S8/U8 using the LOWOHA reorder engine
+2. **Execute matmul**: Dispatches the quantized source with INT8 weights to the selected backend
+3. **Free buffers**: Releases the temporary quantized source, scale, and zero-point buffers
+
+### Quantization Modes
+
+Currently only **dynamic quantization** is supported. Static quantization support is planned for a future release.
+
+| Mode | `dynamic_quant` | Scale/ZP Buffers | Status |
+|------|----------------|-----------------|--------|
+| **Dynamic** | `true` | Optional — allocated internally if `buff` is `nullptr` | Supported |
+| **Static** | `false` | User must provide pre-computed `src_scale.buff` (and `src_zp.buff` for U8) | Not yet supported |
+
+### Zero-Point Handling
+
+Zero-point behavior depends on the target quantization type (`dtypes.compute`):
+
+| Compute Type | Quantization | Zero-Point | Formula |
+|--------------|-------------|------------|---------|
+| `s8` (symmetric) | Signed 8-bit | Implicitly 0 (ignored) | `int8_val = clamp(round(src / scale), -128, 127)` |
+| `u8` (asymmetric) | Unsigned 8-bit | Required (`src_zp` dims/dt must be set) | `uint8_val = clamp(round(src / scale) + zp, 0, 255)` |
+
+### Required Parameters
+
+For reorder quantization to activate, the following must be set:
+
+| Parameter | Requirement |
+|-----------|-------------|
+| `dtypes.src` | `bf16` or `f32` |
+| `dtypes.wei` | `s8` |
+| `dtypes.compute` | `s8` or `u8` |
+| `quant_params.src_scale.dims` | Must be non-empty (e.g., `{1, 1}` for per-tensor) |
+| `quant_params.src_scale.dt` | Must be set (e.g., `f32`) |
+| `quant_params.src_scale.buff` | Required for static mode; optional for dynamic mode |
+| `quant_params.src_zp.dims` | Required only for U8 (asymmetric) |
+| `quant_params.src_zp.dt` | Required only for U8 (asymmetric) |
+| `quant_params.src_zp.buff` | Required for static U8; optional for dynamic U8 |
+
+### Example 6: Dynamic Reorder Quantization (BF16 → U8)
+
+```cpp
+int lowoha_dynamic_reorder_quant_example() {
+  using namespace zendnnl::lowoha::matmul;
+
+  constexpr int M = 64, K = 256, N = 128;
+
+  // BF16 source activations (stored as uint16_t)
+  std::vector<uint16_t> input_bf16(M * K);
+  // S8 weights (pre-quantized)
+  std::vector<int8_t> weights_s8(K * N);
+  // F32 output
+  std::vector<float> output(M * N, 0.0f);
+  // BF16 bias
+  std::vector<uint16_t> bias_bf16(N);
+
+  // Configure data types
+  matmul_data_types dtypes;
+  dtypes.src = data_type_t::bf16;
+  dtypes.wei = data_type_t::s8;
+  dtypes.dst = data_type_t::f32;
+  dtypes.bias = data_type_t::bf16;
+  dtypes.compute = data_type_t::u8;  // Asymmetric quantization target
+
+  matmul_params params;
+  params.dtypes = dtypes;
+  params.dynamic_quant = true;  // Enable dynamic quantization
+
+  // Source scale: dims and dt must be set; buff is nullptr so it will be
+  // allocated internally and filled by the dynamic quantization pass
+  params.quant_params.src_scale.buff = nullptr;
+  params.quant_params.src_scale.dt = data_type_t::f32;
+  params.quant_params.src_scale.dims = {1, 1};  // Per-tensor
+
+  // Source zero-point: required for U8 (asymmetric)
+  params.quant_params.src_zp.buff = nullptr;
+  params.quant_params.src_zp.dt = data_type_t::s32;
+  params.quant_params.src_zp.dims = {1, 1};  // Per-tensor
+
+  // Weight quantization params (pre-quantized weights)
+  float wei_scale_val = 0.05f;
+  int32_t wei_zp_val = 0;
+  params.quant_params.wei_scale.buff = &wei_scale_val;
+  params.quant_params.wei_scale.dt = data_type_t::f32;
+  params.quant_params.wei_scale.dims = {1, 1};
+  params.quant_params.wei_zp.buff = &wei_zp_val;
+  params.quant_params.wei_zp.dt = data_type_t::s32;
+  params.quant_params.wei_zp.dims = {1, 1};
+
+  matmul_batch_params_t batch_params;
+
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f,
+    input_bf16.data(), K,
+    weights_s8.data(), N,
+    bias_bf16.data(),
+    0.0f,
+    output.data(), N,
+    true,
+    batch_params,
+    params
+  );
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
 
 ## Weight Caching and Reordering
 

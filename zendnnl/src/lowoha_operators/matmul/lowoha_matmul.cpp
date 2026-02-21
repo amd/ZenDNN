@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #include "lowoha_matmul_utils.hpp"
+#include "reorder_quantization.hpp"
 #include "bmm_partitioner.hpp"
 #include "matmul_partitioner.hpp"
 #include "lowoha_operators/matmul/libxsmm_kernel.hpp"
@@ -313,6 +314,19 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   const int num_threads = params.num_threads > 0 ? params.num_threads :
                           omp_get_max_threads();
 
+  // Dynamic quantization converts the source matrix from its original dtype
+  // (f32/bf16) to a lower-precision integer type (s8/u8) in a contiguous buffer.
+  // This may change the effective leading dimension (reordered_lda) when the
+  // original source has padding (lda > K), since the quantized buffer is packed
+  // without padding. Non-quantized paths must continue using the original lda.
+  int reordered_lda = lda;
+  reorder_quant_buffers_t quant_buffers;
+  if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
+                               params, batch_params, transA, M, K,
+                               num_threads, quant_buffers) != status_t::success) {
+    return status_t::failure;
+  }
+
   matmul_algo_t kernel = kernel_select(params, batch_params.Batch_A,
                                        batch_params.Batch_B, batch_count, M,
                                        N, K, num_threads, bias, is_weights_const);
@@ -329,14 +343,20 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   if (batch_count > 1) {
     // Batch Matrix Multiplication (BMM)
     bmm_execute(layout, transA, transB,
-                M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                M, N, K, alpha, src,
+                params.dynamic_quant ? reordered_lda : lda,
+                weight, ldb,
+                bias, beta, dst, ldc,
                 is_weights_const, batch_params,
                 src_type_size, out_type_size, num_threads, kernel, params);
   }
   else {
     // Single Matrix Multiplication (Matmul)
     matmul_execute(layout, transA, transB,
-                   M, N, K, alpha, src, lda, weight, ldb, bias, beta, dst, ldc,
+                   M, N, K, alpha, src,
+                   params.dynamic_quant ? reordered_lda : lda,
+                   weight, ldb,
+                   bias, beta, dst, ldc,
                    is_weights_const, src_type_size, out_type_size, num_threads,
                    kernel, params, batch_params, auto_version);
   }
@@ -365,7 +385,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
     })()
         << "]"
         << ", Batch_A=" << batch_params.Batch_A << ", Batch_B=" << batch_params.Batch_B
-        << ", plugin_op=" << params.plugin_op;
+        << ", plugin_op=" << params.plugin_op
+        << ", dynamic_quant=" << (params.dynamic_quant ? "true" : "false");
 
     if (api_log_kernel == matmul_algo_t::auto_tuner) {
       apilog_info(ss.str(), ", kernel=", kernel_to_string(api_log_kernel),
