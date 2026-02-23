@@ -26,6 +26,7 @@
 #include "lowoha_reorder_example.hpp"
 #include "lowoha_softmax_example.hpp"
 #include "lowoha_pooling_example.hpp"
+#include "lowoha_normalization_example.hpp"
 #include <iostream>
 #include "sdpa_example.hpp"
 
@@ -192,6 +193,15 @@ int main() {
      */
     run_lowoha_softmax_fp32_test();
     run_lowoha_softmax_bf16_test();
+
+    /** LOWOHA Normalization operator functionality examples.
+     *  Demonstrates LayerNorm, RMSNorm, and BatchNorm operations using the
+     *  low-overhead LOWOHA API with FP32 data type.
+     */
+    run_lowoha_layer_norm_fp32_test();
+    run_lowoha_layer_norm_3d_fp32_test();
+    run_lowoha_rms_norm_fp32_test();
+    run_lowoha_batch_norm_fp32_test();
 
     /** LOWOHA Pooling operator functionality examples.
      *  Demonstrates max pooling and average pooling operations using the

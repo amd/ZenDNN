@@ -63,6 +63,7 @@ endif()
    lowoha_reorder_example.cpp
    lowoha_softmax_example.cpp
    lowoha_pooling_example.cpp
+   lowoha_normalization_example.cpp
    batchmatmul_example.cpp
    compare_op_example.cpp
    reorder_example.cpp
@@ -79,6 +80,7 @@ endif()
    lowoha_reorder_example.hpp
    lowoha_softmax_example.hpp
    lowoha_pooling_example.hpp
+   lowoha_normalization_example.hpp
    batchmatmul_example.hpp
    compare_op_example.hpp
    reorder_example.hpp
