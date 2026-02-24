@@ -287,13 +287,13 @@ else()
 
   if (DEFINED ENV{ZENDNNL_MANYLINUX_BUILD})
 
-    zendnnl_add_dependency(NAME onednn
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
-      LIB_SUFFIX lib64
-      ARCHIVE_FILE "libdnnl.a"
-      ALIAS "DNNL::dnnl")
+    # zendnnl_add_dependency(NAME onednn
+    #   PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+    #   LIB_SUFFIX lib64
+    #   ARCHIVE_FILE "libdnnl.a"
+    #   ALIAS "DNNL::dnnl")
 
-    target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    # target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
 
     zendnnl_add_dependency(NAME aoclutils
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
@@ -321,7 +321,56 @@ else()
       target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
     endif()
 
+    zendnnl_add_dependency(NAME onednn
+        PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+        LIB_SUFFIX lib64
+        ARCHIVE_FILE "libdnnl.a"
+        ALIAS "DNNL::dnnl")
+
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+    endif()
+
   else()
+    # zendnnl_add_dependency(NAME onednn
+    #   PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
+    #   ARCHIVE_FILE "libdnnl.a"
+    #   ALIAS "DNNL::dnnl")
+
+    # if(ZENDNNL_LIB_BUILD_ARCHIVE)
+    #   target_link_libraries(zendnnl_library INTERFACE DNNL::dnnl)
+    # endif()
+    # if(ZENDNNL_LIB_BUILD_SHARED)
+    #   target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
+    # endif()
+
+    zendnnl_add_dependency(NAME aoclutils
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
+      ARCHIVE_FILE "libaoclutils.a"
+      ALIAS "au::aoclutils")
+
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
+    endif()
+
+    zendnnl_add_dependency(NAME aucpuid
+      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
+      ARCHIVE_FILE "libau_cpuid.a"
+      ALIAS "au::au_cpuid")
+
+    if(ZENDNNL_LIB_BUILD_ARCHIVE)
+      target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
+    endif()
+    if(ZENDNNL_LIB_BUILD_SHARED)
+      target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
+    endif()
+
     zendnnl_add_dependency(NAME onednn
       PATH "${ZENDNNL_INSTALL_PREFIX}/deps/onednn"
       ARCHIVE_FILE "libdnnl.a"
@@ -332,30 +381,6 @@ else()
     endif()
     if(ZENDNNL_LIB_BUILD_SHARED)
       target_link_libraries(zendnnl_shared_library INTERFACE DNNL::dnnl)
-    endif()
-
-    zendnnl_add_dependency(NAME aoclutils
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-      ARCHIVE_FILE "libaoclutils.a"
-      ALIAS "au::aoclutils")
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE au::aoclutils)
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE au::aoclutils)
-    endif()
-
-    zendnnl_add_dependency(NAME aucpuid
-      PATH "${ZENDNNL_INSTALL_PREFIX}/deps/aoclutils"
-      ARCHIVE_FILE "libau_cpuid.a"
-      ALIAS "au::au_cpuid")
-
-    if(ZENDNNL_LIB_BUILD_ARCHIVE)
-      target_link_libraries(zendnnl_library INTERFACE au::au_cpuid)
-    endif()
-    if(ZENDNNL_LIB_BUILD_SHARED)
-      target_link_libraries(zendnnl_shared_library INTERFACE au::au_cpuid)
     endif()
 
   endif()

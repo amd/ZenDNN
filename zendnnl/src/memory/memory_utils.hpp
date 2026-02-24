@@ -69,7 +69,7 @@ T read_and_cast(const void *value, data_type_t data_type, size_t index = 0) {
                             (value)[index]));
   case data_type_t::f16:
     return static_cast<T>(float16_t::f16_to_f32_val(
-                            reinterpret_cast<const uint16_t *>
+                            reinterpret_cast<const int16_t *>
                             (value)[index]));
   default:
     log_error("Unsupported data type for casting");
