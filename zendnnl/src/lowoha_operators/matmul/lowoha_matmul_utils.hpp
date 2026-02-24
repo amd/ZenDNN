@@ -290,12 +290,15 @@ unsigned int get_auto_tuner_ver();
 /**
  * @brief Check if MM partitioner should be enabled
  *
- * Checks both compile-time flag and runtime environment variable.
- * Environment variable ZENDNN_ENABLE_MM_PARTITIONER can override the default.
+ * Returns true if either the runtime environment variable
+ * ZENDNN_ENABLE_MM_PARTITIONER is set, or the selected kernel
+ * is libxsmm or libxsmm_blocked (which require the partitioner
+ * for tiled M/N execution).
  *
+ * @param kernel The selected matmul algorithm
  * @return true if MM partitioner should be used, false otherwise
  */
-bool should_use_mm_partitioner();
+bool should_use_mm_partitioner(const matmul_algo_t &kernel);
 
 } // namespace matmul
 } // namespace lowoha

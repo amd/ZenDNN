@@ -39,12 +39,13 @@ namespace matmul {
  * @param alpha Scaling factor for A*B (must be 1.0 for LibXSMM)
  * @param beta Scaling factor for C (must be 0.0 for LibXSMM)
  * @param dtypes Data types for the operands
+ * @param set_sizes_limit Whether to set size limits for the operation
  * @return true if LibXSMM can handle this operation, false otherwise
  */
 static inline bool can_use_libxsmm(char transA, char transB, int M,
                                    int N, int K, float alpha, float beta,
                                    const matmul_params &lowoha_param,
-                                   const matmul_algo_t &kernel_name) {
+                                   bool set_sizes_limit = true) {
 
 #if ZENDNNL_DEPENDS_LIBXSMM
 
@@ -59,7 +60,7 @@ static inline bool can_use_libxsmm(char transA, char transB, int M,
   }
 
 
-  if (kernel_name == matmul_algo_t::libxsmm) {
+  if (set_sizes_limit) {
     int64_t matrix_b_elements = static_cast<int64_t>(K) * N;
     if (matrix_b_elements > 1000000 || (M > 512 && matrix_b_elements > 1000000)) {
       return false;

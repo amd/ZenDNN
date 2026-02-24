@@ -166,7 +166,7 @@ void bmm_execute(const char layout, const bool transA, const bool transB,
     // Single thread execution for batches
     if (kernel == matmul_algo_t::libxsmm &&
         !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
-                          params, kernel))) {
+                          params))) {
       kernel = matmul_algo_t::aocl_dlp;
     }
 
@@ -232,7 +232,7 @@ void matmul_execute(const char layout,
   }
 
 // Currently supported only for LIBXSMM BACKEND
-  if (should_use_mm_partitioner()) {
+  if (should_use_mm_partitioner(kernel)) {
     // Setup partition configuration
     matmul_partition_config_t part_config;
     part_config.M = M;
@@ -271,13 +271,6 @@ void matmul_execute(const char layout,
   }
 
 #endif
-
-  if (kernel == matmul_algo_t::libxsmm &&
-      !(can_use_libxsmm(trans_input, trans_weight, M, N, K, alpha, beta,
-                        params, kernel))) {
-    kernel = matmul_algo_t::aocl_dlp;
-  }
-
   apilog_info("Executing matmul LOWOHA kernel without zendnnl-partitioner, algo: ",
               static_cast<int>(kernel));
   matmul_kernel_wrapper(layout, trans_input, trans_weight,
@@ -322,8 +315,8 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
   int reordered_lda = lda;
   reorder_quant_buffers_t quant_buffers;
   if (reorder_quantization_wrapper(src, lda, reordered_lda, src_type_size,
-                               params, batch_params, transA, M, K,
-                               num_threads, quant_buffers) != status_t::success) {
+                                   params, batch_params, transA, M, K,
+                                   num_threads, quant_buffers) != status_t::success) {
     return status_t::failure;
   }
 

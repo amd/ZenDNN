@@ -81,7 +81,8 @@ bool should_use_kc_blocking(
   const matmul_params &params
 ) {
 #if ENABLE_LIBXSMM_BRGEMM_KERNEL
-  if (config.kernel != matmul_algo_t::libxsmm_blocked) {
+  if (config.kernel != matmul_algo_t::libxsmm_blocked &&
+      config.kernel != matmul_algo_t::libxsmm) {
     return false;
   }
   if (config.dtypes.src != data_type_t::f32 &&
@@ -141,19 +142,17 @@ static matmul_algo_t select_partition_kernel(
   const matmul_partition_config_t &config,
   const matmul_params &params
 ) {
-  if (config.kernel == matmul_algo_t::libxsmm_blocked) {
-    matmul_algo_t selected_kernel = config.kernel;
+  if (config.kernel == matmul_algo_t::libxsmm_blocked ||
+      config.kernel == matmul_algo_t::libxsmm) {
     if (can_use_libxsmm(trans_input, trans_weight, config.M, config.N, config.K,
                         alpha, beta,
-                        params, selected_kernel)) {
+                        params,false)) {
       return matmul_algo_t::libxsmm;
     }
     else {
       apilog_info("LibXSMM kernel cannot be used for current configuration, falling back to DLP");
       return matmul_algo_t::aocl_dlp;
-
     }
-
   }
   else {
     return config.kernel;

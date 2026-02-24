@@ -805,9 +805,12 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   return kernel;
 }
 
-bool should_use_mm_partitioner() {
+bool should_use_mm_partitioner(const matmul_algo_t &kernel) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
-  return matmul_config.get_mm_partitioner_enabled();
+  //Facing Segmentation Fault issue with libxsmm kernel, using partitioner for now.
+  auto is_libxsmm = (kernel == matmul_algo_t::libxsmm ||
+                     kernel == matmul_algo_t::libxsmm_blocked);
+  return matmul_config.get_mm_partitioner_enabled() || is_libxsmm;
 }
 
 } // namespace matmul

@@ -164,8 +164,7 @@ void execute_bmm_partition(
   // Check libxsmm compatibility and fallback if needed
   if (config.kernel == matmul_algo_t::libxsmm &&
       !(matmul::can_use_libxsmm(trans_input, trans_weight, M_block, config.N,
-                                config.K, alpha, beta, params,
-                                config.kernel))) {
+                                config.K, alpha, beta, params))) {
     // Fallback to AOCL DLP kernel when libxsmm is not supported
     interface::apilog_info("Using AOCL DLP kernel as fallback for libxsmm, algo: ",
                              static_cast<int>(config.kernel));
