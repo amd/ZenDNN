@@ -104,7 +104,6 @@ int libxsmm_brgemm(const TA **A_ptrs, const TB **B_ptrs, TC *C,
                    libxsmm_datatype c_type, libxsmm_datatype comp_type,
                    const matmul_params &lowoha_param, const void *bias,
                    const data_type_t &bias_type, bool apply_postops = true) {
-
   libxsmm_bitfield l_flags = 0;
 
   if (transA == 'T' || transA == 't') {
@@ -165,8 +164,6 @@ int libxsmm_brgemm(const TA **A_ptrs, const TB **B_ptrs, TC *C,
   return 1;
 }
 
-
-
 static inline int run_libxsmm_brgemm(char transA, char transB,
                                      int M, int N, int K, int batch,
                                      float beta, int lda, int ldb, int ldc,
@@ -177,7 +174,7 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
   int kernel_status = 0;
 
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
-    log_info("Using libxsmm BRGEMM kernel");
+    log_info("Using libxsmm BRGEMM f32->f32 kernel");
     kernel_status = libxsmm_brgemm<float, float, float>(
                       reinterpret_cast<const float **>(A_ptrs),
                       reinterpret_cast<const float **>(B_ptrs),
@@ -186,6 +183,29 @@ static inline int run_libxsmm_brgemm(char transA, char transB,
                       LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
                       LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
                       lowoha_para, bias, dtypes.bias, apply_postops);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
+    log_info("Using libxsmm BRGEMM bf16->f32 kernel");
+    kernel_status = libxsmm_brgemm<libxsmm_bfloat16, libxsmm_bfloat16, float>(
+                      reinterpret_cast<const libxsmm_bfloat16 **>(A_ptrs),
+                      reinterpret_cast<const libxsmm_bfloat16 **>(B_ptrs),
+                      static_cast<float *>(C),
+                      M, N, K, batch, beta, lda, ldb, ldc, transA, transB,
+                      LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_BF16,
+                      LIBXSMM_DATATYPE_F32, LIBXSMM_DATATYPE_F32,
+                      lowoha_para, bias, dtypes.bias, apply_postops);
+  }
+  else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
+    log_info("Using libxsmm BRGEMM bf16->bf16 kernel");
+    kernel_status =
+      libxsmm_brgemm<libxsmm_bfloat16, libxsmm_bfloat16, libxsmm_bfloat16>(
+        reinterpret_cast<const libxsmm_bfloat16 **>(A_ptrs),
+        reinterpret_cast<const libxsmm_bfloat16 **>(B_ptrs),
+        reinterpret_cast<libxsmm_bfloat16 *>(C),
+        M, N, K, batch, beta, lda, ldb, ldc, transA, transB,
+        LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_BF16,
+        LIBXSMM_DATATYPE_BF16, LIBXSMM_DATATYPE_F32,
+        lowoha_para, bias, dtypes.bias, apply_postops);
   }
   return kernel_status;
 }
@@ -200,6 +220,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                               const void *bias) {
   int kernel_status = 0;
   if (dtypes.src == data_type_t::f32 && dtypes.dst == data_type_t::f32) {
+    log_info("Using libxsmm GEMM f32->f32 kernel");
     kernel_status = libxsmm_gemm<float,float,float>(
                       static_cast<const float *>(A),
                       static_cast<const float *>(B),
@@ -209,6 +230,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para, bias, dtypes.bias);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::f32) {
+    log_info("Using libxsmm GEMM bf16->f32 kernel");
     kernel_status = libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,float>(
                       reinterpret_cast<const libxsmm_bfloat16 *>(A),
                       reinterpret_cast<const libxsmm_bfloat16 *>(B),
@@ -218,6 +240,7 @@ static inline int run_libxsmm(char transA, char transB, int M, int N, int K,
                       LIBXSMM_DATATYPE_F32,LIBXSMM_DATATYPE_F32, lowoha_para, bias, dtypes.bias);
   }
   else if (dtypes.src == data_type_t::bf16 && dtypes.dst == data_type_t::bf16) {
+    log_info("Using libxsmm GEMM bf16->bf16 kernel");
     kernel_status =
       libxsmm_gemm<libxsmm_bfloat16,libxsmm_bfloat16,libxsmm_bfloat16>(
         reinterpret_cast<const libxsmm_bfloat16 *>(A),

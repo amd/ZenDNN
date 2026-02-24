@@ -29,6 +29,7 @@ namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 
+constexpr int KC_BLOCK = 64;
 
 std::pair<int, int> get_tile_sizes_from_config(int default_m, int default_n) {
   matmul_config_t &matmul_config = matmul_config_t::instance();
@@ -80,10 +81,19 @@ bool should_use_kc_blocking(
   const matmul_params &params
 ) {
 #if ENABLE_LIBXSMM_BRGEMM_KERNEL
-  // TODO: Need to support bf16 brgemm kernels later
-  if (config.dtypes.src != data_type_t::f32 ||
-      config.kernel != matmul_algo_t::libxsmm_blocked) {
-    apilog_info("Only F32 BRGEMM Supported, Executing matmul LOWOHA kernel with fallback Algo");
+  if (config.kernel != matmul_algo_t::libxsmm_blocked) {
+    return false;
+  }
+  if (config.dtypes.src != data_type_t::f32 &&
+      config.dtypes.src != data_type_t::bf16) {
+    apilog_info("Only F32 and BF16 BRGEMM Supported, Executing matmul LOWOHA kernel with fallback Algo");
+    return false;
+  }
+  //Observing bf16 intermediate rounding issues with tail cases
+  if (config.dtypes.src == data_type_t::bf16 &&
+      config.dtypes.dst == data_type_t::bf16 &&
+      config.K % KC_BLOCK != 0) {
+    apilog_info("BF16->BF16 BRGEMM requires K to be a multiple of KC_BLOCK, falling back");
     return false;
   }
   return true;
@@ -292,11 +302,10 @@ void execute_partitioned_matmul_libxsmm_brgemm(
 ) {
   auto [M_block, N_block] = calculate_optimal_tile_sizes(config);
 
-  constexpr int DEFAULT_KC_BLOCK = 64;
-  const int K_main = (config.K / DEFAULT_KC_BLOCK) * DEFAULT_KC_BLOCK;
+  const int K_main = (config.K / KC_BLOCK) * KC_BLOCK;
   const int K_tail = config.K - K_main;
   // Handle case where K < KC_BLOCK (K_main would be 0)
-  const int num_main_blocks = (K_main > 0) ? (K_main / DEFAULT_KC_BLOCK) : 0;
+  const int num_main_blocks = (K_main > 0) ? (K_main / KC_BLOCK) : 0;
 
   const uint8_t *src_ptr = static_cast<const uint8_t *>(src);
   const uint8_t *weight_ptr = static_cast<const uint8_t *>(weight);
@@ -329,7 +338,7 @@ void execute_partitioned_matmul_libxsmm_brgemm(
                                 );
 
         for (int kb = 0; kb < num_main_blocks; ++kb) {
-          int k_offset = kb * DEFAULT_KC_BLOCK;
+          int k_offset = kb * KC_BLOCK;
 
           A_batch_main[kb] = get_matrix_block(
                                src_ptr, i, k_offset, config.lda,
@@ -355,7 +364,7 @@ void execute_partitioned_matmul_libxsmm_brgemm(
           A_batch_main.data(), B_batch_main.data(),
           A_tail, B_tail,
           C_tile, tile_bias,
-          num_main_blocks, DEFAULT_KC_BLOCK, K_tail
+          num_main_blocks, KC_BLOCK, K_tail
         );
       }
     }

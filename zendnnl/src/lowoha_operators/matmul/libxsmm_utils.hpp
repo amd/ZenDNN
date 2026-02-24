@@ -168,6 +168,8 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
       (po.po_type == post_op_type_t::binary_mul)
       ? LIBXSMM_MELTW_TYPE_BINARY_MUL
       : LIBXSMM_MELTW_TYPE_BINARY_ADD;
+    libxsmm_datatype po_buff_type =
+      (po.dtype == data_type_t::bf16) ? LIBXSMM_DATATYPE_BF16 : LIBXSMM_DATATYPE_F32;
     libxsmm_meltw_binary_shape s{};
     s.m = N;
     s.n = M;
@@ -175,7 +177,7 @@ inline static void libxsmm_postop(const int M, const int N, const int ldc,
     s.ldi2 = po.leading_dim;
     s.ldo = ldc;
     s.in0_type = IN_TYPE;
-    s.in1_type = COMP_TYPE;
+    s.in1_type = po_buff_type;
     s.comp_type = COMP_TYPE;
     s.out_type = OUT_TYPE;
 
