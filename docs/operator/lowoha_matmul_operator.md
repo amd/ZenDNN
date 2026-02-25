@@ -194,8 +194,16 @@ struct matmul_quantization_params_t {
   matmul_quant_t dst_zp;        // Destination tensor zero-point (for INT8)
 };
 ```
+**INT8 Quantization Granularity:**
 
-**WOQ Quantization Granularity:**
+| Buffer         | Scale (mandatory)              | Zero-Point     |
+|----------------|--------------------------------|----------------|
+| Input          | Yes  Per-tensor                | Yes Per-tensor |
+| Weights        | Yes  Per-tensor or per-channel | Yes Per-tensor |
+| Output         | Yes  Per-tensor                | Yes Per-tensor |
+
+
+**WOQ Quantization Granularity for weights:**
 
 | Granularity | Scale Dims | Zero-Point Dims | Description |
 |-------------|------------|-----------------|-------------|
@@ -204,6 +212,23 @@ struct matmul_quantization_params_t {
 | Per-group | `{G, N}` | `{G, N}` | G groups along K dimension (G = K/group_size) |
 
 **Note:** WOQ requires `is_weights_const = true` for weight reordering and caching.
+
+
+**Supported Data Types for Scales and Zero Points by Backend:**
+
+| Quant Mode | Tensor  | Parameter  | DLP Backend                        | OneDNN Backend                      |
+|------------|---------|------------|------------------------------------|-------------------------------------|
+| INT8       | Source  | Scale      | F32, BF16                          | F32                                 |
+| INT8       | Source  | Zero-Point | S32, S8, U8                        | S32                                 |
+| INT8       | Weights | Scale      | F32, BF16                          | F32                                 |
+| INT8       | Weights | Zero-Point | S32, S8, U8                        | S32                                 |
+| INT8       | Output  | Scale      | F32, BF16                          | F32, BF16 *(BF16 converted to F32)* |
+| INT8       | Output  | Zero-Point | S8, U8, S32                        | S32                                 |
+| WOQ (S4)   | Weights | Scale      | F32, BF16                          | ✗ *(WOQ always dispatches to DLP)*  |
+| WOQ (S4)   | Weights | Zero-Point | S8                                 | ✗ *(WOQ always dispatches to DLP)*  |
+
+> **Notes:**
+> - **WOQ Routing:** When `dtypes.src = BF16` and `dtypes.wei = S4`, the kernel selector always forces `aocl_dlp_blocked` regardless of the requested algorithm.
 
 
 ## Usage Examples
