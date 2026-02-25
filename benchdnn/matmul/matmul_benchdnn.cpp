@@ -342,11 +342,6 @@ int bench(const std::string &in_filename, const std::string &out_filename,
     inputCommandLineParser(matmulConfig, isPipeline, options);
   }
 
-  if (isLOWOHA && isPipeline) {
-    testlog_error("Error: LOWOHA and pipeline mode are not compatible.");
-    return NOT_OK;
-  }
-
   std::vector<std::pair<MatmulConfig, std::vector<TimingStats>>> matmul_results;
   if (!isLOWOHA) {
     // Run the matmul benchmark with the provided configurations

@@ -44,6 +44,25 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
                            const global_options &options,
                            size_t cache_size);
 
+/**
+ * @brief Sets Weight-Only Quantization (WOQ) parameters in matmul_params from the weight tensor.
+ *
+ * @param params LowOHA matmul parameters to update.
+ * @param weight_tensor Weight tensor containing quantization scale and optional zero point.
+ */
+void set_woq_params(matmul_params &params, const tensor_t &weight_tensor);
+
+/**
+ * @brief Sets INT8 quantization parameters in matmul_params from input, weight, and output tensors.
+ *
+ * @param params LowOHA matmul parameters to update.
+ * @param input_tensor Source/input tensor.
+ * @param weight_tensor Weight tensor.
+ * @param output_tensor Destination/output tensor.
+ */
+void set_int8_params(matmul_params &params, const tensor_t &input_tensor,
+                     const tensor_t &weight_tensor, const tensor_t &output_tensor);
+
 } // namespace matmul
 } // namespace benchdnn
 } // namespace zendnnl
