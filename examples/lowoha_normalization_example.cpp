@@ -24,7 +24,7 @@ namespace examples {
 // ============================================================================
 // LayerNorm – 2D tensor  [batch, hidden_dim]
 // ============================================================================
-int run_lowoha_layer_norm_fp32_test() {
+int run_lowoha_layer_norm_fp32_example() {
   try {
     log_info("** LOWOHA LayerNorm FP32 2D example");
 
@@ -55,31 +55,18 @@ int run_lowoha_layer_norm_fp32_test() {
     params.epsilon    = 1e-5f;
     params.use_scale  = true;
     params.use_shift  = true;
-    params.algorithm  = norm_algo_t::none;  // auto-select
 
     // Execute
     status_t status = normalization_direct(
                         input.data(), output.data(),
                         gamma.data(), beta.data(),
                         /*running_mean=*/nullptr, /*running_var=*/nullptr,
-                        params);
+                        /*residual=*/nullptr, params);
 
     if (status != status_t::success) {
       log_error("LayerNorm FP32 2D: Execution failed");
       return NOT_OK;
     }
-
-    // Quick sanity check: each row should have mean ≈ 0 and std ≈ 1
-    for (uint64_t b = 0; b < batch; ++b) {
-      float sum = 0.0f;
-      for (uint64_t i = 0; i < hidden_dim; ++i) {
-        sum += output[b * hidden_dim + i];
-      }
-      float mean = sum / static_cast<float>(hidden_dim);
-      log_info("  batch ", b, ": output mean = ", mean, " (expected ≈ 0)");
-    }
-
-    log_info("LayerNorm FP32 2D example: PASSED");
   }
   catch (const exception_t &ex) {
     log_error("Exception: ", ex.what());
@@ -91,7 +78,7 @@ int run_lowoha_layer_norm_fp32_test() {
 // ============================================================================
 // LayerNorm – 3D tensor  [batch, seq_len, hidden_dim]
 // ============================================================================
-int run_lowoha_layer_norm_3d_fp32_test() {
+int run_lowoha_layer_norm_3d_fp32_example() {
   try {
     log_info("** LOWOHA LayerNorm FP32 3D example");
 
@@ -123,94 +110,17 @@ int run_lowoha_layer_norm_3d_fp32_test() {
     params.epsilon    = 1e-5f;
     params.use_scale  = true;
     params.use_shift  = true;
-    params.algorithm  = norm_algo_t::none;
 
     status_t status = normalization_direct(
                         input.data(), output.data(),
                         gamma.data(), beta.data(),
-                        nullptr, nullptr, params);
+                        nullptr, nullptr,
+                        /*residual=*/nullptr, params);
 
     if (status != status_t::success) {
       log_error("LayerNorm FP32 3D: Execution failed");
       return NOT_OK;
     }
-
-    // Verify: for each token (batch*seq_len rows), mean ≈ 0
-    const uint64_t num_tokens = batch * seq_len;
-    for (uint64_t t = 0; t < num_tokens; ++t) {
-      float sum = 0.0f;
-      for (uint64_t i = 0; i < hidden_dim; ++i) {
-        sum += output[t * hidden_dim + i];
-      }
-      float mean = sum / static_cast<float>(hidden_dim);
-      log_info("  token ", t, ": output mean = ", mean, " (expected ≈ 0)");
-    }
-
-    log_info("LayerNorm FP32 3D example: PASSED");
-  }
-  catch (const exception_t &ex) {
-    log_error("Exception: ", ex.what());
-    return NOT_OK;
-  }
-  return OK;
-}
-
-// ============================================================================
-// RMSNorm – 2D tensor  [batch, hidden_dim]
-// ============================================================================
-int run_lowoha_rms_norm_fp32_test() {
-  try {
-    log_info("** LOWOHA RMSNorm FP32 example");
-
-    const uint64_t batch      = 4;
-    const uint64_t hidden_dim = 8;
-    const uint64_t total_size = batch * hidden_dim;
-
-    // Input data
-    std::vector<float> input(total_size);
-    for (uint64_t i = 0; i < total_size; ++i) {
-      input[i] = static_cast<float>(i % hidden_dim) * 0.2f + 1.0f;
-    }
-
-    // Gamma only (RMSNorm has no beta)
-    std::vector<float> gamma(hidden_dim, 1.0f);
-
-    std::vector<float> output(total_size, 0.0f);
-
-    // Setup
-    norm_params params;
-    params.shape      = {batch, hidden_dim};
-    params.norm_type  = norm_type_t::RMS_NORM;
-    params.norm_ndims = 1;
-    params.src_dt     = data_type_t::f32;
-    params.dst_dt     = data_type_t::f32;
-    params.epsilon    = 1e-6f;  // LLaMA uses 1e-6
-    params.use_scale  = true;   // RMSNorm uses scale (gamma) only
-    params.use_shift  = false;  // RMSNorm has no shift (beta)
-    params.algorithm  = norm_algo_t::none;
-
-    status_t status = normalization_direct(
-                        input.data(), output.data(),
-                        gamma.data(), /*beta=*/nullptr,
-                        nullptr, nullptr, params);
-
-    if (status != status_t::success) {
-      log_error("RMSNorm FP32: Execution failed");
-      return NOT_OK;
-    }
-
-    // Verify: for each row, RMS of output should be ≈ 1 (with gamma=1)
-    for (uint64_t b = 0; b < batch; ++b) {
-      float sum_sq = 0.0f;
-      for (uint64_t i = 0; i < hidden_dim; ++i) {
-        float v = output[b * hidden_dim + i];
-        sum_sq += v * v;
-      }
-      float rms = std::sqrt(sum_sq / static_cast<float>(hidden_dim));
-      log_info("  batch ", b, ": output RMS = ", rms);
-    }
-
-    log_info("RMSNorm FP32 example: PASSED");
   }
   catch (const exception_t &ex) {
     log_error("Exception: ", ex.what());
@@ -222,7 +132,7 @@ int run_lowoha_rms_norm_fp32_test() {
 // ============================================================================
 // BatchNorm – Inference mode with pre-computed running mean/var
 // ============================================================================
-int run_lowoha_batch_norm_fp32_test() {
+int run_lowoha_batch_norm_fp32_example() {
   try {
     log_info("** LOWOHA BatchNorm FP32 (inference) example");
 
@@ -257,28 +167,120 @@ int run_lowoha_batch_norm_fp32_test() {
     params.epsilon    = 1e-5f;
     params.use_scale  = true;
     params.use_shift  = true;
-    params.algorithm  = norm_algo_t::none;
 
     status_t status = normalization_direct(
                         input.data(), output.data(),
                         gamma.data(), beta.data(),
                         running_mean.data(), running_var.data(),
-                        params);
+                        /*residual=*/nullptr, params);
 
     if (status != status_t::success) {
       log_error("BatchNorm FP32 (inference): Execution failed");
       return NOT_OK;
     }
+  }
+  catch (const exception_t &ex) {
+    log_error("Exception: ", ex.what());
+    return NOT_OK;
+  }
+  return OK;
+}
 
-    // Print first few output values per channel for verification
-    const uint64_t spatial = H * W;
-    for (uint64_t c = 0; c < C; ++c) {
-      float val0 = output[(0 * C + c) * spatial + 0];
-      float val1 = output[(0 * C + c) * spatial + 1];
-      log_info("  channel ", c, ": output[0]=", val0, ", output[1]=", val1);
+// ============================================================================
+// RMSNorm – 2D tensor  [batch, hidden_dim]
+// ============================================================================
+int run_lowoha_rms_norm_fp32_example() {
+  try {
+    log_info("** LOWOHA RMSNorm FP32 example");
+
+    const uint64_t batch      = 4;
+    const uint64_t hidden_dim = 8;
+    const uint64_t total_size = batch * hidden_dim;
+
+    // Input data
+    std::vector<float> input(total_size);
+    for (uint64_t i = 0; i < total_size; ++i) {
+      input[i] = static_cast<float>(i % hidden_dim) * 0.2f + 1.0f;
     }
 
-    log_info("BatchNorm FP32 (inference) example: PASSED");
+    // Gamma only (RMSNorm has no beta)
+    std::vector<float> gamma(hidden_dim, 1.0f);
+
+    std::vector<float> output(total_size, 0.0f);
+
+    // Setup
+    norm_params params;
+    params.shape      = {batch, hidden_dim};
+    params.norm_type  = norm_type_t::RMS_NORM;
+    params.norm_ndims = 1;
+    params.src_dt     = data_type_t::f32;
+    params.dst_dt     = data_type_t::f32;
+    params.epsilon    = 1e-6f;  // LLaMA uses 1e-6
+    params.use_scale  = true;   // RMSNorm uses scale (gamma) only
+
+    status_t status = normalization_direct(
+                        input.data(), output.data(),
+                        gamma.data(), /*beta=*/nullptr,
+                        nullptr, nullptr,
+                        /*residual=*/nullptr, params);
+
+    if (status != status_t::success) {
+      log_error("RMSNorm FP32: Execution failed");
+      return NOT_OK;
+    }
+  }
+  catch (const exception_t &ex) {
+    log_error("Exception: ", ex.what());
+    return NOT_OK;
+  }
+  return OK;
+}
+
+// ============================================================================
+// FusedAddRMSNorm – 2D tensor  [batch, hidden_dim]
+// ============================================================================
+int run_lowoha_fused_add_rms_norm_fp32_example() {
+  try {
+    log_info("** LOWOHA FusedAddRMSNorm FP32 example");
+
+    const uint64_t batch      = 4;
+    const uint64_t hidden_dim = 8;
+    const uint64_t total_size = batch * hidden_dim;
+
+    // Input (current layer output, to be added to the residual stream)
+    std::vector<float> input(total_size);
+    for (uint64_t i = 0; i < total_size; ++i) {
+      input[i] = static_cast<float>(i % hidden_dim) * 0.2f + 1.0f;
+    }
+
+    // Residual buffer – represents the running residual stream; modified in-place
+    std::vector<float> residual(total_size);
+    for (uint64_t i = 0; i < total_size; ++i) {
+      residual[i] = static_cast<float>(i % hidden_dim) * 0.1f + 0.5f;
+    }
+
+    std::vector<float> gamma(hidden_dim, 1.0f);
+    std::vector<float> output(total_size, 0.0f);
+
+    norm_params params;
+    params.shape      = {batch, hidden_dim};
+    params.norm_type  = norm_type_t::FUSED_ADD_RMS_NORM;
+    params.norm_ndims = 1;
+    params.src_dt     = data_type_t::f32;
+    params.dst_dt     = data_type_t::f32;
+    params.epsilon    = 1e-6f;
+    params.use_scale  = true; // true if gamma is provided
+
+    status_t status = normalization_direct(
+                        input.data(), output.data(),
+                        gamma.data(), /*beta=*/nullptr,
+                        /*running_mean=*/nullptr, /*running_var=*/nullptr,
+                        residual.data(), params);
+
+    if (status != status_t::success) {
+      log_error("FusedAddRMSNorm FP32: Execution failed");
+      return NOT_OK;
+    }
   }
   catch (const exception_t &ex) {
     log_error("Exception: ", ex.what());

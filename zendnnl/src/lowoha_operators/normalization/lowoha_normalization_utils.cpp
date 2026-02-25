@@ -20,19 +20,6 @@ namespace zendnnl {
 namespace lowoha {
 namespace normalization {
 
-std::string norm_type_to_str(norm_type_t type) {
-  switch (type) {
-  case norm_type_t::LAYER_NORM:
-    return "LayerNorm";
-  case norm_type_t::RMS_NORM:
-    return "RMSNorm";
-  case norm_type_t::BATCH_NORM:
-    return "BatchNorm";
-  default:
-    return "Unknown";
-  }
-}
-
 status_t validate_normalization_inputs(
   const void *input,
   const void *output,
@@ -40,6 +27,7 @@ status_t validate_normalization_inputs(
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  const void *residual,
   const norm_params &params
 ) {
   // Validate pointers
@@ -59,15 +47,12 @@ status_t validate_normalization_inputs(
   }
 
   // Validate data types
-  // TODO: Add bf16 support once BF16 kernels are implemented.
-  if (params.src_dt != data_type_t::f32) {
-    log_error("Normalization: Unsupported source data type. "
-              "Currently supported: f32");
+  if (params.src_dt != data_type_t::f32 && params.src_dt != data_type_t::bf16) {
+    log_error("Normalization: Unsupported source data type");
     return status_t::failure;
   }
-  if (params.dst_dt != data_type_t::f32) {
-    log_error("Normalization: Unsupported destination data type. "
-              "Currently supported: f32");
+  if (params.dst_dt != data_type_t::f32 && params.dst_dt != data_type_t::bf16) {
+    log_error("Normalization: Unsupported destination data type");
     return status_t::failure;
   }
 
@@ -93,11 +78,22 @@ status_t validate_normalization_inputs(
   }
 
   // Validate shift (beta) parameter
-  // Beta is never used by RMSNorm regardless of use_shift
-  if (params.use_shift && params.norm_type != norm_type_t::RMS_NORM) {
+  // Beta is never used by RMSNorm or FusedAddRMSNorm regardless of use_shift
+  if (params.use_shift &&
+      params.norm_type != norm_type_t::RMS_NORM &&
+      params.norm_type != norm_type_t::FUSED_ADD_RMS_NORM) {
     if (!beta) {
       log_error("Normalization: use_shift=true but beta pointer is null "
                 "(required for ", norm_type_to_str(params.norm_type), ")");
+      return status_t::failure;
+    }
+  }
+
+  // FusedAddRMSNorm-specific validations
+  if (params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
+    if (!residual) {
+      log_error("Normalization: FUSED_ADD_RMS_NORM requires a non-null "
+                "writable residual buffer");
       return status_t::failure;
     }
   }
@@ -126,9 +122,10 @@ status_t validate_normalization_inputs(
     }
   }
 
-  // LayerNorm / RMSNorm validations
+  // LayerNorm / RMSNorm / FusedAddRMSNorm validations
   if (params.norm_type == norm_type_t::LAYER_NORM ||
-      params.norm_type == norm_type_t::RMS_NORM) {
+      params.norm_type == norm_type_t::RMS_NORM ||
+      params.norm_type == norm_type_t::FUSED_ADD_RMS_NORM) {
     if (params.norm_ndims <= 0 ||
         params.norm_ndims > static_cast<int>(params.shape.size())) {
       log_error("Normalization: Invalid norm_ndims: ", params.norm_ndims,
@@ -168,7 +165,8 @@ status_t setup_normalization_shape(norm_params &params) {
 
   switch (params.norm_type) {
   case norm_type_t::LAYER_NORM:
-  case norm_type_t::RMS_NORM: {
+  case norm_type_t::RMS_NORM:
+  case norm_type_t::FUSED_ADD_RMS_NORM: {
     if (params.norm_ndims <= 0 || params.norm_ndims > ndims) {
       log_error("Normalization setup: Invalid norm_ndims: ", params.norm_ndims,
                 " for ", ndims, "D tensor");
@@ -222,6 +220,21 @@ status_t setup_normalization_shape(norm_params &params) {
   }
 
   return status_t::success;
+}
+
+std::string norm_type_to_str(norm_type_t type) {
+  switch (type) {
+  case norm_type_t::LAYER_NORM:
+    return "LayerNorm";
+  case norm_type_t::BATCH_NORM:
+    return "BatchNorm";
+  case norm_type_t::RMS_NORM:
+    return "RMSNorm";
+  case norm_type_t::FUSED_ADD_RMS_NORM:
+    return "FusedAddRMSNorm";
+  default:
+    return "Unknown";
+  }
 }
 
 } // namespace normalization

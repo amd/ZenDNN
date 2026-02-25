@@ -29,7 +29,7 @@ namespace examples {
 
 using namespace zendnnl::lowoha::normalization;
 
-/** @fn run_lowoha_layer_norm_fp32_test
+/** @fn run_lowoha_layer_norm_fp32_example
  *  @brief Demonstrates LayerNorm on FP32 inputs.
  *
  *  LayerNorm normalizes each sample across the last `norm_ndims` dimensions.
@@ -42,9 +42,9 @@ using namespace zendnnl::lowoha::normalization;
  *    - Output: FP32 [batch, hidden_dim]
  *    - Normalizes along last axis (norm_ndims=1)
  */
-int run_lowoha_layer_norm_fp32_test();
+int run_lowoha_layer_norm_fp32_example();
 
-/** @fn run_lowoha_layer_norm_3d_fp32_test
+/** @fn run_lowoha_layer_norm_3d_fp32_example
  *  @brief Demonstrates LayerNorm on a 3D tensor (e.g., [batch, seq_len, hidden_dim]).
  *
  *  A more realistic transformer scenario where the input is a sequence of
@@ -57,23 +57,9 @@ int run_lowoha_layer_norm_fp32_test();
  *    - Output: FP32 [batch, seq_len, hidden_dim]
  *    - Normalizes along last axis (norm_ndims=1)
  */
-int run_lowoha_layer_norm_3d_fp32_test();
+int run_lowoha_layer_norm_3d_fp32_example();
 
-/** @fn run_lowoha_rms_norm_fp32_test
- *  @brief Demonstrates RMSNorm on FP32 inputs.
- *
- *  RMSNorm is a simplified variant of LayerNorm that omits mean subtraction
- *  and the beta (shift) parameter.
- *
- *  Configuration:
- *    - Input:  FP32 [batch, hidden_dim]
- *    - Gamma:  FP32 [hidden_dim]
- *    - Output: FP32 [batch, hidden_dim]
- *    - Normalizes along last axis (norm_ndims=1)
- */
-int run_lowoha_rms_norm_fp32_test();
-
-/** @fn run_lowoha_batch_norm_fp32_test
+/** @fn run_lowoha_batch_norm_fp32_example
  *  @brief Demonstrates BatchNorm in inference mode with running statistics.
  *
  *  In inference mode, pre-computed running mean/variance are used instead of
@@ -87,7 +73,43 @@ int run_lowoha_rms_norm_fp32_test();
  *    - Running var:  FP32 [C]  (pre-computed)
  *    - Output:       FP32 [N, C, H, W]
  */
-int run_lowoha_batch_norm_fp32_test();
+int run_lowoha_batch_norm_fp32_example();
+
+/** @fn run_lowoha_rms_norm_fp32_example
+ *  @brief Demonstrates RMSNorm on FP32 inputs.
+ *
+ *  RMSNorm is a simplified variant of LayerNorm that omits mean subtraction
+ *  and the beta (shift) parameter.
+ *
+ *  Configuration:
+ *    - Input:  FP32 [batch, hidden_dim]
+ *    - Gamma:  FP32 [hidden_dim]
+ *    - Output: FP32 [batch, hidden_dim]
+ *    - Normalizes along last axis (norm_ndims=1)
+ */
+int run_lowoha_rms_norm_fp32_example();
+
+/** @fn run_lowoha_fused_add_rms_norm_fp32_example
+ *  @brief Demonstrates FusedAddRMSNorm on FP32 inputs.
+ *
+ *  Fuses a residual addition with RMSNorm in a single pass, as used in
+ *  transformer decoder blocks (e.g. LLaMA).  The residual buffer is updated
+ *  in-place (residual += input), then RMSNorm is applied over the updated
+ *  residual to produce the output.
+ *
+ *  Formula:
+ *    residual[i] += input[i]
+ *    rms = sqrt( mean(residual^2) + eps )
+ *    output[i] = gamma[i] * residual[i] / rms
+ *
+ *  Configuration:
+ *    - Input:    FP32 [batch, hidden_dim]
+ *    - Residual: FP32 [batch, hidden_dim]  (modified in-place)
+ *    - Gamma:    FP32 [hidden_dim]
+ *    - Output:   FP32 [batch, hidden_dim]
+ *    - Normalizes along last axis (norm_ndims=1)
+ */
+int run_lowoha_fused_add_rms_norm_fp32_example();
 
 } // examples
 } // zendnnl

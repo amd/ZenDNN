@@ -47,8 +47,9 @@ using namespace zendnnl::common;
 enum class norm_type_t : int {
   NONE        = -1,   ///< No normalization type selected
   LAYER_NORM  = 0,    ///< Layer Normalization
-  RMS_NORM    = 1,    ///< Root Mean Square Normalization
-  BATCH_NORM  = 2     ///< Batch Normalization
+  BATCH_NORM  = 1,    ///< Batch Normalization
+  RMS_NORM    = 2,    ///< Root Mean Square Normalization
+  FUSED_ADD_RMS_NORM = 3  ///< Fused Add and RMS Normalization
 };
 
 /**
@@ -118,8 +119,8 @@ struct norm_params {
       num_channels(0),
       epsilon(1e-5f),
       norm_ndims(1),
-      use_scale(true),
-      use_shift(true),
+      use_scale(false),
+      use_shift(false),
       src_dt(data_type_t::none),
       dst_dt(data_type_t::none),
       gamma_dt(data_type_t::f32),

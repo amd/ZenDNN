@@ -27,15 +27,27 @@ namespace normalization {
  * @brief Reference implementation wrapper for normalization
  *
  * Dispatches to the appropriate implementation based on params.src_dt / params.dst_dt,
- * and handles LayerNorm / RMSNorm / BatchNorm via params.norm_type.
+ * and handles LayerNorm / RMSNorm / BatchNorm / FusedAddRMSNorm via params.norm_type.
  *
- * @param input             Input tensor
- * @param output            Output tensor
- * @param gamma             Scale parameter (read-only, may be nullptr)
- * @param beta              Shift parameter (read-only, may be nullptr)
- * @param running_mean      Pre-computed running mean (read-only, required for BatchNorm)
- * @param running_var       Pre-computed running variance (read-only, required for BatchNorm)
- * @param params            Normalization parameters
+ * @param input             Input tensor (read-only). Same element type as params.src_dt.
+ * @param output            Output tensor. Same shape as input, element type params.dst_dt.
+ * @param gamma             Scale parameter (read-only, may be nullptr if !use_scale).
+ *                          Shape depends on norm_type:
+ *                          - LayerNorm / RMSNorm / FusedAddRMSNorm: [norm_size]
+ *                          - BatchNorm: [num_channels]
+ * @param beta              Shift parameter (read-only, may be nullptr if !use_shift).
+ *                          Unused by RMSNorm and FusedAddRMSNorm.
+ * @param running_mean      Pre-computed running mean (read-only, required for BatchNorm,
+ *                          nullptr otherwise).
+ * @param running_var       Pre-computed running variance (read-only, required for BatchNorm,
+ *                          nullptr otherwise).
+ * @param residual          Residual buffer, required only for FUSED_ADD_RMS_NORM,
+ *                          nullptr for all other norm types.
+ *                          - Must have the same shape and element type as the input
+ *                            (i.e. params.src_dt).
+ *                          - Modified in-place: on return, residual[i] = old_residual[i] + input[i].
+ *                          - The normalized output is computed from this updated residual.
+ * @param params            Normalization parameters (type, shape, data types, etc.)
  *
  * @return status_t::success on successful execution, status_t::failure otherwise
  */
@@ -46,6 +58,7 @@ status_t normalization_reference_wrapper(
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  void       *residual,
   norm_params &params
 );
 

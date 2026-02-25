@@ -21,8 +21,6 @@ namespace zendnnl {
 namespace lowoha {
 namespace normalization {
 
-status_t setup_normalization_shape(norm_params &params);
-
 status_t normalization_kernel_wrapper(
   const void *input,
   void *output,
@@ -30,6 +28,7 @@ status_t normalization_kernel_wrapper(
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  void       *residual,
   norm_params &params
 ) {
   // Select algorithm if not specified
@@ -43,7 +42,7 @@ status_t normalization_kernel_wrapper(
   log_info("Using reference kernel for ", norm_type_to_str(params.norm_type));
   status_t status = normalization_reference_wrapper(
                       input, output, gamma, beta,
-                      running_mean, running_var, params);
+                      running_mean, running_var, residual, params);
 
   if (status != status_t::success) {
     log_error("Normalization kernel failed for ",
@@ -60,6 +59,7 @@ status_t normalization_direct(
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  void       *residual,
   norm_params &params
 ) {
   // Create profiler instance for timing
@@ -76,7 +76,7 @@ status_t normalization_direct(
 
   // Validate inputs
   if (validate_normalization_inputs(input, output, gamma, beta,
-                                    running_mean, running_var, params)
+                                    running_mean, running_var, residual, params)
       != status_t::success) {
     return status_t::failure;
   }
@@ -84,7 +84,7 @@ status_t normalization_direct(
   // Execute normalization
   status_t kernel_status = normalization_kernel_wrapper(
                              input, output, gamma, beta,
-                             running_mean, running_var, params);
+                             running_mean, running_var, residual, params);
 
   if (is_profile) {
     profiler.tbp_stop();
@@ -103,8 +103,8 @@ status_t normalization_direct(
        << ", epsilon=" << params.epsilon
        << ", use_scale=" << (params.use_scale ? "true" : "false")
        << ", use_shift=" << (params.use_shift ? "true" : "false")
-       << ", src_dt=" << static_cast<int>(params.src_dt)
-       << ", dst_dt=" << static_cast<int>(params.dst_dt);
+       << ", src_dt=" << dtype_info(params.src_dt)
+       << ", dst_dt=" << dtype_info(params.dst_dt);
 
     apilog_info(ss.str());
     if (is_profile) {

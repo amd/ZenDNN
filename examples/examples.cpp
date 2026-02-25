@@ -198,10 +198,11 @@ int main() {
      *  Demonstrates LayerNorm, RMSNorm, and BatchNorm operations using the
      *  low-overhead LOWOHA API with FP32 data type.
      */
-    run_lowoha_layer_norm_fp32_test();
-    run_lowoha_layer_norm_3d_fp32_test();
-    run_lowoha_rms_norm_fp32_test();
-    run_lowoha_batch_norm_fp32_test();
+    run_lowoha_layer_norm_fp32_example();
+    run_lowoha_layer_norm_3d_fp32_example();
+    run_lowoha_rms_norm_fp32_example();
+    run_lowoha_batch_norm_fp32_example();
+    run_lowoha_fused_add_rms_norm_fp32_example();
 
     /** LOWOHA Pooling operator functionality examples.
      *  Demonstrates max pooling and average pooling operations using the

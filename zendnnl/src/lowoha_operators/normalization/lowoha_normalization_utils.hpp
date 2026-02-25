@@ -37,13 +37,19 @@ using namespace zendnnl::common;
  * for the selected normalization type.
  *
  * For BatchNorm inference, running_mean and running_var are required.
+ * For FusedAddRMSNorm, a non-null writable residual buffer is required.
  *
- * @param input         Input tensor pointer
+ * @param input         Input tensor pointer (read-only)
  * @param output        Output tensor pointer
  * @param gamma         Gamma (scale) parameter pointer (may be nullptr if !use_scale)
- * @param beta          Beta (shift) parameter pointer (may be nullptr if !use_shift or RMSNorm)
+ * @param beta          Beta (shift) parameter pointer (may be nullptr if !use_shift
+ *                      or RMSNorm/FusedAddRMSNorm)
  * @param running_mean  Pre-computed running mean (required for BatchNorm, nullptr otherwise)
  * @param running_var   Pre-computed running variance (required for BatchNorm, nullptr otherwise)
+ * @param residual      Residual buffer (required for FUSED_ADD_RMS_NORM, nullptr otherwise).
+ *                      Must be writable: the kernel updates it in-place
+ *                      (residual[i] += input[i]). Must have the same shape and element
+ *                      type as the input (params.src_dt).
  * @param params        Normalization parameters
  * @return status_t::success if valid, status_t::failure otherwise
  */
@@ -54,14 +60,23 @@ status_t validate_normalization_inputs(
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  const void *residual,
   const norm_params &params
 );
 
 /**
- * @brief Convert norm_type_t to a human-readable string
+ * @brief Setup normalization shape
+ *
+ * @param params  Normalization parameters
+ * @return status_t::success if successful, status_t::failure otherwise
+ */
+status_t setup_normalization_shape(norm_params &params);
+
+/**
+ * @brief Convert norm_type_t to a string
  *
  * @param type  The normalization type enum value
- * @return A string representation (e.g. "LayerNorm", "RMSNorm", "BatchNorm")
+ * @return A string representation (e.g. "LayerNorm", "RMSNorm", "BatchNorm", "FusedAddRMSNorm")
  */
 std::string norm_type_to_str(norm_type_t type);
 

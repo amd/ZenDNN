@@ -28,7 +28,7 @@ namespace lowoha {
 namespace normalization {
 
 // ============================================================================
-// LayerNorm  –  FP32 reference
+// LayerNorm
 //
 // For each sample (row) in the batch:
 //   mean  = (1/N) * sum(x_i)
@@ -37,9 +37,9 @@ namespace normalization {
 //
 // Where N = norm_size (product of the last norm_ndims dimensions).
 // ============================================================================
-static void layer_norm_fp32_impl(
-  const float *input,
-  float *output,
+static void layer_norm_impl(
+  const void  *input,
+  void        *output,
   const float *gamma,
   const float *beta,
   const norm_params &params,
@@ -48,88 +48,59 @@ static void layer_norm_fp32_impl(
   const uint64_t batch     = params.batch;
   const uint64_t norm_size = params.norm_size;
   const float    eps       = params.epsilon;
+  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+
+  const float   *in_f32   = static_cast<const float *>(input);
+  const int16_t *in_bf16  = static_cast<const int16_t *>(input);
+  float         *out_f32  = static_cast<float *>(output);
+  int16_t       *out_bf16 = static_cast<int16_t *>(output);
 
   #pragma omp parallel for num_threads(num_threads)
   for (uint64_t b = 0; b < batch; ++b) {
-    const float *x = input  + b * norm_size;
-    float       *y = output + b * norm_size;
+    const uint64_t off = b * norm_size;
 
-    // Compute mean
     float mean = 0.0f;
     for (uint64_t i = 0; i < norm_size; ++i) {
-      mean += x[i];
+      float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                : in_f32[off + i];
+      mean += x;
     }
     mean /= static_cast<float>(norm_size);
 
-    // Compute variance
     float var = 0.0f;
     for (uint64_t i = 0; i < norm_size; ++i) {
-      float diff = x[i] - mean;
+      float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                : in_f32[off + i];
+      float diff = x - mean;
       var += diff * diff;
     }
     var /= static_cast<float>(norm_size);
 
-    // Normalize
     float inv_std = 1.0f / std::sqrt(var + eps);
     for (uint64_t i = 0; i < norm_size; ++i) {
-      float norm_val = (x[i] - mean) * inv_std;
+      float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                : in_f32[off + i];
+      float norm_val = (x - mean) * inv_std;
       if (params.use_scale) {
         norm_val *= gamma[i];
       }
       if (params.use_shift) {
         norm_val += beta[i];
       }
-      y[i] = norm_val;
-    }
-  }
-}
 
-// ============================================================================
-// RMSNorm  –  FP32 reference
-//
-// For each sample (row) in the batch:
-//   rms   = sqrt( (1/N) * sum(x_i^2) + eps )
-//   y_i   = gamma[i] * x_i / rms
-//
-// Where N = norm_size.
-// ============================================================================
-static void rms_norm_fp32_impl(
-  const float *input,
-  float *output,
-  const float *gamma,
-  const norm_params &params,
-  int num_threads
-) {
-  const uint64_t batch     = params.batch;
-  const uint64_t norm_size = params.norm_size;
-  const float    eps       = params.epsilon;
-
-  #pragma omp parallel for num_threads(num_threads)
-  for (uint64_t b = 0; b < batch; ++b) {
-    const float *x = input  + b * norm_size;
-    float       *y = output + b * norm_size;
-
-    // Compute mean of squares
-    float sum_sq = 0.0f;
-    for (uint64_t i = 0; i < norm_size; ++i) {
-      sum_sq += x[i] * x[i];
-    }
-    float rms = std::sqrt(sum_sq / static_cast<float>(norm_size) + eps);
-    float inv_rms = 1.0f / rms;
-
-    // Normalize
-    for (uint64_t i = 0; i < norm_size; ++i) {
-      float norm_val = x[i] * inv_rms;
-      if (params.use_scale) {
-        norm_val *= gamma[i];
+      if (dst_bf16) {
+        out_bf16[off + i] = bfloat16_t::f32_to_bf16_val(norm_val);
       }
-      y[i] = norm_val;
+      else {
+        out_f32[off + i] = norm_val;
+      }
     }
   }
 }
 
 // ============================================================================
-// BatchNorm  –  FP32 reference  (inference-only)
+// BatchNorm
 //
 // Uses pre-computed running statistics from training.
 // For each channel c across the batch and spatial dimensions:
@@ -138,9 +109,9 @@ static void rms_norm_fp32_impl(
 //
 // Input layout:  [N, C, spatial...]  (contiguous, row-major)
 // ============================================================================
-static void batch_norm_fp32_impl(
-  const float *input,
-  float *output,
+static void batch_norm_impl(
+  const void  *input,
+  void        *output,
   const float *gamma,
   const float *beta,
   const float *running_mean,
@@ -148,52 +119,199 @@ static void batch_norm_fp32_impl(
   const norm_params &params,
   int num_threads
 ) {
-  const uint64_t N            = params.batch;         // batch size
-  const uint64_t C            = params.num_channels;  // channels
-  const uint64_t spatial_size = params.norm_size;      // product of spatial dims
+  const uint64_t N            = params.batch;
+  const uint64_t C            = params.num_channels;
+  const uint64_t spatial_size = params.norm_size;
   const float    eps          = params.epsilon;
+  const bool     src_bf16     = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16     = (params.dst_dt == data_type_t::bf16);
+
+  const float   *in_f32   = static_cast<const float *>(input);
+  const int16_t *in_bf16  = static_cast<const int16_t *>(input);
+  float         *out_f32  = static_cast<float *>(output);
+  int16_t       *out_bf16 = static_cast<int16_t *>(output);
 
   #pragma omp parallel for collapse(2) num_threads(num_threads)
   for (uint64_t n = 0; n < N; ++n) {
     for (uint64_t c = 0; c < C; ++c) {
-      const float *x     = input  + (n * C + c) * spatial_size;
-      float       *y_out = output + (n * C + c) * spatial_size;
-
+      const uint64_t off = (n * C + c) * spatial_size;
       float inv_std = 1.0f / std::sqrt(running_var[c] + eps);
       float m       = running_mean[c];
 
       for (uint64_t s = 0; s < spatial_size; ++s) {
-        float norm_val = (x[s] - m) * inv_std;
+        float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + s])
+                  : in_f32[off + s];
+        float norm_val = (x - m) * inv_std;
         if (params.use_scale) {
           norm_val *= gamma[c];
         }
         if (params.use_shift) {
           norm_val += beta[c];
         }
-        y_out[s] = norm_val;
+
+        if (dst_bf16) {
+          out_bf16[off + s] = bfloat16_t::f32_to_bf16_val(norm_val);
+        }
+        else {
+          out_f32[off + s] = norm_val;
+        }
       }
     }
   }
 }
 
 // ============================================================================
-// Reference entry point – dispatches on data type and norm type (inference-only)
+// RMSNorm
+//
+// For each sample (row) in the batch:
+//   rms   = sqrt( (1/N) * sum(x_i^2) + eps )
+//   y_i   = gamma[i] * x_i / rms
+//
+// Where N = norm_size.
 // ============================================================================
+static void rms_norm_impl(
+  const void  *input,
+  void        *output,
+  const float *gamma,
+  const norm_params &params,
+  int num_threads
+) {
+  const uint64_t batch     = params.batch;
+  const uint64_t norm_size = params.norm_size;
+  const float    eps       = params.epsilon;
+  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+
+  const float   *in_f32   = static_cast<const float *>(input);
+  const int16_t *in_bf16  = static_cast<const int16_t *>(input);
+  float         *out_f32  = static_cast<float *>(output);
+  int16_t       *out_bf16 = static_cast<int16_t *>(output);
+
+  #pragma omp parallel for num_threads(num_threads)
+  for (uint64_t b = 0; b < batch; ++b) {
+    const uint64_t off = b * norm_size;
+
+    float sum_sq = 0.0f;
+    for (uint64_t i = 0; i < norm_size; ++i) {
+      float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                : in_f32[off + i];
+      sum_sq += x * x;
+    }
+    float inv_rms = 1.0f / std::sqrt(
+                      sum_sq / static_cast<float>(norm_size) + eps);
+
+    for (uint64_t i = 0; i < norm_size; ++i) {
+      float x = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                : in_f32[off + i];
+      float norm_val = x * inv_rms;
+      if (params.use_scale) {
+        norm_val *= gamma[i];
+      }
+
+      if (dst_bf16) {
+        out_bf16[off + i] = bfloat16_t::f32_to_bf16_val(norm_val);
+      }
+      else {
+        out_f32[off + i] = norm_val;
+      }
+    }
+  }
+}
+
+// ============================================================================
+// FusedAddRMSNorm
+//
+// For each sample (row) in the batch:
+//   residual[i] += input[i]
+//   rms   = sqrt( (1/N) * sum(residual[i]^2) + eps )
+//   y_i   = gamma[i] * residual[i] / rms
+// ============================================================================
+static void fused_add_rms_norm_impl(
+  const void  *input,
+  void        *output,
+  void        *residual,
+  const float *gamma,
+  const norm_params &params,
+  int num_threads
+) {
+  const uint64_t batch     = params.batch;
+  const uint64_t norm_size = params.norm_size;
+  const float    eps       = params.epsilon;
+  const bool     src_bf16  = (params.src_dt == data_type_t::bf16);
+  const bool     dst_bf16  = (params.dst_dt == data_type_t::bf16);
+
+  const float   *in_f32    = static_cast<const float *>(input);
+  const int16_t *in_bf16   = static_cast<const int16_t *>(input);
+  float         *res_f32   = static_cast<float *>(residual);
+  int16_t       *res_bf16  = static_cast<int16_t *>(residual);
+  float         *out_f32   = static_cast<float *>(output);
+  int16_t       *out_bf16  = static_cast<int16_t *>(output);
+
+  #pragma omp parallel for num_threads(num_threads)
+  for (uint64_t b = 0; b < batch; ++b) {
+    const uint64_t off = b * norm_size;
+
+    // Pass 1: residual[i] += input[i] and accumulate variance
+    float sum_sq = 0.0f;
+    for (uint64_t i = 0; i < norm_size; ++i) {
+      float inp = src_bf16 ? bfloat16_t::bf16_to_f32_val(in_bf16[off + i])
+                  : in_f32[off + i];
+      float res = src_bf16 ? bfloat16_t::bf16_to_f32_val(res_bf16[off + i])
+                  : res_f32[off + i];
+      float sum = res + inp;
+      sum_sq += sum * sum;
+      if (src_bf16) {
+        res_bf16[off + i] = bfloat16_t::f32_to_bf16_val(sum);
+      }
+      else {
+        res_f32[off + i] = sum;
+      }
+    }
+
+    float inv_rms = 1.0f / std::sqrt(
+                      sum_sq / static_cast<float>(norm_size) + eps);
+
+    // Pass 2: normalize updated residual and write output
+    for (uint64_t i = 0; i < norm_size; ++i) {
+      float r = src_bf16 ? bfloat16_t::bf16_to_f32_val(res_bf16[off + i])
+                : res_f32[off + i];
+      float norm_val = r * inv_rms;
+      if (params.use_scale) {
+        norm_val *= gamma[i];
+      }
+
+      if (dst_bf16) {
+        out_bf16[off + i] = bfloat16_t::f32_to_bf16_val(norm_val);
+      }
+      else {
+        out_f32[off + i] = norm_val;
+      }
+    }
+  }
+}
+
+// ===================================================
+// Reference entry point – dispatches on norm type
+// ===================================================
 status_t normalization_reference_wrapper(
   const void *input,
-  void *output,
+  void       *output,
   const void *gamma,
   const void *beta,
   const void *running_mean,
   const void *running_var,
+  void       *residual,
   norm_params &params
 ) {
-  // Reference kernel only supports f32 for both src and dst.
-  if (params.src_dt != data_type_t::f32 || params.dst_dt != data_type_t::f32) {
-    log_error("Normalization Reference: Unsupported data type combination "
-              "(src_dt=", static_cast<int>(params.src_dt),
-              ", dst_dt=", static_cast<int>(params.dst_dt),
-              "). Reference kernel supports f32 only.");
+
+  if (params.src_dt != data_type_t::f32 && params.src_dt != data_type_t::bf16) {
+    log_error("Normalization Reference: Unsupported src data type (",
+              static_cast<int>(params.src_dt), "). Supported: f32, bf16");
+    return status_t::failure;
+  }
+  if (params.dst_dt != data_type_t::f32 && params.dst_dt != data_type_t::bf16) {
+    log_error("Normalization Reference: Unsupported dst data type (",
+              static_cast<int>(params.dst_dt), "). Supported: f32, bf16");
     return status_t::failure;
   }
 
@@ -201,42 +319,35 @@ status_t normalization_reference_wrapper(
                           ? static_cast<int>(params.num_threads)
                           : omp_get_max_threads();
 
-  // ---- FP32 path ----
-  {
-    const float *gamma_f32 = static_cast<const float *>(gamma);
-    const float *beta_f32  = static_cast<const float *>(beta);
+  const float *gamma_f32 = static_cast<const float *>(gamma);
+  const float *beta_f32  = static_cast<const float *>(beta);
 
-    switch (params.norm_type) {
-    case norm_type_t::LAYER_NORM:
-      layer_norm_fp32_impl(
-        static_cast<const float *>(input),
-        static_cast<float *>(output),
-        gamma_f32, beta_f32,
-        params, num_threads);
-      return status_t::success;
+  switch (params.norm_type) {
+  case norm_type_t::LAYER_NORM:
+    layer_norm_impl(input, output, gamma_f32, beta_f32,
+                    params, num_threads);
+    return status_t::success;
 
-    case norm_type_t::RMS_NORM:
-      rms_norm_fp32_impl(
-        static_cast<const float *>(input),
-        static_cast<float *>(output),
-        gamma_f32,
-        params, num_threads);
-      return status_t::success;
+  case norm_type_t::BATCH_NORM:
+    batch_norm_impl(input, output, gamma_f32, beta_f32,
+                    static_cast<const float *>(running_mean),
+                    static_cast<const float *>(running_var),
+                    params, num_threads);
+    return status_t::success;
 
-    case norm_type_t::BATCH_NORM:
-      batch_norm_fp32_impl(
-        static_cast<const float *>(input),
-        static_cast<float *>(output),
-        gamma_f32, beta_f32,
-        static_cast<const float *>(running_mean),
-        static_cast<const float *>(running_var),
-        params, num_threads);
-      return status_t::success;
+  case norm_type_t::RMS_NORM:
+    rms_norm_impl(input, output, gamma_f32,
+                  params, num_threads);
+    return status_t::success;
 
-    default:
-      log_error("Normalization Reference: Unknown norm type");
-      return status_t::failure;
-    }
+  case norm_type_t::FUSED_ADD_RMS_NORM:
+    fused_add_rms_norm_impl(input, output, residual, gamma_f32,
+                            params, num_threads);
+    return status_t::success;
+
+  default:
+    log_error("Normalization Reference: Unknown norm type");
+    return status_t::failure;
   }
 }
 
