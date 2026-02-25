@@ -365,10 +365,10 @@ status_t matmul_direct(const char layout, const bool transA, const bool transB,
        << ", lda=" << lda << ", ldb=" << ldb << ", ldc=" << ldc
        << ", transA=" << (transA ? "true" : "false")
        << ", transB=" << (transB ? "true" : "false")
-       << ", input_dtype=" << data_type_to_string(params.dtypes.src)
-       << ", weight_dtype=" << data_type_to_string(params.dtypes.wei)
-       << ", output_dtype=" << data_type_to_string(params.dtypes.dst)
-       << ", bias_dtype=" << data_type_to_string(params.dtypes.bias)
+       << ", input_dtype=" << dtype_info(params.dtypes.src)
+       << ", weight_dtype=" << dtype_info(params.dtypes.wei)
+       << ", output_dtype=" << dtype_info(params.dtypes.dst)
+       << ", bias_dtype=" << dtype_info(params.dtypes.bias)
        << ", bias=" << (bias != nullptr ? "true" : "false")
        << ", is_weights_const=" << (is_weights_const ? "true" : "false")
        << ", post_op=[" << post_op_names_to_string(params) << "]"

@@ -183,8 +183,8 @@ status_t reorder_quantization_wrapper(
       apilog_info(is_dynamic ? "Dynamic" : "Static",
                   needs_zp ? " asymmetric" : " symmetric",
                   " quantization: source converted from ",
-                  data_type_to_string(orig_src_dtype), " to ",
-                  data_type_to_string(quant_dtype),
+                  dtype_info(orig_src_dtype), " to ",
+                  dtype_info(quant_dtype),
                   " (scale_elems=", ns, ", zp_elems=", nz, ")");
     }
   } else {

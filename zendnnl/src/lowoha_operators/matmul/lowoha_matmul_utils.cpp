@@ -304,14 +304,14 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
 
   if ((!is_f32_src && !is_bf16_src && !is_u8_src && !is_s8_src && !is_f16_src)) {
     log_error("Unsupported source data type: ",
-              data_type_to_string(params.dtypes.src));
+              dtype_info(params.dtypes.src));
     return status_t::failure;
   }
 
   if ((!is_f32_out && !is_bf16_out && !is_u8_out && !is_s8_out && !is_s32_out &&
        !is_f16_out)) {
     log_error("Unsupported destination data type: ",
-              data_type_to_string(params.dtypes.dst));
+              dtype_info(params.dtypes.dst));
     return status_t::failure;
   }
   // F32 src with dst BF16/F16 is not supported
@@ -428,29 +428,6 @@ const char *kernel_to_string(matmul_algo_t kernel) {
   }
 }
 
-const char *data_type_to_string(data_type_t dtype) {
-  switch (dtype) {
-  case data_type_t::none:
-    return "none";
-  case data_type_t::f32:
-    return "f32";
-  case data_type_t::bf16:
-    return "bf16";
-  case data_type_t::s4:
-    return "s4";
-  case data_type_t::s8:
-    return "s8";
-  case data_type_t::u8:
-    return "u8";
-  case data_type_t::s32:
-    return "s32";
-  case data_type_t::f16:
-    return "f16";
-  default:
-    return "unknown";
-  }
-}
-
 std::string post_op_data_types_to_string(const matmul_params &params) {
   std::ostringstream post_op_dtypes;
   bool first = true;
@@ -460,7 +437,7 @@ std::string post_op_data_types_to_string(const matmul_params &params) {
       if (!first) {
         post_op_dtypes << ",";
       }
-      post_op_dtypes << data_type_to_string(po.dtype);
+      post_op_dtypes << dtype_info(po.dtype);
       first = false;
     }
   }

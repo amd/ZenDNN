@@ -225,15 +225,6 @@ std::string post_op_names_to_string(const matmul_params &params);
  */
 const char *kernel_to_string(matmul_algo_t kernel);
 
-/**
- * @brief Convert data_type_t enum to string representation.
- *
- * This function converts a data_type_t enum value to its string representation.
- *
- * @param dtype The data_type_t enum value to convert.
- * @return A const char* pointer to the string representation of the data type.
- */
-const char *data_type_to_string(data_type_t dtype);
 
 /**
  * @brief Get post-op data types as a comma-separated string for binary_add/binary_mul.
