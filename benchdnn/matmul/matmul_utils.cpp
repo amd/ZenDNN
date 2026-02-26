@@ -152,19 +152,31 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
           binary_post_op_pos++;
         }
       }
-      // Parse kernel name (default to 'aocl_dlp' if empty)
-      if (fields[id++].empty()) {
-        commonlog_warning("No kernel name specified. Defaulting to 'aocl_dlp'.");
-        cfg.kernel_name = "aocl_dlp";
-      }
-      else {
-        cfg.kernel_name = fields[id - 1];
-        if (options.ndims > 2 && (cfg.kernel_name != "aocl_dlp" &&
-                                  cfg.kernel_name != "onednn")) {
-          commonlog_error("For BMM, kernel name should be 'aocl_dlp'.");
-          continue;
+      zendnnl::ops::matmul_config_t &matmul_config =
+        zendnnl::ops::matmul_config_t::instance();
+      int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo() :
+                      matmul_config.get_algo();
+      matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
+      if (algo == matmul_algo_t::none) {
+        // Parse kernel name (default to 'aocl_dlp' if empty)
+        if (fields[id].empty()) {
+          commonlog_warning("No kernel name specified. Defaulting to 'aocl_dlp'.");
+          cfg.kernel_name = "aocl_dlp";
+        }
+        else {
+          cfg.kernel_name = fields[id];
+          if (!validateMatmulKernelName(cfg.kernel_name)) {
+            commonlog_warning("Unknown kernel name '", cfg.kernel_name,
+                              "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
+                              "batched_sgemm, auto, dynamic_dispatch, reference. Using 'aocl_dlp' instead.");
+            cfg.kernel_name = "aocl_dlp";
+          }
         }
       }
+      else {
+        cfg.kernel_name = algoToStr(algo);
+      }
+      id++;
 
       std::string transA_flag = fields[id];
       std::transform(transA_flag.begin(), transA_flag.end(), transA_flag.begin(),
@@ -200,38 +212,45 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       id++;
       cfg.beta = fields[id].empty() ? 0.0f : std::stof(fields[id]);
       id++;
-      if (!fields[id].empty()) {
-        std::string scale_gran = fields[id];
-        std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),
-                       ::tolower);
-        if (scale_gran == "per-channel" || scale_gran == "channel") {
-          cfg.scale_granularity = "channel";
-        }
-        else if (scale_gran == "per-group" || scale_gran == "group") {
-          cfg.scale_granularity = "group";
-        }
-        else if (scale_gran == "per-tensor" || scale_gran == "tensor") {
-          cfg.scale_granularity = "tensor";
+      if (cfg.dt[1] == data_type_t::s4 || cfg.dt[1] == data_type_t::s8) {
+        if (!fields[id].empty()) {
+          std::string scale_gran = fields[id];
+          std::transform(scale_gran.begin(), scale_gran.end(), scale_gran.begin(),
+                         ::tolower);
+          if (scale_gran == "per-channel" || scale_gran == "channel") {
+            cfg.scale_granularity = "channel";
+          }
+          else if (scale_gran == "per-group" || scale_gran == "group") {
+            cfg.scale_granularity = "group";
+          }
+          else if (scale_gran == "per-tensor" || scale_gran == "tensor") {
+            cfg.scale_granularity = "tensor";
+          }
+          else {
+            cfg.scale_granularity = "channel";
+            commonlog_warning(
+              "Invalid value for weight scale granularity. Defaulting to 'per-channel'.");
+          }
         }
         else {
+          // Default to per-channel if not specified
           cfg.scale_granularity = "channel";
-          commonlog_warning(
-            "Invalid value for scale granularity. Defaulting to 'per-channel'.");
+          commonlog_warning("No weight scale granularity specified. Defaulting to 'per-channel'.");
         }
+        id++;
+        cfg.group_size = fields[id].empty() ? 0 : std::stoul(fields[id]);
+        id++;
+        // Defaulting scale data type to f32 if not specified
+        cfg.scale_dt = fields[id].empty() ? zendnnl::common::data_type_t::f32 :
+                       strToDatatype(fields[id]);
+        id++;
       }
       else {
-        // Default to per-channel if not specified
         cfg.scale_granularity = "none";
+        cfg.group_size = 0;
+        cfg.scale_dt = zendnnl::common::data_type_t::f32;
+        id += 3;
       }
-      id++;
-      if (cfg.scale_granularity == "group") {
-        cfg.group_size = fields[id].empty() ? 0 : std::stoul(fields[id]);
-      }
-      id++;
-      // Defaulting scale data type to f32 if not specified
-      cfg.scale_dt = fields[id].empty() ? zendnnl::common::data_type_t::f32 :
-                     strToDatatype(fields[id]);
-      id++;
       // Parse warmup iterations if provided, otherwise use 20% of main iterations
       if (id < fields.size() && !(fields[id].empty())) {
         cfg.warmup_iters = std::stoi(fields[id]);
@@ -418,7 +437,17 @@ void inputModelFileParser(std::ifstream &infile,
       cfg.dt.push_back(options.sdt);
       cfg.dt.push_back(options.wdt);
       cfg.dt.push_back(options.ddt);
-      cfg.kernel_name = options.kernel_name;
+      zendnnl::ops::matmul_config_t &matmul_config =
+        zendnnl::ops::matmul_config_t::instance();
+      int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo() :
+                      matmul_config.get_algo();
+      matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
+      if (algo == matmul_algo_t::none) {
+        cfg.kernel_name = options.kernel_name;
+      }
+      else {
+        cfg.kernel_name = algoToStr(algo);
+      }
       cfg.bias_dt = options.bias_dt;
       cfg.isTransA = options.isTransA;
       cfg.isTransB = options.isTransB;
@@ -465,7 +494,17 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     cfg.dt.push_back(options.sdt);
     cfg.dt.push_back(options.wdt);
     cfg.dt.push_back(options.ddt);
-    cfg.kernel_name = options.kernel_name;
+    zendnnl::ops::matmul_config_t &matmul_config =
+      zendnnl::ops::matmul_config_t::instance();
+    int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo() :
+                    matmul_config.get_algo();
+    matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
+    if (algo == matmul_algo_t::none) {
+      cfg.kernel_name = options.kernel_name;
+    }
+    else {
+      cfg.kernel_name = algoToStr(algo);
+    }
     cfg.bias_dt = options.bias_dt;
     if (options.post_ops.size() > 0) {
       auto binary_post_op_pos = 0;

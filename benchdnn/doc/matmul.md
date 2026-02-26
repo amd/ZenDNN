@@ -17,6 +17,7 @@ Run the matmul benchmark using one of the following input methods:
 > **Note:**
 > - When `--ndims=3` is specified, the benchmark runs in batched matmul (BMM) mode. In this case, `bs` (batch size) must be provided.
 > - The `--lowoha` option controls benchmarking for low overhead API. User can pass either `--lowoha=true` or `--lowoha=false`. If not specified, it is enabled by default.
+> - Algorithm selection can be overridden via environment variables `ZENDNNL_MATMUL_ALGO` (matmul) and `ZENDNNL_BMM_ALGO` (BMM).
 
 ### 1. Input File (`--input_file`)
 Provide a file with one configuration per line. Each line should contain:
@@ -71,8 +72,8 @@ Provide a model file with the following parameters:
 - `m` (Rows in src) *(optional; can be specified in the file or via the `--m` command-line option)*
 - `k` (Columns in src / rows in weights)
 - `n` (Columns in weights)
-- `bias` (true/false)
 - `postops` (Post-operations)
+- `bias` (true/false)
 
 Other options (e.g., `iters`, `dt`, etc.) can be provided via command-line arguments.
 
@@ -98,6 +99,21 @@ All configuration parameters can be provided directly via command-line options.
 
 ---
 
+### 4. Algorithm selection via environment variables
+
+The matmul benchmark reads algorithm selection from environment variables. When set, these override the `kernel` (input file) or `--kernel_name` (command line) for the backend used at runtime.
+
+If the variable is unset, algorithm selection falls back to the `kernel` / `--kernel_name` from the input file or command line.
+
+**Example usage:**
+```sh
+export ZENDNNL_MATMUL_ALGO=4
+./install/benchdnn/bin/benchdnn --op=matmul --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32
+export ZENDNNL_BMM_ALGO=auto
+./install/benchdnn/bin/benchdnn --op=matmul --ndims=3 --input_file=bmm_inputs.txt
+```
+
+---
 
 ## Output
 

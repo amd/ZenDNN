@@ -131,6 +131,10 @@ status_t matmul_impl_t::update_matmul_kernel() {
   // Use BMM algo for batch operations, otherwise use matmul algo
   int32_t algo = is_bmm ? matmul_config.get_bmm_algo() : matmul_config.get_algo();
 
+  if (is_bmm && algo == static_cast<int>(matmul_algo_t::none)) {
+    algo = static_cast<int>(matmul_algo_t::aocl_dlp);
+  }
+
   if (algo == static_cast<int>(matmul_algo_t::aocl_dlp)) {
     forced_kernel = "aocl_dlp";
   }

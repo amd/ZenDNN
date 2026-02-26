@@ -211,6 +211,72 @@ std::string postOpsToStr(post_op_type_t post_op) {
   }
 }
 
+matmul_algo_t strToAlgo(std::string str) {
+  if (str == "dynamic_dispatch") {
+    return matmul_algo_t::dynamic_dispatch;
+  }
+  if (str == "aocl_dlp_blocked") {
+    return matmul_algo_t::aocl_dlp_blocked;
+  }
+  if (str == "onednn_blocked") {
+    return matmul_algo_t::onednn_blocked;
+  }
+  if (str == "libxsmm_blocked") {
+    return matmul_algo_t::libxsmm_blocked;
+  }
+  if (str == "aocl_dlp") {
+    return matmul_algo_t::aocl_dlp;
+  }
+  if (str == "onednn") {
+    return matmul_algo_t::onednn;
+  }
+  if (str == "libxsmm") {
+    return matmul_algo_t::libxsmm;
+  }
+  if (str == "batched_sgemm") {
+    return matmul_algo_t::batched_sgemm;
+  }
+  if (str == "auto") {
+    return matmul_algo_t::auto_tuner;
+  }
+  if (str == "reference") {
+    return matmul_algo_t::reference;
+  }
+  return matmul_algo_t::none;
+}
+
+std::string algoToStr(matmul_algo_t algo) {
+  switch (algo) {
+  case matmul_algo_t::dynamic_dispatch:
+    return "dynamic_dispatch";
+  case matmul_algo_t::aocl_dlp_blocked:
+    return "aocl_dlp_blocked";
+  case matmul_algo_t::onednn_blocked:
+    return "onednn_blocked";
+  case matmul_algo_t::libxsmm_blocked:
+    return "libxsmm_blocked";
+  case matmul_algo_t::aocl_dlp:
+    return "aocl_dlp";
+  case matmul_algo_t::onednn:
+    return "onednn";
+  case matmul_algo_t::libxsmm:
+    return "libxsmm";
+  case matmul_algo_t::batched_sgemm:
+    return "batched_sgemm";
+  case matmul_algo_t::auto_tuner:
+    return "auto";
+  case matmul_algo_t::reference:
+    return "reference";
+  default:
+    return "none";
+  }
+}
+
+bool validateMatmulKernelName(const std::string &kernel_name) {
+  return std::find(VALID_KERNEL_NAMES.begin(), VALID_KERNEL_NAMES.end(),
+                   kernel_name) != VALID_KERNEL_NAMES.end();
+}
+
 #if COLD_CACHE
 void flush_cache(size_t cache_size) {
   // Pre-calculate to avoid runtime variability
@@ -382,6 +448,12 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.kernel_name = arg.substr(14);
+    if (!validateMatmulKernelName(options.kernel_name)) {
+      commonlog_warning("Unknown kernel name '", options.kernel_name,
+                        "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
+                        "batched_sgemm, auto, dynamic_dispatch, reference. Using 'aocl_dlp' instead.");
+      options.kernel_name = "aocl_dlp";
+    }
   }
   else if (arg.find("--bias_dt=") == 0) {
     if (arg.substr(10).empty()) {

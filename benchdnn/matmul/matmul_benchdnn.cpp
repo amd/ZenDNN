@@ -79,7 +79,10 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
       }
     }
     matmul_operator.set_output("matmul_output", output_tensor);
-    status = matmul_operator.set_forced_kernel(cfg.kernel_name).execute();
+    if (cfg.kernel_name != "none") {
+      matmul_operator.set_forced_kernel(cfg.kernel_name);
+    }
+    status = matmul_operator.execute();
     if (status == status_t::success) {
       testlog_info("<",matmul_operator.get_name(),">",
                    " operator execution successful.");
@@ -146,9 +149,11 @@ int run_matmul(tensor_t output_tensor, tensor_t input_tensor, tensor_t weights,
                                   binary_post_ops_tensors[i]);
       }
     }
-    status = matmul_operator.set_output("matmul_output", output_tensor)
-             .set_forced_kernel(cfg.kernel_name)
-             .execute();
+    matmul_operator.set_output("matmul_output", output_tensor);
+    if (cfg.kernel_name != "none") {
+      matmul_operator.set_forced_kernel(cfg.kernel_name);
+    }
+    status = matmul_operator.execute();
     auto end_operator_execution = std::chrono::high_resolution_clock::now();
 
     stats.context_creation_ms += (std::chrono::duration<double, std::milli>
@@ -319,6 +324,9 @@ int bench(const std::string &in_filename, const std::string &out_filename,
          ) {
 
   std::vector<MatmulConfig> matmulConfig;
+  zendnnl::ops::matmul_config_t &matmul_config =
+    zendnnl::ops::matmul_config_t::instance();
+  matmul_config.set_env_config();
   bool isPipeline = false;
   if (inputMode == InputMode::FILE) {
     // Open the input file for reading benchmark configurations

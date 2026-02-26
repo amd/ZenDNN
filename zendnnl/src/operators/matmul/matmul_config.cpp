@@ -22,7 +22,7 @@ namespace ops {
 void matmul_config_t::set_default_config() {
   // Set default configuration for matmul
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
-  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::aocl_dlp);
+  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
   set_algo(matmul_algo);
   set_bmm_algo(bmm_algo);
   set_weight_cache(1);
@@ -37,7 +37,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   }
   // get matmul_algo
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
-  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::aocl_dlp);
+  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 1;
   bool zp_comp_cache_enabled = true;  // Default enabled
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
@@ -85,12 +85,6 @@ status_t matmul_config_t::set_user_config(json config_json) {
       if (! bmm_algo_str.empty()) {
         bmm_algo = static_cast<int32_t>(str_to_matmul_algo(bmm_algo_str));
       }
-    }
-
-    // If bmm_kernel is not specified or set to "none", fallback to aocl_dlp
-    if (bmm_algo_json.empty() ||
-        bmm_algo == static_cast<int32_t>(matmul_algo_t::none)) {
-      bmm_algo = static_cast<int32_t>(matmul_algo_t::aocl_dlp);
     }
 
     auto matmul_weight_cache_json = matmul_json["weight_cache"];
@@ -165,8 +159,7 @@ void matmul_config_t::set_env_config() {
   }
   set_algo(matmul_algo);
   char *bmm_algo_env = std::getenv("ZENDNNL_BMM_ALGO");
-  int32_t bmm_algo = static_cast<int32_t>
-                     (matmul_algo_t::aocl_dlp);  // Default to aocl_dlp
+  int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
   if (bmm_algo_env) {
     std::string bmm_algoStr(bmm_algo_env);
     std::transform(bmm_algoStr.begin(), bmm_algoStr.end(), bmm_algoStr.begin(),
@@ -194,11 +187,6 @@ void matmul_config_t::set_env_config() {
         bmm_algo = static_cast<int32_t>(matmul_algo_t::algo_count);
       }
     }
-  }
-
-  // If ZENDNNL_BMM_ALGO is set to -1 (none), fallback to aocl_dlp
-  if (bmm_algo == static_cast<int32_t>(matmul_algo_t::none)) {
-    bmm_algo = static_cast<int32_t>(matmul_algo_t::aocl_dlp);
   }
 
   set_bmm_algo(bmm_algo);

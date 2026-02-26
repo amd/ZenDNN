@@ -685,7 +685,9 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   if (batch_count > 1) {
     // Get BMM algo for batched matrix multiplication
     algo = params.lowoha_algo == matmul_algo_t::none ?
-           matmul_config.get_bmm_algo() : static_cast<int>(params.lowoha_algo);
+           (matmul_config.get_bmm_algo() == static_cast<int>(matmul_algo_t::none) ?
+            static_cast<int>(matmul_algo_t::aocl_dlp) : matmul_config.get_bmm_algo()) :
+           static_cast<int>(params.lowoha_algo);
   }
   else {
     // Get regular matmul algo for single matrix multiplication
