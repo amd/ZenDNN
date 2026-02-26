@@ -19,11 +19,21 @@
 #include "lowoha_operators/softmax/lowoha_softmax.hpp"
 #include <vector>
 #include <limits>
+#include <cstdlib>
 #include <omp.h>
 
 namespace zendnnl {
 namespace lowoha {
 namespace sdpa {
+
+static thread_local void  *scores_ptr  = nullptr;
+static thread_local size_t scores_size = 0;
+
+void sdpa_free_scratch() {
+  free(scores_ptr);
+  scores_ptr  = nullptr;
+  scores_size = 0;
+}
 
 status_t sdpa_direct(
   const void *query,
@@ -46,20 +56,8 @@ status_t sdpa_direct(
     return status_t::failure;
   }
 
-  // Log API call
-  [[maybe_unused]] std::ostringstream ss;
-  if (apilog_info_enabled() || is_profile) {
-    ss << "LOWOHA sdpa_direct: batch=" << params.batch
-       << ", num_heads=" << params.num_heads
-       << ", seq_len=" << params.seq_len
-       << ", head_dim=" << params.head_dim
-       << ", scale=" << params.scale
-       << ", is_causal=" << (params.is_causal ? "true" : "false")
-       << ", has_mask=" << (params.has_attn_mask ? "true" : "false")
-       << ", q_dt=" << static_cast<int>(params.q_dt)
-       << ", out_dt=" << static_cast<int>(params.out_dt);
-  }
-  apilog_info(ss.str());
+  // Log string built lazily -- only after computation when profiling
+  const bool needs_log = apilog_info_enabled() || is_profile;
 
   // Calculate dimensions
   const uint64_t batch = params.batch;
@@ -85,25 +83,45 @@ status_t sdpa_direct(
     mask_po.buff = const_cast<void *>(attn_mask);
     mask_po.dtype = params.mask_dt == data_type_t::none ? data_type_t::f32
                     : params.mask_dt;
-    if (batch_heads == 1) {
-      mask_po.dims = {static_cast<int64_t>(seq_len),
-                      static_cast<int64_t>(seq_len)
-                     };
+
+    // Use actual mask dims provided by caller (already reshaped to 3D)
+    if (params.mask_ndims > 0) {
+      for (int i = 0; i < params.mask_ndims; ++i) {
+        mask_po.dims.push_back(params.mask_dims[i]);
+      }
     }
     else {
-      mask_po.dims = {static_cast<int64_t>(batch_heads),
-                      static_cast<int64_t>(seq_len),
-                      static_cast<int64_t>(seq_len)
-                     };
+      // Fallback: assume full [batch_heads, seq_len, seq_len]
+      if (batch_heads == 1) {
+        mask_po.dims = {static_cast<int64_t>(seq_len),
+                        static_cast<int64_t>(seq_len)};
+      }
+      else {
+        mask_po.dims = {static_cast<int64_t>(batch_heads),
+                        static_cast<int64_t>(seq_len),
+                        static_cast<int64_t>(seq_len)};
+      }
     }
-    mask_po.leading_dim = static_cast<int>(seq_len);
+    mask_po.leading_dim = static_cast<int>(
+        mask_po.dims[mask_po.dims.size() - 1]);
     mask_postops.push_back(mask_po);
   }
 
-  // Allocate intermediate buffer for scores: [batch * num_heads, seq_len, seq_len]
-  const uint64_t scores_size = batch_heads * seq_len * seq_len;
-  std::vector<char> scores_buffer(scores_size * elem_size);
-  void *scores = scores_buffer.data();
+  // Scratch buffer for scores: [batch * num_heads, seq_len, seq_len]
+  // Reuses buffer across calls; only reallocates when a larger size is needed.
+  // Call sdpa_free_scratch() to release.
+  const uint64_t scores_bytes = batch_heads * seq_len * seq_len * elem_size;
+  if (scores_size < scores_bytes) {
+    free(scores_ptr);
+    scores_ptr = malloc(scores_bytes);
+    if (!scores_ptr) {
+      scores_size = 0;
+      log_error("SDPA: Failed to allocate scores buffer");
+      return status_t::failure;
+    }
+    scores_size = scores_bytes;
+  }
+  void *scores = scores_ptr;
 
   // =========================================================================
   // Step 1: BMM - scores = Q @ K^T (+ attn_mask post-op if provided)
@@ -182,8 +200,8 @@ status_t sdpa_direct(
   // =========================================================================
   {
     softmax::softmax_params sm_params;
-    sm_params.batch = batch_heads * seq_len;  // Flatten batch and seq_len_q
-    sm_params.axis_dim = seq_len;             // Softmax over last dimension
+    sm_params.batch = batch_heads * seq_len;
+    sm_params.axis_dim = seq_len;
     sm_params.axis = -1;
     sm_params.log_softmax = false;
     sm_params.src_dt = params.q_dt;
@@ -191,10 +209,11 @@ status_t sdpa_direct(
     sm_params.num_threads = num_threads;
     sm_params.algorithm = softmax::softmax_algo_t::onednn;
 
-    // Setup shape for OneDNN backend (required)
-    sm_params.ndims = 2;
-    sm_params.shape[0] = batch_heads * seq_len;
+    // 3D shape [batch_heads, seq_len, seq_len] — single onednn call for all heads
+    sm_params.ndims = 3;
+    sm_params.shape[0] = batch_heads;
     sm_params.shape[1] = seq_len;
+    sm_params.shape[2] = seq_len;
 
     status_t status = softmax::softmax_direct(
                         scores,     // input (in-place)
@@ -257,11 +276,26 @@ status_t sdpa_direct(
     }
   }
 
-
   if (is_profile) {
     profiler.tbp_stop();
-    profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
-                       profiler.get_res_str());
+  }
+
+  if (needs_log) {
+    std::ostringstream ss;
+    ss << "LOWOHA sdpa_direct: batch=" << params.batch
+       << ", num_heads=" << params.num_heads
+       << ", seq_len=" << params.seq_len
+       << ", head_dim=" << params.head_dim
+       << ", scale=" << params.scale
+       << ", is_causal=" << (params.is_causal ? "true" : "false")
+       << ", has_mask=" << (params.has_attn_mask ? "true" : "false")
+       << ", q_dt=" << static_cast<int>(params.q_dt)
+       << ", out_dt=" << static_cast<int>(params.out_dt);
+    apilog_info(ss.str());
+    if (is_profile) {
+      profilelog_verbose(ss.str(), ", time=", profiler.tbp_elapsedtime(),
+                         profiler.get_res_str());
+    }
   }
 
   return status_t::success;

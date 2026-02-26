@@ -65,6 +65,8 @@ struct sdpa_params {
   // Mask parameters
   mask_type_t mask_type;      ///< Type of attention mask
   bool has_attn_mask;         ///< Whether attention mask is provided
+  int mask_ndims;             ///< Number of dims in the (reshaped 3D) mask
+  int64_t mask_dims[3];       ///< Mask shape after reshape to 3D [batch_heads, seq_q, seq_k]
 
   // Data types
   data_type_t q_dt;           ///< Query data type
@@ -82,7 +84,7 @@ struct sdpa_params {
   sdpa_params() : batch(1), num_heads(1), seq_len(0),
     head_dim(0), scale(0.0f), is_causal(false),
     dropout_p(0.0f), mask_type(mask_type_t::none),
-    has_attn_mask(false),
+    has_attn_mask(false), mask_ndims(0), mask_dims{0, 0, 0},
     q_dt(data_type_t::none), k_dt(data_type_t::none),
     v_dt(data_type_t::none), out_dt(data_type_t::none),
     mask_dt(data_type_t::none),

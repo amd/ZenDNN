@@ -57,6 +57,9 @@ status_t sdpa_direct(
   sdpa_params &params
 );
 
+// Free the thread-local scratch buffer. Must be called from the same thread.
+void sdpa_free_scratch();
+
 } // namespace sdpa
 } // namespace lowoha
 } // namespace zendnnl
