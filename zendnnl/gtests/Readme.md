@@ -224,9 +224,9 @@ cmake --build .
      - `true`: Use Low Overhead API
      - `false`: Use Regular API
    - **Default behavior varies by test suite**:
-     - **Reorder tests**: 
-       - Default (no flag): Runs only regular reorder tests (matmul weight blocking)
-       - `--lowoha true`: Runs only LOWOHA reorder tests (quantization/dequantization)
+     - **Reorder tests**:
+       - LOWOHA reorder tests always run (default)
+       - `--lowoha false`: Regular reorder tests additionally run alongside LOWOHA tests
      - **Matmul/BatchMatmul tests**: Tests are automatically partitioned into thirds:
        - First third: LOWOHA off
        - Second third: LOWOHA on
@@ -273,7 +273,7 @@ cmake --build .
  - If **`<num_of_tests>`** parameter is not provided, gtest sets the number of tests to a default value i.e. 1000.
  - If **`<Backend>`** parameter is not provided, gtest will randomly select from available backends based on compilation flags.
  - If **`<lowoha>`** parameter is not provided:
-   - **Reorder tests**: Only regular reorder tests are run (use `--lowoha true` for LOWOHA tests)
+   - **Reorder tests**: LOWOHA reorder tests always run; use `--lowoha false` to additionally enable regular tests
    - **Matmul/BatchMatmul tests**: Tests are partitioned to cover both LOWOHA and non-LOWOHA scenarios
    - **Embedding/EmbeddingBag tests**: Random 50/50 selection between LOWOHA on/off
  - If **`<num_threads>`** parameter is not provided, a random value is selected from available thread count.
@@ -330,43 +330,48 @@ M,K,N,postOp,kernel,transA,transB,inplace_reorder
 
 ## **Examples**
 ### Reorder Tests (Reorder + Matmul)
- - Reorder TestSuite has two modes: Regular (default) and LOWOHA (`--lowoha true`)
- - Regular testcases: F32_F32, BF16_F32, BF16_BF16, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride
- - LOWOHA testcases: BF16_QUANT, FP32_QUANT, BF16_DEQUANT, FP32_DEQUANT, FP32_BF16_CONV, FP32_BF16_CONV_SCALED, QUANT_STRIDED, DEQUANT_STRIDED, FP32_BF16_CONV_STRIDED
+ - Reorder TestSuite has LOWOHA tests (always run) and Regular tests (run with `--lowoha false`)
+ - LOWOHA testcases (always run): BF16_QUANT, FP32_QUANT, BF16_DEQUANT, FP32_DEQUANT, FP32_BF16_CONV, FP32_BF16_CONV_SCALED, QUANT_STRIDED, DEQUANT_STRIDED, FP32_BF16_CONV_STRIDED, FP32_DYN_QUANT, BF16_DYN_QUANT
+ - Regular testcases (require `--lowoha false`): F32_F32, BF16_F32, BF16_BF16, F32, BF16, S8, F32_F32_Stride, BF16_F32_Stride, BF16_BF16_Stride
 
 1. Run all BF16 reorder tests followed by Matmul(BF16 Input, F32 Output):
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_F32/*
+./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.BF16_F32/*
 ```
 2. Run all BF16 reorder tests followed by Matmul(BF16 Input, BF16 Output):
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_BF16/*
+./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.BF16_BF16/*
 ```
 3. Run all FP32 reorder tests followed by Matmul(F32 Input, F32 Output):
 ```bash
-./install/gtests/gtests --gtest_filter=Reorder/TestReorder.F32_F32/*
+./install/gtests/gtests --lowoha false --gtest_filter=Reorder/TestReorder.F32_F32/*
 ```
 4. Run BF16 matmul tests with specific backend (AOCL DLP):
 ```bash
 ./install/gtests/gtests --gtest_filter=Matmul/TestMatmul.BF16_BF16/* --backend aocl_dlp
 ```
-5. Run all LOWOHA reorder tests:
+5. Run all LOWOHA reorder tests (default):
 ```bash
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.*
 ```
 6. Run LOWOHA quantization tests:
 ```bash
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.BF16_QUANT/*
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_QUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_QUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_QUANT/*
 ```
 7. Run LOWOHA dequantization tests:
 ```bash
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.BF16_DEQUANT/*
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_DEQUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DEQUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DEQUANT/*
 ```
-8. Run LOWOHA type conversion tests:
+8. Run LOWOHA dynamic quantization tests:
 ```bash
-./install/gtests/gtests --lowoha true --gtest_filter=Reorder/TestReorder.FP32_BF16_CONV/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_DYN_QUANT/*
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.BF16_DYN_QUANT/*
+```
+9. Run LOWOHA type conversion tests:
+```bash
+./install/gtests/gtests --gtest_filter=Reorder/TestReorder.FP32_BF16_CONV/*
 ```
 
 ### Matmul Tests

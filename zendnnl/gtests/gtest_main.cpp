@@ -129,20 +129,10 @@ int main(int argc, char **argv) {
       }
     }
     else {
-      // Create reorder tests based on --lowoha flag
-      // --lowoha true  : only LOWOHA reorder tests (quantization/dequantization)
-      // (default)      : only regular reorder tests (matmul weight reordering)
-      if (cmd_lowoha == "true" || cmd_lowoha == "1") {
-        // Add LOWOHA reorder tests
-        for (uint32_t i = 0; i < test_num; ++i) {
-          reorder_test.push_back(ReorderType(i, test_num, true));  // LOWOHA mode
-        }
-      }
-      else {
-        // Add regular reorder tests (default)
-        for (uint32_t i = 0; i < test_num; ++i) {
-          reorder_test.push_back(ReorderType(i, test_num));  // Regular mode (default)
-        }
+      // Create reorder tests - always with LOWOHA params initialized
+      // LOWOHA tests always run; regular tests additionally run with --lowoha false
+      for (uint32_t i = 0; i < test_num; ++i) {
+        reorder_test.push_back(ReorderType(i, test_num, true));  // LOWOHA mode
       }
     }
     // Creating Random parameters for Embedding Bag

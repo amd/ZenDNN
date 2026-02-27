@@ -530,14 +530,16 @@ size_t get_aligned_size(size_t alignment, size_t size_);
  *  @param dst_tensor Destination tensor
  *  @param scale_tensor Scale tensor for quantization
  *  @param zp_tensor Zero-point tensor for quantization
- *  @param params LOWOHA reorder test parameters (ReorderType with is_lowoha_test=true)
+ *  @param params LOWOHA reorder test parameters
+ *  @param dynamic_quant If true, enables dynamic quantization (default: false)
  *  @return status_t Success or failure status
  */
 status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
                                     tensor_t &dst_tensor,
                                     tensor_t &scale_tensor,
                                     tensor_t &zp_tensor,
-                                    const ReorderType &params);
+                                    const ReorderType &params,
+                                    bool dynamic_quant = false);
 
 /** @fn compare_lowoha_reorder_output
  *  @brief Compare LOWOHA reorder output with reference
@@ -546,7 +548,7 @@ status_t lowoha_reorder_kernel_test(tensor_t &src_tensor,
  *
  *  @param output_tensor Actual output tensor
  *  @param ref_tensor Reference tensor
- *  @param params LOWOHA reorder test parameters (ReorderType with is_lowoha_test=true)
+ *  @param params LOWOHA reorder test parameters
  *  @param is_comparison_successful Output flag indicating comparison result
  */
 void compare_lowoha_reorder_output(tensor_t &output_tensor,
@@ -607,5 +609,49 @@ std::vector<size_t> get_lowoha_strided_shape(const ReorderType &params,
  *  @return std::vector<size_t> Scale/zero-point shape vector
  */
 std::vector<size_t> get_lowoha_quant_shape(const ReorderType &params);
+
+/** @fn get_lowoha_dynamic_quant_shape
+ *  @brief Get quantization parameter shape for dynamic quantization
+ *
+ *  Randomly selects among all 5 supported quantization granularities to
+ *  ensure comprehensive coverage of the dynamic quantization API:
+ *
+ *  For 2D/3D tensors (5 granularities):
+ *    - tensor   → per-tensor:      {1,1} / {1,1,1}
+ *    - channel  → per-channel-row: {M,1} / {1,M,1}   (50% of channel tests)
+ *               → per-channel-col: {1,N} / {1,1,N}   (50% of channel tests)
+ *    - group    → per-group-row:   {G,N} / {1,G,N}   (50% of group tests)
+ *               → per-group-col:   {M,G} / {1,M,G}   (50% of group tests,
+ *                                                       falls back to row if N%G!=0)
+ *
+ *  For 1D tensors (2 granularities):
+ *    - tensor   → per-tensor:  {1}
+ *    - channel  → per-channel: {N}
+ *
+ *  @param params LOWOHA reorder test parameters
+ *  @return std::vector<size_t> Scale/zero-point shape vector
+ */
+std::vector<size_t> get_lowoha_dynamic_quant_shape(const ReorderType &params);
+
+
+/** @fn compare_lowoha_dyn_quant_output
+ *  @brief Compare original input with dequantized output for dynamic quant
+ *         round-trip validation
+ *
+ *  Compares the original source tensor with the dequantized tensor after a
+ *  dynamic quantization → dequantization round trip. Tolerance is computed
+ *  based on the quantization scale (max error ≈ scale/2 + numerical epsilon).
+ *
+ *  @param original_tensor Original source tensor (f32 or bf16)
+ *  @param dequant_tensor Dequantized tensor (same dtype as original)
+ *  @param scale_tensor Computed scale tensor from dynamic quantization
+ *  @param params LOWOHA reorder test parameters
+ *  @param is_comparison_successful Output flag indicating comparison result
+ */
+void compare_lowoha_dyn_quant_output(tensor_t &original_tensor,
+                                     tensor_t &dequant_tensor,
+                                     tensor_t &scale_tensor,
+                                     const ReorderType &params,
+                                     bool &is_comparison_successful);
 
 #endif
