@@ -423,6 +423,10 @@ const char *kernel_to_string(matmul_algo_t kernel) {
     return "reference";
   case matmul_algo_t::auto_tuner:
     return "auto_tuner";
+  case matmul_algo_t::ai_gemm:
+    return "ai_gemm";
+  case matmul_algo_t::ai_brgemm:
+    return "ai_brgemm";
   default:
     return "none";
   }

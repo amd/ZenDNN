@@ -96,7 +96,9 @@ TEST_P(TestMatmul,F32_F32) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
   bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
-                                 algo == matmul_algo_t::libxsmm_blocked);
+                                 algo == matmul_algo_t::libxsmm_blocked ||
+                                 algo == matmul_algo_t::ai_gemm ||
+                                 algo == matmul_algo_t::ai_brgemm);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
                              epsilon_f32, is_test_successful, enable_f32_relaxation,
@@ -280,7 +282,9 @@ TEST_P(TestMatmul, BF16_F32) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
   bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
-                                 algo == matmul_algo_t::libxsmm_blocked);
+                                 algo == matmul_algo_t::libxsmm_blocked ||
+                                 algo == matmul_algo_t::ai_gemm ||
+                                 algo == matmul_algo_t::ai_brgemm);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
                              epsilon_f32, is_test_successful, enable_f32_relaxation,
@@ -458,7 +462,9 @@ TEST_P(TestMatmul,F32_F32_Stride) {
   bool is_test_successful =
     (status == status_t::success && ref_status == status_t::success);
   bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
-                                 algo == matmul_algo_t::libxsmm_blocked);
+                                 algo == matmul_algo_t::libxsmm_blocked ||
+                                 algo == matmul_algo_t::ai_gemm ||
+                                 algo == matmul_algo_t::ai_brgemm);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
                              epsilon_f32, is_test_successful, enable_f32_relaxation,
@@ -521,7 +527,9 @@ TEST_P(TestMatmul,BF16_F32_Stride) {
     (status == status_t::success && ref_status == status_t::success);
 
   bool enable_f32_relaxation  = (algo == matmul_algo_t::libxsmm ||
-                                 algo == matmul_algo_t::libxsmm_blocked);
+                                 algo == matmul_algo_t::libxsmm_blocked ||
+                                 algo == matmul_algo_t::ai_gemm ||
+                                 algo == matmul_algo_t::ai_brgemm);
   if (is_test_successful) {
     compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m,n,k, rtol_f32,
                              epsilon_f32, is_test_successful, enable_f32_relaxation,

@@ -42,6 +42,8 @@ enum class matmul_algo_t : int32_t {
   batched_sgemm = 7,     /*!< Batched SGEMM */
   auto_tuner = 8,        /*!< Auto Tuner */
   reference = 9,         /*!< Reference */
+  ai_gemm = 10,          /*!< AI GEMM microkernel */
+  ai_brgemm = 11,        /*!< AI BRGEMM microkernel */
   algo_count             /*!< Algo count */
 };
 

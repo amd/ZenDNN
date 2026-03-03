@@ -15,6 +15,7 @@
 # *******************************************************************************/
 
 #add_subdirectory(native_kernels)
+add_subdirectory(matmul_ai)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp
@@ -32,6 +33,7 @@ set(lowoha_matmul_public_headers
   lowoha_matmul_utils.hpp
   bmm_partitioner.hpp
   matmul_partitioner.hpp
+
   lru_cache.hpp
   zendnnl_key.hpp)
 

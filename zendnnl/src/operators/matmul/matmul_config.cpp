@@ -264,6 +264,7 @@ void matmul_config_t::set_env_config() {
     }
   }
   set_tile_n(tile_n);
+
 }
 
 void matmul_config_t::set_algo(int32_t algo) {
@@ -329,7 +330,6 @@ int32_t matmul_config_t::get_tile_n() {
   return tile_n;
 }
 
-
 matmul_config_t &matmul_config_t::instance() {
   // The static local variable 'instance' is created on first call
   // and reused for all subsequent calls, providing global access
@@ -376,6 +376,12 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   }
   else if (algo == "auto_tuner") {
     return matmul_algo_t::auto_tuner;
+  }
+  else if (algo == "ai_gemm") {
+    return matmul_algo_t::ai_gemm;
+  }
+  else if (algo == "ai_brgemm") {
+    return matmul_algo_t::ai_brgemm;
   }
 
   return matmul_algo_t::algo_count;

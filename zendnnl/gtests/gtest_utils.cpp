@@ -155,6 +155,11 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
         po_type = post_op_type_t::none;
       }
     }
+    else if (algo == matmul_algo_t::ai_gemm ||
+             algo == matmul_algo_t::ai_brgemm) {
+      // ai_gemm/ai_brgemm are LOWOHA-only kernels, always force LOWOHA path
+      use_LOWOHA = true;
+    }
     else {
       use_LOWOHA = rand() % 2;
     }
@@ -1023,6 +1028,10 @@ std::string algoToStr(matmul_algo_t algo) {
     return "libxsmm";
   case matmul_algo_t::libxsmm_blocked:
     return "libxsmm_blocked";
+  case matmul_algo_t::ai_gemm:
+    return "ai_gemm";
+  case matmul_algo_t::ai_brgemm:
+    return "ai_brgemm";
   default:
     return "none";
   }
@@ -1678,6 +1687,15 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           else {
             postop_item.buff = nullptr; // For element-wise operations
             postop_item.dtype = out_data_type;
+          }
+
+          // Set default alpha/scale to match standard API (post_op_t) defaults
+          // so LOWOHA and reference kernels compute the same post-op.
+          if (po_type == post_op_type_t::swish) {
+            postop_item.alpha = 1.0f;  // swish_params.scale defaults to 1.0
+          }
+          else if (po_type == post_op_type_t::elu) {
+            postop_item.alpha = 1.0f;  // elu_params.alpha defaults to 1.0
           }
 
           params.postop_.push_back(postop_item);
