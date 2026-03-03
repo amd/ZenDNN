@@ -129,10 +129,9 @@ int main(int argc, char **argv) {
       }
     }
     else {
-      // Create reorder tests - always with LOWOHA params initialized
-      // LOWOHA tests always run; regular tests additionally run with --lowoha false
+      // Create reorder tests: --lowoha true = LOWOHA tests, --lowoha false = regular, omit = randomised.
       for (uint32_t i = 0; i < test_num; ++i) {
-        reorder_test.push_back(ReorderType(i, test_num, true));  // LOWOHA mode
+        reorder_test.push_back(ReorderType(i, test_num));
       }
     }
     // Creating Random parameters for Embedding Bag

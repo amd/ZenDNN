@@ -240,31 +240,23 @@ BatchMatmulType::BatchMatmulType(uint32_t test_index, uint32_t total_tests) {
 
 // @param test_index Index of current test (for partitioning)
 // @param total_tests Total number of tests
-// @param is_lowoha If true, also configure LOWOHA quantization params (regular tests still run)
-ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests,
-                         bool is_lowoha) {
-  is_lowoha_test = is_lowoha;
+ReorderType::ReorderType(uint32_t test_index, uint32_t total_tests) {
 
-  // ========== Always initialize Regular Reorder params ==========
-  // Regular tests always run (they don't support LOWOHA, ignore the flag)
-  inplace_reorder = rand() % 2;
-  mat = MatmulType(test_index, total_tests);
-
-  if (!is_lowoha) {
-    // Initialize LOWOHA fields to defaults (not used)
-    M = 0;
-    N = 0;
-    batch = 0;
-    src_dtype = data_type_t::f32;
-    dst_dtype = data_type_t::f32;
-    granularity = quant_granularity_t::tensor;
-    num_groups = 1;
-    use_strided_src = false;
-    lowoha_algo = reorder_algo_t::native;
-    num_threads = 1;
+  if (!cmd_lowoha.empty()) {
+    is_lowoha_test = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
   else {
-    // ========== Also initialize LOWOHA params when is_lowoha = true ==========
+    is_lowoha_test = rand() % 2;
+  }
+
+  if (!is_lowoha_test) {
+    // Initialize Regular Reorder params
+    inplace_reorder = rand() % 2;
+    mat = MatmulType(test_index, total_tests);
+    mat.use_LOWOHA = is_lowoha_test;
+  }
+  else {
+    // Initialize LOWOHA params
     // Randomly decide dimensionality: 1D (20%), 2D (50%), 3D (30%)
     int dim_choice = std::rand() % 10;
     if (dim_choice < 2) {
@@ -990,6 +982,69 @@ bool Parser::isInteger(const std::string &s) {
     }
   }
   return true;
+}
+
+void PrintTo(const MatmulType &value, ::std::ostream *os) {
+  *os << "m=" << value.matmul_m << ", k=" << value.matmul_k << ", n="
+      << value.matmul_n << ", transA=" << value.transA << ", transB="
+      << value.transB << ", alpha=" << value.alpha << ", beta=" << value.beta
+      << ", postop=" << postOpsToStr(value.po_type)
+      << ", algo=" << static_cast<int>(value.algo)
+      << ", src_dtype=" << dtype_info(value.source_dtype)
+      << ", dst_dtype=" << dtype_info(value.output_dtype)
+      << ", weight_granularity=" << static_cast<int>(value.weight_granularity)
+      << ", use_LOWOHA=" << value.use_LOWOHA
+      << ", num_threads=" << value.num_threads << ", seed=" << seed;
+}
+
+void PrintTo(const BatchMatmulType &value, ::std::ostream *os) {
+  *os << "batch_size=" << value.batch_size << ", ";
+  PrintTo(value.mat, os);
+}
+
+void PrintTo(const ReorderType &value, ::std::ostream *os) {
+  if (value.is_lowoha_test) {
+    *os << "M=" << value.M << ", N=" << value.N << ", batch=" << value.batch
+        << ", src_dtype=" << dtype_info(value.src_dtype)
+        << ", dst_dtype=" << dtype_info(value.dst_dtype)
+        << ", granularity=" << static_cast<int>(value.granularity)
+        << ", num_groups=" << value.num_groups
+        << ", use_strided_src=" << value.use_strided_src
+        << ", lowoha_algo=" << static_cast<int>(value.lowoha_algo)
+        << ", num_threads=" << value.num_threads << ", seed=" << seed;
+  }
+  else {
+    *os << "inplace_reorder=" << value.inplace_reorder << ", ";
+    PrintTo(value.mat, os);
+  }
+}
+
+void PrintTo(const EmbagType &value, ::std::ostream *os) {
+  *os << "num_embeddings=" << value.num_embeddings << ", embedding_dim=" <<
+      value.embedding_dim
+      << ", num_bags=" << value.num_bags << ", num_indices=" << value.num_indices
+      << ", algo=" << static_cast<int>(value.algo) << ", padding_index="
+      << value.padding_index << ", include_last_offset=" << value.include_last_offset
+      << ", is_weights=" << value.is_weights
+      << ", indices_dtype=" << dtype_info(value.indices_dtype)
+      << ", offsets_dtype=" << dtype_info(value.offsets_dtype)
+      << ", fp16_scale_bias=" << value.fp16_scale_bias
+      << ", strided=" << value.strided
+      << ", use_LOWOHA=" << value.use_LOWOHA << ", num_threads=" << value.num_threads
+      << ", seed=" << seed;
+}
+
+void PrintTo(const EmbeddingType &value, ::std::ostream *os) {
+  *os << "num_embeddings=" << value.num_embeddings
+      << ", embedding_dim=" << value.embedding_dim
+      << ", num_indices=" << value.num_indices
+      << ", padding_index=" << value.padding_index
+      << ", is_weights=" << value.is_weights
+      << ", indices_dtype=" << dtype_info(value.indices_dtype)
+      << ", fp16_scale_bias=" << value.fp16_scale_bias
+      << ", strided=" << value.strided
+      << ", use_LOWOHA=" << value.use_LOWOHA << ", num_threads=" << value.num_threads
+      << ", seed=" << seed;
 }
 
 matmul_algo_t strToAlgo(std::string str) {

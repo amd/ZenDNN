@@ -101,9 +101,7 @@ struct ReorderType {
 
   /// @param test_index Index of current test (for partitioning)
   /// @param total_tests Total number of tests
-  /// @param is_lowoha If true, configure for LOWOHA quantization tests
-  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1,
-              bool is_lowoha = false);
+  ReorderType(uint32_t test_index = 0, uint32_t total_tests = 1);
 };
 
 /** @brief Embag Op Parameters Structure */
@@ -270,6 +268,17 @@ const post_op_type_t post_op_arr[] = {
 
 //Supported Dtype declaration
 extern std::vector<data_type_t> dtype_arr;
+
+/** @brief Print MatmulType for GTest parameterized test failure messages. */
+void PrintTo(const MatmulType &value, ::std::ostream *os);
+/** @brief Print BatchMatmulType for GTest parameterized test failure messages. */
+void PrintTo(const BatchMatmulType &value, ::std::ostream *os);
+/** @brief Print ReorderType for GTest parameterized test failure messages. */
+void PrintTo(const ReorderType &value, ::std::ostream *os);
+/** @brief Print EmbagType for GTest parameterized test failure messages. */
+void PrintTo(const EmbagType &value, ::std::ostream *os);
+/** @brief Print EmbeddingType for GTest parameterized test failure messages. */
+void PrintTo(const EmbeddingType &value, ::std::ostream *os);
 
 /** @fn strToAlgo
  *  @brief Convert string representation to matmul algorithm type
