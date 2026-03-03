@@ -352,15 +352,21 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
   bool is_non_qunat_src_int8 = (dtypes.src == data_type_t::bf16 ||
                                 dtypes.src == data_type_t::f32) &&
                                is_int8;
-  // Count INT8 scale post-ops
+
+  size_t src_scale_nelems = get_num_elements(lowoha_param.quant_params.src_scale.dims);
+  bool is_sym_quant = is_int8 && dtypes.src == data_type_t::s8 &&
+                      !lowoha_param.quant_params.src_zp.buff &&
+                      src_scale_nelems > 1 &&
+                      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16);
+
+  // Count INT8 scale post-ops (sym_quant scales go via post_op_grp, not SCALE post-ops)
   int int8_scale_count = 0;
   if (is_int8) {
-    // Source scale
-
-    if (lowoha_param.quant_params.src_scale.buff && !is_non_qunat_src_int8) {
+    if (lowoha_param.quant_params.src_scale.buff && !is_non_qunat_src_int8 &&
+        !is_sym_quant) {
       int8_scale_count++;
     }
-    if (lowoha_param.quant_params.wei_scale.buff) {
+    if (lowoha_param.quant_params.wei_scale.buff && !is_sym_quant) {
       int8_scale_count++;
     }
     if (lowoha_param.quant_params.dst_scale.buff ||
@@ -553,6 +559,47 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     dlp_metadata->a_post_quant->scl->scale_factor_len = 1;
     dlp_metadata->a_post_quant->scl->scale_factor_type = DLP_F32;
   }
+  if (is_sym_quant) {
+    int64_t src_group_size = (src_scale_nelems == static_cast<size_t>(M))
+      ? K : K / (static_cast<int64_t>(src_scale_nelems) / M);
+
+    dlp_metadata->post_op_grp = static_cast<dlp_group_post_op *>(calloc(1,
+                                sizeof(dlp_group_post_op)));
+    if (!dlp_metadata->post_op_grp) {
+      cleanup_dlp_post_op(dlp_metadata);
+      return nullptr;
+    }
+    dlp_metadata->post_op_grp->group_size = static_cast<int>(src_group_size);
+    dlp_metadata->post_op_grp->seq_length = 1;
+
+    dlp_metadata->post_op_grp->a_scl = static_cast<dlp_sf_t *>(calloc(1,
+                                       sizeof(dlp_sf_t)));
+    if (!dlp_metadata->post_op_grp->a_scl) {
+      cleanup_dlp_post_op(dlp_metadata);
+      return nullptr;
+    }
+    dlp_metadata->post_op_grp->a_scl->scale_factor =
+      const_cast<void *>(lowoha_param.quant_params.src_scale.buff);
+    dlp_metadata->post_op_grp->a_scl->scale_factor_len = src_scale_nelems;
+    dlp_metadata->post_op_grp->a_scl->scale_factor_type =
+      to_dlp_type(lowoha_param.quant_params.src_scale.dt);
+
+    size_t wei_scale_nelems = get_num_elements(lowoha_param.quant_params.wei_scale.dims);
+    dlp_metadata->post_op_grp->b_scl = static_cast<dlp_sf_t *>(calloc(1,
+                                       sizeof(dlp_sf_t)));
+    if (!dlp_metadata->post_op_grp->b_scl) {
+      cleanup_dlp_post_op(dlp_metadata);
+      return nullptr;
+    }
+    dlp_metadata->post_op_grp->b_scl->scale_factor =
+      const_cast<void *>(lowoha_param.quant_params.wei_scale.buff);
+    dlp_metadata->post_op_grp->b_scl->scale_factor_len = wei_scale_nelems;
+    dlp_metadata->post_op_grp->b_scl->scale_factor_type =
+      to_dlp_type(lowoha_param.quant_params.wei_scale.dt);
+
+    dlp_metadata->post_op_grp->a_zp = nullptr;
+    dlp_metadata->post_op_grp->b_zp = nullptr;
+  }
   // Allocate scale for INT8
   if (scale_count > 0) {
     dlp_metadata->scale = static_cast<dlp_scale_t *>(calloc(scale_count,
@@ -720,9 +767,9 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     matrix_add_index++;
   }
 
-  // For INT8: Add source scale
+  // For INT8: Add source scale (skip for sym_quant, handled via post_op_grp)
   if (is_int8 && lowoha_param.quant_params.src_scale.buff &&
-      !is_non_qunat_src_int8) {
+      !is_non_qunat_src_int8 && !is_sym_quant) {
     dlp_metadata->seq_vector[op_index++] = SCALE;
     dlp_metadata->scale[scale_index].sf->scale_factor =
       const_cast<void *>(lowoha_param.quant_params.src_scale.buff);
@@ -738,8 +785,8 @@ dlp_metadata_t *create_dlp_post_op(const matmul_params &lowoha_param,
     scale_index++;
   }
 
-  // For INT8: Add weight scale
-  if (is_int8 && lowoha_param.quant_params.wei_scale.buff) {
+  // For INT8: Add weight scale (skip for sym_quant, handled via post_op_grp)
+  if (is_int8 && lowoha_param.quant_params.wei_scale.buff && !is_sym_quant) {
     dlp_metadata->seq_vector[op_index++] = SCALE;
     dlp_metadata->scale[scale_index].sf->scale_factor =
       const_cast<void *>(lowoha_param.quant_params.wei_scale.buff);
@@ -1244,6 +1291,18 @@ void cleanup_dlp_post_op(dlp_metadata_t *aocl_po) {
     }
 
     if (aocl_po->post_op_grp) {
+      if (aocl_po->post_op_grp->a_scl) {
+        free(aocl_po->post_op_grp->a_scl);
+      }
+      if (aocl_po->post_op_grp->b_scl) {
+        free(aocl_po->post_op_grp->b_scl);
+      }
+      if (aocl_po->post_op_grp->a_zp) {
+        free(aocl_po->post_op_grp->a_zp);
+      }
+      if (aocl_po->post_op_grp->b_zp) {
+        free(aocl_po->post_op_grp->b_zp);
+      }
       free(aocl_po->post_op_grp);
     }
 
@@ -1410,6 +1469,66 @@ template bool reorderAndCacheWeights<int8_t>(Key_matmul, const void *, void *&,
     int, int, int, char, char, char, get_reorder_buff_size_func_ptr,
     reorder_func_ptr<int8_t>, int);
 
+#if ZENDNNL_DEPENDS_AOCLDLP
+template <typename T>
+bool reorderAndCacheWeightsSymQuant(Key_matmul key, const void *weights,
+    void *&reorder_weights, const int k, const int n, const int ldb,
+    const char order, const char trans, char mem_format_b,
+    get_reorder_buf_size_sym_quant_func_ptr get_reorder_buf_size,
+    reorder_sym_quant_func_ptr<T> reorder_func,
+    DLP_SYMM_STAT_QUANT *symq_meta, int weight_cache_type) {
+
+  static lru_cache_t<Key_matmul, void *> matmul_weight_cache;
+  static std::mutex weight_cache_mutex;
+
+  if (mem_format_b == 'r') {
+    matmul_weight_cache.add(key, nullptr);
+    reorder_weights = const_cast<void *>(weights);
+    return true;
+  }
+
+  if (weight_cache_type == 0) {
+    apilog_info("AOCL sym_quant reorder weights (WEIGHT_CACHE_DISABLE)");
+    size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                   k, n, symq_meta, nullptr);
+    size_t alignment    = 64;
+    size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
+    reorder_weights     = (T *)aligned_alloc(alignment, reorder_size);
+    if (!reorder_weights) {
+      apilog_error("AOCL sym_quant reorder weights: aligned_alloc failed");
+      return false;
+    }
+    reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                 k, n, ldb, symq_meta, nullptr);
+  }
+  else if (weight_cache_type == 1) {
+    std::lock_guard<std::mutex> lock(weight_cache_mutex);
+    auto found_obj = matmul_weight_cache.find_key(key);
+    if (!found_obj) {
+      apilog_info("AOCL sym_quant reorder weights WEIGHT_CACHE_OUT_OF_PLACE");
+      size_t b_reorder_buf_siz_req = get_reorder_buf_size(order, trans, 'B',
+                                     k, n, symq_meta, nullptr);
+      size_t alignment    = 64;
+      size_t reorder_size = (b_reorder_buf_siz_req + alignment - 1) & ~(alignment - 1);
+      reorder_weights = (T *)aligned_alloc(alignment, reorder_size);
+      reorder_func(order, trans, 'B', (T *)weights, (T *)reorder_weights,
+                   k, n, ldb, symq_meta, nullptr);
+      matmul_weight_cache.add(key, reorder_weights);
+    }
+    else {
+      apilog_info("Read AOCL sym_quant cached weights WEIGHT_CACHE_OUT_OF_PLACE");
+      reorder_weights = matmul_weight_cache.get(key);
+    }
+  }
+  return true;
+}
+
+template bool reorderAndCacheWeightsSymQuant<int8_t>(Key_matmul, const void *,
+    void *&, int, int, int, char, char, char,
+    get_reorder_buf_size_sym_quant_func_ptr,
+    reorder_sym_quant_func_ptr<int8_t>, DLP_SYMM_STAT_QUANT *, int);
+#endif
+
 void woqReorderAndCacheWeightsAocl(Key_matmul key, const int8_t *weights,
                                    void *&reorder_weights, const int k, const int n, const int ldb,
                                    const bool is_weights_const, const char order, const char trans,
@@ -1483,9 +1602,22 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   matmul_config_t &matmul_config = matmul_config_t::instance();
   int32_t weight_cache_type = matmul_config.get_weight_cache();
 
-  // Create cache key once for both weight reordering and ZP compensation caching
+  size_t run_src_scale_nelems = get_num_elements(lowoha_param.quant_params.src_scale.dims);
+  bool is_sym_quant = dtypes.wei == data_type_t::s8 &&
+                      dtypes.src == data_type_t::s8 &&
+                      !lowoha_param.quant_params.src_zp.buff &&
+                      run_src_scale_nelems > 1 &&
+                      (dtypes.dst == data_type_t::f32 || dtypes.dst == data_type_t::bf16);
+
+  size_t cache_extra_hash = 0;
+  if (is_sym_quant) {
+    int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
+      ? K : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
+    cache_extra_hash = std::hash<int64_t>{}(src_grp);
+  }
   Key_matmul cache_key(transB == 't', K, N, ldb, B,
-                       static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked));
+                       static_cast<uint32_t>(matmul_algo_t::aocl_dlp_blocked),
+                       cache_extra_hash);
 
   // AOCL blocked kernel reordering for 2D MatMul
   if (kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked &&
@@ -1514,10 +1646,21 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                      weight_cache_type);
     }
     else if (lowoha_param.dtypes.wei == data_type_t::s8) {
-      // INT8 weight reordering - select based on source data type
-      if (lowoha_param.dtypes.src == data_type_t::s8 ||
-          lowoha_param.dtypes.src == data_type_t::bf16 ||
-          lowoha_param.dtypes.src == data_type_t::f32) {
+      if (is_sym_quant) {
+        int64_t src_grp = (run_src_scale_nelems == static_cast<size_t>(M))
+          ? K : K / (static_cast<int64_t>(run_src_scale_nelems) / M);
+        DLP_SYMM_STAT_QUANT symq_meta;
+        symq_meta.group_size = static_cast<int>(src_grp);
+        blocked_flag = reorderAndCacheWeightsSymQuant<int8_t>(cache_key, B,
+                       reordered_mem, K, N, ldb,
+                       'r', transB, mem_format_b,
+                       aocl_get_reorder_buf_size_s8s8s32os32_sym_quant,
+                       aocl_reorder_s8s8s32os32_sym_quant,
+                       &symq_meta, weight_cache_type);
+      }
+      else if (lowoha_param.dtypes.src == data_type_t::s8 ||
+               lowoha_param.dtypes.src == data_type_t::bf16 ||
+               lowoha_param.dtypes.src == data_type_t::f32) {
         blocked_flag = reorderAndCacheWeights<int8_t>(cache_key, B, reordered_mem, K,
                        N, ldb,
                        'r', transB, mem_format_b,
@@ -1744,40 +1887,61 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
   else if (dtypes.src == data_type_t::s8 && dtypes.wei == data_type_t::s8) {
     const int8_t *weight_ptr = is_weight_blocked ? static_cast<int8_t *>
                                (reordered_mem) : static_cast<const int8_t *>(B);
-    switch (dtypes.dst) {
-    case data_type_t::u8:
-      aocl_gemm_s8s8s32ou8(layout, transA, transB, M, N, K, alpha,
-                           static_cast<const int8_t *>(A), lda, mem_format_a,
-                           weight_ptr, ldb, mem_format_b, beta,
-                           static_cast<uint8_t *>(C), ldc, aocl_po);
-      break;
-    case data_type_t::s8:
-      aocl_gemm_s8s8s32os8(layout, transA, transB, M, N, K, alpha,
-                           static_cast<const int8_t *>(A), lda, mem_format_a,
-                           weight_ptr, ldb, mem_format_b, beta,
-                           static_cast<int8_t *>(C), ldc, aocl_po);
-      break;
-    case data_type_t::s32:
-      aocl_gemm_s8s8s32os32(layout, transA, transB, M, N, K, alpha,
-                            static_cast<const int8_t *>(A), lda, mem_format_a,
-                            weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<int32_t *>(C), ldc, aocl_po);
-      break;
-    case data_type_t::f32:
-      aocl_gemm_s8s8s32of32(layout, transA, transB, M, N, K, alpha,
-                            static_cast<const int8_t *>(A), lda, mem_format_a,
-                            weight_ptr, ldb, mem_format_b, beta,
-                            static_cast<float *>(C), ldc, aocl_po);
-      break;
-    case data_type_t::bf16:
-      aocl_gemm_s8s8s32obf16(layout, transA, transB, M, N, K, alpha,
+    if (is_sym_quant) {
+      switch (dtypes.dst) {
+      case data_type_t::f32:
+        aocl_gemm_s8s8s32of32_sym_quant(layout, transA, transB, M, N, K, alpha,
+                              static_cast<const int8_t *>(A), lda, mem_format_a,
+                              weight_ptr, ldb, mem_format_b, beta,
+                              static_cast<float *>(C), ldc, aocl_po);
+        break;
+      case data_type_t::bf16:
+        aocl_gemm_s8s8s32obf16_sym_quant(layout, transA, transB, M, N, K, alpha,
+                               static_cast<const int8_t *>(A), lda, mem_format_a,
+                               weight_ptr, ldb, mem_format_b, beta,
+                               static_cast<int16_t *>(C), ldc, aocl_po);
+        break;
+      default:
+        log_error("Unsupported output data type for sym_quant s8 source");
+        break;
+      }
+    }
+    else {
+      switch (dtypes.dst) {
+      case data_type_t::u8:
+        aocl_gemm_s8s8s32ou8(layout, transA, transB, M, N, K, alpha,
                              static_cast<const int8_t *>(A), lda, mem_format_a,
                              weight_ptr, ldb, mem_format_b, beta,
-                             static_cast<int16_t *>(C), ldc, aocl_po);
-      break;
+                             static_cast<uint8_t *>(C), ldc, aocl_po);
+        break;
+      case data_type_t::s8:
+        aocl_gemm_s8s8s32os8(layout, transA, transB, M, N, K, alpha,
+                             static_cast<const int8_t *>(A), lda, mem_format_a,
+                             weight_ptr, ldb, mem_format_b, beta,
+                             static_cast<int8_t *>(C), ldc, aocl_po);
+        break;
+      case data_type_t::s32:
+        aocl_gemm_s8s8s32os32(layout, transA, transB, M, N, K, alpha,
+                              static_cast<const int8_t *>(A), lda, mem_format_a,
+                              weight_ptr, ldb, mem_format_b, beta,
+                              static_cast<int32_t *>(C), ldc, aocl_po);
+        break;
+      case data_type_t::f32:
+        aocl_gemm_s8s8s32of32(layout, transA, transB, M, N, K, alpha,
+                              static_cast<const int8_t *>(A), lda, mem_format_a,
+                              weight_ptr, ldb, mem_format_b, beta,
+                              static_cast<float *>(C), ldc, aocl_po);
+        break;
+      case data_type_t::bf16:
+        aocl_gemm_s8s8s32obf16(layout, transA, transB, M, N, K, alpha,
+                               static_cast<const int8_t *>(A), lda, mem_format_a,
+                               weight_ptr, ldb, mem_format_b, beta,
+                               static_cast<int16_t *>(C), ldc, aocl_po);
+        break;
     default:
       log_error("Unsupported output data type for s8 source");
       break;
+      }
     }
   }
   else {
@@ -1788,7 +1952,7 @@ void run_dlp(char layout, char transA, char transB, int M, int N,
                                 reordered_mem != nullptr &&
                                 lowoha_param.mem_format_b != 'r'
                                 && kernel==zendnnl::ops::matmul_algo_t::aocl_dlp_blocked);
-  if (weight_cache_disabled || simulated_woq_free_buff)  {
+  if (weight_cache_disabled || simulated_woq_free_buff) {
     free(reordered_mem);
     reordered_mem = nullptr;
   }

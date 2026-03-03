@@ -146,6 +146,9 @@ status_t reorder_quantization_wrapper(
   rp.quant_params.scale.buff = scale_buff;
   rp.quant_params.scale.dt = params.quant_params.src_scale.dt;
   rp.quant_params.scale.dims = params.quant_params.src_scale.dims;
+  if (transA && rp.quant_params.scale.dims.size() == 2) {
+    std::swap(rp.quant_params.scale.dims[0], rp.quant_params.scale.dims[1]);
+  }
 
   if (needs_zp) {
     rp.quant_params.zero_point.buff = zp_buff;
@@ -165,6 +168,26 @@ status_t reorder_quantization_wrapper(
     if (is_batched) {
       batch_params.batch_stride_src =
           static_cast<size_t>(phys_rows * phys_cols);
+    }
+
+    if (transA && params.quant_params.src_scale.dims.size() == 2) {
+      const int64_t M_dim = params.quant_params.src_scale.dims[0];
+      const int64_t G_dim = params.quant_params.src_scale.dims[1];
+      if (M_dim != G_dim && M_dim > 1 && G_dim > 1) {
+        const size_t nelems = static_cast<size_t>(M_dim * G_dim);
+        const size_t elem_size = size_of(params.quant_params.src_scale.dt);
+        std::vector<uint8_t> tmp(nelems * elem_size);
+        uint8_t *buf = static_cast<uint8_t *>(scale_buff);
+        std::memcpy(tmp.data(), buf, nelems * elem_size);
+        #pragma omp parallel for collapse(2)
+        for (int64_t m = 0; m < M_dim; ++m) {
+          for (int64_t g = 0; g < G_dim; ++g) {
+            std::memcpy(buf + static_cast<size_t>(m * G_dim + g) * elem_size,
+                        tmp.data() + static_cast<size_t>(g * M_dim + m) * elem_size,
+                        elem_size);
+          }
+        }
+      }
     }
 
     params.quant_params.src_scale.buff = scale_buff;

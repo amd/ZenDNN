@@ -270,18 +270,38 @@ status_t matmul_impl_t::validate() {
 
   if (input->is_quantized()) {
     unsigned long scale_nelems = compute_product(input->get_quant_scale_size());
-    // TODO: Expand this support for different granularities
-    if (scale_nelems != 1) {
-      apilog_error("Source quant scale supports only per-tensor");
+    unsigned long M_dim = input_size.at(input_size.size()-2);
+    unsigned long K_dim = input_size.at(input_size.size()-1);
+    bool is_per_tensor_src = (scale_nelems == 1);
+    bool is_per_token_src = (scale_nelems == M_dim);
+    bool is_per_group_src = (scale_nelems > M_dim) && (scale_nelems % M_dim == 0) &&
+                            (K_dim % (scale_nelems / M_dim) == 0);
+    if (!(is_per_tensor_src || is_per_token_src || is_per_group_src)) {
+      apilog_error("Source quant scale: unsupported granularity");
       return status_t::failure;
     }
 
     if (input->get_quant_subtype() == quant_subtype_t::asymmetric) {
       auto zero_nelems = compute_product(input->get_quant_zero_size());
-      // TODO: Expand this support for different granularities
       if (zero_nelems != 1) {
         apilog_error("Source quant zero supports only per-tensor");
         return status_t::failure;
+      }
+    }
+
+    if (weights->is_quantized() && is_per_group_src) {
+      unsigned long N_dim = weights_size.at(weights_size.size()-1);
+      unsigned long wei_scale_nelems = compute_product(weights->get_quant_scale_size());
+      bool is_per_group_wei = (wei_scale_nelems > N_dim) &&
+                              (wei_scale_nelems % N_dim == 0);
+      if (is_per_group_wei) {
+        unsigned long src_groups = scale_nelems / M_dim;
+        unsigned long wei_groups = wei_scale_nelems / N_dim;
+        if (src_groups != wei_groups) {
+          apilog_error("Weight scale per-group count (", wei_groups,
+                       ") does not match source per-group count (", src_groups, ")");
+          return status_t::failure;
+        }
       }
     }
   }

@@ -262,9 +262,51 @@ status_t validate_matmul_direct_inputs(const void *src, const void *weight,
     return true;
   };
 
-  if (!validate_per_tensor(params.quant_params.src_scale.buff,
-                           params.quant_params.src_scale.dims, "Source quant scale") ||
-      !validate_per_tensor(params.quant_params.src_zp.buff,
+  if (params.quant_params.src_scale.buff) {
+    int64_t nelems = std::accumulate(
+        params.quant_params.src_scale.dims.begin(),
+        params.quant_params.src_scale.dims.end(),
+        int64_t{1}, std::multiplies<int64_t>());
+    if (nelems != 1) {
+      bool is_supported_src = (params.dtypes.src == data_type_t::s8 ||
+                               params.dtypes.src == data_type_t::bf16 ||
+                               params.dtypes.src == data_type_t::f32);
+      bool is_symmetric = (!params.quant_params.src_zp.buff);
+      bool is_supported_dst = (params.dtypes.dst == data_type_t::f32 ||
+                               params.dtypes.dst == data_type_t::bf16);
+      bool is_per_token = (nelems == static_cast<int64_t>(M));
+      bool is_per_group = (nelems > static_cast<int64_t>(M)) &&
+                          (nelems % static_cast<int64_t>(M) == 0) &&
+                          (static_cast<int64_t>(K) % (nelems / static_cast<int64_t>(M)) == 0);
+      if (!(is_supported_src && is_symmetric && is_supported_dst &&
+            (is_per_token || is_per_group))) {
+        log_error("Source quant scale: per-token/per-group requires s8/bf16/f32 src, "
+          "symmetric quantization, and f32/bf16 output");
+        return status_t::failure;
+      }
+      int64_t wei_scale_nelems = params.quant_params.wei_scale.buff
+        ? std::accumulate(params.quant_params.wei_scale.dims.begin(),
+                          params.quant_params.wei_scale.dims.end(),
+                          int64_t{1}, std::multiplies<int64_t>())
+        : 0;
+      if (is_per_token && wei_scale_nelems != static_cast<int64_t>(N)) {
+        log_error("Per-token source scale requires per-channel weight scale "
+                  "(expected ", N, " elements, got ", wei_scale_nelems, ")");
+        return status_t::failure;
+      }
+      if (is_per_group) {
+        int64_t src_num_groups = nelems / static_cast<int64_t>(M);
+        int64_t expected_wei_nelems = src_num_groups * static_cast<int64_t>(N);
+        if (wei_scale_nelems != expected_wei_nelems) {
+          log_error("Per-group source scale requires per-group weight scale "
+                    "(expected ", expected_wei_nelems,
+                    " elements, got ", wei_scale_nelems, ")");
+          return status_t::failure;
+        }
+      }
+    }
+  }
+  if (!validate_per_tensor(params.quant_params.src_zp.buff,
                            params.quant_params.src_zp.dims, "Source quant zero") ||
       !validate_per_tensor(params.quant_params.dst_scale.buff,
                            params.quant_params.dst_scale.dims, "Destination quant scale") ||
@@ -760,6 +802,21 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
   if (is_woq && (kernel != matmul_algo_t::aocl_dlp &&
                  kernel != matmul_algo_t::aocl_dlp_blocked)) {
     log_info("WOQ detected, switching to aocl_dlp_blocked kernel");
+    kernel = matmul_algo_t::aocl_dlp_blocked;
+  }
+
+  size_t src_scale_nelems = 1;
+  for (auto d : params.quant_params.src_scale.dims) {
+    src_scale_nelems *= static_cast<size_t>(d);
+  }
+  const bool is_sym_quant = params.dtypes.src == data_type_t::s8 &&
+                            params.dtypes.wei == data_type_t::s8 &&
+                            !params.quant_params.src_zp.buff &&
+                            src_scale_nelems > 1 &&
+                            (params.dtypes.dst == data_type_t::f32 ||
+                             params.dtypes.dst == data_type_t::bf16);
+
+  if (is_sym_quant && kernel != matmul_algo_t::aocl_dlp_blocked) {
     kernel = matmul_algo_t::aocl_dlp_blocked;
   }
 

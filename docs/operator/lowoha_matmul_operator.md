@@ -196,11 +196,33 @@ struct matmul_quantization_params_t {
 ```
 **INT8 Quantization Granularity:**
 
-| Buffer         | Scale (mandatory)              | Zero-Point     |
-|----------------|--------------------------------|----------------|
-| Input          | Yes  Per-tensor                | Yes Per-tensor |
-| Weights        | Yes  Per-tensor or per-channel | Yes Per-tensor |
-| Output         | Yes  Per-tensor                | Yes Per-tensor |
+| Buffer         | Scale (mandatory)                            | Zero-Point     |
+|----------------|----------------------------------------------|----------------|
+| Input          | Yes  Per-tensor, per-token, or per-group     | Yes Per-tensor |
+| Weights        | Yes  Per-tensor, per-channel, or per-group   | Yes Per-tensor |
+| Output         | Yes  Per-tensor                              | Yes Per-tensor |
+
+> **Note:**
+> - Zero-points are not supported when input or weight scales are per-token or per-group.
+> - Only bf16 and f32 output data types are supported when input or weight scales are per-token or per-group.
+
+**INT8 Source Scale Granularity Details:**
+
+| Granularity | Scale Dims | Description |
+|-------------|------------|-------------|
+| Per-tensor  | `{1}` or `{1, 1}` | Single scale for entire source matrix |
+| Per-token   | `{M, 1}` | One scale per row (token) of the source matrix |
+| Per-group   | `{M, G}` | G groups along K dimension, where G = K/group_size |
+
+**INT8 Weight Scale Granularity Details:**
+
+| Granularity | Scale Dims | Description |
+|-------------|------------|-------------|
+| Per-tensor  | `{1}` or `{1, 1}` | Single scale for entire weight matrix |
+| Per-channel | `{1, N}` | One scale per output channel (column) |
+| Per-group   | `{G, N}` | G groups along K dimension (G = K/group_size) |
+
+> **Note:** When both source and weight use per-group scales, the number of groups (G) must match between them.
 
 
 **WOQ Quantization Granularity for weights:**
@@ -625,8 +647,20 @@ To enable reorder quantization, `dtypes.compute` must be set to the target quant
 When eligible (src is BF16/F32, weight is S8, `dtypes.compute` is S8 or U8, and `dynamic_quant` is true), `matmul_direct` automatically invokes the reorder quantization path before the matmul dispatch:
 
 1. **Quantize source**: Converts the BF16/F32 source tensor to S8/U8 using the LOWOHA reorder engine
-2. **Execute matmul**: Dispatches the quantized source with INT8 weights to the selected backend
+2. **Execute matmul**: Dispatches the quantized source with INT8 weights to the selected backend (using per-group symmetric quantization when per-group scales are provided)
 3. **Free buffers**: Releases the temporary quantized source, scale, and zero-point buffers
+
+### Source Scale Granularity
+
+The reorder quantization path supports multiple scale granularities for the source tensor:
+
+| Granularity | Scale Dims | Description |
+|-------------|------------|-------------|
+| Per-tensor  | `{1, 1}` | Single scale for entire source matrix |
+| Per-token   | `{M, 1}` | One scale per row; each token is independently quantized |
+| Per-group   | `{M, G}` | G groups along K dimension (G = K/group_size); finer granularity reduces quantization error |
+
+When `transA` is true, the reorder quantization wrapper automatically transposes the scale dimensions and scale buffer data to match the physical tensor layout, then transposes back for downstream consumption.
 
 ### Quantization Modes
 
@@ -655,8 +689,8 @@ For reorder quantization to activate, the following must be set:
 | `dtypes.src` | `bf16` or `f32` |
 | `dtypes.wei` | `s8` |
 | `dtypes.compute` | `s8` or `u8` |
-| `quant_params.src_scale.dims` | Must be non-empty (e.g., `{1, 1}` for per-tensor) |
-| `quant_params.src_scale.dt` | Must be set (e.g., `f32`) |
+| `quant_params.src_scale.dims` | Must be non-empty (e.g., `{1, 1}` for per-tensor, `{M, 1}` for per-token, `{M, G}` for per-group) |
+| `quant_params.src_scale.dt` | Must be set (`f32` or `bf16`) |
 | `quant_params.src_scale.buff` | Required for static mode; optional for dynamic mode |
 | `quant_params.src_zp.dims` | Required only for U8 (asymmetric) |
 | `quant_params.src_zp.dt` | Required only for U8 (asymmetric) |
@@ -732,6 +766,84 @@ int lowoha_dynamic_reorder_quant_example() {
 }
 ```
 
+### Example 7: INT8 Per-Group Symmetric Quantization with Dynamic Source Quantization
+
+This example demonstrates per-group symmetric quantization where both source and weight scales are per-group, and the BF16 source is dynamically quantized to S8 before the matmul:
+
+```cpp
+int lowoha_int8_per_group_dynamic_quant_example() {
+  using namespace zendnnl::lowoha::matmul;
+
+  constexpr int M = 32, K = 256, N = 128;
+  constexpr int GROUP_SIZE = 64;
+  constexpr int NUM_GROUPS = K / GROUP_SIZE;  // = 4 groups
+
+  // BF16 source activations
+  std::vector<uint16_t> input_bf16(M * K);
+
+  // S8 weights (pre-quantized with per-group scales)
+  std::vector<int8_t> weights_s8(K * N);
+
+  // Weight scale: per-group {NUM_GROUPS, N}
+  std::vector<float> wei_scale(NUM_GROUPS * N);
+  for (int g = 0; g < NUM_GROUPS; ++g)
+    for (int n = 0; n < N; ++n)
+      wei_scale[g * N + n] = 0.02f + 0.001f * g;
+
+  // Source scale: per-group {M, NUM_GROUPS}
+  // buff is nullptr — will be computed dynamically during quantization
+  // Output
+  std::vector<float> output(M * N, 0.0f);
+
+  // Configure data types
+  matmul_data_types dtypes;
+  dtypes.src = data_type_t::bf16;
+  dtypes.wei = data_type_t::s8;
+  dtypes.dst = data_type_t::f32;
+  dtypes.bias = data_type_t::none;
+  dtypes.compute = data_type_t::s8;  // Symmetric quantization target
+
+  matmul_params params;
+  params.dtypes = dtypes;
+  params.dynamic_quant = true;
+
+  // Source scale: per-group {M, NUM_GROUPS}
+  params.quant_params.src_scale.buff = nullptr;  // Dynamic — computed at runtime
+  params.quant_params.src_scale.dt = data_type_t::f32;
+  params.quant_params.src_scale.dims = {M, NUM_GROUPS};
+
+  // Weight scale: per-group {NUM_GROUPS, N}
+  params.quant_params.wei_scale.buff = wei_scale.data();
+  params.quant_params.wei_scale.dt = data_type_t::f32;
+  params.quant_params.wei_scale.dims = {NUM_GROUPS, N};
+
+  matmul_batch_params_t batch_params;
+
+  status_t status = matmul_direct(
+    'r', false, false,
+    M, N, K,
+    1.0f,
+    input_bf16.data(), K,
+    weights_s8.data(), N,
+    nullptr,
+    0.0f,
+    output.data(), N,
+    true,
+    batch_params,
+    params
+  );
+
+  return (status == status_t::success) ? 0 : -1;
+}
+```
+
+**Key Points for Per-Group INT8:**
+- **Source and weight groups must match**: When both use per-group scales, `K / group_size` must be the same for source dims `{M, G}` and weight dims `{G, N}`.
+- **Scale data types**: Both `f32` and `bf16` are supported for scale tensors.
+- **Dynamic source quantization**: When `src_scale.buff` is `nullptr` with `dynamic_quant = true`, the scale is computed from the source data at runtime using per-group statistics.
+- **Weight reorder caching**: The weight reorder cache key includes the group size, so different group sizes for the same weight tensor produce separate cache entries.
+
+
 ## Weight Caching and Reordering
 
 One of the key features of LowOHA MatMul is **automatic weight reordering and caching**.
@@ -741,7 +853,7 @@ One of the key features of LowOHA MatMul is **automatic weight reordering and ca
 1. **First Execution**: 
    - Weights are reordered to the optimal format for the selected backend
    - Reordered weights are stored in an LRU cache
-   - Cache key is generated from weight pointer, dimensions, data type, and backend
+   - Cache key is generated from weight pointer, dimensions, data type, backend, and group size (for per-group symmetric quantization)
 
 2. **Subsequent Executions**:
    - Cache is queried using the same key

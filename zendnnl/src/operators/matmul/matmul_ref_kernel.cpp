@@ -828,6 +828,23 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
   auto src_scale_size = quant_param.src_scale.size;
   auto wei_scale_size = quant_param.wei_scale.size;
 
+  bool src_scale_per_token = (src_scale_size == static_cast<size_t>(M) && M > 1);
+  bool src_scale_per_group = (src_scale_size > static_cast<size_t>(M) &&
+                              src_scale_size % static_cast<size_t>(M) == 0);
+  int src_num_groups = src_scale_per_group
+    ? static_cast<int>(src_scale_size) / M : 1;
+  int src_group_size = src_scale_per_group ? K / src_num_groups : K;
+  int wei_num_groups = 1;
+  bool wei_scale_per_group = (wei_scale_size > static_cast<size_t>(N) &&
+                              wei_scale_size % static_cast<size_t>(N) == 0);
+  if (wei_scale_per_group) {
+    wei_num_groups = static_cast<int>(wei_scale_size / static_cast<size_t>(N));
+    if (src_scale_per_group && wei_num_groups != src_num_groups) {
+      wei_scale_per_group = false;
+      wei_num_groups = 1;
+    }
+  }
+
   int32_t *zp_comp = nullptr;
   int zp_comp_size = 0;
   int32_t src_zero_point = 0;
@@ -852,32 +869,72 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
   for (auto bs = 0; bs < batch_size; ++bs) {
     for (auto i = 0; i < M; ++i) {
       for (auto j = 0; j < N; ++j) {
-        int32_t sum_s32 = 0;
         size_t op_idx = bs * offset_out + i * ldc + j;
         size_t ac_idx = bs * offset_out + i * N + j;
-        for (auto k = 0; k < K; ++k) {
-          size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
-                          (bs * offset_wei + k * ldb + j);
-          size_t ip_idx = is_transpose_src ? (bs * offset_src + k * lda + i) :
-                          (bs * offset_src + i * lda + k);
-          if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
-            float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
-            float src_scale = read_and_cast<float>(quant_param.src_scale.buff,
-                                                   quant_param.src_scale.dt, 0);
-            if (src_scale == 0.f) {
-              src_scale = 1.f;
+        float sum = 0.0f;
+
+        if (src_scale_per_group) {
+          for (int g = 0; g < src_num_groups; ++g) {
+            int32_t group_sum = 0;
+            int k_start = g * src_group_size;
+            int k_end = k_start + src_group_size;
+            for (int kk = k_start; kk < k_end; ++kk) {
+              size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + kk) :
+                              (bs * offset_wei + kk * ldb + j);
+              size_t ip_idx = is_transpose_src ? (bs * offset_src + kk * lda + i) :
+                              (bs * offset_src + i * lda + kk);
+              int32_t src_val;
+              if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
+                float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
+                float grp_src_scale = read_and_cast<float>(quant_param.src_scale.buff,
+                    quant_param.src_scale.dt, i * src_num_groups + g);
+                if (grp_src_scale == 0.f) grp_src_scale = 1.f;
+                src_val = static_cast<int32_t>(std::nearbyint(ip_f32 / grp_src_scale)) +
+                          src_zero_point;
+              } else {
+                src_val = read_and_cast<int32_t>(input, input_dtype, ip_idx);
+              }
+              group_sum += src_val *
+                           read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
             }
-            int32_t ip_s32 = static_cast<int32_t>(std::nearbyint(ip_f32 / src_scale)) +
-                             src_zero_point;
-            sum_s32 += ip_s32 *
-                       read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
-          }
-          else {
-            sum_s32 += read_and_cast<int32_t>(input, input_dtype, ip_idx) *
-                       read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+            float grp_scale = read_and_cast<float>(quant_param.src_scale.buff,
+                quant_param.src_scale.dt, i * src_num_groups + g);
+            float grp_val = static_cast<float>(group_sum) * grp_scale;
+            if (wei_scale_per_group) {
+              grp_val *= read_and_cast<float>(quant_param.wei_scale.buff,
+                  quant_param.wei_scale.dt, g * N + j);
+            }
+            sum += grp_val;
           }
         }
-        float sum = static_cast<float>(sum_s32);
+        else {
+          int32_t sum_s32 = 0;
+          for (auto k = 0; k < K; ++k) {
+            size_t wt_idx = is_transpose_weights ? (bs * offset_wei + j * ldb + k) :
+                            (bs * offset_wei + k * ldb + j);
+            size_t ip_idx = is_transpose_src ? (bs * offset_src + k * lda + i) :
+                            (bs * offset_src + i * lda + k);
+            if (input_dtype == data_type_t::bf16 || input_dtype == data_type_t::f32) {
+              float ip_f32 = read_and_cast<float>(input, input_dtype, ip_idx);
+              size_t src_scl_idx = src_scale_per_token ? static_cast<size_t>(i) : 0;
+              float src_scale = read_and_cast<float>(quant_param.src_scale.buff,
+                                                     quant_param.src_scale.dt, src_scl_idx);
+              if (src_scale == 0.f) {
+                src_scale = 1.f;
+              }
+              int32_t ip_s32 = static_cast<int32_t>(std::nearbyint(ip_f32 / src_scale)) +
+                               src_zero_point;
+              sum_s32 += ip_s32 *
+                         read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+            }
+            else {
+              sum_s32 += read_and_cast<int32_t>(input, input_dtype, ip_idx) *
+                         read_and_cast<int32_t>(weights, weight_dtype, wt_idx);
+            }
+          }
+          sum = static_cast<float>(sum_s32);
+        }
+
         if (alpha != 1.0f) {
           sum *= alpha;
         }
@@ -887,11 +944,12 @@ void matmul_ref_kernel_t::compute_quantized_matmul(int batch_size, int M, int N,
         if (zp_comp) {
           sum += (float)(zp_comp[(i * N + j) % zp_comp_size]);
         }
-        if (src_scale_size) {
+        if (src_scale_size && !src_scale_per_group) {
+          size_t scale_idx = src_scale_per_token ? static_cast<size_t>(i) : 0;
           sum *= read_and_cast<float>(quant_param.src_scale.buff,
-                                      quant_param.src_scale.dt, j % src_scale_size);
+                                      quant_param.src_scale.dt, scale_idx);
         }
-        if (wei_scale_size) {
+        if (wei_scale_size && !(src_scale_per_group && wei_scale_per_group)) {
           sum *= read_and_cast<float>(quant_param.wei_scale.buff,
                                       quant_param.wei_scale.dt, j % wei_scale_size);
         }

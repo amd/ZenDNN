@@ -669,7 +669,7 @@ TEST_P(TestMatmul, F16_F16_Stride) {
  *  @param INT8 user-defined name of test according to test
  *  @brief Test to validate matmul INT8 aocl kernel support wrt Reference kernel
  */
-TEST_P(TestMatmul, INT8) {
+ TEST_P(TestMatmul, INT8) {
   // TODO: Extend support for test cases with a wider range of values.
   std::vector<uint64_t> wei_scale_size = (weight_granularity ==
                                           quant_granularity_t::tensor) ?
@@ -721,6 +721,368 @@ TEST_P(TestMatmul, INT8) {
   }
 
   EXPECT_TRUE(is_test_successful);
+}
+
+/** @brief Test INT8 sym_quant: per-group source scale, bf16 output */
+TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+  std::vector<uint64_t> valid_gs;
+  for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+    if (sym_k % gs == 0) valid_gs.push_back(gs);
+  }
+  if (valid_gs.empty()) {
+    GTEST_SKIP() << "No valid group_size for K=" << sym_k;
+  }
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF16);
+  uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+
+  source_dtype = data_type_t::s8;
+  use_LOWOHA = true;
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto wei_scale     = tensor_factory.uniform_dist_tensor({sym_k / group_size, n}, scale_dt, 0.2);
+  auto src_scale     = tensor_factory.uniform_dist_tensor({m, sym_k / group_size}, scale_dt, 0.3);
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
+                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
+  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
+                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
+                       rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor = is_binary_postop(po_type)
+                       ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                       : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
+                        weight_tensor, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_bf16, epsilon_bf16, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @brief Test INT8 sym_quant: per-group source scale, f32 output */
+TEST_P(TestMatmul, INT8_SYM_QUANT_PER_GROUP_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+  std::vector<uint64_t> valid_gs;
+  for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+    if (sym_k % gs == 0) valid_gs.push_back(gs);
+  }
+  if (valid_gs.empty()) {
+    GTEST_SKIP() << "No valid group_size for K=" << sym_k;
+  }
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF320);
+  uint64_t group_size = valid_gs[local_rng() % valid_gs.size()];
+
+  source_dtype = data_type_t::s8;
+  use_LOWOHA = true;
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto wei_scale     = tensor_factory.uniform_dist_tensor({sym_k / group_size, n}, scale_dt, 0.2);
+  auto src_scale     = tensor_factory.uniform_dist_tensor({m, sym_k / group_size}, scale_dt, 0.3);
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
+                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
+  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
+                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
+                       rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor = is_binary_postop(po_type)
+                       ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                       : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
+                        weight_tensor, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_f32, epsilon_f32, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @brief Test INT8 sym_quant: per-token source scale, bf16 output */
+TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+
+  source_dtype = data_type_t::s8;
+  use_LOWOHA = true;
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF17);
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto wei_scale     = tensor_factory.uniform_dist_tensor({1, n}, scale_dt, 0.2);
+  auto src_scale     = tensor_factory.uniform_dist_tensor({m, 1}, scale_dt, 0.3);
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
+                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
+  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
+                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
+                       rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor = is_binary_postop(po_type)
+                       ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                       : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::bf16, 2.0);
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
+                        weight_tensor, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_bf16, epsilon_bf16, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @brief Test INT8 sym_quant: per-token source scale, f32 output */
+TEST_P(TestMatmul, INT8_SYM_QUANT_PER_TOKEN_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+
+  source_dtype = data_type_t::s8;
+  use_LOWOHA = true;
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF321);
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+  auto wei_scale     = tensor_factory.uniform_dist_tensor({1, n}, scale_dt, 0.2);
+  auto src_scale     = tensor_factory.uniform_dist_tensor({m, 1}, scale_dt, 0.3);
+  auto weight_tensor = tensor_factory.uniform_dist_tensor({sym_k, n},
+                       data_type_t::s8, 25.0, transB, wei_scale, tensor_t());
+  auto input_tensor  = tensor_factory.uniform_dist_tensor({m, sym_k},
+                       source_dtype, 25.0, transA, src_scale, tensor_t());
+  auto bias_tensor   = tensor_factory.uniform_dist_tensor({1, n},
+                       rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor = is_binary_postop(po_type)
+                       ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                       : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0);
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor,
+                        weight_tensor, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_f32, epsilon_f32, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @brief Test INT8 dynamic GEMM: bf16 src, s8 weight (dynamically quantized), bf16 dst vs bf16 reference */
+TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_BF16) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+
+  use_LOWOHA = true;
+  data_type_t test_dt = data_type_t::bf16;
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xBF18);
+  bool use_per_group = (local_rng() % 2 == 0);
+  uint64_t group_size = 0;
+  uint64_t num_groups = 0;
+
+  if (use_per_group) {
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+      if (sym_k % gs == 0) valid_gs.push_back(gs);
+    }
+    if (valid_gs.empty()) {
+      use_per_group = false;
+    } else {
+      group_size = valid_gs[local_rng() % valid_gs.size()];
+      num_groups = sym_k / group_size;
+    }
+  }
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+
+  std::vector<int64_t> wei_scale_dims;
+  std::vector<uint64_t> src_scale_shape;
+  if (use_per_group) {
+    wei_scale_dims = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
+    src_scale_shape = {m, num_groups};
+  } else {
+    wei_scale_dims = {1, static_cast<int64_t>(n)};
+    src_scale_shape = {m, 1};
+  }
+
+  auto weight_tensor_ref = tensor_factory.uniform_dist_tensor({sym_k, n},
+                           test_dt, 2.0);
+
+  auto wei_scale = tensor_factory.zero_tensor(
+                     {static_cast<uint64_t>(wei_scale_dims[0]),
+                      static_cast<uint64_t>(wei_scale_dims[1])},
+                     scale_dt);
+  auto weight_tensor_s8 = tensor_factory.zero_tensor({sym_k, n},
+                          data_type_t::s8, wei_scale);
+  {
+    reorder_params_t rp;
+    rp.src_dtype = test_dt;
+    rp.dst_dtype = data_type_t::s8;
+    rp.dynamic_quant = true;
+    rp.src_shape = {static_cast<int64_t>(sym_k), static_cast<int64_t>(n)};
+    rp.dst_shape = rp.src_shape;
+    rp.quant_params.scale.buff = wei_scale.get_raw_handle_unsafe();
+    rp.quant_params.scale.dt = scale_dt;
+    rp.quant_params.scale.dims = wei_scale_dims;
+    status_t rs = reorder_direct(
+        weight_tensor_ref.get_raw_handle_unsafe(),
+        weight_tensor_s8.get_raw_handle_unsafe(), rp);
+    if (rs != status_t::success) {
+      GTEST_SKIP() << "weight reorder_direct dynamic quantization failed";
+    }
+  }
+
+  auto src_scale      = tensor_factory.zero_tensor(src_scale_shape,
+                        scale_dt);
+  auto input_tensor   = tensor_factory.uniform_dist_tensor({m, sym_k},
+                        test_dt, 2.0, transA, src_scale, tensor_t());
+  auto input_tensor_ref = tensor_factory.uniform_dist_tensor({m, sym_k},
+                          test_dt, 2.0, transA);
+  auto bias_tensor    = tensor_factory.uniform_dist_tensor({1, n},
+                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor  = is_binary_postop(po_type)
+                        ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                        : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+
+  log_info("INT8_DYNAMIC_GEMM_BF16: ", use_per_group ? "per-group" : "per-token",
+           use_per_group ? " group_size=" + std::to_string(group_size) : "",
+           " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor_s8,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor_ref,
+                        weight_tensor_ref, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                             rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
+}
+
+/** @brief Test INT8 dynamic GEMM: f32 src, s8 weight (dynamically quantized), f32 dst vs f32 reference */
+TEST_P(TestMatmul, INT8_DYNAMIC_GEMM_F32) {
+  uint64_t sym_k = (k / 4) * 4;
+  if (sym_k == 0) sym_k = 4;
+
+  use_LOWOHA = true;
+  data_type_t test_dt = data_type_t::f32;
+
+  std::mt19937 local_rng(m ^ k ^ n ^ 0xF322);
+  bool use_per_group = (local_rng() % 2 == 0);
+  uint64_t group_size = 0;
+  uint64_t num_groups = 0;
+
+  if (use_per_group) {
+    std::vector<uint64_t> valid_gs;
+    for (uint64_t gs = 4; gs <= sym_k; gs *= 2) {
+      if (sym_k % gs == 0) valid_gs.push_back(gs);
+    }
+    if (valid_gs.empty()) {
+      use_per_group = false;
+    } else {
+      group_size = valid_gs[local_rng() % valid_gs.size()];
+      num_groups = sym_k / group_size;
+    }
+  }
+
+  data_type_t scale_dt = (local_rng() % 2 == 0) ? data_type_t::f32 : data_type_t::bf16;
+
+  std::vector<int64_t> wei_scale_dims;
+  std::vector<uint64_t> src_scale_shape;
+  if (use_per_group) {
+    wei_scale_dims = {static_cast<int64_t>(num_groups), static_cast<int64_t>(n)};
+    src_scale_shape = {m, num_groups};
+  } else {
+    wei_scale_dims = {1, static_cast<int64_t>(n)};
+    src_scale_shape = {m, 1};
+  }
+
+  auto weight_tensor_ref = tensor_factory.uniform_dist_tensor({sym_k, n},
+                           test_dt, 2.0);
+
+  auto wei_scale = tensor_factory.zero_tensor(
+                     {static_cast<uint64_t>(wei_scale_dims[0]),
+                      static_cast<uint64_t>(wei_scale_dims[1])},
+                     scale_dt);
+  auto weight_tensor_s8 = tensor_factory.zero_tensor({sym_k, n},
+                          data_type_t::s8, wei_scale);
+  {
+    reorder_params_t rp;
+    rp.src_dtype = test_dt;
+    rp.dst_dtype = data_type_t::s8;
+    rp.dynamic_quant = true;
+    rp.src_shape = {static_cast<int64_t>(sym_k), static_cast<int64_t>(n)};
+    rp.dst_shape = rp.src_shape;
+    rp.quant_params.scale.buff = wei_scale.get_raw_handle_unsafe();
+    rp.quant_params.scale.dt = scale_dt;
+    rp.quant_params.scale.dims = wei_scale_dims;
+    status_t rs = reorder_direct(
+        weight_tensor_ref.get_raw_handle_unsafe(),
+        weight_tensor_s8.get_raw_handle_unsafe(), rp);
+    if (rs != status_t::success) {
+      GTEST_SKIP() << "weight reorder_direct dynamic quantization failed";
+    }
+  }
+
+  auto src_scale      = tensor_factory.zero_tensor(src_scale_shape,
+                        scale_dt);
+  auto input_tensor   = tensor_factory.uniform_dist_tensor({m, sym_k},
+                        test_dt, 2.0, transA, src_scale, tensor_t());
+  auto input_tensor_ref = tensor_factory.uniform_dist_tensor({m, sym_k},
+                          test_dt, 2.0, transA);
+  auto bias_tensor    = tensor_factory.uniform_dist_tensor({1, n},
+                        rand() % 2 == 0 ? data_type_t::bf16 : data_type_t::f32, 2.0);
+  auto binary_tensor  = is_binary_postop(po_type)
+                        ? tensor_factory.uniform_dist_tensor({m, n}, data_type_t::f32, 2.0)
+                        : tensor_t();
+  auto output_tensor     = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+  auto output_tensor_ref = tensor_factory.uniform_dist_tensor({m, n}, test_dt, 2.0);
+
+  log_info("INT8_DYNAMIC_GEMM_F32: ", use_per_group ? "per-group" : "per-token",
+           use_per_group ? " group_size=" + std::to_string(group_size) : "",
+           " scale_dt=", scale_dt == data_type_t::f32 ? "f32" : "bf16");
+
+  status_t status     = matmul_kernel_test(input_tensor, weight_tensor_s8,
+                        bias_tensor, output_tensor, po_type, binary_tensor,
+                        use_LOWOHA, algo, 1.0, 0.0);
+  status_t ref_status = matmul_forced_ref_kernel_test(input_tensor_ref,
+                        weight_tensor_ref, bias_tensor, output_tensor_ref, po_type,
+                        binary_tensor, use_LOWOHA, algo, 1.0, 0.0);
+  bool ok = (status == status_t::success && ref_status == status_t::success);
+  if (ok) {
+    compare_tensor_2D_matrix(output_tensor, output_tensor_ref, m, n, sym_k,
+                            rtol_bf16, 16 *epsilon_bf16, ok, false, 1.0f);
+  }
+  EXPECT_TRUE(ok);
 }
 
 /** @fn TEST_P

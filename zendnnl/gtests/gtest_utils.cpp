@@ -1528,12 +1528,12 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         bool is_woq = (src_data_type == data_type_t::bf16 &&
                        wei_data_type == data_type_t::s4);
 
-        // Check if this is INT8 quantization
-        bool is_int8 = wei_data_type == data_type_t::s8;
+        // Check if weight is INT8 (s8)
+        bool is_wei_s8 = wei_data_type == data_type_t::s8;
 
         log_info("LOWOHA: Calling matmul_direct with batchA:", batchA, " batchB:",
                  batchB, " M:", M, " N:", N, " K:", K,
-                 " alpha:", alpha, " beta:", beta, " is_woq:", is_woq, " is_int8:", is_int8);
+                 " alpha:", alpha, " beta:", beta, " is_woq:", is_woq, " is_wei_s8:", is_wei_s8);
 
         // Extract batch strides from tensors if they have batch dimension (3D)
         // Batch strides are in elements, not bytes
@@ -1589,7 +1589,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
         }
 
         // For INT8: Extract quantization parameters from all tensors
-        if (is_int8) {
+        if (is_wei_s8) {
           // Extract source scale
           if (input_tensor.is_quantized()) {
             const void *src_scale_buff = input_tensor.get_quant_scale_raw_handle_const();
@@ -1663,6 +1663,13 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
           }
         }
 
+        if (is_wei_s8 &&
+            (src_data_type == data_type_t::bf16 || src_data_type == data_type_t::f32) &&
+            input_tensor.is_quantized()) {
+          params.dynamic_quant = true;
+          params.dtypes.compute = data_type_t::s8;
+        }
+
         // Create batch_params structure
         matmul_batch_params_t batch_params;
         batch_params.Batch_A = batchA;
@@ -1705,7 +1712,7 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
-                            beta, C_data, ldc, (is_woq || is_int8) ? true : rand() % 2 == 0 ? true : false,
+                            beta, C_data, ldc, (is_woq || is_wei_s8) ? true : rand() % 2 == 0 ? true : false,
                             batch_params, params);
         if (status != status_t::success) {
           if (status != status_t::isa_unsupported) {
