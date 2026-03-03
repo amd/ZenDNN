@@ -240,7 +240,7 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       }
 
       float alpha = cfg.alpha, beta = cfg.beta;
-      bool is_weights_const       = true;
+      bool is_weights_const       = cfg.is_weights_const;
 
       const int batchA = cfg.bs;
       const int batchB = cfg.bs;
@@ -249,10 +249,6 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       matmul_batch_params_t batch_params;
       batch_params.Batch_A = batchA;
       batch_params.Batch_B = batchB;
-
-      if (batchA > 1 || batchB > 1) {
-        is_weights_const = false;
-      }
 
       TimingStats time_stats;
       // warm-up iterations

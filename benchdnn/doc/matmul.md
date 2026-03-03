@@ -30,7 +30,9 @@ Provide a file with one configuration per line. Each line should contain:
 - `bias` (true/false)
 - `bias_dt` (Data type for bias)
 - `post_ops` (Post-operations, e.g., relu, gelu, binary_mul)
+- `post_op_dt` (Data type for binary post-operations, e.g. `f32`, `bf16`; used when `post_ops` include binary ops; defaults to `f32`. Can be empty when no binary post-ops.)
 - `kernel` (Kernel backend)
+- `is_weights_const` (Whether weights are constant: `true`/`false` or `1`/`0`. If empty: default is `true` for 2D-Matmul, `false` for BMM.)
 - `isTransA` (Transpose flag for src)
 - `isTransB` (Transpose flag for weights)
 - `alpha` (Alpha parameter for the matmul operation)
@@ -49,17 +51,17 @@ Provide a file with one configuration per line. Each line should contain:
 
 - Single-layer matmul:
   ```
-  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, aocl_dlp_blocked, false, false, 1.0, 0.0, per-channel, , f32, 30
-  128, 9216, 4096, 100, bf16:s4:bf16, true, f32, relu, aocl_dlp_blocked, false, false, 2.0, 1.0, per-group, 256, bf16, 30
+  128, 9216, 4096, 1, f32:f32:f32, true, f32, relu, , aocl_dlp_blocked, false, false, false, 1.0, 0.0, per-channel, , f32, 30
+  128, 9216, 4096, 100, bf16:s4:bf16, true, f32, binary_add:relu, f32, aocl_dlp_blocked, true, false, false, 2.0, 1.0, per-group, 256, bf16, 30
   ```
 - Multi-layer (pipeline) matmul:
   ```
-  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 1.0, 0.0, per-channel, , f32, 30
-  4096, 768, 256:3072:512, 100, bf16:s4:f32, true, f32, gelu_erf, aocl_dlp_blocked, false, false, 1.5, 0.0, per-group, 128, f32, 30
+  768, 3072, 512:256, 100, f32:f32:f32, true, f32, gelu_erf, , aocl_dlp_blocked, true, false, false, 1.0, 0.0, per-channel, , f32, 30
+  4096, 768, 256:3072:512, 100, bf16:s4:f32, true, f32, gelu_erf, , aocl_dlp_blocked, true, false, false, 1.5, 0.0, per-group, 128, f32, 30
   ```
 - Batched matmul (BMM):
   ```
-  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , aocl_dlp, false, false, 1.0, 0.0, , , f32, 20
+  100, 100, 3456, 512, 100, f32:f32:f32, true, f32, , , aocl_dlp, true, false, false, 1.0, 0.0, , , f32, 20
   ```
   > **Note:** For BMM, ensure you specify `--ndims=3` on the command line and provide `bs` in the input file.
 
@@ -93,7 +95,7 @@ All configuration parameters can be provided directly via command-line options.
 
 **Example usage:**
 ```sh
-./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --kernel_name=aocl_dlp --isTransA=false --isTransB=false --alpha=1.0 --beta=0.0 --scale_granularity=per-group --group_size=256 --scale_dt=bf16 --warmup_iters=30 --ndims=3
+./install/benchdnn/bin/benchdnn --op=matmul --bs=128 --m=9216 --k=4096 --n=512 --iters=100 --sdt=f32 --ddt=f32 --wdt=f32 --bias=true --bias_dt=f32 --post_ops=relu --post_op_dt=f32 --kernel_name=aocl_dlp --is_weights_const=true --isTransA=false --isTransB=false --alpha=1.0 --beta=0.0 --scale_granularity=per-group --group_size=256 --scale_dt=bf16 --warmup_iters=30 --ndims=3
 ```
 > **Note:** For BMM benchmarking, always specify `--ndims=3` and provide `bs`.
 
@@ -129,6 +131,6 @@ Output is printed to the console and also saved to a CSV file named `timings_<cu
 
 ### Example (batched matmul, console/CSV)
 ```
-BS  M     K    N    Iters  Data_type    Bias_Enabled  Bias_dt  PostOp  Kernel_Name  isTransA  isTransB  Alpha     Beta      Scale_Granularity  Group_Size  Scale_dt  Warmup_iters  Total_time(ms, all iters)  Avg_time(ms)  GFLOPS  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
-2   1024  256  512  10     f32:f32:f32  1             f32      relu    aocl_dlp     0         0         1.000000  0.000000  group              256         bf16      30            220.46                     22.05         24.35   0.05 (0.02 %)       0.02 (0.01 %)      220.39 (99.97 %)
+BS  M     K    N    Iters  Data_type    Bias_Enabled  Bias_dt  PostOp  PostOp_dt  Kernel_Name  isWeightsConst  isTransA  isTransB  Alpha     Beta      Weight_Scale_Granularity  Weight_Group_Size  Weight_Scale_dt  Warmup_iters  Total_time(ms, all iters)  Avg_time(ms)  GFLOPS  Ctx_Creation(ms_%)  Op_Creation(ms_%)  Op_Execution(ms_%)  
+2   1024  256  512  10     f32:f32:f32  1             f32      relu             aocl_dlp     1               0         0         1.000000  0.000000  group                       256                 bf16            30            220.46                     22.05         24.35   0.05 (0.02 %)       0.02 (0.01 %)      220.39 (99.97 %)
 ```

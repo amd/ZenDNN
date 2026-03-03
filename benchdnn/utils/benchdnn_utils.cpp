@@ -414,6 +414,13 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       options.post_ops.push_back(strToPostOps(post_op_str));
     }
   }
+  else if (arg.find("--post_op_dt=") == 0) {
+    if (arg.substr(13).empty()) {
+      commonlog_error("Post-op data type cannot be empty. Please provide a valid data type.");
+      return NOT_OK;
+    }
+    options.post_op_dt = strToDatatype(arg.substr(13));
+  }
   else if (arg.find("--iters=") == 0) {
     if (arg.substr(8).empty()) {
       commonlog_error("Iterations value cannot be empty. Please provide a valid number.");
@@ -448,12 +455,6 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.kernel_name = arg.substr(14);
-    if (!validateMatmulKernelName(options.kernel_name)) {
-      commonlog_warning("Unknown kernel name '", options.kernel_name,
-                        "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
-                        "batched_sgemm, auto, dynamic_dispatch, reference. Using 'aocl_dlp' instead.");
-      options.kernel_name = "aocl_dlp";
-    }
   }
   else if (arg.find("--bias_dt=") == 0) {
     if (arg.substr(10).empty()) {
@@ -461,6 +462,24 @@ int parseCLArgs(benchdnn::global_options &options, std::string arg) {
       return NOT_OK;
     }
     options.bias_dt = strToDatatype(arg.substr(10));
+  }
+  else if (arg.find("--is_weights_const=") == 0) {
+    if (arg.substr(19).empty()) {
+      commonlog_error("is_weights_const value cannot be empty. Please provide true/false or 1/0.");
+      return NOT_OK;
+    }
+    std::string val = arg.substr(19);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "true" || val == "1") {
+      options.is_weights_const = 1;
+    }
+    else if (val == "false" || val == "0") {
+      options.is_weights_const = 0;
+    }
+    else {
+      commonlog_error("Invalid value for is_weights_const. Use true/false or 1/0.");
+      return NOT_OK;
+    }
   }
   else if (arg.find("--isTransA=") == 0) {
     if (arg.substr(11).empty()) {

@@ -42,8 +42,9 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
       commonlog_error(
         "Invalid line (expected ", expected_fields_cnt, " fields): [",
         (options.ndims > 2) ? "bs, " : "",
-        "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, ",
-        "kernel name, isTransA, isTransB, alpha, beta, weight_scale_granularity, weight_group_size, weight_scale_dt, warmup iterations (optional)]");
+        "m, k, n, iterations, input_dtype:weights_dtype:output_dtype, isBiasEnabled, bias_dtype, postOp, postOp_dtype, ",
+        "kernel name, isWeightsConst, isTransA, isTransB, alpha, beta, ",
+        "weight_scale_granularity, weight_group_size, weight_scale_dt, warmup iterations (optional)]");
       continue;
     }
     MatmulConfig cfg;
@@ -152,29 +153,66 @@ void inputFileParser(std::ifstream &infile, std::vector<MatmulConfig> &configs,
           binary_post_op_pos++;
         }
       }
+
+      if (binary_post_op_pos > 0) {
+        if (fields[id].empty()) {
+          commonlog_warning("No postOp_dtype specified for binary post-operation. Defaulting it to f32.");
+          cfg.post_op_dt = data_type_t::f32;
+        }
+        else {
+          cfg.post_op_dt = strToDatatype(fields[id]);
+        }
+      }
+      id++;
+
       zendnnl::ops::matmul_config_t &matmul_config =
         zendnnl::ops::matmul_config_t::instance();
       int32_t algo_ = options.ndims > 2 ? matmul_config.get_bmm_algo() :
                       matmul_config.get_algo();
       matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
       if (algo == matmul_algo_t::none) {
-        // Parse kernel name (default to 'aocl_dlp' if empty)
+        // Parse kernel name
         if (fields[id].empty()) {
-          commonlog_warning("No kernel name specified. Defaulting to 'aocl_dlp'.");
-          cfg.kernel_name = "aocl_dlp";
+          auto kernel_name = options.ndims > 2 ? "aocl_dlp" : "aocl_dlp_blocked";
+          commonlog_warning("No kernel name specified. Defaulting to '", kernel_name,
+                            "'.");
+          cfg.kernel_name = kernel_name;
         }
         else {
           cfg.kernel_name = fields[id];
           if (!validateMatmulKernelName(cfg.kernel_name)) {
+            auto kernel_name = options.ndims > 2 ? "aocl_dlp" : "aocl_dlp_blocked";
             commonlog_warning("Unknown kernel name '", cfg.kernel_name,
                               "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
-                              "batched_sgemm, auto, dynamic_dispatch, reference. Using 'aocl_dlp' instead.");
-            cfg.kernel_name = "aocl_dlp";
+                              "batched_sgemm, auto, dynamic_dispatch, reference. Using '", kernel_name,
+                              "' instead.");
+            cfg.kernel_name = kernel_name;
           }
         }
       }
       else {
         cfg.kernel_name = algoToStr(algo);
+      }
+      id++;
+
+      if (fields[id].empty()) {
+        cfg.is_weights_const = options.ndims > 2 ? false : true;
+      }
+      else {
+        std::string is_weights_const = fields[id];
+        std::transform(is_weights_const.begin(), is_weights_const.end(),
+                       is_weights_const.begin(),
+                       ::tolower);
+        if (is_weights_const == "true" || is_weights_const == "1") {
+          cfg.is_weights_const = true;
+        }
+        else if (is_weights_const == "false" || is_weights_const == "0") {
+          cfg.is_weights_const = false;
+        }
+        else {
+          commonlog_error("Invalid value for is_weights_const. Use true/false or 1/0.");
+          continue;
+        }
       }
       id++;
 
@@ -444,10 +482,24 @@ void inputModelFileParser(std::ifstream &infile,
       matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
       if (algo == matmul_algo_t::none) {
         cfg.kernel_name = options.kernel_name;
+        if (!validateMatmulKernelName(cfg.kernel_name)) {
+          auto kernel_name = options.ndims > 2 ? "aocl_dlp" : "aocl_dlp_blocked";
+          commonlog_warning("Unknown kernel name '", cfg.kernel_name,
+                            "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
+                            "batched_sgemm, auto, dynamic_dispatch, reference. Using '", kernel_name,
+                            "' instead.");
+          cfg.kernel_name = kernel_name;
+        }
       }
       else {
         cfg.kernel_name = algoToStr(algo);
       }
+      if (cfg.binary_post_ops_pos.size() > 0) {
+        cfg.post_op_dt = options.post_op_dt;
+      }
+      cfg.is_weights_const = options.is_weights_const >= 0
+                             ? options.is_weights_const
+                             : (options.ndims > 2 ? 0 : 1);
       cfg.bias_dt = options.bias_dt;
       cfg.isTransA = options.isTransA;
       cfg.isTransB = options.isTransB;
@@ -501,10 +553,22 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
     matmul_algo_t algo = static_cast<matmul_algo_t>(algo_);
     if (algo == matmul_algo_t::none) {
       cfg.kernel_name = options.kernel_name;
+      if (!validateMatmulKernelName(cfg.kernel_name)) {
+        auto kernel_name = options.ndims > 2 ? "aocl_dlp" : "aocl_dlp_blocked";
+        commonlog_warning("Unknown kernel name '", cfg.kernel_name,
+                          "'. Supported: aocl_dlp_blocked, onednn_blocked, libxsmm_blocked, aocl_dlp, onednn, libxsmm, "
+                          "batched_sgemm, auto, dynamic_dispatch, reference. Using '", kernel_name,
+                          "' instead.");
+        cfg.kernel_name = kernel_name;
+      }
     }
     else {
       cfg.kernel_name = algoToStr(algo);
     }
+
+    cfg.is_weights_const = options.is_weights_const >= 0
+                           ? options.is_weights_const
+                           : (options.ndims > 2 ? 0 : 1);
     cfg.bias_dt = options.bias_dt;
     if (options.post_ops.size() > 0) {
       auto binary_post_op_pos = 0;
@@ -517,6 +581,9 @@ void inputCommandLineParser(std::vector<MatmulConfig> &configs,
         }
         binary_post_op_pos++;
       }
+    }
+    if (cfg.binary_post_ops_pos.size() > 0) {
+      cfg.post_op_dt = options.post_op_dt;
     }
     cfg.isTransA = options.isTransA;
     cfg.isTransB = options.isTransB;
@@ -552,7 +619,10 @@ void log_benchmark_failure(const MatmulConfig &cfg) {
                   n_values, ", ", datatypeToStr(cfg.dt[0]), ":",
                   datatypeToStr(cfg.dt[1]), ":", datatypeToStr(cfg.dt[2]), ", ",
                   cfg.isBiasEnabled, ", ", (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) :""),
-                  ", ", post_op, ", ", cfg.kernel_name, ", ", cfg.isTransA, ", ", cfg.isTransB,
+                  ", ", post_op,
+                  ", ", (cfg.binary_post_ops_pos.size() > 0 ? datatypeToStr(cfg.post_op_dt) : ""),
+                  ", ", cfg.kernel_name, ", ", cfg.is_weights_const,
+                  ", ", cfg.isTransA, ", ", cfg.isTransB,
                   ", ", cfg.alpha, ", ", cfg.beta, ", ", cfg.scale_granularity, ", ",
                   cfg.group_size, ", ", datatypeToStr(cfg.scale_dt), ", ", cfg.warmup_iters);
 }
@@ -581,7 +651,10 @@ void print_matmul_execution_summary(const MatmulConfig &cfg,
             << ":" << datatypeToStr(cfg.dt[2]) << ", "
             << cfg.isBiasEnabled << ", "
             << (cfg.isBiasEnabled ? datatypeToStr(cfg.bias_dt) : "")
-            << ", " << post_op << ", " << cfg.kernel_name << ", "
+            << ", " << post_op << ", "
+            << (cfg.binary_post_ops_pos.size() > 0 ? datatypeToStr(cfg.post_op_dt) : "")
+            << ", " << cfg.kernel_name << ", "
+            << cfg.is_weights_const << ", "
             << cfg.isTransA << ", "
             << cfg.isTransB << ", "
             << cfg.alpha << ", "
@@ -620,7 +693,12 @@ void write_each_config_result(const MatmulConfig &config,
     }
   }
   outfile << ", ";
+  if (config.binary_post_ops_pos.size() > 0) {
+    outfile << datatypeToStr(config.post_op_dt);
+  }
+  outfile << ", ";
   outfile << config.kernel_name << ", "
+          << config.is_weights_const << ", "
           << config.isTransA << ", "
           << config.isTransB << ", "
           << config.alpha << ", "
@@ -687,7 +765,13 @@ void cal_column_width(const MatmulConfig &config,
     }
   }
   col_widths[col++] = std::max(col_widths[col], postop_str.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               config.binary_post_ops_pos.size() > 0
+                               ? datatypeToStr(config.post_op_dt).size() + 2
+                               : 0);
   col_widths[col++] = std::max(col_widths[col], config.kernel_name.size() + 2);
+  col_widths[col++] = std::max(col_widths[col],
+                               std::to_string(config.is_weights_const).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
                                std::to_string(config.isTransA).size() + 2);
   col_widths[col++] = std::max(col_widths[col],
@@ -765,7 +849,11 @@ void fill_row(const MatmulConfig &config,
     }
   }
   row.push_back(postop_str);
+  row.push_back(config.binary_post_ops_pos.size() > 0
+                ? datatypeToStr(config.post_op_dt)
+                : "");
   row.push_back(config.kernel_name);
+  row.push_back(std::to_string(config.is_weights_const));
   row.push_back(std::to_string(config.isTransA));
   row.push_back(std::to_string(config.isTransB));
   row.push_back(std::to_string(config.alpha));
@@ -779,7 +867,7 @@ void fill_row(const MatmulConfig &config,
                 stat[layer_num].total_time_ms;
   row.push_back(total_time_ss.str());
   std::ostringstream avg_time_ss;
-  avg_time_ss << std::fixed << std::setprecision(2) <<
+  avg_time_ss << std::fixed << std::setprecision(6) <<
               (stat[layer_num].total_time_ms / config.iters);
   row.push_back(avg_time_ss.str());
   std::ostringstream gflops_ss;
@@ -828,9 +916,11 @@ void log_pipeline_results(
   if (options.ndims > 2) {
     outfile << "BS, ";
   }
-  outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, "
-          << "Alpha, Beta, Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, Total time (ms) (all iters), Avg time (ms), GFLOPS, % of Total";
+  outfile << "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, "
+          << "Post Operation, PostOp Data type, "
+          << "Kernel name, isWeightsConst, isTransA, isTransB, "
+          << "Alpha, Beta, Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, "
+          << "Total time (ms) (all iters), Avg time (ms), GFLOPS, % of Total";
 #if MEASURE_INDIVIDUAL_TIMINGS
   outfile <<
           ", Context Creation (ms & %), Operator Creation (ms & %), Operator Execution (ms & %)";
@@ -874,9 +964,14 @@ void log_pipeline_results(
       }
     }
     outfile << ", ";
+    if (config.binary_post_ops_pos.size() > 0) {
+      outfile << datatypeToStr(config.post_op_dt);
+    }
+    outfile << ", ";
     outfile << config.kernel_name << ", "
+            << config.is_weights_const << ", "
             << config.isTransA << ", "
-            << config. isTransB << ", "
+            << config.isTransB << ", "
             << config.alpha << ", "
             << config.beta << ", "
             << config.scale_granularity << ", "
@@ -913,8 +1008,8 @@ void print_pipeline_results(
     headers.push_back("BS");
   }
   headers.insert(headers.end(), {
-    "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
+    "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "PostOp_dt", "Kernel_Name",
+    "isWeightsConst", "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
     "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS", "%_of_Total"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS
@@ -978,7 +1073,12 @@ void print_pipeline_results(
       }
     }
     col_widths[col++] = std::max(col_widths[col], postop_str.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 config.binary_post_ops_pos.size() > 0
+                                 ? datatypeToStr(config.post_op_dt).size() + 2 : 0);
     col_widths[col++] = std::max(col_widths[col], config.kernel_name.size() + 2);
+    col_widths[col++] = std::max(col_widths[col],
+                                 std::to_string(config.is_weights_const).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
                                  std::to_string(config.isTransA).size() + 2);
     col_widths[col++] = std::max(col_widths[col],
@@ -1088,7 +1188,10 @@ void print_pipeline_results(
       }
     }
     summary_row.push_back(postop_str);
+    summary_row.push_back(config.binary_post_ops_pos.size() > 0
+                          ? datatypeToStr(config.post_op_dt) : "");
     summary_row.push_back(config.kernel_name);
+    summary_row.push_back(std::to_string(config.is_weights_const));
     summary_row.push_back(std::to_string(config.isTransA));
     summary_row.push_back(std::to_string(config.isTransB));
     summary_row.push_back(std::to_string(config.alpha));
@@ -1101,7 +1204,7 @@ void print_pipeline_results(
     total_time_oss << std::fixed << std::setprecision(2) << total_time;
     summary_row.push_back(total_time_oss.str());
     std::ostringstream avg_time_oss;
-    avg_time_oss << std::fixed << std::setprecision(2) << (total_time /
+    avg_time_oss << std::fixed << std::setprecision(6) << (total_time /
                  config.iters);
     summary_row.push_back(avg_time_oss.str());
     summary_row.push_back("");
@@ -1142,9 +1245,10 @@ void log_results(
   if (options.ndims > 2) {
     outfile << "BS, ";
   }
-  outfile <<
-          "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, Post Operation, Kernel name, isTransA, isTransB, Alpha, Beta, "
-          << "Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, Total time (ms) (all iters),  Avg time (ms), GFLOPS";
+  outfile << "M, K, N, Iterations, Data type, Bias Enabled, Bias Data type, "
+          << "Post Operation, PostOp Data type, Kernel name, isWeightsConst, isTransA, isTransB, Alpha, Beta, "
+          << "Weight Scale Granularity, Weight Group Size, Weight Scale Data type, Warmup iterations, "
+          << "Total time (ms) (all iters),  Avg time (ms), GFLOPS";
 #if MEASURE_INDIVIDUAL_TIMINGS
   if (!isLOWOHA) {
     outfile <<
@@ -1181,8 +1285,8 @@ void print_results(
     headers.insert(headers.end(), "BS");
   }
   headers.insert(headers.end(), {
-    "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "Kernel_Name",
-    "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
+    "M", "K", "N", "Iters", "Data_type", "Bias_Enabled", "Bias_dt", "PostOp", "PostOp_dt", "Kernel_Name",
+    "isWeightsConst", "isTransA", "isTransB", "Alpha", "Beta", "Weight_Scale_Granularity", "Weight_Group_Size", "Weight_Scale_dt",
     "Warmup_iters", "Total_time(ms, all iters)", "Avg_time(ms)", "GFLOPS"
   });
 #if MEASURE_INDIVIDUAL_TIMINGS

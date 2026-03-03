@@ -52,12 +52,14 @@ struct global_options {
   bool isBiasEnabled; /**< Flag indicating if bias is enabled in the matmul operation. */
   std::vector<zendnnl::ops::post_op_type_t> post_ops; /**< List of post operations
                                                       to apply (e.g., relu, gelu). */
+  data_type_t post_op_dt; /**< Datatype of post operation. */
   int ndims; /**< Number of dimensions for tensors (e.g., 2 for standard matmul, 3 for batched matmul). */
   int iters; /**< Number of iterations to run the benchmark. */
   data_type_t sdt; /**< Datatype of input. */
   data_type_t wdt; /**< Datatype of weights. */
   data_type_t ddt; /**< Datatype of destination/output. */
   std::string kernel_name; /**< Name of the kernel to use. */
+  int is_weights_const; /**< 0: weights are not constant, 1: weights are constant, -1: not set. */
   data_type_t bias_dt; /**< Datatype of bias. */
   bool isTransA; /**< Transpose flag for input matrix */
   bool isTransB; /**< Transpose flag for weight matrix */
@@ -69,7 +71,8 @@ struct global_options {
 
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
-    ddt(data_type_t::f32), kernel_name("aocl_dlp"), bias_dt(data_type_t::f32),
+    ddt(data_type_t::f32), is_weights_const(-1), bias_dt(data_type_t::f32),
+    post_op_dt(data_type_t::f32),
     isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
     scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32) {}
 };

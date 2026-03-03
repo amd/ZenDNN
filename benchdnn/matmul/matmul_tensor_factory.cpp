@@ -236,7 +236,7 @@ int create_binary_post_ops_tensors(tensor_factory_t &tensor_factory,
     for (const auto &post_op : cfg.binary_post_ops_pos) {
       // Create a tensor for each binary post-op
       auto binary_tensor = tensor_factory.uniform_dist_tensor({cfg.m, cfg.n_values[i]},
-                           cfg.dt[2],
+                           cfg.post_op_dt,
                            2.0, "binary_post_op_" + std::to_string(post_op));
       binary_tensors.push_back(binary_tensor);
     }

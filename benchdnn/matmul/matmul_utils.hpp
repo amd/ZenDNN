@@ -19,7 +19,7 @@
 #include "benchdnn.hpp"
 
 // Number of extra fields in each matmul input line (beyond ndims)
-#define MATMUL_EXTRA_INPUT_FIELD_COUNT 13
+#define MATMUL_EXTRA_INPUT_FIELD_COUNT 15
 
 namespace zendnnl {
 namespace benchdnn {
@@ -64,6 +64,7 @@ struct MatmulConfig {
                                         (e.g., f32, bf16). Defaults to f32 if not specified. */
   std::vector<zendnnl::ops::post_op_type_t> post_ops; /**< List of post operations
                                                       to apply (e.g., relu, gelu). */
+  zendnnl::common::data_type_t post_op_dt; /**< Datatype of post operation. */
   std::vector<int> binary_post_ops_pos; /**< List of positions for
                                         binary post-operations. */
   std::string kernel_name; /**< Name of the kernel backend
@@ -76,6 +77,7 @@ struct MatmulConfig {
   uint64_t group_size; /**< Group size for per-group scaling granularity. */
   zendnnl::common::data_type_t scale_dt; /**< Data type
                                          for scaling factors (e.g., f32, bf16). */
+  bool is_weights_const; /**< Flag indicating if weights are constant. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
 };
 
