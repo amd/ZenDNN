@@ -683,9 +683,13 @@ static void convert_fp32_to_bf16_tile(
         }
         // Scalar tail
         for (; n < cols; ++n) {
-            // Truncation conversion: take upper 16 bits of FP32
+            // Round-to-nearest-even to match vectorized _mm512_cvtneps_pbh
+            float val = src_fp32[m * ldc_fp32 + n];
             uint32_t bits;
-            std::memcpy(&bits, &src_fp32[m * ldc_fp32 + n], sizeof(bits));
+            std::memcpy(&bits, &val, sizeof(bits));
+            uint32_t lsb = (bits >> 16) & 1;
+            uint32_t rounding_bias = 0x7FFF + lsb;
+            bits += rounding_bias;
             dst_bf16[m * ldc_bf16 + n] = static_cast<uint16_t>(bits >> 16);
         }
     }
@@ -702,7 +706,7 @@ static void convert_fp32_to_bf16_tile(
 // K is rounded up to even (zero-padded if odd).
 // ============================================================================
 __attribute__((target("avx512f,avx512bw")))
-static void pack_b_vnni(
+[[maybe_unused]] static void pack_b_vnni(
     const uint16_t *B, int K, int N, int ldb, bool transB,
     uint16_t *packed, int K_padded) {
 
@@ -783,6 +787,68 @@ static void pack_b_vnni(
 // Accumulates into a temporary FP32 C buffer, then optionally converts
 // to BF16 for the final output.
 // ============================================================================
+// ============================================================================
+// On-the-fly VNNI pack: pack NR_PACK columns of B for a K-block into VNNI.
+// Used when weight caching is disabled — each thread packs only its strip.
+// ============================================================================
+__attribute__((target("avx512f,avx512bw")))
+static void pack_b_vnni_strip(
+    const uint16_t *B, int ldb, bool transB,
+    int col_start, int nr_act, int K, int K_padded,
+    int pc, int kb,
+    uint16_t *packed) {
+
+    const int kb_padded = (kb + 1) & ~1;
+    const int k_pairs = kb_padded / 2;
+    const int out_stride = NR_PACK * VNNI_PAIR;
+
+    for (int kp = 0; kp < k_pairs; ++kp) {
+        uint16_t *d = packed + kp * out_stride;
+        const int k0 = pc + kp * 2;
+        const int k1 = k0 + 1;
+
+        if (!transB && nr_act == NR_PACK) {
+            const uint16_t *row0 = (k0 < K) ? B + k0 * ldb + col_start
+                                             : nullptr;
+            const uint16_t *row1 = (k1 < K) ? B + k1 * ldb + col_start
+                                             : nullptr;
+            for (int n = 0; n < NR_PACK; n += 32) {
+                __m512i r0 = row0 ? _mm512_loadu_si512(row0 + n)
+                                  : _mm512_setzero_si512();
+                __m512i r1 = row1 ? _mm512_loadu_si512(row1 + n)
+                                  : _mm512_setzero_si512();
+                __m512i lo = _mm512_unpacklo_epi16(r0, r1);
+                __m512i hi = _mm512_unpackhi_epi16(r0, r1);
+                const __m512i idx_lo = _mm512_setr_epi32(
+                    0,1,2,3, 16,17,18,19, 4,5,6,7, 20,21,22,23);
+                const __m512i idx_hi = _mm512_setr_epi32(
+                    8,9,10,11, 24,25,26,27, 12,13,14,15, 28,29,30,31);
+                _mm512_storeu_si512(d + n * VNNI_PAIR,
+                    _mm512_permutex2var_epi32(lo, idx_lo, hi));
+                _mm512_storeu_si512(d + (n + 16) * VNNI_PAIR,
+                    _mm512_permutex2var_epi32(lo, idx_hi, hi));
+            }
+        } else {
+            for (int n = 0; n < nr_act; ++n) {
+                uint16_t v0, v1;
+                if (!transB) {
+                    v0 = (k0 < K) ? B[k0 * ldb + (col_start + n)] : 0;
+                    v1 = (k1 < K) ? B[k1 * ldb + (col_start + n)] : 0;
+                } else {
+                    v0 = (k0 < K) ? B[(col_start + n) * ldb + k0] : 0;
+                    v1 = (k1 < K) ? B[(col_start + n) * ldb + k1] : 0;
+                }
+                d[n * VNNI_PAIR + 0] = v0;
+                d[n * VNNI_PAIR + 1] = v1;
+            }
+            for (int n = nr_act; n < NR_PACK; ++n) {
+                d[n * VNNI_PAIR + 0] = 0;
+                d[n * VNNI_PAIR + 1] = 0;
+            }
+        }
+    }
+}
+
 __attribute__((target("avx512f,avx512bf16,fma")))
 static void bf16_thread_loop(
     const GemmDescriptor &desc,
@@ -806,6 +872,12 @@ static void bf16_thread_loop(
     const int num_threads = plan.num_threads;
     const bool has_bias = (bias != nullptr);
     const bool b_prepacked = (prepacked_b != nullptr);
+
+    // On-the-fly packing support: raw B pointer for when weights aren't cached
+    const uint16_t *B_raw = static_cast<const uint16_t *>(weight);
+    const int ldb_raw = desc.ldb;
+    const bool transB_raw = desc.transB;
+    const int K_padded_raw = (K + 1) & ~1;
 
     // Convert bias to FP32 if needed (cached across calls if pointer unchanged).
     // Microkernels always receive FP32 bias pointers.
@@ -970,27 +1042,44 @@ static void bf16_thread_loop(
                         const float *tile_bias =
                             (has_bias && can_fuse) ? (bias_f + col) : nullptr;
 
+                        // Resolve B pointer once per NR-tile (outside M-panel loop)
+                        const uint16_t *pb;
+                        int pb_stride;
+                        if (b_prepacked) {
+                            int panel_idx = col / NR_PACK;
+                            int in_panel_off = col % NR_PACK;
+                            pb = prepacked_b->get_panel(pc_pair, panel_idx)
+                                 + in_panel_off * VNNI_PAIR;
+                            pb_stride = vnni_stride;
+                        } else {
+                            static thread_local uint16_t *s_otf = nullptr;
+                            static thread_local size_t s_otf_cap = 0;
+                            int kb_pad = (kb_act + 1) & ~1;
+                            size_t need = static_cast<size_t>(
+                                kb_pad / 2) * NR_PACK * VNNI_PAIR;
+                            if (s_otf_cap < need) {
+                                std::free(s_otf);
+                                s_otf = static_cast<uint16_t *>(
+                                    std::aligned_alloc(64,
+                                        ((need * sizeof(uint16_t) + 63)
+                                         & ~size_t(63))));
+                                s_otf_cap = s_otf ? need : 0;
+                            }
+                            if (!s_otf) continue;
+                            pack_b_vnni_strip(B_raw, ldb_raw, transB_raw,
+                                col, std::min(static_cast<int>(NR_PACK),
+                                              N - col),
+                                K, K_padded_raw, pc, kb_act, s_otf);
+                            pb = s_otf;
+                            pb_stride = vnni_stride;
+                        }
+
                         for (int ip = 0; ip < m_panels; ++ip) {
                             const int ir = ip * MR;
                             const int mr_act = std::min(MR, mb_act - ir);
                             const uint16_t *At = A + (ic + ir) * lda + pc;
                             float *Ct = C_fp32 + (ic + ir) * ldc_fp32 + col;
 
-                            const uint16_t *pb;
-                            int pb_stride;
-                            if (b_prepacked) {
-                                // All active NR (16,32,64) divide NR_PACK=64
-                                // exactly → no panel crossing possible.
-                                int panel_idx = col / NR_PACK;
-                                int in_panel_off = col % NR_PACK;
-                                pb = prepacked_b->get_panel(pc_pair, panel_idx)
-                                     + in_panel_off * VNNI_PAIR;
-                                pb_stride = vnni_stride;
-                            } else {
-                                continue;
-                            }
-
-                            // BF16 direct store for this tile (last K-block only)
                             uint16_t *tile_bf16 = nullptr;
                             int tile_ldc_bf16 = 0;
                             if (can_direct_bf16 && is_last_k) {
@@ -1129,6 +1218,39 @@ static void bf16_thread_loop(
                         const float *tile_bias =
                             (has_bias && can_fuse) ? (bias_f + col) : nullptr;
 
+                        // Resolve B once per NR-tile (outside M-panel loop)
+                        const uint16_t *pb;
+                        int pb_stride;
+                        if (b_prepacked) {
+                            int panel_idx = col / NR_PACK;
+                            int in_panel_off = col % NR_PACK;
+                            pb = prepacked_b->get_panel(pc_pair, panel_idx)
+                                 + in_panel_off * VNNI_PAIR;
+                            pb_stride = vnni_stride;
+                        } else {
+                            static thread_local uint16_t *tl_otf = nullptr;
+                            static thread_local size_t tl_otf_cap = 0;
+                            int kb_pad = (kb_act + 1) & ~1;
+                            size_t need = static_cast<size_t>(
+                                kb_pad / 2) * NR_PACK * VNNI_PAIR;
+                            if (tl_otf_cap < need) {
+                                std::free(tl_otf);
+                                tl_otf = static_cast<uint16_t *>(
+                                    std::aligned_alloc(64,
+                                        ((need * sizeof(uint16_t) + 63)
+                                         & ~size_t(63))));
+                                tl_otf_cap = tl_otf ? need : 0;
+                            }
+                            if (!tl_otf) continue;
+                            pack_b_vnni_strip(B_raw, ldb_raw,
+                                transB_raw, col,
+                                std::min(static_cast<int>(NR_PACK),
+                                         N - col),
+                                K, K_padded_raw, pc, kb_act, tl_otf);
+                            pb = tl_otf;
+                            pb_stride = vnni_stride;
+                        }
+
                         for (int ip = 0; ip < m_panels; ++ip) {
                             const int ir = ip * MR;
                             const int mr_act = std::min(MR, mb_act - ir);
@@ -1142,18 +1264,6 @@ static void bf16_thread_loop(
                             } else {
                                 At = a_base + ir * at_stride_base;
                                 at_stride = at_stride_base;
-                            }
-
-                            const uint16_t *pb;
-                            int pb_stride;
-                            if (b_prepacked) {
-                                int panel_idx = col / NR_PACK;
-                                int in_panel_off = col % NR_PACK;
-                                pb = prepacked_b->get_panel(pc_pair, panel_idx)
-                                     + in_panel_off * VNNI_PAIR;
-                                pb_stride = vnni_stride;
-                            } else {
-                                continue;
                             }
 
                             uint16_t *tile_bf16 = nullptr;
@@ -1348,18 +1458,27 @@ void bf16_gemm_execute(
         else               plan.NR = 16;
         path_name = "decode";
     } else if (N >= 64 && !has_complex_activation) {
-        plan.MR = 6;
+        // MR selection: prefer MR=6 for throughput, but use MR=4 when
+        // MR=6 creates badly unbalanced IC tiles (e.g. M=8 → 6+2).
+        // MR=4 with NV=4 gives 16 accumulators — still efficient.
+        if (M % 6 == 0 || M >= 18) {
+            plan.MR = 6;
+        } else if (M % 4 == 0) {
+            plan.MR = 4;
+        } else if (M % 6 <= 3 && M > 12) {
+            plan.MR = 4;
+        } else {
+            plan.MR = 6;
+        }
         plan.NR = 64;
         path_name = "gemm-nr64";
     } else if (N >= 32) {
-        // GEMM with complex activation: MR=6, NR=32 (NV=2) — 12 acc
-        // Leaves 20 ZMM for gelu/sigmoid/tanh math scratch
-        plan.MR = 6;
+        plan.MR = (M % 6 == 0 || M >= 18) ? 6
+                : (M % 4 == 0) ? 4 : 6;
         plan.NR = 32;
     } else {
-        // Small N: MR=6, NR=16 (NV=1)
-        // NR=16 divides NR_PACK=64 exactly (4 tiles/panel), zero crossing
-        plan.MR = 6;
+        plan.MR = (M % 6 == 0 || M >= 18) ? 6
+                : (M % 4 == 0) ? 4 : 6;
         plan.NR = 16;
     }
     // Re-align NB to be a multiple of the final NR
@@ -1422,11 +1541,9 @@ void bf16_gemm_execute(
 
     // ── 2. B matrix VNNI prepacking ──
     //
-    // BF16 B must always be prepacked in VNNI format for dpbf16ps.
-    // Two cases:
-    //   (a) WEIGHT_CACHE=1 + is_weights_const: one-time VNNI pack, cached
-    //       forever in BF16PrepackedWeightCache singleton.
-    //   (b) Otherwise: per-call VNNI packing into thread-local buffer.
+    // (a) WEIGHT_CACHE + is_weights_const: one-time pack, cached forever.
+    // (b) Otherwise: prepacked_b = nullptr → thread loop does on-the-fly
+    //     VNNI packing per NR-wide strip per thread (parallelized, L1-hot).
     //
     static int32_t s_weight_cache =
         matmul_config_t::instance().get_weight_cache();
@@ -1434,40 +1551,11 @@ void bf16_gemm_execute(
     const bool can_cache = is_weights_const && (s_weight_cache != 0);
 
     if (can_cache) {
-        // Case (a): cached VNNI prepack
         PrepackedWeightKey bk{weight, K, N, desc.ldb, transB};
         prepacked_b = BF16PrepackedWeightCache::instance().get_or_prepack(
             bk, static_cast<const uint16_t *>(weight));
-    } else {
-        // Case (b): per-call VNNI packing into thread-local buffer
-        static thread_local uint16_t *s_vnni_buf = nullptr;
-        static thread_local size_t s_vnni_cap = 0;
-        static thread_local BF16PrepackedWeight s_vnni_pw;
-
-        const int np = (N + NR_PACK - 1) / NR_PACK;
-        const int k_pairs = K_padded / 2;
-        const size_t total_bf16 =
-            static_cast<size_t>(np) * k_pairs * NR_PACK * VNNI_PAIR;
-
-        if (s_vnni_cap < total_bf16) {
-            std::free(s_vnni_buf);
-            s_vnni_buf = static_cast<uint16_t *>(std::aligned_alloc(
-                64, ((total_bf16 * sizeof(uint16_t) + 63) & ~size_t(63))));
-            s_vnni_cap = total_bf16;
-        }
-
-        if (s_vnni_buf) {
-            pack_b_vnni(static_cast<const uint16_t *>(weight),
-                        K, N, desc.ldb, transB,
-                        s_vnni_buf, K_padded);
-            s_vnni_pw.data = s_vnni_buf;
-            s_vnni_pw.K = K;
-            s_vnni_pw.K_padded = K_padded;
-            s_vnni_pw.N = N;
-            s_vnni_pw.n_panels = np;
-            prepacked_b = &s_vnni_pw;
-        }
     }
+    // else: prepacked_b stays nullptr → on-the-fly packing in thread loop
 
     // ── 3. Thread loop ──
     bf16_thread_loop(desc, plan, uarch, src, weight, dst, bias, params,

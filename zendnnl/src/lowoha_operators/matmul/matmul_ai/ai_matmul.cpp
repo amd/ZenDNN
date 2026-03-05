@@ -19,7 +19,8 @@
 #include "lowoha_operators/matmul/matmul_ai/common/cost_model.hpp"
 #include "lowoha_operators/matmul/matmul_ai/gemm/intrinsic/fp32/avx512_fp32_gemm.hpp"
 #include "lowoha_operators/matmul/matmul_ai/gemm/intrinsic/bf16/avx512_bf16_gemm.hpp"
-#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/avx512_fp32_brgemm.hpp"
+#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/fp32/avx512_fp32_brgemm.hpp"
+#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/bf16/avx512_bf16_brgemm.hpp"
 #include "common/data_types.hpp"
 
 namespace zendnnl {
@@ -67,7 +68,9 @@ void ai_matmul_execute(
   const bool is_bf16 = (desc.src_dt == data_type_t::bf16 &&
                         desc.wei_dt == data_type_t::bf16);
 
-  if (is_bf16) {
+  if (is_bf16 && kernel == matmul_algo_t::ai_brgemm && uarch.avx512bf16) {
+    bf16_brgemm_execute(desc, uarch, src, weight, dst, bias, params);
+  } else if (is_bf16) {
     bf16_gemm_execute(desc, uarch, src, weight, dst, bias, params);
   } else if (kernel == matmul_algo_t::ai_brgemm && uarch.avx512f) {
     brgemm_execute(desc, uarch, src, weight, dst, bias, params);

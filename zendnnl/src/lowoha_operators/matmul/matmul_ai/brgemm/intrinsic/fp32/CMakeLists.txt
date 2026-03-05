@@ -14,6 +14,23 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-# BRGEMM intrinsic microkernels organized by data type
-add_subdirectory(fp32)
-add_subdirectory(bf16)
+# AVX-512 FP32 BRGEMM microkernel sources
+set(matmul_ai_brgemm_fp32_sources
+  avx512_fp32_brgemm.cpp)
+
+set(matmul_ai_brgemm_fp32_headers
+  avx512_fp32_brgemm.hpp)
+
+if(ZENDNNL_LIB_BUILD_ARCHIVE)
+  target_sources(zendnnl_archive
+    PRIVATE ${matmul_ai_brgemm_fp32_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${matmul_ai_brgemm_fp32_headers})
+endif()
+
+if(ZENDNNL_LIB_BUILD_SHARED)
+  target_sources(zendnnl
+    PRIVATE ${matmul_ai_brgemm_fp32_sources}
+    PRIVATE FILE_SET zendnnl_pvt_headers
+            TYPE HEADERS FILES ${matmul_ai_brgemm_fp32_headers})
+endif()

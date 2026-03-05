@@ -26,6 +26,7 @@ void matmul_config_t::set_default_config() {
   set_algo(matmul_algo);
   set_bmm_algo(bmm_algo);
   set_weight_cache(1);
+  set_otf_bpack(0);
   set_zp_comp_cache(true);  // Enable ZP compensation caching by default
 }
 
@@ -39,6 +40,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   int32_t matmul_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t bmm_algo = static_cast<int32_t>(matmul_algo_t::none);
   int32_t matmul_weight_cache = 1;
+  int32_t matmul_otf_bpack_json = 0;
   bool zp_comp_cache_enabled = true;  // Default enabled
   uint32_t lru_cache_capacity = std::numeric_limits<uint32_t>::max();
   auto matmul_json = runtime_variables_json["matmul"];
@@ -95,6 +97,14 @@ status_t matmul_config_t::set_user_config(json config_json) {
         matmul_weight_cache = (matmul_weight_cache_str == "0") ? 0 : 1;
       }
     }
+    auto otf_bpack_json = matmul_json["otf_bpack"];
+    if (!otf_bpack_json.empty()) {
+      auto otf_bpack_str = otf_bpack_json.template get<std::string>();
+      if (!otf_bpack_str.empty()) {
+        matmul_otf_bpack_json = (otf_bpack_str == "1") ? 1 : 0;
+      }
+    }
+
     // Read ZP compensation cache setting from JSON
     auto zp_comp_cache_json = matmul_json["zp_comp_cache"];
     if (! zp_comp_cache_json.empty()) {
@@ -116,6 +126,7 @@ status_t matmul_config_t::set_user_config(json config_json) {
   set_algo(matmul_algo);
   set_bmm_algo(bmm_algo);
   set_weight_cache(matmul_weight_cache);
+  set_otf_bpack(matmul_otf_bpack_json);
   set_zp_comp_cache(zp_comp_cache_enabled);
   set_lru_cache_capacity(lru_cache_capacity);
   set_mm_partitioner_enabled(mm_partitioner_enabled);
@@ -199,6 +210,19 @@ void matmul_config_t::set_env_config() {
     }
   }
   set_weight_cache(matmul_weight_cache);
+
+  char *otf_bpack_env = std::getenv("ZENDNNL_MATMUL_AI_OTF_BPACK");
+  int32_t matmul_otf_bpack = 0;
+  if (otf_bpack_env) {
+    try {
+      int32_t val = std::stoi(otf_bpack_env);
+      if (val == 0 || val == 1) {
+        matmul_otf_bpack = val;
+      }
+    } catch (...) {
+    }
+  }
+  set_otf_bpack(matmul_otf_bpack);
 
   // Read ZP compensation cache setting from environment
   char *zp_comp_cache_env = std::getenv("ZENDNNL_ZP_COMP_CACHE");
@@ -289,6 +313,14 @@ void matmul_config_t::set_weight_cache(int32_t weight_cache) {
 
 int32_t matmul_config_t::get_weight_cache() {
   return matmul_weight_cache;
+}
+
+void matmul_config_t::set_otf_bpack(int32_t enable) {
+  matmul_otf_bpack = enable;
+}
+
+int32_t matmul_config_t::get_otf_bpack() {
+  return matmul_otf_bpack;
 }
 
 void matmul_config_t::set_zp_comp_cache(bool comp_cache) {

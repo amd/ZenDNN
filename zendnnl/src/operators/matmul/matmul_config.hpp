@@ -111,6 +111,18 @@ class matmul_config_t final : public op_config_t {
    */
   int32_t get_weight_cache();
 
+  /** @brief Sets on-the-fly B packing flag for AI kernels.
+  *
+  * @param enable 0 = disabled (default), 1 = enabled.
+  */
+  void set_otf_bpack(int32_t enable);
+
+  /** @brief Get on-the-fly B packing flag for AI kernels.
+   *
+   * @return 0 if disabled, 1 if enabled.
+   */
+  int32_t get_otf_bpack();
+
   /** @brief Sets zp_comp_cache enable flag.
   *
   * @param enable Whether to enable zero-point compensation caching.
@@ -213,6 +225,7 @@ class matmul_config_t final : public op_config_t {
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t bmm_algo;            /**< Batched Matmul algorithm. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
+  int32_t matmul_otf_bpack;    /**< On-the-fly B packing for AI kernels. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
   uint32_t lru_cache_capacity; /**< LRU cache capacity. */
   bool mm_partitioner_enabled;      /**< Enable MM partitioner. */

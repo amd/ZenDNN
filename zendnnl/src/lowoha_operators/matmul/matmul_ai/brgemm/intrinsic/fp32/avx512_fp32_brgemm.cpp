@@ -14,8 +14,9 @@
  * limitations under the License.
  ******************************************************************************/
 
-#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/avx512_fp32_brgemm.hpp"
+#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/fp32/avx512_fp32_brgemm.hpp"
 #include "lowoha_operators/matmul/matmul_ai/brgemm/brgemm_planner.hpp"
+#include "lowoha_operators/matmul/matmul_ai/gemm/intrinsic/fp32/avx512_fp32_gemm.hpp"
 #include "lowoha_operators/matmul/matmul_ai/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_ai/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_ai/common/postop.hpp"
@@ -476,6 +477,8 @@ void brgemm_execute(
     //
     static int32_t s_weight_cache =
         matmul_config_t::instance().get_weight_cache();
+    static int32_t s_otf_bpack =
+        matmul_config_t::instance().get_otf_bpack();
     const PrepackedWeight *prepacked_b = nullptr;
     const bool can_cache = is_weights_const && (s_weight_cache != 0);
 
@@ -519,6 +522,12 @@ void brgemm_execute(
             s_tb_pw.n_panels = np;
             prepacked_b = &s_tb_pw;
         }
+    }
+
+    const bool do_otf = (!prepacked_b && s_otf_bpack != 0);
+    if (!prepacked_b && !do_otf) {
+        gemm_execute(desc, uarch, src, weight, dst, bias, params);
+        return;
     }
 
     // ── 3. Thread loop ──
