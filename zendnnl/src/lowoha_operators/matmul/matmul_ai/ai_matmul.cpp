@@ -17,10 +17,10 @@
 #include "lowoha_operators/matmul/matmul_ai/ai_matmul.hpp"
 #include "lowoha_operators/matmul/matmul_ai/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_ai/common/cost_model.hpp"
-#include "lowoha_operators/matmul/matmul_ai/gemm/intrinsic/fp32/avx512_fp32_gemm.hpp"
-#include "lowoha_operators/matmul/matmul_ai/gemm/intrinsic/bf16/avx512_bf16_gemm.hpp"
-#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/fp32/avx512_fp32_brgemm.hpp"
-#include "lowoha_operators/matmul/matmul_ai/brgemm/intrinsic/bf16/avx512_bf16_brgemm.hpp"
+#include "lowoha_operators/matmul/matmul_ai/gemm/looper/bf16_gemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_ai/gemm/looper/fp32_gemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_ai/brgemm/looper/bf16_brgemm_looper.hpp"
+#include "lowoha_operators/matmul/matmul_ai/brgemm/looper/fp32_brgemm_looper.hpp"
 #include "common/data_types.hpp"
 
 namespace zendnnl {
@@ -41,13 +41,10 @@ void ai_matmul_execute(
   bool is_weights_const, int num_threads,
   matmul_params &params) {
 
-  // Early exit
   if (M <= 0 || N <= 0 || K <= 0) return;
 
-  // ── 1. UArch detection (cached static, zero cost after first call) ──
   const UarchParams &uarch = detect_uarch();
 
-  // ── 2. Build descriptor (stack only, no heap) ──
   GemmDescriptor desc;
   desc.M = M; desc.N = N; desc.K = K;
   desc.lda = lda; desc.ldb = ldb; desc.ldc = ldc;
@@ -64,7 +61,6 @@ void ai_matmul_execute(
   desc.is_weights_const = is_weights_const;
   desc.num_threads = num_threads;
 
-  // ── 3. Dispatch: each module owns its planner + B prepack + thread loop ──
   const bool is_bf16 = (desc.src_dt == data_type_t::bf16 &&
                         desc.wei_dt == data_type_t::bf16);
 

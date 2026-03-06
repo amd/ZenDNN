@@ -1,286 +1,286 @@
-1, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 13824, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 13824, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 16384, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 16384, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 50400, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 18944, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 18944, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 152964, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 151936, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2560, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 10240, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2560, 10240, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2560, 51200, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2560, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 14336, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3584, 256000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 17920, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 17920, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 13696, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 5120, 152064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 2048, 50272, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-1, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 13824, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 13824, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 16384, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 16384, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 50400, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 18944, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 18944, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 152964, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 151936, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2560, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 10240, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2560, 10240, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2560, 51200, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2560, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 14336, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3584, 256000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 17920, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 17920, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 13696, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 5120, 152064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 2048, 50272, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-32, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 13824, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 13824, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 16384, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 16384, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 50400, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 18944, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 18944, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 152964, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 151936, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2560, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 10240, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2560, 10240, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2560, 51200, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2560, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 14336, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3584, 256000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 17920, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 17920, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 13696, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 5120, 152064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 2048, 50272, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-256, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 5120, 15360, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 5120, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 5120, 13824, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 13824, 5120, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 5120, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 13696, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 13696, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 65024, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 12288, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 16384, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 16384, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 50400, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 4608, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 18944, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 18944, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 152964, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 11008, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 11008, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 151936, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 32000, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 8192, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2048, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2048, 128256, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2048, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2560, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 10240, 2560, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2560, 10240, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2560, 51200, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2560, 7680, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3072, 9216, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3072, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3072, 8192, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 8192, 3072, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3072, 32064, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 6144, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 14336, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 2048, 2048, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 4096, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 4096, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 3584, 14336, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
-512, 14336, 3584, 1000, f32:f32:f32, false, , , aocl_dlp_blocked, false, false, 1.0, 0.0, , , f32, 1000
+1, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 13824, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 13824, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 16384, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 16384, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 50400, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 18944, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 18944, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 152964, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 151936, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 10240, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 10240, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 51200, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2560, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 14336, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3584, 256000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 17920, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 17920, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 13696, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 5120, 152064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 2048, 50272, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+1, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 13824, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 13824, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 16384, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 16384, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 50400, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 18944, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 18944, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 152964, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 151936, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2560, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 10240, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2560, 10240, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2560, 51200, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2560, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 14336, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3584, 256000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 17920, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 17920, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 13696, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 5120, 152064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 2048, 50272, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+32, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 13824, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 13824, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 16384, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 16384, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 50400, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 18944, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 18944, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 152964, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 151936, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2560, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 10240, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2560, 10240, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2560, 51200, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2560, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 14336, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3584, 256000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 17920, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 17920, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 13696, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 5120, 152064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 2048, 50272, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+256, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 5120, 15360, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 5120, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 5120, 13824, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 13824, 5120, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 5120, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 13696, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 13696, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 65024, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 12288, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 16384, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 16384, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 50400, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 4608, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 18944, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 18944, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 152964, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 11008, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 11008, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 151936, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 32000, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 8192, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2048, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2048, 128256, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2048, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2560, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 10240, 2560, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2560, 10240, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2560, 51200, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2560, 7680, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3072, 9216, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3072, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3072, 8192, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 8192, 3072, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3072, 32064, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 6144, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 14336, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 2048, 2048, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 4096, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 4096, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 3584, 14336, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500
+512, 14336, 3584, 1000, f32:f32:f32, false, , , , aocl_dlp_blocked, true, false, false, 1.0, 0.0, none, 0, f32, 500

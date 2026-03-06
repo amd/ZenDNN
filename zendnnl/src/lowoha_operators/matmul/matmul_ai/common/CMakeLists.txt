@@ -25,7 +25,9 @@ set(matmul_ai_common_headers
   cost_model.hpp
   postop.hpp
   kernel_cache.hpp
-  avx512_math.hpp)
+  avx512_math.hpp
+  bf16_packing.hpp
+  fp32_packing.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
