@@ -109,7 +109,7 @@ int run_lowoha_reorder_bf16_to_int8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -277,7 +277,7 @@ int run_lowoha_reorder_bf16_to_uint8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
       expected = std::max(0, std::min(255, expected));
       if (output_uint8[i] != static_cast<uint8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -448,7 +448,7 @@ int run_lowoha_reorder_bf16_to_s8_per_tensor_test() {
     log_info("Verification:");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[i] / scale) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -545,7 +545,7 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_test() {
         size_t idx = i * N + j;
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale_j) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_j) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -664,7 +664,7 @@ int run_lowoha_reorder_bf16_to_s8_per_group_test() {
         size_t scale_zp_idx = group_idx * N + j;  // Index: group_idx * N + col
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
@@ -765,7 +765,7 @@ int run_lowoha_reorder_bf16_to_s8_per_channel_row_test() {
         size_t idx = i * N + j;
         float scale_i = scales[i];  // Index by row
         int32_t zp_i = zero_points[i];  // Index by row
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale_i) + zp_i);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_i) + zp_i);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -887,7 +887,7 @@ int run_lowoha_reorder_bf16_to_s8_per_group_col_test() {
         size_t scale_zp_idx = i * G + group_col_idx;  // Index: row * G + group_col_idx
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
@@ -986,7 +986,7 @@ int run_lowoha_reorder_bf16_to_s8_mixed_granularity_test() {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
         int32_t zp_j = zero_points[j];  // per-channel zp
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -1105,7 +1105,7 @@ int run_lowoha_reorder_bf16_to_s8_mixed_row_group_test() {
         size_t zp_idx = group_idx * N + col;  // per-group-row: group*N + col
         int32_t zp = zero_points[zp_idx];
 
-        int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale) + zp);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zp);
         expected = std::max(-128, std::min(127, expected));
 
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
@@ -1211,7 +1211,7 @@ int run_lowoha_reorder_bf16_to_s8_batched_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::round(input_f32_ref[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32_ref[idx] / scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -2135,7 +2135,7 @@ int run_lowoha_reorder_bf16_to_s8_strided_2d_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2252,7 +2252,7 @@ int run_lowoha_reorder_bf16_to_s8_strided_3d_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -2385,7 +2385,7 @@ int run_lowoha_reorder_bf16_to_s8_strided_row_padding_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;  // Contiguous output index
-        int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2469,7 +2469,7 @@ int run_lowoha_reorder_f32_to_int8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2617,7 +2617,7 @@ int run_lowoha_reorder_f32_to_uint8_test() {
     log_info("Verification (expected vs actual):");
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
       expected = std::max(0, std::min(255, expected));
       if (output_uint8[i] != static_cast<uint8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2765,7 +2765,7 @@ int run_lowoha_reorder_f32_to_s8_per_tensor_test() {
 
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
-      int32_t expected = static_cast<int32_t>(std::round(input_f32[i] / scale) + zero_point);
+      int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[i] / scale) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -2842,7 +2842,7 @@ int run_lowoha_reorder_f32_to_s8_per_channel_test() {
         size_t idx = i * N + j;
         float scale_j = scales[j];
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale_j) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_j) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -2935,7 +2935,7 @@ int run_lowoha_reorder_f32_to_s8_per_group_test() {
         size_t scale_zp_idx = group_idx * N + j;
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "] (group ", group_idx, "): expected ", expected,
@@ -3015,7 +3015,7 @@ int run_lowoha_reorder_f32_to_s8_per_channel_row_test() {
         size_t idx = i * N + j;
         float scale_i = scales[i];
         int32_t zp_i = zero_points[i];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale_i) + zp_i);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_i) + zp_i);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -3109,7 +3109,7 @@ int run_lowoha_reorder_f32_to_s8_per_group_col_test() {
         size_t scale_zp_idx = i * G + group_col_idx;
         float scale_g = scales[scale_zp_idx];
         int32_t zp_g = zero_points[scale_zp_idx];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale_g) + zp_g);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale_g) + zp_g);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "] (col_group ", group_col_idx, "): expected ", expected,
@@ -3188,7 +3188,7 @@ int run_lowoha_reorder_f32_to_s8_mixed_granularity_test() {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
         int32_t zp_j = zero_points[j];
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale) + zp_j);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zp_j);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -3295,7 +3295,7 @@ int run_lowoha_reorder_f32_to_s8_mixed_row_group_test() {
         size_t zp_idx = group_idx * N + col;
         int32_t zp = zero_points[zp_idx];
 
-        int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale) + zp);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zp);
         expected = std::max(-128, std::min(127, expected));
 
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
@@ -3378,7 +3378,7 @@ int run_lowoha_reorder_f32_to_s8_batched_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::round(input_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(input_f32[idx] / scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -4068,7 +4068,7 @@ int run_lowoha_reorder_f32_to_s8_strided_2d_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -4159,7 +4159,7 @@ int run_lowoha_reorder_f32_to_s8_strided_3d_test() {
       for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
           size_t idx = b * (M * N) + i * N + j;
-          int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+          int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
           expected = std::max(-128, std::min(127, expected));
           if (output_int8[idx] != static_cast<int8_t>(expected)) {
             log_error("Mismatch at [batch=", b, ", ", i, ", ", j, "]: expected ", expected,
@@ -4255,7 +4255,7 @@ int run_lowoha_reorder_f32_to_s8_strided_row_padding_test() {
     for (int64_t i = 0; i < M; ++i) {
       for (int64_t j = 0; j < N; ++j) {
         size_t idx = i * N + j;
-        int32_t expected = static_cast<int32_t>(std::round(expected_f32[idx] / scale) + zero_point);
+        int32_t expected = static_cast<int32_t>(std::nearbyint(expected_f32[idx] / scale) + zero_point);
         expected = std::max(-128, std::min(127, expected));
         if (output_int8[idx] != static_cast<int8_t>(expected)) {
           log_error("Mismatch at [", i, ",", j, "]: expected ", expected,
@@ -5970,7 +5970,7 @@ int run_lowoha_reorder_bf16_scale_per_tensor_quant_test() {
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
       int32_t expected = static_cast<int32_t>(
-          std::round(input_f32_ref[i] / scale_f32_ref) + zero_point);
+          std::nearbyint(input_f32_ref[i] / scale_f32_ref) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,
@@ -6126,7 +6126,7 @@ int run_lowoha_reorder_bf16_scale_f32_to_s8_test() {
     bool all_correct = true;
     for (size_t i = 0; i < nelems; ++i) {
       int32_t expected = static_cast<int32_t>(
-          std::round(input_f32[i] / scale_f32_ref) + zero_point);
+          std::nearbyint(input_f32[i] / scale_f32_ref) + zero_point);
       expected = std::max(-128, std::min(127, expected));
       if (output_int8[i] != static_cast<int8_t>(expected)) {
         log_error("Mismatch at index ", i, ": expected ", expected,

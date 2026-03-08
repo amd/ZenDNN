@@ -394,7 +394,7 @@ void quantize_bf16_to_uint8_ref(const uint16_t *input, uint8_t *output,
     std::memcpy(&val, &bits, sizeof(float));
 
     // Apply quantization: (val / scale) + zero_point
-    int32_t q = static_cast<int32_t>(std::round(val / scale) + zero_point);
+    int32_t q = static_cast<int32_t>(std::nearbyint(val / scale)) + zero_point;
     q = std::max(0, std::min(255, q));
     output[i] = static_cast<uint8_t>(q);
   }
@@ -646,7 +646,7 @@ void quantize_f32_to_uint8_ref(const float *input, uint8_t *output,
                                 size_t nelems, float scale, int zero_point) {
   for (size_t i = 0; i < nelems; ++i) {
     // Apply quantization: (val / scale) + zero_point
-    int32_t q = static_cast<int32_t>(std::round(input[i] / scale) + zero_point);
+    int32_t q = static_cast<int32_t>(std::nearbyint(input[i] / scale)) + zero_point;
     q = std::max(0, std::min(255, q));
     output[i] = static_cast<uint8_t>(q);
   }

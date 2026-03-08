@@ -124,7 +124,7 @@ static inline int get_zero_point_value(const reorder_quant_params_t::quant_t &zp
  */
 static inline int8_t quantize_bf16_to_s8_scalar(uint16_t bf16_val, float scale, int zp) {
   float f32_val = bf16_to_float(bf16_val);
-  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
 }
 
@@ -137,7 +137,7 @@ static inline int8_t quantize_bf16_to_s8_scalar(uint16_t bf16_val, float scale, 
  */
 static inline uint8_t quantize_bf16_to_u8_scalar(uint16_t bf16_val, float scale, int zp) {
   float f32_val = bf16_to_float(bf16_val);
-  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
 }
 
@@ -177,7 +177,7 @@ static inline uint16_t dequantize_u8_to_bf16_scalar(uint8_t u8_val, float scale,
  * @return Quantized int8 value
  */
 static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale, int zp) {
-  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<int8_t>(std::max(-128, std::min(127, quantized)));
 }
 
@@ -189,7 +189,7 @@ static inline int8_t quantize_f32_to_s8_scalar(float f32_val, float scale, int z
  * @return Quantized uint8 value
  */
 static inline uint8_t quantize_f32_to_u8_scalar(float f32_val, float scale, int zp) {
-  int32_t quantized = static_cast<int32_t>(std::round(f32_val / scale)) + zp;
+  int32_t quantized = static_cast<int32_t>(std::nearbyint(f32_val / scale)) + zp;
   return static_cast<uint8_t>(std::max(0, std::min(255, quantized)));
 }
 

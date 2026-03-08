@@ -23,6 +23,7 @@ namespace matmul {
 
 using namespace zendnnl::ops;
 using zendnnl::common::size_of;
+using zendnnl::lowoha::reorder::reorder_algo_t;
 
 status_t reorder_quantization_wrapper(
     const void *&src, const int lda, int &reordered_lda, size_t &src_type_size,
@@ -123,6 +124,7 @@ status_t reorder_quantization_wrapper(
   rp.dst_dtype = quant_dtype;
   rp.dynamic_quant = is_dynamic;
   rp.num_threads = num_threads;
+  rp.algo = reorder_algo_t::native;
 
   if (is_batched) {
     rp.src_shape = {batch_A, phys_rows, phys_cols};

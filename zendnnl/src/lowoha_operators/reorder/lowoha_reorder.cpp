@@ -17,6 +17,7 @@
 #include "lowoha_operators/reorder/lowoha_reorder.hpp"
 #include "lowoha_operators/reorder/lowoha_reorder_utils.hpp"
 #include "lowoha_operators/reorder/reorder_kernels.hpp"
+#include "lowoha_operators/reorder/per_token_avx512_kernel.hpp"
 #include "lowoha_operators/matmul/lowoha_matmul_utils.hpp"
 #include "common/zendnnl_global.hpp"
 
@@ -752,6 +753,76 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
   }
 }
 
+/**
+ * @brief Dispatch fused per-token dynamic quantization (native AVX-512 path)
+ *
+ * Handles all supported src/dst type combinations for per-token (M,1)
+ * dynamic quantization using the fused kernel that computes scale/zp and
+ * quantizes in a single cache-friendly pass per row.
+ *
+ * Supports both f32 and bf16 scale output buffers. When scale.dt is bf16,
+ * an intermediate f32 buffer is used for kernel computation, then converted
+ * to bf16 on output.
+ *
+ * @return true if a matching kernel was dispatched, false otherwise
+ */
+static bool dispatch_fused_per_token(const void *src, void *dst,
+                                      const reorder_params_t &params,
+                                      int64_t M, int64_t N) {
+  const auto scale_dt = params.quant_params.scale.dt;
+  if (scale_dt != data_type_t::f32 && scale_dt != data_type_t::bf16)
+    return false;
+
+  const bool scale_is_bf16 = (scale_dt == data_type_t::bf16);
+  std::vector<float> scale_f32_tmp;
+  float *scale_f32;
+
+  if (scale_is_bf16) {
+    scale_f32_tmp.resize(M);
+    scale_f32 = scale_f32_tmp.data();
+  } else {
+    scale_f32 = static_cast<float *>(params.quant_params.scale.buff);
+  }
+
+  const bool is_symmetric = (params.quant_params.zero_point.buff == nullptr);
+  bool dispatched = false;
+
+  if (is_symmetric) {
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_bf16_s8_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::s8) {
+      dynamic_per_token_quant_f32_s8_native(
+          static_cast<const float *>(src),
+          static_cast<int8_t *>(dst), scale_f32, M, N);
+      dispatched = true;
+    }
+  } else {
+    int32_t *zp_out = static_cast<int32_t *>(params.quant_params.zero_point.buff);
+    if (params.src_dtype == data_type_t::bf16 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_bf16_u8_native(
+          static_cast<const uint16_t *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    } else if (params.src_dtype == data_type_t::f32 && params.dst_dtype == data_type_t::u8) {
+      dynamic_per_token_quant_f32_u8_native(
+          static_cast<const float *>(src),
+          static_cast<uint8_t *>(dst), scale_f32, zp_out, M, N);
+      dispatched = true;
+    }
+  }
+
+  if (dispatched && scale_is_bf16) {
+    uint16_t *bf16_out = static_cast<uint16_t *>(params.quant_params.scale.buff);
+    for (int64_t m = 0; m < M; ++m)
+      bf16_out[m] = float_to_bf16(scale_f32[m]);
+  }
+
+  return dispatched;
+}
+
 status_t reorder_direct(const void *src, void *dst,
                          reorder_params_t params) {
   // Compute nelems from shape - shape is mandatory
@@ -812,6 +883,30 @@ status_t reorder_direct(const void *src, void *dst,
                          omp_get_max_threads();
 
     reorder_threadlimit thread_guard(params.num_threads);
+
+    //------------------------------------------------------------------
+    // Fused per-token path: when granularity is per-channel-row (M,1)
+    // and dst is provided, use fused kernel that computes scale/zp and
+    // quantizes in one cache-friendly pass per row.
+    //------------------------------------------------------------------
+    const auto &scale_dims_dq = params.quant_params.scale.dims;
+    reorder_algo_t algo_dq = select_reorder_algo(params, nelems);
+
+    if (dst != nullptr && params.is_2d() && algo_dq == reorder_algo_t::native &&
+        (!params.has_src_strides() || params.is_src_contiguous()) &&
+        is_per_channel_row_dims(scale_dims_dq, params.src_shape)) {
+
+      if (dispatch_fused_per_token(src, dst, params, params.M(), params.N())) {
+        if (is_profile) {
+          profiler.tbp_stop();
+          profilelog_verbose(ss_dq.str(),
+                             ", algo=native (fused per-token), time=",
+                             profiler.tbp_elapsedtime(),
+                             profiler.get_res_str());
+        }
+        return status_t::success;
+      }
+    }
 
     // Compute dynamic quantization parameters (scale and zero_point)
     status_t status = compute_dynamic_quant_params(src, params);

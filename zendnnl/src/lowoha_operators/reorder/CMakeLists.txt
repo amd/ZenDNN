@@ -17,7 +17,8 @@
 set(lowoha_reorder_sources
   lowoha_reorder.cpp
   lowoha_reorder_utils.cpp
-  reorder_kernels.cpp)
+  reorder_kernels.cpp
+  per_token_avx512_kernel.cpp)
 
 set(lowoha_reorder_public_headers
   lowoha_reorder_common.hpp
@@ -25,7 +26,8 @@ set(lowoha_reorder_public_headers
   lowoha_reorder_utils.hpp)
 
 set(lowoha_reorder_private_headers
-  reorder_kernels.hpp)
+  reorder_kernels.hpp
+  per_token_avx512_kernel.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive
