@@ -28,6 +28,8 @@ for dt, bits in DTYPE_BITS.items():
 
 L2_BW_B_PER_CYCLE = 64
 L1D_KB, L2_KB = 48, 1024
+L3_BW_GBS = 120.0    # per-core L3 effective BW (empirical: ~115-121 GB/s on Turin)
+DRAM_BW_GBS = 50.0   # per-core DRAM effective BW (empirical: ~40-60 GB/s on Turin)
 
 ELEM_BYTES = {"u8":1, "s8":1, "s4":0.5, "bf16":2, "f16":2, "f32":4}
 
@@ -55,6 +57,34 @@ def l2_peak_gbs():
 def ws_bytes(m, k, n, dt):
     p = dt.lower().split(":")
     return int(m*k*esz(p[0]) + k*n*esz(p[1]) + m*n*esz(p[2] if len(p)>2 else "f32"))
+
+CORES_PER_CCD = 8   # AMD Zen 5 Turin: 8 cores share one L3 CCD
+
+def _scaled_shared_bw(nt):
+    """Per-core share of L3 and DRAM BW under thread contention.
+    L3 is shared by up to 8 cores per CCD; DRAM is shared system-wide."""
+    l3_contention = min(nt, CORES_PER_CCD)
+    dram_contention = nt
+    return L3_BW_GBS / l3_contention, DRAM_BW_GBS / dram_contention
+
+def blended_bw_l2(pf_l2_pct, pf_l3_pct, pf_dr_pct, nt=1):
+    """Effective per-core BW through L2 port based on data source.
+    L2 is private (no contention). L3/DRAM scale with thread count."""
+    l2_bw = l2_peak_gbs()
+    l3_bw, dram_bw = _scaled_shared_bw(nt)
+    return (pf_l2_pct / 100.0 * l2_bw +
+            pf_l3_pct / 100.0 * l3_bw +
+            pf_dr_pct / 100.0 * dram_bw)
+
+def blended_bw_l3(pf_l3_pct, pf_dr_pct, nt=1):
+    """Effective per-core BW through L3 port based on data source.
+    Only considers traffic that actually reaches L3 (L2 misses).
+    Scales by thread contention on shared L3/DRAM."""
+    l3_bw, dram_bw = _scaled_shared_bw(nt)
+    l3_frac = pf_l3_pct / (pf_l3_pct + pf_dr_pct) * 100 if (pf_l3_pct + pf_dr_pct) > 0 else 100
+    dr_frac = 100 - l3_frac
+    return (l3_frac / 100.0 * l3_bw +
+            dr_frac / 100.0 * dram_bw)
 
 def cache_level(b_kb):
     if b_kb <= L1D_KB:   return "L1d"
@@ -199,6 +229,14 @@ def print_column_guide():
   BW GB/s = operational bandwidth = WorkSet x iters / time / 1e9
   L2 Peak = theoretical L2 peak bandwidth (GB/s)
   L2 BW%  = L2 Bandwidth Efficiency = BW / L2_Peak x 100
+  L2Eff   = L2 effective achievable BW (GB/s) through L2 port for this shape
+            = PF->L2% x L2_peak + PF->L3% x L3_BW + PF->DRAM% x DRAM_BW
+            Per-shape L2 roofline: adapts to where data actually lives.
+            L2-resident: ~264 GB/s | L3: ~120 GB/s | DRAM: ~50 GB/s
+  L2Meas  = L2 measured BW (GB/s) = L1_misses x 64B / time / threads
+            Actual data throughput rate through the L2->L1 port.
+  L2%Eff  = L2Meas / L2Eff x 100  — kernel efficiency vs L2 port roofline
+            >80%: near-optimal | 50-80%: room to improve | <50%: overhead-limited
 """)
 
 def single_file_analysis(path):
@@ -403,13 +441,33 @@ def compare_algos(files):
 # ── Per-shape perf stat analysis ──────────────────────────────────────
 
 def parse_perf_raw(path):
-    """Parse the _perf_raw.txt file produced by run_matmul_benchmark_sweep.sh -p.
-    Each shape block starts with '=== SHAPE N/M ===' and contains benchdnn CSV
-    output plus perf stat counters."""
+    """Parse perf counter data from either:
+    1. External format (_perf_raw.txt from -p): delimited by '=== SHAPE N/M ==='
+    2. Internal format (from -P / --perf-counters): inline CSV + raw counters
+    """
     with open(path) as f:
         content = f.read()
 
-    blocks = re.split(r'=== SHAPE \d+/\d+ ===', content)
+    # Detect format: external has '=== SHAPE' delimiters, internal doesn't
+    if '=== SHAPE' in content:
+        blocks = re.split(r'=== SHAPE \d+/\d+ ===', content)
+    else:
+        # Internal format: split into blocks at each benchdnn CSV line
+        # A CSV line has 19+ comma-separated fields starting with a digit
+        lines = content.split('\n')
+        blocks = []
+        current_block = []
+        for line in lines:
+            csv_fields = [x.strip() for x in line.split(',')]
+            is_csv = (len(csv_fields) >= 19 and csv_fields[0].isdigit()
+                      and not line.strip().startswith("M"))
+            if is_csv and current_block:
+                blocks.append('\n'.join(current_block))
+                current_block = []
+            current_block.append(line)
+        if current_block:
+            blocks.append('\n'.join(current_block))
+
     rows = []
 
     for block in blocks:
@@ -424,7 +482,7 @@ def parse_perf_raw(path):
         for line in block.split('\n'):
             line = line.strip()
 
-            # Parse INPUT line for M,K,N
+            # Parse INPUT line for M,K,N (external format)
             if line.startswith("INPUT:"):
                 fields = [x.strip() for x in line[6:].split(',')]
                 if len(fields) >= 5:
@@ -440,16 +498,32 @@ def parse_perf_raw(path):
             if len(csv_fields) >= 19 and not line.startswith("M"):
                 try:
                     tm = float(csv_fields[-1])
-                    if tm > 0 and m > 0:
+                    if tm > 0:
+                        if m == 0:
+                            f0 = csv_fields[0]
+                            if not f0.isdigit():
+                                continue
+                            m_val = int(f0)
+                            k_val = int(csv_fields[1])
+                            n_str = csv_fields[2]
+                            if ':' in n_str:
+                                n_str = n_str.split(':')[0]
+                            n_val = int(n_str)
+                            iters_val = int(csv_fields[3])
+                            m, k, n, iters = m_val, k_val, n_val, iters_val
+                            dt = csv_fields[4]
                         tot_ms = tm
                         flops = 2.0 * m * k * n * iters
                         gflops = flops / (tot_ms * 1e6)
-                except ValueError:
+                except (ValueError, IndexError):
                     pass
                 continue
 
-            # Parse perf stat counter lines: "  1,234,567  event_name  ..."
-            # After strip(): "117,953,177      L1-dcache-loads ..."
+            # Skip [PERF] summary line (derived values, we recompute from raw)
+            if line.startswith("[PERF]"):
+                continue
+
+            # Parse perf stat counter lines: "117,953,177      L1-dcache-loads ..."
             ctr_match = re.match(r'([\d,]+)\s+(\S+)', line)
             if not ctr_match:
                 continue
@@ -468,9 +542,9 @@ def parse_perf_raw(path):
                 counters['l2pf_l3hit'] = val
             elif ename == 'rFF72':
                 counters['l2pf_dram'] = val
-            elif ename in ('r0764', 'r0F64'):
+            elif ename in ('r0764', 'r0F64', 'rF064'):
                 counters['l2_hit'] = val
-            elif ename in ('r3864', 'r1064'):
+            elif ename in ('r3864', 'r1064', 'r0864'):
                 counters['l2_miss'] = val
 
         if m == 0 or k == 0 or n == 0:
@@ -518,25 +592,28 @@ def parse_perf_raw(path):
         # Counter-based L2 BW: every L1 miss = 64-byte cacheline through L2
         l2_bw_measured = (l1_miss * 64) / (tot_ms / 1000) / 1e9 if tot_ms > 0 else 0
 
+        # Counter-based L3 BW: every L2 miss = 64-byte cacheline through L3
+        l3_traffic = l2_miss + l2pf_l3hit + l2pf_dram
+        l3_bw_measured = (l3_traffic * 64) / (tot_ms / 1000) / 1e9 if tot_ms > 0 else 0
+
         rows.append(dict(
             m=m, k=k, n=n, iters=iters, dt=dt, cls=cls,
             tot_ms=tot_ms, avg_ms=avg_ms, gflops=gflops,
             ws=ws, ai=ai, bw=bw, b_kb=b_kb,
             l2_bw_meas=l2_bw_measured,
+            l3_bw_meas=l3_bw_measured,
             l1m_pct=l1m_pct, l2m_pct=l2m_pct, l3m_pct=l3m_pct,
             pf_l2=pf_l2, pf_l3=pf_l3, pf_dr=pf_dr))
 
     return rows
 
 
-def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
+def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1, cache_level=None):
     rows = parse_perf_raw(path)
     if not rows:
         sys.exit("No data parsed from perf raw file.")
 
     peak_l2 = l2_peak_gbs()
-    cls = rows[0]["cls"]
-    pk = peak_gops(cls)
 
     nt = num_threads
     mode = "Single Core" if nt == 1 else f"{nt}-Thread (per-core normalized)"
@@ -548,7 +625,9 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
         print(f"  Threads: {nt} | GOPS = system total | Comp%, L2BW%, L2BW%m = per-core (÷ {nt})")
     print(f"  NOTE: Actual freq under sustained AVX-512 may be ~3-5% lower than max boost.")
     print(f"{'='*110}")
-    print(f"  Compute peak/core ({cls.upper()}): {pk:.2f} GOPS  |  L2 BW peak/core: {peak_l2:.2f} GB/s")
+    dtypes_present = sorted(set(r["cls"] for r in rows))
+    peaks_str = " | ".join(f"{c.upper()}: {peak_gops(c):.2f}" for c in dtypes_present)
+    print(f"  Compute peak/core: {peaks_str} GOPS  |  L2 BW peak/core: {peak_l2:.2f} GB/s")
 
     print_formulas()
 
@@ -559,32 +638,42 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
         if not subset:
             continue
 
+        sub_dtypes = sorted(set(r["cls"] for r in subset))
+        dtype_label = "/".join(c.upper() for c in sub_dtypes)
         print(f"\n{'='*170}")
-        print(f"  {cls.upper()} {label}  —  Timing + L2/L3 HW Counters (perf stat counting mode)")
+        print(f"  {dtype_label} {label}  —  Timing + L2/L3 HW Counters (perf stat counting mode)")
         print(f"{'='*170}")
 
-        roofline_knee = pk / peak_l2 if peak_l2 > 0 else 1.0
-
+        CL = cache_level.upper() if cache_level else None
         S = "│"
         if verbose:
-            h = (f"{'M':>5}\t{'K':>6}\t{'N':>6}\t{'K:N':>6}\t{'DType':>16}\t{'Tot(ms)':>10}\t"
-                 f"{'GOPS':>8}\t{'Comp%':>6}\t{'BW GB/s':>8}\t{'L2 BW%':>7}\t"
-                 f"{'AI':>5}\t{'B(KB)':>8}\t"
-                 f"{S}\t{'L1miss':>7}\t{'L2miss':>7}\t{'L3miss':>7}\t"
-                 f"{'PF_L2':>6}\t{'PF_L3':>6}\t{'PF_DR':>6}\t"
-                 f"{'L2BW%m':>7}")
+            h = (f"  {'M':>5} {'K':>6} {'N':>6} {'K:N':>6} {'DType':>14}"
+                 f" {'Tot(ms)':>9} {'GOPS':>8} {'Comp%':>7} {'BW GB/s':>8} {'L2 BW%':>7}"
+                 f" {'AI':>5} {'B(KB)':>8}"
+                 f"  {S} {'L1miss':>7} {'L2miss':>7} {'L3miss':>7}"
+                 f" {'PF_L2':>7} {'PF_L3':>7} {'PF_DR':>7}"
+                 f" {'L2BW%m':>7}")
         else:
-            h = (f"{'M':>5}\t{'K':>6}\t{'N':>6}\t{'DType':>16}\t"
-                 f"{'GOPS':>8}\t{'Comp%':>6}\t{'L2 BW%':>7}\t"
-                 f"{S}\t{'L1miss':>7}\t{'L2miss':>7}\t{'L3miss':>7}\t"
-                 f"{'PF_L2':>6}\t{'PF_L3':>6}\t{'PF_DR':>6}\t"
-                 f"{'L2BW%m':>7}")
+            h = (f"  {'M':>5} {'K':>6} {'N':>6} {'DType':>14}"
+                 f" {'GOPS':>8} {'Comp%':>7} {'L2 BW%':>7}"
+                 f"  {S} {'L1miss':>7} {'L2miss':>7} {'L3miss':>7}"
+                 f" {'PF_L2':>7} {'PF_L3':>7} {'PF_DR':>7}"
+                 f" {'L2BW%m':>7}")
+        if CL:
+            eff_hdr = CL + "Eff"
+            meas_hdr = CL + "Meas"
+            pct_hdr = CL + "%Eff"
+            h += f"  {S} {eff_hdr+' GB/s':>12} {meas_hdr+' GB/s':>12} {pct_hdr:>7}"
         if bottleneck:
-            h += f"\t{S}\t{'Bottleneck'}"
+            h += f"  {S} Bottleneck"
         print(h)
-        print("-" * 120)
+        print("  " + "─" * (len(h) - 2))
 
         for r in subset:
+            # Per-row peak: each row uses its own dtype's compute peak
+            pk = peak_gops(r["cls"])
+            roofline_knee = pk / peak_l2 if peak_l2 > 0 else 1.0
+
             # Per-core normalization: divide system-wide metrics by num_threads
             # Ratios (L1miss%, L2miss%, PF→L2, etc.) are already per-core averages
             gops_per_core = r["gflops"] / nt
@@ -652,32 +741,48 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
                 comment = (f"Memory-bound: AI={r['ai']:.1f} < knee ({roofline_knee:.1f}), "
                            f"B={b_kb:.0f}KB, L2 port at {l2bw_m_pct:.0f}%.")
 
-            # Fixed-width formatting for HW counter columns (7 chars each: "  XX.X%" or " XXX.X%")
-            sl1  = f"{r['l1m_pct']:>5.1f}%"
-            sl2  = f"{r['l2m_pct']:>5.1f}%"
-            sl3  = f"{r['l3m_pct']:>5.1f}%"
-            spl2 = f"{r['pf_l2']:>5.1f}%"
-            spl3 = f"{r['pf_l3']:>5.1f}%"
-            spdr = f"{r['pf_dr']:>5.1f}%"
-            sbwm = f"{l2bw_m_pct:>5.1f}%"
+            # Per-shape BW roofline (only when -c is specified)
+            roof_suffix = ""
+            if CL:
+                l1_resident = b_kb < L1D_KB and r["l1m_pct"] < 5.0
+                l2_resident = b_kb < L2_KB and r["l2m_pct"] < 5.0
+
+                if CL == "L3":
+                    if l1_resident:
+                        roof_suffix = f"  {S} {'':>12} {'L1':>12} {'bound':>7}"
+                    elif l2_resident:
+                        roof_suffix = f"  {S} {'':>12} {'L2':>12} {'bound':>7}"
+                    else:
+                        eff_bw = blended_bw_l3(r["pf_l3"], r["pf_dr"], nt)
+                        meas_bw = r["l3_bw_meas"] / nt
+                        pct_eff = meas_bw / eff_bw * 100 if eff_bw > 0 else 0
+                        roof_suffix = f"  {S} {eff_bw:>12.1f} {meas_bw:>12.1f} {pct_eff:>6.1f}%"
+                else:
+                    if l1_resident:
+                        roof_suffix = f"  {S} {'':>12} {'L1':>12} {'bound':>7}"
+                    else:
+                        eff_bw = blended_bw_l2(r["pf_l2"], r["pf_l3"], r["pf_dr"], nt)
+                        meas_bw = l2bw_meas_per_core
+                        pct_eff = meas_bw / eff_bw * 100 if eff_bw > 0 else 0
+                        roof_suffix = f"  {S} {eff_bw:>12.1f} {meas_bw:>12.1f} {pct_eff:>6.1f}%"
 
             if verbose:
-                row = (f"{r['m']:>5}\t{r['k']:>6}\t{r['n']:>6}\t{ratio:>6}\t{r['dt']:>16}\t"
-                       f"{r['tot_ms']:>10.2f}\t"
-                       f"{r['gflops']:>8.2f}\t{eff:>5.2f}%\t"
-                       f"{bw_per_core:>8.2f}\t{l2_pct:>6.2f}%\t"
-                       f"{r['ai']:>5.1f}\t{r['b_kb']:>8.1f}\t"
-                       f"{S}\t{sl1}\t{sl2}\t{sl3}\t"
-                       f"{spl2}\t{spl3}\t{spdr}\t"
-                       f"{sbwm}")
+                row = (f"  {r['m']:>5} {r['k']:>6} {r['n']:>6} {ratio:>6} {r['dt']:>14}"
+                       f" {r['tot_ms']:>9.2f} {r['gflops']:>8.2f} {eff:>6.2f}% {bw_per_core:>8.2f} {l2_pct:>6.2f}%"
+                       f" {r['ai']:>5.1f} {r['b_kb']:>8.1f}"
+                       f"  {S} {r['l1m_pct']:>6.1f}% {r['l2m_pct']:>6.1f}% {r['l3m_pct']:>6.1f}%"
+                       f" {r['pf_l2']:>6.1f}% {r['pf_l3']:>6.1f}% {r['pf_dr']:>6.1f}%"
+                       f" {l2bw_m_pct:>6.1f}%"
+                       f"{roof_suffix}")
             else:
-                row = (f"{r['m']:>5}\t{r['k']:>6}\t{r['n']:>6}\t{r['dt']:>16}\t"
-                       f"{r['gflops']:>8.2f}\t{eff:>5.2f}%\t{l2_pct:>6.2f}%\t"
-                       f"{S}\t{sl1}\t{sl2}\t{sl3}\t"
-                       f"{spl2}\t{spl3}\t{spdr}\t"
-                       f"{sbwm}")
+                row = (f"  {r['m']:>5} {r['k']:>6} {r['n']:>6} {r['dt']:>14}"
+                       f" {r['gflops']:>8.2f} {eff:>6.2f}% {l2_pct:>6.2f}%"
+                       f"  {S} {r['l1m_pct']:>6.1f}% {r['l2m_pct']:>6.1f}% {r['l3m_pct']:>6.1f}%"
+                       f" {r['pf_l2']:>6.1f}% {r['pf_l3']:>6.1f}% {r['pf_dr']:>6.1f}%"
+                       f" {l2bw_m_pct:>6.1f}%"
+                       f"{roof_suffix}")
             if bottleneck:
-                row += f"\t{S}\t{comment}"
+                row += f"  {S} {comment}"
             print(row)
 
     print_column_guide()
@@ -716,8 +821,8 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
                 / (DC_hit + DC_miss + PF_hit_L2 + PF_miss_L2_hit_L3 + PF_miss_L2_L3) × 100
               % of ALL L2 accesses (demand + prefetch) that missed L2.
               Source: PMCx064 L2CacheReqStat (demand, excludes PF):
-                        r0F64 = umask 0x0F = all DC hits (read+store)
-                        r1064 = umask 0x10 = DC miss
+                        rF064 = umask 0xF0 = all DC hits (read+store)
+                        r0864 = umask 0x08 = DC miss
                       PMCx070-072 (prefetcher):
                         rFF70 = PF hit L2, rFF71 = PF→L3, rFF72 = PF→DRAM
 
@@ -728,7 +833,7 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
               split (would need PMCx044 Any_DC_Fills_by_Data_Source for that).
               For GEMV workloads this is a reasonable proxy since most B-matrix
               traffic is prefetcher-driven.
-              Source: rFF72 / (r1064 + rFF71 + rFF72)
+              Source: rFF72 / (r0864 + rFF71 + rFF72)
 
   ── L2 Prefetcher Source Breakdown (PF→L2 + PF→L3 + PF→DR ≈ 100%) ─────────────
 
@@ -778,6 +883,35 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1):
     │ 1MB–32MB   │ High   │ HIGH   │ Low    │ Low    │ HIGH   │ L3 streaming     │
     │ > 32 MB    │ High   │ High   │ HIGH   │ Low    │ Low    │ DRAM bottleneck  │
     └────────────┴────────┴────────┴────────┴────────┴────────┴──────────────────┘
+
+  ── L2 BW Roofline (L2Eff / L2Meas / L2%Eff columns) ────────────────────────────
+
+    The achievable BW through the L2 port depends on WHERE data actually lives.
+    We use HW prefetcher counters (PF→L2/L3/DRAM) to compute the effective BW:
+
+        L2Eff = PF→L2% × L2_peak + PF→L3% × L3_BW + PF→DRAM% × DRAM_BW
+
+    Per-core BW constants (empirical, AMD EPYC 9B45):
+        L2 peak  = {L2_BW_B_PER_CYCLE} B/cycle × {CPU_FREQ_GHZ} GHz = {l2_peak_gbs():.0f} GB/s  (theoretical max)
+        L3 eff   ≈ {L3_BW_GBS:.0f} GB/s   (measured from PF→L3 > 85% shapes)
+        DRAM eff ≈ {DRAM_BW_GBS:.0f} GB/s   (measured from PF→DRAM > 70% shapes)
+
+    L2Meas = L1_dcache_load_misses × 64 bytes / total_time / num_threads
+             Every L1 miss = one 64B cacheline fill through L2 port.
+
+    ┌───────────────┬─────────────┬────────────────────────────────────────────┐
+    │ Data Location  │ L2Eff       │ Interpretation                            │
+    ├───────────────┼─────────────┼────────────────────────────────────────────┤
+    │ 100% in L2     │ 264 GB/s    │ Max: L2 fill port is the bottleneck       │
+    │ 100% in L3     │ 120 GB/s    │ L3→L2 fill rate limits throughput         │
+    │ 100% in DRAM   │  50 GB/s    │ DRAM BW wall, nothing kernel can do       │
+    │ 50% L2, 50% L3 │ 192 GB/s    │ Transition: some data spills to L3        │
+    └───────────────┴─────────────┴────────────────────────────────────────────┘
+
+    L2%Eff = L2Meas / L2Eff × 100  — kernel efficiency at utilizing L2 port BW
+      >80%  → near-optimal for this memory level
+      50-80% → room for improvement (prefetch depth, tiling, instruction mix)
+      <50%  → significant overhead (small shapes) or pipeline stalls
 """)
 
 
@@ -815,12 +949,13 @@ FLAGS (for --perf mode):
   -t N        Number of OMP threads used during the benchmark run.
               Default: 1 (single-core). For multi-thread perf data,
               perf stat aggregates counters across all cores. This flag
-              normalizes Comp%, L2 BW%, and L2BW%m to per-core averages:
-                Comp%  = (system_GOPS / N) / single_core_peak × 100
-                L2BW%  = (system_BW / N) / single_core_L2_peak × 100
-                L2BW%m = (total_L1_misses / N) × 64B / time / L2_peak × 100
-              Ratio metrics (L1miss%, L2miss%, PF→L2/L3/DR) are unaffected
-              since they are already per-core averages.
+              normalizes Comp%, L2 BW%, and L2BW%m to per-core averages.
+
+  -c LEVEL    Cache level for BW roofline analysis: L2 or L3 (off by default).
+              L2: roofline based on L2→L1 port BW (from L1 miss counters).
+                  Shows L2Eff/L2Meas/L2%Eff. L1-resident shapes show "L1 bound".
+              L3: roofline based on L3→L2 port BW (from L2 miss counters).
+                  Shows L3Eff/L3Meas/L3%Eff. L2-resident shapes show "L2 bound".
 
   -h, --help  Show this help message.
 
@@ -860,6 +995,7 @@ WORKFLOW:
         verbose = False
         bneck = False
         nt = 1
+        clevel = None
         filepath = None
         i = 0
         while i < len(args):
@@ -872,12 +1008,20 @@ WORKFLOW:
                 if i >= len(args):
                     sys.exit("-t requires a number")
                 nt = int(args[i])
+            elif args[i] == "-c":
+                i += 1
+                if i >= len(args):
+                    sys.exit("-c requires L2 or L3")
+                clevel = args[i].upper()
+                if clevel not in ("L2", "L3"):
+                    sys.exit(f"-c must be L2 or L3, got: {args[i]}")
             else:
                 filepath = args[i]
             i += 1
         if not filepath:
             sys.exit("--perf requires a perf_raw file")
-        perf_analysis(filepath, verbose=verbose, bottleneck=bneck, num_threads=nt)
+        perf_analysis(filepath, verbose=verbose, bottleneck=bneck,
+                      num_threads=nt, cache_level=clevel)
     else:
         single_file_analysis(sys.argv[1])
 

@@ -14,7 +14,7 @@
 # * limitations under the License.
 # *******************************************************************************/
 
-set(util_sources benchdnn_utils.cpp)
+set(util_sources benchdnn_utils.cpp perf_counters.cpp)
 
 add_library(benchdnn_utils STATIC ${util_sources})
 

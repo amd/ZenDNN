@@ -5,15 +5,28 @@ set -euo pipefail
 # AI Matmul Benchmark Runner
 #
 # Usage:
-#   ./run_matmul_benchmark_sweep.sh [options] algo [algo ...]
+#   ./run_matmul_benchmark_sweep.sh [options]
 #
 # Options:
+#   -a, --algo <N>[,N,...]        Algo number(s) to benchmark (required)
+#                                 Comma-separated or repeated: -a 1,11 or -a 1 -a 11
+#                                 Bare positional args also accepted for backward compat.
+#                                   1  = AOCL DLP Blocked
+#                                   3  = OneDNN BRGEMM
+#                                   10 = AI GEMM
+#                                   11 = AI BRGEMM
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
-#   -p, --perf                    Run each shape under perf stat to collect
-#                                 per-shape L2/L3 HW counters. Requires sudo.
-#                                 Outputs a separate _perf_raw.txt per algo.
+#   -p, --perf                    External perf: run each shape under perf stat
+#                                 to collect per-shape L2/L3 HW counters.
+#                                 Requires sudo. Outputs _perf_raw.txt per algo.
+#   -P, --perf-internal           Internal perf: pass --perf-counters to benchdnn
+#                                 so it uses perf_event_open() API in-process.
+#                                 More accurate (measures only matmul iterations,
+#                                 excludes warmup and process startup overhead).
+#                                 Counts user-space events only (exclude_kernel=1).
+#                                 Requires sudo or perf_event_paranoid<=1.
 #   -h, --help                    Show this help
 #
 # Input shortcuts:
@@ -23,15 +36,13 @@ set -euo pipefail
 #   fp32_pytorch     -> benchmark_sweep/fp32_pytorch_models_eval.txt
 #   <path>           -> custom input file
 #
-# Algo values (positional, after options):
-#   Pass one or more algo numbers (e.g. 1, 3, 10, 11).
-#   At least one algo must be specified.
-#
 # Examples:
-#   ./run_matmul_benchmark_sweep.sh -t 64 -i bf16 1 11       # 64 threads, ALGO 1 & 11
-#   ./run_matmul_benchmark_sweep.sh -i fp32 -t 1 10          # fp32, single thread, ALGO 10
-#   sudo ./run_matmul_benchmark_sweep.sh -t 1 -p -i bf16 1   # timing + HW counters
-#   ./run_matmul_benchmark_sweep.sh -i /tmp/shapes.txt 11    # custom file, ALGO 11
+#   ./run_matmul_benchmark_sweep.sh -a 1 -t 64 -i bf16                # ALGO 1, 64 threads
+#   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 1              # ALGO 1 & 11, 1 thread
+#   ./run_matmul_benchmark_sweep.sh -a 10 -a 11 -i fp32 -t 1          # ALGO 10 & 11
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -p -i bf16         # external perf stat
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -P -i bf16         # internal perf (API)
+#   ./run_matmul_benchmark_sweep.sh -a 11 -i /tmp/shapes.txt          # custom file
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,22 +52,35 @@ SWEEP_DIR="$REPO_ROOT/benchdnn/input/matmul/benchmark_sweep"
 INPUT_ARG="bf16"
 NUM_THREADS=""
 OUTDIR="$REPO_ROOT/build"
-PERF_MODE=0
+PERF_MODE=0        # 0=off, 1=external (perf stat), 2=internal (--perf-counters)
+ALGOS=()
 
 show_help() {
     cat <<'HELP'
 AI Matmul Benchmark Runner
 
 Usage:
-  ./run_matmul_benchmark_sweep.sh [options] algo [algo ...]
+  ./run_matmul_benchmark_sweep.sh -a <algo> [options]
 
 Options:
+  -a, --algo <N>[,N,...]        Algo number(s) to benchmark (required)
+                                Comma-separated or repeated: -a 1,11 or -a 1 -a 11
+                                Bare positional args also accepted for backward compat.
+                                  1  = AOCL DLP Blocked
+                                  3  = OneDNN BRGEMM
+                                  10 = AI GEMM
+                                  11 = AI BRGEMM
   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
   -t, --threads <N>             Number of OMP threads (default: all cores)
   -o, --outdir <dir>            Output directory (default: build/)
-  -p, --perf                    Run each shape under perf stat to collect
-                                per-shape L2/L3 HW counters. Requires sudo.
-                                Outputs a separate _perf_raw.txt per algo.
+  -p, --perf                    External perf: run each shape under perf stat
+                                to collect per-shape L2/L3 HW counters.
+                                Requires sudo. Outputs _perf_raw.txt per algo.
+  -P, --perf-internal           Internal perf: pass --perf-counters to benchdnn
+                                so it uses perf_event_open() API in-process.
+                                More accurate (measures only matmul iterations,
+                                excludes warmup and process startup overhead).
+                                Requires sudo or perf_event_paranoid<=1.
   -h, --help                    Show this help
 
 Input shortcuts:
@@ -66,15 +90,13 @@ Input shortcuts:
   fp32_pytorch     -> benchmark_sweep/fp32_pytorch_models_eval.txt
   <path>           -> custom input file
 
-Algo values (positional, after options):
-  Pass one or more algo numbers (e.g. 1, 3, 10, 11).
-  At least one algo must be specified.
-
 Examples:
-  ./run_matmul_benchmark_sweep.sh -t 64 -i bf16 1 11       # 64 threads, ALGO 1 & 11
-  ./run_matmul_benchmark_sweep.sh -i fp32 -t 1 10          # fp32, single thread, ALGO 10
-  sudo ./run_matmul_benchmark_sweep.sh -t 1 -p -i bf16 1   # timing + HW counters
-  ./run_matmul_benchmark_sweep.sh -i /tmp/shapes.txt 11    # custom file, ALGO 11
+  ./run_matmul_benchmark_sweep.sh -a 1 -t 64 -i bf16                # ALGO 1, 64 threads
+  ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 1              # ALGO 1 & 11, 1 thread
+  ./run_matmul_benchmark_sweep.sh -a 10 -a 11 -i fp32 -t 1          # ALGO 10 & 11
+  sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -p -i bf16         # external perf stat
+  sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -P -i bf16         # internal perf (API)
+  ./run_matmul_benchmark_sweep.sh -a 11 -i /tmp/shapes.txt          # custom file
 HELP
     exit 0
 }
@@ -82,13 +104,18 @@ HELP
 # --- Parse options ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -a|--algo)
+            IFS=',' read -ra _vals <<< "$2"
+            ALGOS+=("${_vals[@]}")
+            shift 2 ;;
         -i|--input)   INPUT_ARG="$2"; shift 2 ;;
         -t|--threads) NUM_THREADS="$2"; shift 2 ;;
         -o|--outdir)  OUTDIR="$2"; shift 2 ;;
         -p|--perf)    PERF_MODE=1; shift ;;
+        -P|--perf-internal) PERF_MODE=2; shift ;;
         -h|--help)    show_help ;;
         -*)           echo "Unknown option: $1"; show_help ;;
-        *)            break ;;
+        *)            ALGOS+=("$1"); shift ;;
     esac
 done
 
@@ -108,10 +135,9 @@ fi
 # --- Resolve threads ---
 export OMP_NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 
-# --- Resolve algos (remaining positional args) ---
-ALGOS=("$@")
+# --- Validate algos ---
 if [ ${#ALGOS[@]} -eq 0 ]; then
-    echo "ERROR: at least one algo number is required (e.g. 1, 3, 10, 11)"; show_help
+    echo "ERROR: -a/--algo is required (e.g. -a 1 or -a 1,11)"; show_help
 fi
 
 # --- Locate benchdnn ---
@@ -144,21 +170,18 @@ CPU_BIND="0-$((OMP_NUM_THREADS - 1))"
 #
 # PMCx064 L2CacheReqStat — "Core to L2 Cacheable Request Access Status"
 #   NOTE: Does NOT include L2 Prefetcher requests (those are PMCx070-072).
-#   Bit 0: LsRdBlkCS    DC Shared Read HIT     ┐
-#   Bit 1: LsRdBlkLHitX DC Read HIT Modifiable │ umask 0x0F = all DC hits
-#   Bit 2: LsRdBlkLHitS DC Read HIT Non-Mod    │
-#   Bit 3: LsRdBlkX     DC Store HIT           ┘
-#   Bit 4: LsRdBlkC     DC Req MISS            ← umask 0x10 = DC miss
-#   Bit 5: IcFillHitX   IC HIT Modifiable      ┐
-#   Bit 6: IcFillHitS   IC HIT Non-Modifiable  │ (IC events, not tracked)
-#   Bit 7: IcFillMiss   IC Req MISS            ┘
+#   Bit 3: LsRdBlkC     DC Req MISS              ← umask 0x08 = DC miss
+#   Bit 4: LsRdBlkX     DC Store HIT             ┐
+#   Bit 5: LsRdBlkLHitS DC Read HIT Non-Mod      │ umask 0xF0 = all DC hits
+#   Bit 6: LsRdBlkLHitX DC Read HIT Modifiable   │
+#   Bit 7: LsRdBlkCS    DC Shared Read HIT       ┘
 #
 # PMCx070-072 — L2 Prefetcher events (separate from demand requests)
 #   rFF70 = L2PfHitL2       PF accepted by L2, data found in L2
 #   rFF71 = L2PfMissL2HitL3 PF accepted by L2, missed L2, hit L3
 #   rFF72 = L2PfMissL2L3    PF accepted by L2, missed both L2 & L3 → DRAM
 #
-PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,rFF70,rFF71,rFF72,r0F64,r1064"
+PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,rFF70,rFF71,rFF72,rF064,r0864"
 
 mkdir -p "$OUTDIR"
 
@@ -168,7 +191,10 @@ echo "  Input   : $INPUT_FILE"
 echo "  Algos   : ${ALGOS[*]}"
 echo "  Threads : $OMP_NUM_THREADS"
 echo "  CPU bind: $CPU_BIND"
-echo "  HW Perf : $([ $PERF_MODE -eq 1 ] && echo 'ON (-p)' || echo 'OFF')"
+if [[ $PERF_MODE -eq 1 ]]; then PERF_LABEL="External (perf stat -p)"
+elif [[ $PERF_MODE -eq 2 ]]; then PERF_LABEL="Internal (benchdnn --perf-counters -P)"
+else PERF_LABEL="OFF"; fi
+echo "  HW Perf : $PERF_LABEL"
 echo "  Output  : $OUTDIR/"
 echo "================================================================"
 echo ""
@@ -211,6 +237,17 @@ for algo in "${ALGOS[@]}"; do
         done < "$INPUT_FILE"
 
         echo "--- ALGO=$algo perf counters → $PERF_RAW ---"
+    elif [[ $PERF_MODE -eq 2 ]]; then
+        # --- Internal perf: benchdnn uses perf_event_open() API ---
+        echo "--- ALGO=$algo (internal perf counters via --perf-counters) ---"
+
+        ZENDNNL_MATMUL_ALGO=$algo \
+        numactl --physcpubind="$CPU_BIND" \
+            "$BENCHDNN_BIN" --op=matmul --lowoha=true --perf-counters \
+            --input_file="$INPUT_FILE" \
+            2>&1 | tee "$OUTFILE"
+
+        echo "--- ALGO=$algo done → $OUTFILE ---"
     else
         # --- Normal mode: all shapes in one benchdnn run ---
         echo "--- ALGO=$algo ---"
@@ -240,6 +277,9 @@ echo "To analyze:"
 if [[ $PERF_MODE -eq 1 ]]; then
     echo "  python3 scripts/analyze_benchmark.py --perf -t $OMP_NUM_THREADS <perf_raw_file>"
     echo "  python3 scripts/analyze_benchmark.py --perf -t $OMP_NUM_THREADS -v -b <perf_raw_file>"
+elif [[ $PERF_MODE -eq 2 ]]; then
+    echo "  # Internal perf output is inline — timing + [PERF] + raw counters per shape"
+    echo "  python3 scripts/analyze_benchmark.py --perf <timing_file>"
 else
     echo "  python3 scripts/analyze_benchmark.py <timing_file>"
 fi

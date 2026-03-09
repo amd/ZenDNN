@@ -68,13 +68,15 @@ struct global_options {
   uint64_t group_size; /**< Group size for quantization. */
   data_type_t scale_dt; /**< Datatype of scale. */
   int warmup_iters; /**< Number of warmup iterations to run before actual benchmarking. */
+  bool perf_counters; /**< Enable per-shape HW perf counter collection (AMD Zen 5 PMU). */
 
   global_options() : isBiasEnabled(false), ndims(2), iters(100),
     sdt(data_type_t::f32), wdt(data_type_t::f32),
     ddt(data_type_t::f32), is_weights_const(-1), bias_dt(data_type_t::f32),
     post_op_dt(data_type_t::f32),
     isTransA(false), isTransB(false), warmup_iters(-1), alpha(1.0f), beta(0.0f),
-    scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32) {}
+    scale_granularity("none"), group_size(0), scale_dt(data_type_t::f32),
+    perf_counters(false) {}
 };
 
 /**

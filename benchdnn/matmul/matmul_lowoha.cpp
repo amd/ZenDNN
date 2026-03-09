@@ -15,6 +15,11 @@
 # *******************************************************************************/
 
 #include "matmul_lowoha.hpp"
+#include "utils/perf_counters.hpp"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace zendnnl {
 namespace benchdnn {
@@ -251,6 +256,15 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       batch_params.Batch_B = batchB;
 
       TimingStats time_stats;
+
+      PerfCounterGroup perf_ctrs;
+      const bool use_perf = options.perf_counters && perf_ctrs.is_available();
+      if (use_perf) {
+        if (!perf_ctrs.open()) {
+          commonlog_warning("HW perf counters unavailable; continuing without them.");
+        }
+      }
+
       // warm-up iterations
       for (auto j = 0; j < cfg.warmup_iters && !skip; j++) {
         for (auto i = 0; i < cfg.n_values.size(); i++) {
@@ -298,6 +312,11 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
       std::vector<TimingStats> time_stats_layer(cfg.n_values.size());
       std::vector<double> elapsed_ms_layer(cfg.n_values.size(), 0.0);
 
+      if (use_perf && perf_ctrs.is_available()) {
+        perf_ctrs.reset();
+        perf_ctrs.enable();
+      }
+
       for (auto j = 0; j < cfg.iters && !skip; j++) {
 #if COLD_CACHE
         flush_cache(cache_size);
@@ -326,9 +345,9 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
           }
 
           auto start_layer = std::chrono::high_resolution_clock::now();
-          TimingStats time_stats; // Per-layer, per-iteration
+          TimingStats time_stats;
           status_t status = matmul_direct(
-                              'r',  // layout: row-major
+                              'r',
                               cfg.isTransA, cfg.isTransB,
                               static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                               alpha, A_data, lda, B_data, ldb, bias_data,
@@ -350,15 +369,36 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
           break;
         }
       }
+
+      if (use_perf && perf_ctrs.is_available()) {
+        perf_ctrs.disable();
+        perf_ctrs.read();
+      }
+
       if (skip) {
         continue;
       }
 
-      // Store total time for each layer
       for (size_t i = 0; i < cfg.n_values.size(); i++) {
         time_stats_layer[i].total_time_ms = elapsed_ms_layer[i];
       }
       print_matmul_execution_summary(cfg, time_stats_layer, options);
+
+      if (use_perf && perf_ctrs.is_available()) {
+        double elapsed_sec = 0;
+        for (auto &ts : time_stats_layer)
+          elapsed_sec += ts.total_time_ms / 1000.0;
+        int nt = 1;
+#ifdef _OPENMP
+        nt = omp_get_max_threads();
+#endif
+        if (nt < 1) nt = 1;
+        auto derived = perf_ctrs.derive(elapsed_sec, nt);
+        printf("  [PERF]");
+        perf_ctrs.print_values(derived, false);
+        printf("\n");
+        perf_ctrs.print_raw_counters();
+      }
       matmul_results.emplace_back(cfg, time_stats_layer);
     }
     catch (const exception_t &ex) {

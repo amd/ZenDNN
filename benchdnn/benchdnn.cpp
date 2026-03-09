@@ -65,6 +65,9 @@ int main(int argc, char **argv) {
         return NOT_OK;
       }
     }
+    else if (arg == "--perf-counters") {
+      options.perf_counters = true;
+    }
     else if (arg.find("--lowoha=") == 0) {
       std::string value = arg.substr(9);
       std::transform(value.begin(), value.end(), value.begin(), ::tolower);
