@@ -43,6 +43,9 @@ using namespace zendnnl::common;
  * - BATCH_NORM:  Normalizes per-channel using pre-computed running mean/variance.
  *                Running statistics must be provided (from training).
  *                Formula: y = gamma * (x - running_mean) / sqrt(running_var + eps) + beta
+ *
+ * - FUSED_ADD_RMS_NORM: Fused Add and RMS Normalization.
+ *                Formula: y = gamma * (x + residual) / sqrt(mean((x + residual)  ^2) + eps)
  */
 enum class norm_type_t : int {
   NONE        = -1,   ///< No normalization type selected

@@ -17,7 +17,7 @@
 #ifndef _LOWOHA_NORMALIZATION_REFERENCE_KERNEL_HPP
 #define _LOWOHA_NORMALIZATION_REFERENCE_KERNEL_HPP
 
-#include "lowoha_normalization_utils.hpp"
+#include "lowoha_operators/normalization/lowoha_normalization_utils.hpp"
 
 namespace zendnnl {
 namespace lowoha {
