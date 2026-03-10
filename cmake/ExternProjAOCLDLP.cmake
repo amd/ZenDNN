@@ -1,5 +1,5 @@
 # *******************************************************************************
-# * Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 # *
 # * Licensed under the Apache License, Version 2.0 (the "License");
 # * you may not use this file except in compliance with the License.
@@ -29,6 +29,16 @@ if(ZENDNNL_DEPENDS_AOCLDLP)
 
     # uncoment if openmp root need to be given
     # list(APPEND AD_CMAKE_ARGS "-DDLP_OPENMP_ROOT=/path/to/openmp")
+
+    # -------------------------------------------------------------------------
+    # Workaround: Rename AOCL-DLP's Xbyak namespace to avoid ODR conflicts
+    # with other third party Xbyak. Without this flag, the linker silently picks one
+    # version's weak symbols for both libraries, causing SIGILL (illegal
+    # instruction) on FP16 paths or crashes on F32/BF16 depending on link order.
+    # The -DXbyak=XbyakAOCL flag renames the namespace at the preprocessor level
+    # so both libraries compile to uniquely-named symbols with zero overhead.
+    # -------------------------------------------------------------------------
+    list(APPEND AD_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-DXbyak=XbyakAOCL")
 
     message(DEBUG "${ZENDNNL_MSG_PREFIX}AOCLDLP_CMAKE_ARGS=${AD_CMAKE_ARGS}")
 
