@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ===========================================================================
-# AI Matmul Benchmark Runner
+# Native Matmul Benchmark Runner
 #
 # Usage:
 #   ./run_matmul_benchmark_sweep.sh [options]
@@ -13,8 +13,8 @@ set -euo pipefail
 #                                 Bare positional args also accepted for backward compat.
 #                                   1  = AOCL DLP Blocked
 #                                   3  = OneDNN BRGEMM
-#                                   10 = AI GEMM
-#                                   11 = AI BRGEMM
+#                                   10 = Native GEMM
+#                                   11 = Native BRGEMM
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
@@ -57,7 +57,7 @@ ALGOS=()
 
 show_help() {
     cat <<'HELP'
-AI Matmul Benchmark Runner
+Native Matmul Benchmark Runner
 
 Usage:
   ./run_matmul_benchmark_sweep.sh -a <algo> [options]
@@ -68,8 +68,8 @@ Options:
                                 Bare positional args also accepted for backward compat.
                                   1  = AOCL DLP Blocked
                                   3  = OneDNN BRGEMM
-                                  10 = AI GEMM
-                                  11 = AI BRGEMM
+                                  10 = Native GEMM
+                                  11 = Native BRGEMM
   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
   -t, --threads <N>             Number of OMP threads (default: all cores)
   -o, --outdir <dir>            Output directory (default: build/)
@@ -186,7 +186,7 @@ PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,rFF70,rFF71,rFF72,rF064,r0864
 mkdir -p "$OUTDIR"
 
 echo "================================================================"
-echo "  AI Matmul Benchmark"
+echo "  Native Matmul Benchmark"
 echo "  Input   : $INPUT_FILE"
 echo "  Algos   : ${ALGOS[*]}"
 echo "  Threads : $OMP_NUM_THREADS"

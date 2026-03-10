@@ -22,7 +22,7 @@
 #include "lowoha_operators/matmul/aocl_kernel.hpp"
 #include "lowoha_operators/matmul/onednn_kernel.hpp"
 #include "lowoha_operators/matmul/auto_tuner.hpp"
-#include "matmul_ai/ai_matmul.hpp"
+#include "matmul_native/native_matmul.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -273,9 +273,9 @@ void matmul_execute(const char layout,
 
 #endif
 
-  if (kernel == matmul_algo_t::ai_gemm ||
-      kernel == matmul_algo_t::ai_brgemm) {
-    // AI kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
+  if (kernel == matmul_algo_t::native_gemm ||
+      kernel == matmul_algo_t::native_brgemm) {
+    // Native kernels support FP32 and BF16 (src=BF16,wei=BF16,dst=BF16|FP32), no transA
     const bool is_fp32 = (params.dtypes.src == data_type_t::f32 &&
                           params.dtypes.wei == data_type_t::f32 &&
                           params.dtypes.dst == data_type_t::f32);
@@ -284,16 +284,16 @@ void matmul_execute(const char layout,
                           (params.dtypes.dst == data_type_t::bf16 ||
                            params.dtypes.dst == data_type_t::f32));
     if (!is_fp32 && !is_bf16) {
-      log_info("AI kernel: unsupported data type, falling back to aocl_dlp");
+      log_info("Native kernel: unsupported data type, falling back to aocl_dlp");
       kernel = matmul_algo_t::aocl_dlp;
     } else if (transA) {
-      log_info("AI kernel: transA not supported, falling back to aocl_dlp");
+      log_info("Native kernel: transA not supported, falling back to aocl_dlp");
       kernel = matmul_algo_t::aocl_dlp;
     } else {
       apilog_info("Executing matmul LOWOHA kernel with ",
                   kernel_to_string(kernel),
                   ", algo: ", static_cast<int>(kernel));
-      ai::ai_matmul_execute(kernel, layout, transA, transB,
+      native::native_matmul_execute(kernel, layout, transA, transB,
                               M, N, K, alpha, src, lda,
                               weight, ldb, bias, beta, dst, ldc,
                               is_weights_const, num_threads, params);

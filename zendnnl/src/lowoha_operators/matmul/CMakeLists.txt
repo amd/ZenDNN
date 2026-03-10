@@ -15,7 +15,7 @@
 # *******************************************************************************/
 
 #add_subdirectory(native_kernels)
-add_subdirectory(matmul_ai)
+add_subdirectory(matmul_native)
 
 set(lowoha_matmul_sources
   lowoha_matmul.cpp

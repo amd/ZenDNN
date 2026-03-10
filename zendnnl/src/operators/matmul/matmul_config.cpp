@@ -211,7 +211,7 @@ void matmul_config_t::set_env_config() {
   }
   set_weight_cache(matmul_weight_cache);
 
-  char *otf_bpack_env = std::getenv("ZENDNNL_MATMUL_AI_OTF_BPACK");
+  char *otf_bpack_env = std::getenv("ZENDNNL_MATMUL_NATIVE_OTF_BPACK");
   int32_t matmul_otf_bpack = 0;
   if (otf_bpack_env) {
     try {
@@ -409,11 +409,11 @@ matmul_algo_t matmul_config_t::str_to_matmul_algo(std::string algo) {
   else if (algo == "auto_tuner") {
     return matmul_algo_t::auto_tuner;
   }
-  else if (algo == "ai_gemm") {
-    return matmul_algo_t::ai_gemm;
+  else if (algo == "native_gemm") {
+    return matmul_algo_t::native_gemm;
   }
-  else if (algo == "ai_brgemm") {
-    return matmul_algo_t::ai_brgemm;
+  else if (algo == "native_brgemm") {
+    return matmul_algo_t::native_brgemm;
   }
 
   return matmul_algo_t::algo_count;

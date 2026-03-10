@@ -35,7 +35,7 @@ ELEM_BYTES = {"u8":1, "s8":1, "s4":0.5, "bf16":2, "f16":2, "f32":4}
 
 ALGO_NAMES = {
     "1": "DLP-Blocked", "2": "DLP-2", "3": "DLP-Reorder",
-    "10": "AI-GEMM", "11": "AI-BRGEMM",
+    "10": "Native-GEMM", "11": "Native-BRGEMM",
 }
 
 def esz(tag):

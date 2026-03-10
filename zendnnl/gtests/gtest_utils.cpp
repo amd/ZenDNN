@@ -155,9 +155,9 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
         po_type = post_op_type_t::none;
       }
     }
-    else if (algo == matmul_algo_t::ai_gemm ||
-             algo == matmul_algo_t::ai_brgemm) {
-      // ai_gemm/ai_brgemm are LOWOHA-only kernels, always force LOWOHA path
+    else if (algo == matmul_algo_t::native_gemm ||
+             algo == matmul_algo_t::native_brgemm) {
+      // native_gemm/native_brgemm are LOWOHA-only kernels, always force LOWOHA path
       use_LOWOHA = true;
     }
     else {
@@ -1083,10 +1083,10 @@ std::string algoToStr(matmul_algo_t algo) {
     return "libxsmm";
   case matmul_algo_t::libxsmm_blocked:
     return "libxsmm_blocked";
-  case matmul_algo_t::ai_gemm:
-    return "ai_gemm";
-  case matmul_algo_t::ai_brgemm:
-    return "ai_brgemm";
+  case matmul_algo_t::native_gemm:
+    return "native_gemm";
+  case matmul_algo_t::native_brgemm:
+    return "native_brgemm";
   default:
     return "none";
   }

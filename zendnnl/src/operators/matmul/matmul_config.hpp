@@ -42,8 +42,8 @@ enum class matmul_algo_t : int32_t {
   batched_sgemm = 7,     /*!< Batched SGEMM */
   auto_tuner = 8,        /*!< Auto Tuner */
   reference = 9,         /*!< Reference */
-  ai_gemm = 10,          /*!< AI GEMM microkernel */
-  ai_brgemm = 11,        /*!< AI BRGEMM microkernel */
+  native_gemm = 10,          /*!< Native GEMM microkernel */
+  native_brgemm = 11,        /*!< Native BRGEMM microkernel */
   algo_count             /*!< Algo count */
 };
 
@@ -111,13 +111,13 @@ class matmul_config_t final : public op_config_t {
    */
   int32_t get_weight_cache();
 
-  /** @brief Sets on-the-fly B packing flag for AI kernels.
+  /** @brief Sets on-the-fly B packing flag for Native kernels.
   *
   * @param enable 0 = disabled (default), 1 = enabled.
   */
   void set_otf_bpack(int32_t enable);
 
-  /** @brief Get on-the-fly B packing flag for AI kernels.
+  /** @brief Get on-the-fly B packing flag for Native kernels.
    *
    * @return 0 if disabled, 1 if enabled.
    */
@@ -225,7 +225,7 @@ class matmul_config_t final : public op_config_t {
   int32_t matmul_algo;         /**< Matmul runtime algorithm. */
   int32_t bmm_algo;            /**< Batched Matmul algorithm. */
   int32_t matmul_weight_cache; /**< Matmul weight cache type. */
-  int32_t matmul_otf_bpack;    /**< On-the-fly B packing for AI kernels. */
+  int32_t matmul_otf_bpack;    /**< On-the-fly B packing for Native kernels. */
   bool zp_comp_cache;          /**< Enable zero-point compensation caching. */
   uint32_t lru_cache_capacity; /**< LRU cache capacity. */
   bool mm_partitioner_enabled;      /**< Enable MM partitioner. */

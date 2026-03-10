@@ -16,6 +16,7 @@
 
 #include "lowoha_matmul_utils.hpp"
 #include "common/zendnnl_global.hpp"
+#include "matmul_native/native_matmul.hpp"
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -465,10 +466,10 @@ const char *kernel_to_string(matmul_algo_t kernel) {
     return "reference";
   case matmul_algo_t::auto_tuner:
     return "auto_tuner";
-  case matmul_algo_t::ai_gemm:
-    return "ai_gemm";
-  case matmul_algo_t::ai_brgemm:
-    return "ai_brgemm";
+  case matmul_algo_t::native_gemm:
+    return "native_gemm";
+  case matmul_algo_t::native_brgemm:
+    return "native_brgemm";
   default:
     return "none";
   }
@@ -782,7 +783,11 @@ matmul_algo_t kernel_select(matmul_params &params, int Batch_A, int Batch_B,
       }
       else {
         if (params.dtypes.wei == data_type_t::bf16) {
-          kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
+          if (M == 1 && num_threads == 1) {
+            kernel = native::bf16_gemv_best_algo(N, K, num_threads);
+          } else {
+            kernel = select_algo_by_heuristics_bf16_mm(M, N, K);
+          }
         }
         else {
           kernel = matmul_algo_t::aocl_dlp_blocked;
