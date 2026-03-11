@@ -34,6 +34,9 @@ using namespace zendnnl::error_handling;
 
 namespace ai_gtests {
 
+// Global variable definition for LOWOHA mode
+std::string cmd_lowoha_ai = "";
+
 // Explicit template instantiation for MatmulParamsAI
 // (Template definition is in gtest_utils_ai.hpp)
 template std::vector<MatmulParamsAI>
@@ -101,6 +104,46 @@ void initialize_test_mode(const std::string &mode_str) {
     std::cout << "[AI_GTEST] Unknown test mode '" << mode_str
               << "', using DEFAULT" << std::endl;
   }
+}
+
+// -----------------------------------------------------------------------------
+// initialize_lowoha_mode
+//
+// Initializes the global LOWOHA mode flag from a command-line string.
+// Stores the flag value for use in AI tests to determine whether to run
+// LOWOHA-based implementations or primitive operators.
+//
+// Parameters:
+//   lowoha_flag - String from command-line (e.g., "true", "1", "false", "0")
+//
+// Usage:
+//   Called from gtest_main.cpp after parsing command-line arguments
+// -----------------------------------------------------------------------------
+void initialize_lowoha_mode(const std::string &lowoha_flag) {
+  cmd_lowoha_ai = lowoha_flag;
+  if (is_lowoha_mode_enabled()) {
+    std::cout << "[AI_GTEST] LOWOHA mode enabled" << std::endl;
+  }
+  else {
+    std::cout << "[AI_GTEST] LOWOHA mode disabled (using primitive operators)" <<
+              std::endl;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// is_lowoha_mode_enabled
+//
+// Checks if LOWOHA mode is enabled based on the command-line flag.
+// Returns true if the flag is set to "true" or "1", false otherwise.
+//
+// Returns:
+//   true if LOWOHA mode is enabled, false otherwise
+//
+// Usage:
+//   Called by AI test implementations to determine which kernel to use
+// -----------------------------------------------------------------------------
+bool is_lowoha_mode_enabled() {
+  return (cmd_lowoha_ai == "true" || cmd_lowoha_ai == "1");
 }
 
 // -----------------------------------------------------------------------------
@@ -427,11 +470,12 @@ tensor_t AITensorFactory::create_quantized_embedding_tensor(
   data_type_t dtype,
   const std::string &name,
   bool fp16_scale_bias) {
-  
+
   if (dims.size() != 2) {
     throw std::invalid_argument("Quantized embedding tensor must be 2D");
   }
-  if (dtype != data_type_t::u4 && dtype != data_type_t::s8 && dtype != data_type_t::s4) {
+  if (dtype != data_type_t::u4 && dtype != data_type_t::s8 &&
+      dtype != data_type_t::s4) {
     throw std::invalid_argument("Only U4, S4, and S8 dtypes supported for quantized embeddings");
   }
 
@@ -440,7 +484,8 @@ tensor_t AITensorFactory::create_quantized_embedding_tensor(
 
   const uint64_t num_embeddings = dims[0];
   const uint64_t embedding_dim = dims[1];
-  const uint64_t quantized_size = (dtype == data_type_t::s4 || dtype == data_type_t::u4) ?
+  const uint64_t quantized_size = (dtype == data_type_t::s4 ||
+                                   dtype == data_type_t::u4) ?
                                   (embedding_dim + 1) / 2 : embedding_dim;
   const uint64_t row_size = quantized_size + (fp16_scale_bias ? 4 : 8);
 
@@ -466,7 +511,8 @@ tensor_t AITensorFactory::create_quantized_embedding_tensor(
 
   if (!qtensor.check()) {
     std::free(raw_buffer);
-    throw std::runtime_error("Failed to create quantized embedding tensor: " + tensor_name);
+    throw std::runtime_error("Failed to create quantized embedding tensor: " +
+                             tensor_name);
   }
 
   // Fill with random quantized values and scale/bias
@@ -1235,7 +1281,7 @@ std::vector<PostOpConfig> AITestUtils::get_all_post_op_configs() {
   configs.push_back(PostOpConfig{}); // No post-op
   configs.push_back(create_elu_config());
   configs.push_back(create_relu_config());
-  configs.push_back(create_leaky_relu_config());
+  // configs.push_back(create_leaky_relu_config()); // Removed: Default alpha value of primitive and LoA is different JIRA ZENAI-3179
   configs.push_back(create_gelu_tanh_config());
   configs.push_back(create_gelu_erf_config());
   configs.push_back(create_silu_config()); // swish
@@ -1247,7 +1293,7 @@ std::vector<PostOpConfig> AITestUtils::get_all_post_op_configs() {
   configs.push_back(create_sqrt_config());
   configs.push_back(create_exp_config());
   configs.push_back(create_log_config());
-  configs.push_back(create_clip_config());
+  // configs.push_back(create_clip_config()); // Removed: clip post-op not supported in LOWOHA mode JIRA ZENAI-3178
   configs.push_back(create_binary_add_config());
   configs.push_back(create_binary_mul_config());
   // Multi-post-op configs (chains)

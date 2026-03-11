@@ -16,8 +16,10 @@
 
 #include <gtest/gtest.h>
 #include "gtest_utils_ai.hpp"
+#include "lowoha_operators/matmul/lowoha_matmul.hpp"
 
 using namespace ai_gtests;
+using namespace zendnnl::lowoha::matmul;
 #include <iostream>
 #include <memory>
 #include <cstdlib>
@@ -933,59 +935,157 @@ class TestMatmulAI : public ::testing::TestWithParam<MatmulParamsAI> {
                            const MatmulParamsAI &params,
                            std::vector<std::pair<std::string, tensor_t>> &binary_post_op_tensors) {
     try {
-      matmul_context_t matmul_context = matmul_context_t()
-                                        .set_param("weights", weights)
-                                        .set_param("bias", bias);
-      for (const auto &post_op_type : params.post_op_config.post_ops) {
-        post_op_t post_op{post_op_type};
-        matmul_context = matmul_context.set_post_op(post_op);
-      }
-      matmul_context = matmul_context.create();
-      if (!matmul_context.check()) {
-        std::cout << "[AI_TEST] Context creation failed for " << params.test_name <<
-                  std::endl;
-        return status_t::failure;
-      }
-      auto matmul_operator = matmul_operator_t()
-                             .set_name(AITestUtils::generate_unique_name("matmul_ai_op"))
-                             .set_context(matmul_context)
-                             .create();
-      if (matmul_operator.is_bad_object()) {
-        std::cout << "[AI_TEST] Operator creation failed for " << params.test_name <<
-                  std::endl;
-        return status_t::failure;
-      }
-      // Bind extra tensors for binary post-ops using context-derived names
-      size_t binary_tensor_idx = 0;
-      for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
-        auto post_op_type = params.post_op_config.post_ops[i];
-        if ((post_op_type == post_op_type_t::binary_add ||
-             post_op_type == post_op_type_t::binary_mul)
-            && binary_tensor_idx < binary_post_op_tensors.size()) {
-          std::string tensor_name;
-          try {
-            if (post_op_type == post_op_type_t::binary_add) {
-              tensor_name = matmul_context.get_post_op(i).binary_add_params.tensor_name;
-            }
-            else {
-              tensor_name = matmul_context.get_post_op(i).binary_mul_params.tensor_name;
-            }
-          }
-          catch (...) {
-            tensor_name = binary_post_op_tensors[binary_tensor_idx].first; // fallback
-          }
-          matmul_operator = matmul_operator.set_input(tensor_name,
-                            binary_post_op_tensors[binary_tensor_idx].second);
-          binary_tensor_idx++;
+      // Check if LOWOHA mode is enabled
+      if (is_lowoha_mode_enabled()) {
+        // LOWOHA path - use matmul_direct API
+        AITestUtils::debug_print("[AI_DEBUG] Running LOWOHA matmul_direct...");
+
+        // Validate tensors
+        if (!input.check() || !weights.check() || !output.check()) {
+          std::cout << "[AI_TEST] LOWOHA: Invalid tensor state for " << params.test_name
+                    << std::endl;
+          return status_t::failure;
         }
+
+        // Get dimensions
+        const int M = static_cast<int>(params.m);
+        const int N = static_cast<int>(params.n);
+        const int K = static_cast<int>(params.k);
+        const int lda = K;  // Row-major, no transpose
+        const int ldb = N;  // Row-major, no transpose
+        const int ldc = N;  // Row-major output
+
+        // Get data pointers
+        void *A_data = input.get_raw_handle_unsafe();
+        void *B_data = weights.get_raw_handle_unsafe();
+        void *C_data = output.get_raw_handle_unsafe();
+        void *bias_data = bias.get_raw_handle_unsafe();
+
+        if (!A_data || !B_data || !C_data) {
+          std::cout << "[AI_TEST] LOWOHA: Null data pointer for " << params.test_name <<
+                    std::endl;
+          return status_t::failure;
+        }
+
+        // Set up data types
+        matmul_data_types matmul_dtypes;
+        matmul_dtypes.src = input.get_data_type();
+        matmul_dtypes.wei = weights.get_data_type();
+        matmul_dtypes.dst = output.get_data_type();
+        matmul_dtypes.bias = bias.get_data_type();
+        matmul_dtypes.compute = data_type_t::none;
+
+        // Set up batch parameters (2D matmul, no batching)
+        matmul_batch_params_t batch_params;
+        batch_params.Batch_A = 1;
+        batch_params.Batch_B = 1;
+        batch_params.batch_stride_src = static_cast<size_t>(-1);
+        batch_params.batch_stride_wei = static_cast<size_t>(-1);
+        batch_params.batch_stride_dst = static_cast<size_t>(-1);
+
+        // Set up matmul params
+        matmul_params matmul_params_obj;
+        matmul_params_obj.dtypes = matmul_dtypes;
+        matmul_params_obj.num_threads = 0;  // Use default
+
+        // Add post-ops
+        for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
+          auto post_op_type = params.post_op_config.post_ops[i];
+          matmul_post_op postop_item;
+          postop_item.po_type = post_op_type;
+
+          if (post_op_type == post_op_type_t::binary_add ||
+              post_op_type == post_op_type_t::binary_mul) {
+            if (i < binary_post_op_tensors.size()) {
+              postop_item.buff = binary_post_op_tensors[i].second.get_raw_handle_unsafe();
+              postop_item.dtype = binary_post_op_tensors[i].second.get_data_type();
+              auto dims = binary_post_op_tensors[i].second.get_size();
+              postop_item.dims.assign(dims.begin(), dims.end());
+            }
+          }
+          else {
+            postop_item.buff = nullptr;
+            postop_item.dtype = output.get_data_type();
+          }
+          matmul_params_obj.postop_.push_back(postop_item);
+        }
+
+        // Call LOWOHA matmul_direct
+        status_t status = matmul_direct(
+                            'r',  // layout: row-major
+                            false, false,  // transA, transB
+                            M, N, K,
+                            1.0f, A_data, lda,
+                            B_data, ldb,
+                            bias_data,
+                            0.0f, C_data, ldc,
+                            false,  // is_weights_const
+                            batch_params,
+                            matmul_params_obj);
+
+        if (status != status_t::success) {
+          std::cout << "[AI_TEST] LOWOHA matmul_direct failed for " << params.test_name <<
+                    std::endl;
+        }
+        return status;
       }
-      auto status = matmul_operator
-                    .set_input("matmul_input", input)
-                    .set_output("matmul_output", output)
-                    .execute();
+      else {
+        // Primitive operator path (default)
+        AITestUtils::debug_print("[AI_DEBUG] Running primitive matmul operator...");
 
-      return status;
+        matmul_context_t matmul_context = matmul_context_t()
+                                          .set_param("weights", weights)
+                                          .set_param("bias", bias);
+        for (const auto &post_op_type : params.post_op_config.post_ops) {
+          post_op_t post_op{post_op_type};
+          matmul_context = matmul_context.set_post_op(post_op);
+        }
+        matmul_context = matmul_context.create();
+        if (!matmul_context.check()) {
+          std::cout << "[AI_TEST] Context creation failed for " << params.test_name <<
+                    std::endl;
+          return status_t::failure;
+        }
+        auto matmul_operator = matmul_operator_t()
+                               .set_name(AITestUtils::generate_unique_name("matmul_ai_op"))
+                               .set_context(matmul_context)
+                               .create();
+        if (matmul_operator.is_bad_object()) {
+          std::cout << "[AI_TEST] Operator creation failed for " << params.test_name <<
+                    std::endl;
+          return status_t::failure;
+        }
+        // Bind extra tensors for binary post-ops using context-derived names
+        size_t binary_tensor_idx = 0;
+        for (size_t i = 0; i < params.post_op_config.post_ops.size(); ++i) {
+          auto post_op_type = params.post_op_config.post_ops[i];
+          if ((post_op_type == post_op_type_t::binary_add ||
+               post_op_type == post_op_type_t::binary_mul)
+              && binary_tensor_idx < binary_post_op_tensors.size()) {
+            std::string tensor_name;
+            try {
+              if (post_op_type == post_op_type_t::binary_add) {
+                tensor_name = matmul_context.get_post_op(i).binary_add_params.tensor_name;
+              }
+              else {
+                tensor_name = matmul_context.get_post_op(i).binary_mul_params.tensor_name;
+              }
+            }
+            catch (...) {
+              tensor_name = binary_post_op_tensors[binary_tensor_idx].first; // fallback
+            }
+            matmul_operator = matmul_operator.set_input(tensor_name,
+                              binary_post_op_tensors[binary_tensor_idx].second);
+            binary_tensor_idx++;
+          }
+        }
+        auto status = matmul_operator
+                      .set_input("matmul_input", input)
+                      .set_output("matmul_output", output)
+                      .execute();
 
+        return status;
+      }
     }
     catch (const std::exception &e) {
       std::cout << "[AI_TEST] Exception in " << params.test_name << ": " << e.what()

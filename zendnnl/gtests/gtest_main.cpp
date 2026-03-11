@@ -90,6 +90,9 @@ int main(int argc, char **argv) {
     // Initialize AI test mode from command-line argument
     ai_gtests::initialize_test_mode(ai_test_mode_str);
 
+    // Initialize AI LOWOHA mode from command-line argument
+    ai_gtests::initialize_lowoha_mode(cmd_lowoha);
+
     srand(static_cast<unsigned int>(seed));
     std::cout << "Value " << seed << " is used as seed. \n";
 

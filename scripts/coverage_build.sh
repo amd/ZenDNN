@@ -106,7 +106,7 @@ function run_and_generate_coverage_report() {
     echo "Running tests with ZENDNNL_MATMUL_ALGO=$algo ..."
     echo "=========================================="
     export ZENDNNL_MATMUL_ALGO=$algo
-    ./install/gtests/gtests --ai_test_mode post-sub --gtest_filter="AITests/*:-AITests/TestBatch*"
+    ./install/gtests/gtests --ai_test_mode post-sub --lowoha true --gtest_filter="AITests/*:-AITests/TestBatch*"
     
     # Capture coverage for this run
     lcov --capture --directory . --output-file "coverage_direct_algo_${algo}.info"
@@ -124,8 +124,75 @@ function run_and_generate_coverage_report() {
   echo "=========================================="
   lcov $TRACEFILE_ARGS --output-file "$OUTPUT_INFO"
   
-  echo "Filtering out system and test files..."
-  lcov --remove "$OUTPUT_INFO" '/usr/*' '*/gtest/*' --output-file "$FILTERED_INFO"
+  # ============================================================================
+  # FILTERING CONFIGURATION
+  # ============================================================================
+  # You can use POSITIVE filtering (include only), NEGATIVE filtering (exclude),
+  # or BOTH (extract first, then remove from the extracted set)
+  # ============================================================================
+  
+  # ----------------------------------------------------------------------------
+  # POSITIVE FILTER: Specify directories/files to INCLUDE in coverage report
+  # ----------------------------------------------------------------------------
+  # Uncomment to use positive filtering (extracts ONLY the specified paths)
+  # To add more paths, add them to the array:
+  # Example: INCLUDE_PATHS=("*/zendnnl/src/*" "*/benchdnn/*" "*/examples/*")
+  #
+  # Note: Patterns should use wildcards (*) for lcov matching
+  # ----------------------------------------------------------------------------
+  INCLUDE_PATHS=(
+    "*/zendnnl/*"
+  )
+  
+  # ----------------------------------------------------------------------------
+  # NEGATIVE FILTER: Patterns to EXCLUDE from coverage report
+  # ----------------------------------------------------------------------------
+  # Current exclusions: system files, gtest framework, test files, and build artifacts
+  #
+  # To add more exclusions, add them to the array:
+  # Common patterns to exclude:
+  # - */benchdnn/*          (benchmark code)
+  # - */examples/*          (example code)
+  # - */external/*          (external dependencies)
+  # - */third_party/*       (third-party dependencies)
+  # - */dependencies/*      (dependency directory)
+  # - */CMakeFiles/*        (CMake build artifacts)
+  # ----------------------------------------------------------------------------
+  EXCLUDE_PATTERNS=(
+    '/usr/*'              # System headers
+    '*/gtest/*'           # Google Test framework
+    '*/gtests/*'          # Test files (zendnnl/gtests and ai_gtests)
+    '*/build/*'           # Build artifacts
+  )
+  
+  # ============================================================================
+  # FILTERING EXECUTION
+  # ============================================================================
+  # Three modes available:
+  # 1. NEGATIVE only: Remove unwanted files (current default)
+  # 2. POSITIVE only: Extract only wanted files
+  # 3. BOTH: Extract wanted files, then remove unwanted patterns from that set
+  # ============================================================================
+  
+  # Check if INCLUDE_PATHS is defined and not empty
+  if [ -n "${INCLUDE_PATHS+x}" ] && [ ${#INCLUDE_PATHS[@]} -gt 0 ]; then
+    # POSITIVE filtering is enabled
+    echo "Applying POSITIVE filter (extracting specified paths)..."
+    lcov --extract "$OUTPUT_INFO" "${INCLUDE_PATHS[@]}" --output-file "temp_extracted.info"
+    
+    # Check if we should also apply NEGATIVE filtering
+    if [ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]; then
+      echo "Applying NEGATIVE filter on extracted data..."
+      lcov --remove "temp_extracted.info" "${EXCLUDE_PATTERNS[@]}" --output-file "$FILTERED_INFO"
+      rm -f "temp_extracted.info"
+    else
+      mv "temp_extracted.info" "$FILTERED_INFO"
+    fi
+  else
+    # Only NEGATIVE filtering (default mode)
+    echo "Applying NEGATIVE filter (removing unwanted files)..."
+    lcov --remove "$OUTPUT_INFO" "${EXCLUDE_PATTERNS[@]}" --output-file "$FILTERED_INFO"
+  fi
   
   echo "Generating HTML report..."
   genhtml "$FILTERED_INFO" --output-directory "$HTML_DIR"
@@ -134,7 +201,13 @@ function run_and_generate_coverage_report() {
   echo "=========================================="
   echo "Code Coverage report for ZENDNN(L) is generated."
   echo "Coverage includes data from:"
-  echo "  - Direct mode (USE_ZENDNN_MATMUL_DIRECT=1): ZENDNNL_MATMUL_ALGO values ${ALGO_VALUES_DIRECT[*]}"
+  echo "  - AI tests with LOWOHA enabled (--lowoha true)"
+  echo "  - ZENDNNL_MATMUL_ALGO values: ${ALGO_VALUES_DIRECT[*]}"
+  echo ""
+  echo "This covers LOWOHA operators:"
+  echo "  - lowoha_operators/matmul/*"
+  echo "  - lowoha_operators/embedding_bag/*"
+  echo ""
   echo "Open $HTML_DIR/index.html manually in your browser."
   echo "=========================================="
 }

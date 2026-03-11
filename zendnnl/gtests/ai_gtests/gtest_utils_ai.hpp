@@ -74,6 +74,9 @@ enum class TestMode {
 // Global variable to store current test mode (default: DEFAULT)
 inline TestMode ai_gtest_mode = TestMode::DEFAULT;
 
+// Global variable to store LOWOHA mode flag from command-line
+extern std::string cmd_lowoha_ai;
+
 /** @brief Test categories for comprehensive coverage */
 enum class TestCategory {
   ACCURACY,      // Standard accuracy tests
@@ -86,6 +89,14 @@ enum class TestCategory {
 // Initialize test mode from command-line string
 // Normalizes input by removing special characters and converting to lowercase
 void initialize_test_mode(const std::string &mode_str);
+
+// Initialize LOWOHA mode from command-line flag
+// Stores the flag value for use in AI tests
+void initialize_lowoha_mode(const std::string &lowoha_flag);
+
+// Check if LOWOHA mode is enabled
+// Returns true if --lowoha flag is set to "true" or "1"
+bool is_lowoha_mode_enabled();
 
 // Standalone function to initialize nightly test configuration
 // Sets MaxTestCases values for nightly mode (10x base values)

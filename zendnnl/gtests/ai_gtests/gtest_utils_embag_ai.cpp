@@ -117,7 +117,7 @@ bool EmbagTestUtils::is_embag_kernel_supported(data_type_t table_dtype,
     return true;
   }
   // U4/S4/S8 quantized tables with F32 or BF16 output
-  if ((table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 || 
+  if ((table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 ||
        table_dtype == data_type_t::s4) &&
       (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
     return true;
@@ -139,7 +139,7 @@ bool EmbagTestUtils::is_embag_reference_supported(data_type_t table_dtype,
     return true;
   }
   // Reference supports U4/S4/S8 quantized with F32 or BF16 output
-  if ((table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 || 
+  if ((table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 ||
        table_dtype == data_type_t::s4) &&
       (output_dtype == data_type_t::f32 || output_dtype == data_type_t::bf16)) {
     return true;
@@ -522,7 +522,7 @@ void EmbagParameterGenerator::add_minimal_accuracy_params(
     if (data_combo == EmbagDataTypeCombination::U4_F32) {
       continue;
     }
-    
+
     for (auto algo : algos) {
       for (const auto &[num_emb, emb_dim, num_idx, num_bag, desc] : fixed_dims) {
         if (EmbagTestUtils::is_embag_kernel_supported(
@@ -539,8 +539,8 @@ void EmbagParameterGenerator::add_minimal_accuracy_params(
 void EmbagParameterGenerator::add_accuracy_params(
   std::vector<EmbagParamsAI> &params) {
   const std::vector<std::string> categories = {"tiny", "small", "medium",
-                                                "large"
-                                               };
+                                               "large"
+                                              };
   const int max_cases_per_category = 5;
 
   std::vector<embag_algo_t> algos = {
@@ -606,7 +606,8 @@ void EmbagParameterGenerator::add_edge_case_params(
             EmbagTestUtils::get_table_dtype(data_combo),
             EmbagTestUtils::get_output_dtype(data_combo), embag_algo_t::sum)) {
         params.push_back(create_param(num_emb, emb_dim, num_idx, num_bag,
-                                      data_combo, embag_algo_t::sum, TestCategory::EDGE_CASE, true, true, "edge_case"));
+                                      data_combo, embag_algo_t::sum, TestCategory::EDGE_CASE, true, true,
+                                      "edge_case"));
       }
     }
   }
@@ -622,7 +623,7 @@ void EmbagParameterGenerator::add_invalid_params(
                                   TestCategory::INVALID, true, false, "invalid"));
     params.push_back(create_param(100, 64, 0, 4, data_combo, embag_algo_t::sum,
                                   TestCategory::INVALID, true, false, "invalid"));
-    
+
     // Note: num_bags > num_indices is NOT tested as invalid because the operator
     // allows this configuration (creates empty bags with zero output)
   }
@@ -642,7 +643,8 @@ void EmbagParameterGenerator::add_embedding_lookup_params(
             EmbagTestUtils::get_table_dtype(data_combo),
             EmbagTestUtils::get_output_dtype(data_combo), embag_algo_t::none)) {
         params.push_back(create_param(num_emb, emb_dim, num_idx, 0,
-                                      data_combo, embag_algo_t::none, TestCategory::EDGE_CASE, false, true, "accuracy"));
+                                      data_combo, embag_algo_t::none, TestCategory::EDGE_CASE, false, true,
+                                      "accuracy"));
       }
     }
   }
@@ -702,9 +704,9 @@ EmbagParamsAI EmbagParameterGenerator::create_param(
   param.category = category;
   param.use_offsets = use_offsets;
   param.expect_success = expect_success;
-  
+
   // Set fp16_scale_bias to true for all quantized embeddings (U4/S8/S4)
-  if (data_types == EmbagDataTypeCombination::U4_F32 || 
+  if (data_types == EmbagDataTypeCombination::U4_F32 ||
       data_types == EmbagDataTypeCombination::U4_BF16 ||
       data_types == EmbagDataTypeCombination::S8_F32 ||
       data_types == EmbagDataTypeCombination::S8_BF16 ||

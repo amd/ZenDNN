@@ -48,26 +48,26 @@ enum class EmbagDimensions : uint64_t {
   SMALL_EMBEDDINGS = 100,
   MEDIUM_EMBEDDINGS = 1000,
   LARGE_EMBEDDINGS = 10000,
-  
+
   // Embedding dimensions
   TINY_DIM = 8,
   SMALL_DIM = 64,
   MEDIUM_DIM = 128,
   LARGE_DIM = 256,
   XLARGE_DIM = 512,
-  
+
   // Number of indices
   TINY_INDICES = 4,
   SMALL_INDICES = 16,
   MEDIUM_INDICES = 64,
   LARGE_INDICES = 256,
-  
+
   // Number of bags
   TINY_BAGS = 2,
   SMALL_BAGS = 8,
   MEDIUM_BAGS = 32,
   LARGE_BAGS = 128,
-  
+
   // Range values for random generation
   MIN_EMBEDDINGS = 10,
   MAX_EMBEDDINGS = 10000,
@@ -99,21 +99,21 @@ struct EmbagParamsAI {
   uint64_t embedding_dim;   // Dimension of each embedding
   uint64_t num_indices;     // Total number of indices
   uint64_t num_bags;        // Number of bags (for embedding bag mode)
-  
+
   EmbagDataTypeCombination data_types;
   embag_algo_t algo;        // sum, mean, max, or none (for embedding lookup)
   TestCategory category;
-  
+
   bool use_offsets;         // If false, embedding lookup mode (no aggregation)
   bool use_padding_idx;     // Whether to use padding index
   int64_t padding_idx;      // Padding index value
   bool fp16_scale_bias;     // For quantized embeddings (U4/S8)
   bool include_last_offset; // Include last offset in offsets tensor
-  
+
   bool expect_success;
   std::string test_name;
 
-  EmbagParamsAI() : num_embeddings(100), embedding_dim(64), 
+  EmbagParamsAI() : num_embeddings(100), embedding_dim(64),
     num_indices(16), num_bags(4),
     data_types(EmbagDataTypeCombination::F32_F32),
     algo(embag_algo_t::sum),
@@ -131,58 +131,59 @@ struct EmbagParamsAI {
 class EmbagTestUtils {
  public:
   // Dimension validation
-  static bool validate_embag_dimensions(uint64_t num_embeddings, 
+  static bool validate_embag_dimensions(uint64_t num_embeddings,
                                         uint64_t embedding_dim,
-                                        uint64_t num_indices, 
+                                        uint64_t num_indices,
                                         uint64_t num_bags);
-  
+
   // Data type utilities
   static data_type_t get_table_dtype(EmbagDataTypeCombination combo);
   static data_type_t get_output_dtype(EmbagDataTypeCombination combo);
-  static bool is_valid_embag_data_type_combination(EmbagDataTypeCombination combo);
-  
+  static bool is_valid_embag_data_type_combination(EmbagDataTypeCombination
+      combo);
+
   // Kernel support utilities
   static bool is_embag_kernel_supported(data_type_t table_dtype,
                                         data_type_t output_dtype,
                                         embag_algo_t algo);
   static bool is_embag_reference_supported(data_type_t table_dtype,
-                                           data_type_t output_dtype,
-                                           embag_algo_t algo);
-  
+      data_type_t output_dtype,
+      embag_algo_t algo);
+
   // Tensor dimension helpers
-  static std::vector<uint64_t> get_table_dims(uint64_t num_embeddings, 
-                                              uint64_t embedding_dim);
+  static std::vector<uint64_t> get_table_dims(uint64_t num_embeddings,
+      uint64_t embedding_dim);
   static std::vector<uint64_t> get_indices_dims(uint64_t num_indices);
-  static std::vector<uint64_t> get_offsets_dims(uint64_t num_bags, 
-                                                bool include_last_offset);
-  static std::vector<uint64_t> get_output_dims_bag(uint64_t num_bags, 
-                                                   uint64_t embedding_dim);
-  static std::vector<uint64_t> get_output_dims_lookup(uint64_t num_indices, 
-                                                      uint64_t embedding_dim);
-  
+  static std::vector<uint64_t> get_offsets_dims(uint64_t num_bags,
+      bool include_last_offset);
+  static std::vector<uint64_t> get_output_dims_bag(uint64_t num_bags,
+      uint64_t embedding_dim);
+  static std::vector<uint64_t> get_output_dims_lookup(uint64_t num_indices,
+      uint64_t embedding_dim);
+
   // Index and offset generation
   static std::vector<int64_t> generate_random_indices(uint64_t num_indices,
-                                                      uint64_t num_embeddings,
-                                                      int64_t padding_idx = -1);
+      uint64_t num_embeddings,
+      int64_t padding_idx = -1);
   static std::vector<int64_t> generate_offsets(uint64_t num_bags,
-                                               uint64_t num_indices,
-                                               bool include_last_offset = false);
+      uint64_t num_indices,
+      bool include_last_offset = false);
   static std::vector<int64_t> generate_boundary_indices(uint64_t num_indices,
-                                                        uint64_t num_embeddings);
-  
+      uint64_t num_embeddings);
+
   // Tensor comparison
   static bool compare_embag_tensors(const tensor_t &test_tensor,
                                     const tensor_t &ref_tensor,
                                     float abs_tolerance,
                                     float rel_tolerance);
-  
+
   // Reference implementation
   static status_t run_reference_embag(tensor_t &table,
                                       tensor_t &indices,
                                       tensor_t &offsets,
                                       tensor_t &output,
                                       const EmbagParamsAI &params);
-  
+
   // Tolerance helpers
   static float get_accuracy_tolerance(data_type_t output_dtype);
   static float get_relative_tolerance(data_type_t output_dtype);
@@ -193,7 +194,7 @@ class EmbagTestUtils {
 class EmbagParameterGenerator {
  public:
   static std::vector<EmbagDataTypeCombination> supported_combinations;
-  
+
   static std::vector<EmbagParamsAI> generate_comprehensive_test_suite();
   static std::vector<EmbagParamsAI> generate_minimal_test_suite();
   static std::vector<EmbagParamsAI> generate_category_specific_params(
@@ -205,7 +206,7 @@ class EmbagParameterGenerator {
     EmbagDataTypeCombination data_combo,
     embag_algo_t algo,
     bool expect_success);
-  
+
   static void add_minimal_accuracy_params(std::vector<EmbagParamsAI> &params);
   static void add_accuracy_params(std::vector<EmbagParamsAI> &params);
   static void add_boundary_params(std::vector<EmbagParamsAI> &params);
@@ -214,7 +215,7 @@ class EmbagParameterGenerator {
   static void add_embedding_lookup_params(std::vector<EmbagParamsAI> &params);
   static void generate_reference_kernel_exhaustive_params(
     std::vector<EmbagParamsAI> &params);
-  
+
   static EmbagParamsAI create_param(
     uint64_t num_embeddings, uint64_t embedding_dim,
     uint64_t num_indices, uint64_t num_bags,

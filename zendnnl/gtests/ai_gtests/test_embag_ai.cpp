@@ -16,8 +16,10 @@
 
 #include <gtest/gtest.h>
 #include "gtest_utils_embag_ai.hpp"
+#include "lowoha_operators/embedding_bag/lowoha_embedding_bag.hpp"
 
 using namespace ai_gtests;
+using namespace zendnnl::lowoha::embag;
 #include <iostream>
 #include <memory>
 #include <cstdlib>
@@ -77,10 +79,11 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     auto indices_dims = EmbagTestUtils::get_indices_dims(params.num_indices);
     auto output_dims = params.use_offsets ?
                        EmbagTestUtils::get_output_dims_bag(params.num_bags, params.embedding_dim) :
-                       EmbagTestUtils::get_output_dims_lookup(params.num_indices, params.embedding_dim);
+                       EmbagTestUtils::get_output_dims_lookup(params.num_indices,
+                           params.embedding_dim);
 
     // Create table tensor
-    if (table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 || 
+    if (table_dtype == data_type_t::u4 || table_dtype == data_type_t::s8 ||
         table_dtype == data_type_t::s4) {
       // For quantized tables, use special quantized creation method
       tensors.table = AITensorFactory::create_quantized_embedding_tensor(
@@ -112,7 +115,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                       .set_data_type(data_type_t::s64)
                       .set_storage()
                       .create();
-    
+
     if (!tensors.indices.check()) {
       throw std::runtime_error("Failed to create indices tensor");
     }
@@ -128,7 +131,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
       auto offsets_dims = EmbagTestUtils::get_offsets_dims(params.num_bags,
                           params.include_last_offset);
       std::vector<int64_t> offsets_data = EmbagTestUtils::generate_offsets(
-          params.num_bags, params.num_indices, params.include_last_offset);
+                                            params.num_bags, params.num_indices, params.include_last_offset);
 
       std::vector<tensor_t::index_type> offsets_size_vec(offsets_dims.begin(),
           offsets_dims.end());
@@ -138,7 +141,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                         .set_data_type(data_type_t::s64)
                         .set_storage()
                         .create();
-      
+
       if (!tensors.offsets.check()) {
         throw std::runtime_error("Failed to create offsets tensor");
       }
@@ -264,7 +267,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     bool kernel_supported = EmbagTestUtils::is_embag_kernel_supported(table_dtype,
                             output_dtype, params.algo);
     status_t test_status = run_embag_test(tensors.table, tensors.indices,
-                                           tensors.offsets, tensors.output, params);
+                                          tensors.offsets, tensors.output, params);
     AITestUtils::debug_print("[AI_EMBAG_DEBUG] ZenDNNL kernel finished.");
 
     if (kernel_supported) {
@@ -338,7 +341,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                                        true, false, "_boundary");
 
     status_t test_status = run_embag_test(tensors.table, tensors.indices,
-                                           tensors.offsets, tensors.output, params);
+                                          tensors.offsets, tensors.output, params);
 
     if (params.expect_success) {
       EXPECT_EQ(test_status, status_t::success)
@@ -373,7 +376,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                                        false, false, "_edge");
 
     status_t test_status = run_embag_test(tensors.table, tensors.indices,
-                                           tensors.offsets, tensors.output, params);
+                                          tensors.offsets, tensors.output, params);
 
     if (params.expect_success) {
       EXPECT_EQ(test_status, status_t::success)
@@ -429,7 +432,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
 
       // Try to run the operator
       status_t status = run_embag_test(tensors.table, tensors.indices,
-                                        tensors.offsets, tensors.output, params);
+                                       tensors.offsets, tensors.output, params);
       return status;
     }
     catch (...) {
@@ -457,46 +460,135 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
                           tensor_t &offsets, tensor_t &output,
                           const EmbagParamsAI &params) {
     try {
-      auto embag_context = embag_context_t()
-                           .set_param("table", table)
-                           .set_algo(params.algo);
+      // Check if LOWOHA mode is enabled
+      if (is_lowoha_mode_enabled()) {
+        // LOWOHA path - use embedding_bag_direct or embedding_direct API
+        AITestUtils::debug_print("[AI_EMBAG_DEBUG] Running LOWOHA embedding_bag_direct...");
 
-      if (params.use_padding_idx) {
-        embag_context = embag_context.set_padding_index(params.padding_idx);
-      }
-      if (params.fp16_scale_bias) {
-        embag_context = embag_context.set_fp16_scale_bias(true);
-      }
-      if (params.include_last_offset) {
-        embag_context = embag_context.set_include_last_offset(true);
-      }
+        // Validate tensors
+        if (!table.check() || !indices.check() || !output.check()) {
+          std::cout << "[AI_EMBAG_TEST] LOWOHA: Invalid tensor state for " <<
+                    params.test_name << std::endl;
+          return status_t::failure;
+        }
 
-      embag_context = embag_context.create();
-      if (!embag_context.check()) {
-        std::cout << "[AI_EMBAG_TEST] Context creation failed for " << params.test_name
-                  << std::endl;
-        return status_t::failure;
+        if (params.use_offsets && !offsets.check()) {
+          std::cout << "[AI_EMBAG_TEST] LOWOHA: Invalid offsets tensor for " <<
+                    params.test_name << std::endl;
+          return status_t::failure;
+        }
+
+        // Get data pointers
+        void *table_data = table.get_raw_handle_unsafe();
+        void *indices_data = indices.get_raw_handle_unsafe();
+        void *offsets_data = params.use_offsets ? offsets.get_raw_handle_unsafe() :
+                             nullptr;
+        void *output_data = output.get_raw_handle_unsafe();
+
+        if (!table_data || !indices_data || !output_data) {
+          std::cout << "[AI_EMBAG_TEST] LOWOHA: Null data pointer for " <<
+                    params.test_name << std::endl;
+          return status_t::failure;
+        }
+
+        // Build embag_params_t structure
+        embag_params_t embag_params_obj;
+        embag_params_obj.dtypes.table = table.get_data_type();
+        embag_params_obj.dtypes.output = output.get_data_type();
+        embag_params_obj.dtypes.indices = indices.get_data_type();
+        if (params.use_offsets) {
+          embag_params_obj.dtypes.offsets = offsets.get_data_type();
+        }
+
+        embag_params_obj.algo = params.algo;
+        embag_params_obj.num_embeddings = params.num_embeddings;
+        embag_params_obj.embedding_dim = params.embedding_dim;
+        embag_params_obj.num_indices = params.num_indices;
+
+        if (params.use_offsets) {
+          embag_params_obj.num_bags = params.num_bags;
+          embag_params_obj.include_last_offset = params.include_last_offset;
+        }
+
+        embag_params_obj.is_weights = false;  // AI tests don't use per-sample weights
+        embag_params_obj.padding_idx = params.use_padding_idx ? params.padding_idx : -1;
+        embag_params_obj.num_threads = 0;  // Use default
+        embag_params_obj.fp16_scale_bias = params.fp16_scale_bias;
+        embag_params_obj.dst_stride = output.get_stride()[0];
+
+        // Call appropriate LOWOHA API
+        status_t status;
+        if (params.use_offsets) {
+          // Embedding bag with offsets
+          status = embedding_bag_direct(
+                     table_data,
+                     indices_data,
+                     offsets_data,
+                     nullptr,  // weights_data (not used in AI tests)
+                     output_data,
+                     embag_params_obj);
+        }
+        else {
+          // Embedding lookup (no offsets)
+          status = embedding_direct(
+                     table_data,
+                     indices_data,
+                     nullptr,  // weights_data (not used in AI tests)
+                     output_data,
+                     embag_params_obj);
+        }
+
+        if (status != status_t::success) {
+          std::cout << "[AI_EMBAG_TEST] LOWOHA embedding API failed for " <<
+                    params.test_name << std::endl;
+        }
+        return status;
       }
+      else {
+        // Primitive operator path (default)
+        AITestUtils::debug_print("[AI_EMBAG_DEBUG] Running primitive embag operator...");
 
-      auto embag_operator = embag_operator_t()
-                            .set_name(AITestUtils::generate_unique_name("embag_ai_op"))
-                            .set_context(embag_context)
-                            .create();
+        auto embag_context = embag_context_t()
+                             .set_param("table", table)
+                             .set_algo(params.algo);
 
-      if (embag_operator.is_bad_object()) {
-        std::cout << "[AI_EMBAG_TEST] Operator creation failed for " << params.test_name
-                  << std::endl;
-        return status_t::failure;
+        if (params.use_padding_idx) {
+          embag_context = embag_context.set_padding_index(params.padding_idx);
+        }
+        if (params.fp16_scale_bias) {
+          embag_context = embag_context.set_fp16_scale_bias(true);
+        }
+        if (params.include_last_offset) {
+          embag_context = embag_context.set_include_last_offset(true);
+        }
+
+        embag_context = embag_context.create();
+        if (!embag_context.check()) {
+          std::cout << "[AI_EMBAG_TEST] Context creation failed for " << params.test_name
+                    << std::endl;
+          return status_t::failure;
+        }
+
+        auto embag_operator = embag_operator_t()
+                              .set_name(AITestUtils::generate_unique_name("embag_ai_op"))
+                              .set_context(embag_context)
+                              .create();
+
+        if (embag_operator.is_bad_object()) {
+          std::cout << "[AI_EMBAG_TEST] Operator creation failed for " << params.test_name
+                    << std::endl;
+          return status_t::failure;
+        }
+
+        embag_operator = embag_operator.set_input("indices", indices);
+        if (params.use_offsets) {
+          embag_operator = embag_operator.set_input("offsets", offsets);
+        }
+        embag_operator = embag_operator.set_output("output", output);
+
+        auto status = embag_operator.execute();
+        return status;
       }
-
-      embag_operator = embag_operator.set_input("indices", indices);
-      if (params.use_offsets) {
-        embag_operator = embag_operator.set_input("offsets", offsets);
-      }
-      embag_operator = embag_operator.set_output("output", output);
-
-      auto status = embag_operator.execute();
-      return status;
     }
     catch (const std::exception &e) {
       std::cout << "[AI_EMBAG_TEST] Exception in " << params.test_name << ": "
@@ -527,7 +619,8 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     // Check dimensions
     auto expected_dims = params.use_offsets ?
                          EmbagTestUtils::get_output_dims_bag(params.num_bags, params.embedding_dim) :
-                         EmbagTestUtils::get_output_dims_lookup(params.num_indices, params.embedding_dim);
+                         EmbagTestUtils::get_output_dims_lookup(params.num_indices,
+                             params.embedding_dim);
 
     if (output.get_size() != expected_dims) {
       return false;
@@ -536,7 +629,8 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     // Check data type
     auto expected_dtype = EmbagTestUtils::get_output_dtype(params.data_types);
     if (output.get_data_type() != expected_dtype) {
-      std::cout << "[AI_EMBAG_BOUNDARY_ERROR] Output tensor data type mismatch" << std::endl;
+      std::cout << "[AI_EMBAG_BOUNDARY_ERROR] Output tensor data type mismatch" <<
+                std::endl;
       return false;
     }
 
@@ -567,7 +661,7 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
           }
         }
       }
-      
+
       if (!has_non_zero) {
         std::cout << "[AI_EMBAG_BOUNDARY_ERROR] Output is all zeros" << std::endl;
         return false;
@@ -652,10 +746,11 @@ class TestEmbagAI : public ::testing::TestWithParam<EmbagParamsAI> {
     // For small boundary cases, ensure we have reasonable values
     // Skip this check for very small embedding dimensions (≤2) as boundary values
     // in such cases can legitimately produce edge-case results
-    uint64_t total_elements = params.use_offsets ? 
+    uint64_t total_elements = params.use_offsets ?
                               (params.num_bags * params.embedding_dim) :
                               (params.num_indices * params.embedding_dim);
-    if (total_elements <= 1000 && params.embedding_dim > 2 && !has_reasonable_values) {
+    if (total_elements <= 1000 && params.embedding_dim > 2 &&
+        !has_reasonable_values) {
       std::cout <<
                 "[AI_EMBAG_BOUNDARY_ERROR] Small boundary case produced unreasonable values"
                 << std::endl;
