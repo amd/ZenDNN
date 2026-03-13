@@ -2,3 +2,6 @@ build/
 dependencies/
 docs/html/
 docs/latex/
+timings_*
+bf16_*_perf_*
+int8_*_perf_*

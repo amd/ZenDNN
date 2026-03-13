@@ -257,7 +257,9 @@ int matmul_lowoha_benchdnn(std::vector<MatmulConfig> configs,
 
       TimingStats time_stats;
 
-      PerfCounterGroup perf_ctrs;
+      PerfProfile perf_profile = parse_perf_profile(
+          options.perf_profile_str.c_str());
+      PerfCounterGroup perf_ctrs(perf_profile);
       const bool use_perf = options.perf_counters && perf_ctrs.is_available();
       if (use_perf) {
         if (!perf_ctrs.open()) {

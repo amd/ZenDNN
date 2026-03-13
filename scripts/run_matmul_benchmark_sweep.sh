@@ -18,15 +18,17 @@ set -euo pipefail
 #   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
 #   -t, --threads <N>             Number of OMP threads (default: all cores)
 #   -o, --outdir <dir>            Output directory (default: build/)
-#   -p, --perf                    External perf: run each shape under perf stat
-#                                 to collect per-shape L2/L3 HW counters.
+#   -p, --perf [profile]          External perf: run each shape under perf stat.
+#                                 Profiles: cache (default), tlb, stalls.
 #                                 Requires sudo. Outputs _perf_raw.txt per algo.
-#   -P, --perf-internal           Internal perf: pass --perf-counters to benchdnn
+#   -P, --perf-internal [profile] Internal perf: pass --perf-counters to benchdnn
 #                                 so it uses perf_event_open() API in-process.
 #                                 More accurate (measures only matmul iterations,
 #                                 excludes warmup and process startup overhead).
 #                                 Counts user-space events only (exclude_kernel=1).
 #                                 Requires sudo or perf_event_paranoid<=1.
+#                                 Profiles: cache (default), tlb, stalls
+#                                 Auto-detects Zen4/Zen5 for correct constants.
 #   -h, --help                    Show this help
 #
 # Input shortcuts:
@@ -40,8 +42,11 @@ set -euo pipefail
 #   ./run_matmul_benchmark_sweep.sh -a 1 -t 64 -i bf16                # ALGO 1, 64 threads
 #   ./run_matmul_benchmark_sweep.sh -a 1,11 -i bf16 -t 1              # ALGO 1 & 11, 1 thread
 #   ./run_matmul_benchmark_sweep.sh -a 10 -a 11 -i fp32 -t 1          # ALGO 10 & 11
-#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -p -i bf16         # external perf stat
-#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -P -i bf16         # internal perf (API)
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -p -i bf16         # external perf (cache)
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -p tlb -i bf16    # external perf (TLB)
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -P -i bf16         # internal perf (cache profile)
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 1 -P tlb -i bf16    # TLB + IPC profile
+#   sudo ./run_matmul_benchmark_sweep.sh -a 1 -t 128 -P stalls -i bf16  # dispatch stalls
 #   ./run_matmul_benchmark_sweep.sh -a 11 -i /tmp/shapes.txt          # custom file
 # ===========================================================================
 
@@ -53,6 +58,7 @@ INPUT_ARG="bf16"
 NUM_THREADS=""
 OUTDIR="$REPO_ROOT/build"
 PERF_MODE=0        # 0=off, 1=external (perf stat), 2=internal (--perf-counters)
+PERF_PROFILE="cache"  # cache, tlb, or stalls (for -P mode)
 ALGOS=()
 
 show_help() {
@@ -73,13 +79,15 @@ Options:
   -i, --input <file|shortcut>   Input file or shortcut (default: bf16)
   -t, --threads <N>             Number of OMP threads (default: all cores)
   -o, --outdir <dir>            Output directory (default: build/)
-  -p, --perf                    External perf: run each shape under perf stat
-                                to collect per-shape L2/L3 HW counters.
-                                Requires sudo. Outputs _perf_raw.txt per algo.
-  -P, --perf-internal           Internal perf: pass --perf-counters to benchdnn
-                                so it uses perf_event_open() API in-process.
-                                More accurate (measures only matmul iterations,
-                                excludes warmup and process startup overhead).
+  -p, --perf [profile]          External perf: run each shape under perf stat.
+                                Profiles: cache (default), tlb, stalls.
+                                Same event sets as -P. Requires sudo.
+  -P, --perf-internal [profile] Internal perf via perf_event_open() API.
+                                Auto-detects Zen4/Zen5 for correct constants.
+                                Profiles: cache (default), tlb, stalls.
+                                  cache  = L1/L2 hit-miss + L2 prefetcher
+                                  tlb    = DTLB misses + IPC
+                                  stalls = FP/LQ dispatch stalls + IPC
                                 Requires sudo or perf_event_paranoid<=1.
   -h, --help                    Show this help
 
@@ -111,8 +119,20 @@ while [[ $# -gt 0 ]]; do
         -i|--input)   INPUT_ARG="$2"; shift 2 ;;
         -t|--threads) NUM_THREADS="$2"; shift 2 ;;
         -o|--outdir)  OUTDIR="$2"; shift 2 ;;
-        -p|--perf)    PERF_MODE=1; shift ;;
-        -P|--perf-internal) PERF_MODE=2; shift ;;
+        -p|--perf)
+            PERF_MODE=1
+            if [[ -n "${2:-}" && "$2" =~ ^(cache|tlb|stalls)$ ]]; then
+                PERF_PROFILE="$2"; shift 2
+            else
+                PERF_PROFILE="cache"; shift
+            fi ;;
+        -P|--perf-internal)
+            PERF_MODE=2
+            if [[ -n "${2:-}" && "$2" =~ ^(cache|tlb|stalls)$ ]]; then
+                PERF_PROFILE="$2"; shift 2
+            else
+                PERF_PROFILE="cache"; shift
+            fi ;;
         -h|--help)    show_help ;;
         -*)           echo "Unknown option: $1"; show_help ;;
         *)            ALGOS+=("$1"); shift ;;
@@ -164,24 +184,28 @@ export KMP_BLOCKTIME=1
 # --- CPU binding ---
 CPU_BIND="0-$((OMP_NUM_THREADS - 1))"
 
-# --- AMD Zen 5 PMU events for L2/L3 cache analysis (via perf stat counting mode) ---
+# --- AMD Zen 4/5 PMU events (uniform across both architectures) ---
 # perf stat gives exact aggregate counters per run (not statistical samples).
 # AMD raw event format: rUUEE (UU=unit_mask, EE=event_select)
+# All PMC event codes are identical between Zen 4 (Family 19h) and Zen 5 (1Ah).
 #
-# PMCx064 L2CacheReqStat — "Core to L2 Cacheable Request Access Status"
-#   NOTE: Does NOT include L2 Prefetcher requests (those are PMCx070-072).
-#   Bit 3: LsRdBlkC     DC Req MISS              ← umask 0x08 = DC miss
-#   Bit 4: LsRdBlkX     DC Store HIT             ┐
-#   Bit 5: LsRdBlkLHitS DC Read HIT Non-Mod      │ umask 0xF0 = all DC hits
-#   Bit 6: LsRdBlkLHitX DC Read HIT Modifiable   │
-#   Bit 7: LsRdBlkCS    DC Shared Read HIT       ┘
+# Profile-specific event sets (matching benchdnn internal profiles):
 #
-# PMCx070-072 — L2 Prefetcher events (separate from demand requests)
-#   rFF70 = L2PfHitL2       PF accepted by L2, data found in L2
-#   rFF71 = L2PfMissL2HitL3 PF accepted by L2, missed L2, hit L3
-#   rFF72 = L2PfMissL2L3    PF accepted by L2, missed both L2 & L3 → DRAM
+#   cache: PMCx064 L2CacheReqStat (demand hit/miss) + PMCx070-072 (L2 prefetcher)
+#   tlb:   PMCx045 L1DtlbMiss (L2 hit / page walk) + PMCx0C0/076 (IPC)
+#   stalls: PMCx0AE dispatch stalls + PMCx0AF retire stalls + PMCx0C0/076 (IPC)
 #
-PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,rFF70,rFF71,rFF72,rF064,r0864"
+case "$PERF_PROFILE" in
+    cache)
+        PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,rFF70,rFF71,rFF72,rF064,r0864"
+        ;;
+    tlb)
+        PERF_EVENTS="L1-dcache-loads,L1-dcache-load-misses,r0F45,rF045,r00C0,r0076"
+        ;;
+    stalls)
+        PERF_EVENTS="r00C0,r0076,r20AE,r40AE,r02AE,r20AF"
+        ;;
+esac
 
 mkdir -p "$OUTDIR"
 
@@ -191,8 +215,8 @@ echo "  Input   : $INPUT_FILE"
 echo "  Algos   : ${ALGOS[*]}"
 echo "  Threads : $OMP_NUM_THREADS"
 echo "  CPU bind: $CPU_BIND"
-if [[ $PERF_MODE -eq 1 ]]; then PERF_LABEL="External (perf stat -p)"
-elif [[ $PERF_MODE -eq 2 ]]; then PERF_LABEL="Internal (benchdnn --perf-counters -P)"
+if [[ $PERF_MODE -eq 1 ]]; then PERF_LABEL="External perf stat (profile=$PERF_PROFILE)"
+elif [[ $PERF_MODE -eq 2 ]]; then PERF_LABEL="Internal perf_event_open (profile=$PERF_PROFILE)"
 else PERF_LABEL="OFF"; fi
 echo "  HW Perf : $PERF_LABEL"
 echo "  Output  : $OUTDIR/"
@@ -243,7 +267,8 @@ for algo in "${ALGOS[@]}"; do
 
         ZENDNNL_MATMUL_ALGO=$algo \
         numactl --physcpubind="$CPU_BIND" \
-            "$BENCHDNN_BIN" --op=matmul --lowoha=true --perf-counters \
+            "$BENCHDNN_BIN" --op=matmul --lowoha=true \
+            "--perf-counters=$PERF_PROFILE" \
             --input_file="$INPUT_FILE" \
             2>&1 | tee "$OUTFILE"
 

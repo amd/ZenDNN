@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Analyze benchdnn matmul output for a single AMD EPYC 9B45 (Zen 5) core.
+Analyze benchdnn matmul output for AMD EPYC (Zen 4 / Zen 5).
+Auto-detects architecture from [ARCH] line in perf output; falls back to Zen 5.
 
 Usage:
     Single file:   python3 analyze_benchmark.py <raw_output_file>
@@ -13,7 +14,35 @@ import os
 import re
 from math import gcd
 
-CPU_FREQ_GHZ = 4.121
+# ── Architecture constants ─────────────────────────────────────────────────
+# Selected at startup from [ARCH] line or --arch flag; default = Zen 5.
+ARCH_CONSTANTS = {
+    "zen4": dict(name="Zen4", family=0x19,
+                 cpu_freq_ghz=3.7,
+                 l1d_kb=32, l2_kb=1024, l3_mb_per_ccd=32,
+                 l2_bw_b_per_cycle=32, dispatch_width=6,
+                 l3_bw_gbs=80.0, dram_bw_gbs=40.0),
+    "zen5": dict(name="Zen5", family=0x1A,
+                 cpu_freq_ghz=4.121,
+                 l1d_kb=48, l2_kb=1024, l3_mb_per_ccd=32,
+                 l2_bw_b_per_cycle=64, dispatch_width=8,
+                 l3_bw_gbs=120.0, dram_bw_gbs=50.0),
+}
+
+def set_arch(arch_key="zen5"):
+    """Set global constants from the named architecture."""
+    global CPU_FREQ_GHZ, L2_BW_B_PER_CYCLE, L1D_KB, L2_KB
+    global L3_BW_GBS, DRAM_BW_GBS, ARCH_NAME
+    ac = ARCH_CONSTANTS.get(arch_key, ARCH_CONSTANTS["zen5"])
+    CPU_FREQ_GHZ = ac["cpu_freq_ghz"]
+    L2_BW_B_PER_CYCLE = ac["l2_bw_b_per_cycle"]
+    L1D_KB = ac["l1d_kb"]
+    L2_KB = ac["l2_kb"]
+    L3_BW_GBS = ac["l3_bw_gbs"]
+    DRAM_BW_GBS = ac["dram_bw_gbs"]
+    ARCH_NAME = ac["name"]
+
+set_arch("zen5")  # default until [ARCH] detected
 
 SIMD_WIDTH   = 512
 FMA_PER_CORE = 2
@@ -25,11 +54,6 @@ DTYPE_BITS = {"fp32": 32, "bf16": 16, "int8": 8}
 COMPUTE = {}
 for dt, bits in DTYPE_BITS.items():
     COMPUTE[dt] = (SIMD_WIDTH // bits) * FMA_PER_CORE * OPS_PER_FMA * DOUBLE_PUMP
-
-L2_BW_B_PER_CYCLE = 64
-L1D_KB, L2_KB = 48, 1024
-L3_BW_GBS = 120.0    # per-core L3 effective BW (empirical: ~115-121 GB/s on Turin)
-DRAM_BW_GBS = 50.0   # per-core DRAM effective BW (empirical: ~40-60 GB/s on Turin)
 
 ELEM_BYTES = {"u8":1, "s8":1, "s4":0.5, "bf16":2, "f16":2, "f32":4}
 
@@ -523,6 +547,19 @@ def parse_perf_raw(path):
             if line.startswith("[PERF]"):
                 continue
 
+            # [ARCH] line: auto-detect architecture from benchdnn output.
+            # Profile is stored for future use but current analysis always
+            # computes cache-profile metrics. TLB/stalls event names are
+            # parsed into counters[] for raw display but profile-specific
+            # derived output is not yet implemented.
+            if line.startswith("[ARCH]"):
+                arch_m = re.search(r'(Zen\d)', line, re.IGNORECASE)
+                if arch_m:
+                    akey = arch_m.group(1).lower()
+                    if akey in ARCH_CONSTANTS:
+                        set_arch(akey)
+                continue
+
             # Parse perf stat counter lines: "117,953,177      L1-dcache-loads ..."
             ctr_match = re.match(r'([\d,]+)\s+(\S+)', line)
             if not ctr_match:
@@ -532,6 +569,7 @@ def parse_perf_raw(path):
             except ValueError:
                 continue
             ename = ctr_match.group(2)
+            # ── cache profile events ──
             if ename == 'L1-dcache-loads':
                 counters['l1_ld'] = val
             elif ename == 'L1-dcache-load-misses':
@@ -546,6 +584,25 @@ def parse_perf_raw(path):
                 counters['l2_hit'] = val
             elif ename in ('r3864', 'r1064', 'r0864'):
                 counters['l2_miss'] = val
+            # ── tlb profile events ──
+            elif ename == 'r0F45':
+                counters['dtlb_l2_hit'] = val
+            elif ename == 'rF045':
+                counters['dtlb_l2_miss'] = val
+            # ── stalls + tlb: IPC events ──
+            elif ename == 'r00C0':
+                counters['ret_insn'] = val
+            elif ename == 'r0076':
+                counters['cycles'] = val
+            # ── stalls profile events ──
+            elif ename == 'r20AE':
+                counters['fp_reg_stall'] = val
+            elif ename == 'r40AE':
+                counters['fp_sched_stall'] = val
+            elif ename == 'r02AE':
+                counters['lq_stall'] = val
+            elif ename == 'r20AF':
+                counters['retire_stall'] = val
 
         if m == 0 or k == 0 or n == 0:
             continue
@@ -619,8 +676,9 @@ def perf_analysis(path, verbose=False, bottleneck=False, num_threads=1, cache_le
     mode = "Single Core" if nt == 1 else f"{nt}-Thread (per-core normalized)"
 
     print(f"\n{'='*110}")
-    print(f"  AMD EPYC 9B45 (Zen 5 / Turin) - {mode} Analysis + HW Counters")
-    print(f"  CPU freq: {CPU_FREQ_GHZ} GHz | L1d: {L1D_KB} KB | L2: {L2_KB} KB | L3: 32 MB/CCD")
+    print(f"  AMD EPYC ({ARCH_NAME}) - {mode} Analysis + HW Counters")
+    print(f"  CPU freq: {CPU_FREQ_GHZ} GHz | L1d: {L1D_KB} KB | L2: {L2_KB} KB"
+          f" | L2 BW: {L2_BW_B_PER_CYCLE} B/cycle | L3: 32 MB/CCD")
     if nt > 1:
         print(f"  Threads: {nt} | GOPS = system total | Comp%, L2BW%, L2BW%m = per-core (÷ {nt})")
     print(f"  NOTE: Actual freq under sustained AVX-512 may be ~3-5% lower than max boost.")
@@ -1015,6 +1073,14 @@ WORKFLOW:
                 clevel = args[i].upper()
                 if clevel not in ("L2", "L3"):
                     sys.exit(f"-c must be L2 or L3, got: {args[i]}")
+            elif args[i] == "--arch":
+                i += 1
+                if i >= len(args):
+                    sys.exit("--arch requires zen4 or zen5")
+                akey = args[i].lower()
+                if akey not in ARCH_CONSTANTS:
+                    sys.exit(f"--arch must be zen4 or zen5, got: {args[i]}")
+                set_arch(akey)
             else:
                 filepath = args[i]
             i += 1
