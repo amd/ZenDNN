@@ -101,12 +101,10 @@ static inline void compute_asymmetric_scale_zp(float min_val, float max_val,
 }
 
 //==============================================================================
-// Cache-line-wide non-temporal store
+// Cache-line-wide store
 //
 // Packs 4 x 16-byte narrowed results into a single 64-byte (cache-line)
-// write using _mm512_stream_si512.  This eliminates read-for-ownership
-// (RFO) traffic on the output buffer, which would otherwise waste ~25%
-// of DRAM write bandwidth.
+// write using _mm512_store_si512.
 //
 // Requires 64-byte alignment; falls back to 4 x unaligned stores otherwise.
 //==============================================================================
@@ -120,7 +118,7 @@ static inline void store_4x16_s8(int8_t *dst,
     __m256i lo = _mm256_set_m128i(i1, i0);
     __m256i hi = _mm256_set_m128i(i3, i2);
     __m512i pack = _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
-    _mm512_stream_si512(reinterpret_cast<__m512i *>(dst), pack);
+    _mm512_store_si512(reinterpret_cast<__m512i *>(dst), pack);
   } else {
     _mm_storeu_si128(reinterpret_cast<__m128i *>(dst),      i0);
     _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 16), i1);
@@ -142,29 +140,6 @@ static inline void store_4x16_u8(uint8_t *dst,
 // Tuning constants
 //==============================================================================
 
-/**
- * L1 scratch threshold: when N <= this value, the F32 scratch buffer
- * (N * 4 bytes) fits in L1d cache (48 KB on Zen 5).  Pass 2 then reads
- * pre-converted F32 directly, avoiding a redundant BF16-to-F32 conversion.
- * For N > threshold, the scratch would spill to L2 and hurt performance,
- * so pass 2 re-loads BF16 from L1 cache and re-converts instead.
- */
-static constexpr int64_t SCRATCH_THRESHOLD = 12288;  // 48 KB / 4
-
-/**
- * Work-aware thread selection: avoids spawning more OMP threads than
- * the problem can keep busy.  Each thread needs at least MIN_ELEMS
- * elements of work to amortise the OMP fork/join overhead (~5-20 us).
- * Also capped at M (one row per thread minimum).
- */
-static inline int select_num_threads(int64_t M, int64_t N) {
-  int max_thr = omp_get_max_threads();
-  int by_rows = static_cast<int>(std::min(static_cast<int64_t>(max_thr), M));
-  constexpr int64_t MIN_ELEMS_PER_THREAD = 20000;
-  int by_work = std::max(1, static_cast<int>(M * N / MIN_ELEMS_PER_THREAD));
-  return std::min(by_rows, std::min(by_work, max_thr));
-}
-
 //==============================================================================
 // KERNEL 1:  BF16 -> S8 Symmetric Per-Token Quantization  (AVX-512F)
 //==============================================================================
@@ -182,10 +157,9 @@ static inline int select_num_threads(int64_t M, int64_t N) {
 //   zmm (512-bit):  ~13 total
 //     Pass 1:  abs_mask(1) + vinf(1) + f0-f3(4) + a0-a3(4, overlapped)
 //              + vam0-vam3(4) = 14, but a0-a3 are temporaries
-//     Pass 2:  vscale(1) + f0-f3 or loads(4) + r0-r3(4) = 9
+//     Pass 2:  vscale(1) + f0-f3(4) + r0-r3(4) = 9
 //   k-mask:    4  (finite_mask results for f0-f3)
 //   Scalar:    scale, absmax, j, cl_ok
-//   Stack:     f32_stack[12288] (48 KB) when use_scratch=true
 //
 // Optimizations:
 //   1. Fused per-row:  Pass 1 + Pass 2 back-to-back keeps row in L1/L2,
@@ -194,16 +168,18 @@ static inline int select_num_threads(int64_t M, int64_t N) {
 //      avoiding separate min/max/abs operations (1 op vs 4).
 //   3. Non-finite masking:  finite_mask() + VMAXPS{k} skips NaN/Inf lanes,
 //      matching the reference path's std::isfinite() behavior.
-//   4. Conditional L1 scratch:  when N*4 <= 48 KB (Zen5 L1d), stores
-//      converted F32 in Pass 1 so Pass 2 skips BF16-to-F32 re-conversion.
+//   4. L1 re-read:  Pass 2 re-loads BF16 from L1 (still hot from Pass 1)
+//      and re-converts to F32.  Avoids per-call heap allocation that would
+//      hurt multi-threaded scaling (OMP fork/join + NUMA placement).
 //   5. 4x unrolling:  64 elements/iter across 4 independent accumulators
 //      breaks dependency chains for out-of-order execution (ILP).
 //   6. VPMOVSDB saturation:  _mm512_cvtsepi32_epi8 narrows int32->int8
 //      with hardware saturation to [-128,127], no explicit clamp needed.
-//   7. Cache-line NT stores:  packs 4x __m128i into 64B and writes with
-//      VMOVNTDQ, eliminating read-for-ownership DRAM traffic (~25% BW).
-//   8. Adaptive threading:  select_num_threads() caps OMP threads to
-//      min(M, M*N/20000, max_threads) to avoid fork/join overhead.
+//   7. Cache-line stores:  packs 4x __m128i into a single 64B aligned
+//      store for efficient cache-line writes.
+//   8. OMP threading:  the parallel-for uses the default OMP thread count,
+//      typically up to M threads (one row per thread) for NUMA-distributed
+//      writes.
 //   9. True division:  VDIVPS for exact match with reference scalar path
 //      (no reciprocal multiply rounding differences).
 //  10. Banker's rounding:  VCVTPS2DQ matches std::nearbyint() for
@@ -216,148 +192,98 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
                                              int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  int nthr = select_num_threads(M, N);
-  const bool use_scratch = (N <= SCRATCH_THRESHOLD);
 
-  #pragma omp parallel num_threads(nthr)
-  {
-    float f32_stack[SCRATCH_THRESHOLD];
-    float *f32_buf = use_scratch ? f32_stack : nullptr;
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+    int8_t         *row_dst = dst + m * N;
 
-    #pragma omp for schedule(static)
-    for (int64_t m = 0; m < M; ++m) {
-      const uint16_t *row_src = src + m * N;
-      int8_t         *row_dst = dst + m * N;
+    // -- Pass 1: absmax reduction -----------------------------------------
+    __m512 vam0 = _mm512_setzero_ps();
+    __m512 vam1 = _mm512_setzero_ps();
+    __m512 vam2 = _mm512_setzero_ps();
+    __m512 vam3 = _mm512_setzero_ps();
 
-      // -- Pass 1: absmax reduction with optional F32 staging -------------
-      __m512 vam0 = _mm512_setzero_ps();
-      __m512 vam1 = _mm512_setzero_ps();
-      __m512 vam2 = _mm512_setzero_ps();
-      __m512 vam3 = _mm512_setzero_ps();
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 48)));
 
-      int64_t j = 0;
-      for (; j + 63 < N; j += 64) {
+      __m512 a0 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f0), abs_mask));
+      __m512 a1 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f1), abs_mask));
+      __m512 a2 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f2), abs_mask));
+      __m512 a3 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f3), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f0, abs_mask, vinf), vam0, a0);
+      vam1 = _mm512_mask_max_ps(vam1, finite_mask(f1, abs_mask, vinf), vam1, a1);
+      vam2 = _mm512_mask_max_ps(vam2, finite_mask(f2, abs_mask, vinf), vam2, a2);
+      vam3 = _mm512_mask_max_ps(vam3, finite_mask(f3, abs_mask, vinf), vam3, a3);
+    }
 
-        __m512 f0 = bf16x16_to_f32(
-            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
-        __m512 f1 = bf16x16_to_f32(
-            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 16)));
-        __m512 f2 = bf16x16_to_f32(
-            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 32)));
-        __m512 f3 = bf16x16_to_f32(
-            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j + 48)));
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 af = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f), abs_mask));
+      vam0 = _mm512_mask_max_ps(vam0, finite_mask(f, abs_mask, vinf), vam0, af);
+    }
 
-        if (use_scratch) {
-          _mm512_storeu_ps(f32_buf + j,      f0);
-          _mm512_storeu_ps(f32_buf + j + 16, f1);
-          _mm512_storeu_ps(f32_buf + j + 32, f2);
-          _mm512_storeu_ps(f32_buf + j + 48, f3);
-        }
+    vam0 = _mm512_max_ps(_mm512_max_ps(vam0, vam1),
+                          _mm512_max_ps(vam2, vam3));
+    float absmax = _mm512_reduce_max_ps(vam0);
 
-        __m512 a0 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f0), abs_mask));
-        __m512 a1 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f1), abs_mask));
-        __m512 a2 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f2), abs_mask));
-        __m512 a3 = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f3), abs_mask));
-        vam0 = _mm512_mask_max_ps(vam0, finite_mask(f0, abs_mask, vinf), vam0, a0);
-        vam1 = _mm512_mask_max_ps(vam1, finite_mask(f1, abs_mask, vinf), vam1, a1);
-        vam2 = _mm512_mask_max_ps(vam2, finite_mask(f2, abs_mask, vinf), vam2, a2);
-        vam3 = _mm512_mask_max_ps(vam3, finite_mask(f3, abs_mask, vinf), vam3, a3);
-      }
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v))
+        absmax = std::max(absmax, std::abs(v));
+    }
 
-      for (; j + 15 < N; j += 16) {
-        __m512 f = bf16x16_to_f32(
-            _mm256_loadu_si256(reinterpret_cast<const __m256i *>(row_src + j)));
-        if (use_scratch)
-          _mm512_storeu_ps(f32_buf + j, f);
-        __m512 af = _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(f), abs_mask));
-        vam0 = _mm512_mask_max_ps(vam0, finite_mask(f, abs_mask, vinf), vam0, af);
-      }
+    // -- Compute per-row scale --------------------------------------------
+    float scale;
+    compute_symmetric_scale_from_absmax(absmax, scale);
+    scales[m] = scale;
 
-      vam0 = _mm512_max_ps(_mm512_max_ps(vam0, vam1),
-                            _mm512_max_ps(vam2, vam3));
-      float absmax = _mm512_reduce_max_ps(vam0);
+    // -- Pass 2: quantize (re-load BF16 from L1, still hot from Pass 1) --
+    __m512 vscale = _mm512_set1_ps(scale);
+    bool cl_ok = (reinterpret_cast<uintptr_t>(row_dst) & 63) == 0;
 
-      for (; j < N; ++j) {
-        float v = bf16_scalar_to_f32(row_src[j]);
-        if (use_scratch) f32_buf[j] = v;
-        if (std::isfinite(v))
-          absmax = std::max(absmax, std::abs(v));
-      }
+    j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 48)));
 
-      // -- Compute per-row scale ------------------------------------------
-      float scale;
-      compute_symmetric_scale_from_absmax(absmax, scale);
-      scales[m] = scale;
+      __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(f0, vscale));
+      __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(f1, vscale));
+      __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(f2, vscale));
+      __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(f3, vscale));
 
-      // -- Pass 2: quantize with division -----------------------------------
-      __m512 vscale = _mm512_set1_ps(scale);
-      bool cl_ok = (reinterpret_cast<uintptr_t>(row_dst) & 63) == 0;
-
-      j = 0;
-      if (use_scratch) {
-        // Scratch path: read pre-converted F32 from L1 (no bf16 decode)
-        for (; j + 63 < N; j += 64) {
-          __m512i r0 = _mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j), vscale));
-          __m512i r1 = _mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 16), vscale));
-          __m512i r2 = _mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 32), vscale));
-          __m512i r3 = _mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 48), vscale));
-
-          store_4x16_s8(row_dst + j,
-                        _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
-                        _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
-                        cl_ok);
-        }
-        for (; j + 15 < N; j += 16) {
-          __m512i r = _mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j), vscale));
-          _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
-                           _mm512_cvtsepi32_epi8(r));
-        }
-        for (; j < N; ++j) {
-          int32_t q = static_cast<int32_t>(std::nearbyint(f32_buf[j] / scale));
-          q = std::max(-128, std::min(127, q));
-          row_dst[j] = static_cast<int8_t>(q);
-        }
-      } else {
-        // No-scratch path: re-load BF16 from L1 cache and re-convert
-        for (; j + 63 < N; j += 64) {
-          __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j)));
-          __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 16)));
-          __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 32)));
-          __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 48)));
-
-          __m512i r0 = _mm512_cvtps_epi32(_mm512_div_ps(f0, vscale));
-          __m512i r1 = _mm512_cvtps_epi32(_mm512_div_ps(f1, vscale));
-          __m512i r2 = _mm512_cvtps_epi32(_mm512_div_ps(f2, vscale));
-          __m512i r3 = _mm512_cvtps_epi32(_mm512_div_ps(f3, vscale));
-
-          store_4x16_s8(row_dst + j,
-                        _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
-                        _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
-                        cl_ok);
-        }
-        for (; j + 15 < N; j += 16) {
-          __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j)));
-          __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(f, vscale));
-          _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
-                           _mm512_cvtsepi32_epi8(r));
-        }
-        for (; j < N; ++j) {
-          float v = bf16_scalar_to_f32(row_src[j]);
-          int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
-          q = std::max(-128, std::min(127, q));
-          row_dst[j] = static_cast<int8_t>(q);
-        }
-      }
+      store_4x16_s8(row_dst + j,
+                    _mm512_cvtsepi32_epi8(r0), _mm512_cvtsepi32_epi8(r1),
+                    _mm512_cvtsepi32_epi8(r2), _mm512_cvtsepi32_epi8(r3),
+                    cl_ok);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512i r = _mm512_cvtps_epi32(_mm512_div_ps(f, vscale));
+      _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
+                       _mm512_cvtsepi32_epi8(r));
+    }
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      int32_t q = static_cast<int32_t>(std::nearbyint(v / scale));
+      q = std::max(-128, std::min(127, q));
+      row_dst[j] = static_cast<int8_t>(q);
     }
   }
 }
@@ -392,8 +318,8 @@ void dynamic_per_token_quant_bf16_s8_native(const uint16_t *src, int8_t *dst,
 //   4. Non-finite masking:  finite_mask() + VMAXPS{k}.
 //   5. 4x unrolling:  64 elements/iter for ILP.
 //   6. VPMOVSDB saturation:  hardware int32->int8 clamping.
-//   7. Cache-line NT stores:  64B streaming writes.
-//   8. Adaptive threading:  work-aware thread count.
+//   7. Cache-line stores:  64B aligned writes.
+//   8. OMP parallelization: uses the default OMP thread count.
 //   9. True division + banker's rounding:  bit-exact with reference.
 //==============================================================================
 
@@ -403,9 +329,7 @@ void dynamic_per_token_quant_f32_s8_native(const float *src, int8_t *dst,
                                             int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  int nthr = select_num_threads(M, N);
-
-  #pragma omp parallel for schedule(static) num_threads(nthr)
+  #pragma omp parallel for schedule(static)
   for (int64_t m = 0; m < M; ++m) {
     const float *row_src = src + m * N;
     int8_t      *row_dst = dst + m * N;
@@ -512,20 +436,20 @@ void dynamic_per_token_quant_f32_s8_native(const float *src, int8_t *dst,
 //              + r0-r3(4) = 12
 //   k-mask:    4  (finite_mask results)
 //   Scalar:    scale, zp, row_min, row_max, j, cl_ok
-//   Stack:     f32_stack[12288] (48 KB) when use_scratch=true
 //
 // Optimizations:
 //   1. Fused per-row:  same L1 cache reuse as Kernel 1.
 //   2. Min/Max with non-finite masking:  VMINPS{k}/VMAXPS{k} skip
 //      NaN/Inf lanes during reduction.
-//   3. Conditional L1 scratch:  same as Kernel 1 for BF16 sources.
+//   3. L1 re-read:  same as Kernel 1, avoids per-call heap allocation.
 //   4. 4x unrolling:  64 elements/iter with 4 independent min/max
 //      accumulator pairs (8 zmm accumulators total).
 //   5. Explicit [0,255] clamp:  VPMAXSD(0) + VPMINSD(255) before
 //      VPMOVUSDB, because VPMOVUSDB treats negative int32 as large
 //      unsigned and saturates to 255 instead of 0.
-//   6. Cache-line NT stores:  64B streaming writes via store_4x16_u8.
-//   7. Adaptive threading + true division + banker's rounding.
+//   6. Cache-line stores:  64B aligned writes via store_4x16_u8.
+//   7. OMP parallelization with default thread pool + true division +
+//      banker's rounding.
 //==============================================================================
 
 __attribute__((target("avx512f")))
@@ -534,175 +458,122 @@ void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
                                              int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  int nthr = select_num_threads(M, N);
-  const bool use_scratch = (N <= SCRATCH_THRESHOLD);
+  #pragma omp parallel for schedule(static)
+  for (int64_t m = 0; m < M; ++m) {
+    const uint16_t *row_src = src + m * N;
+    uint8_t        *row_dst = dst + m * N;
 
-  #pragma omp parallel num_threads(nthr)
-  {
-    float f32_stack[SCRATCH_THRESHOLD];
-    float *f32_buf = use_scratch ? f32_stack : nullptr;
+    // -- Pass 1: min/max reduction (skipping non-finite) ------------------
+    __m512 vmin0 = _mm512_set1_ps(std::numeric_limits<float>::max());
+    __m512 vmax0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
+    __m512 vmin1 = vmin0, vmax1 = vmax0;
+    __m512 vmin2 = vmin0, vmax2 = vmax0;
+    __m512 vmin3 = vmin0, vmax3 = vmax0;
 
-    #pragma omp for schedule(static)
-    for (int64_t m = 0; m < M; ++m) {
-      const uint16_t *row_src = src + m * N;
-      uint8_t        *row_dst = dst + m * N;
+    int64_t j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 48)));
 
-      // -- Pass 1: min/max reduction (skipping non-finite) with optional staging
-      __m512 vmin0 = _mm512_set1_ps(std::numeric_limits<float>::max());
-      __m512 vmax0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
-      __m512 vmin1 = vmin0, vmax1 = vmax0;
-      __m512 vmin2 = vmin0, vmax2 = vmax0;
-      __m512 vmin3 = vmin0, vmax3 = vmax0;
+      __mmask16 k0 = finite_mask(f0, abs_mask, vinf);
+      __mmask16 k1 = finite_mask(f1, abs_mask, vinf);
+      __mmask16 k2 = finite_mask(f2, abs_mask, vinf);
+      __mmask16 k3 = finite_mask(f3, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k0, vmin0, f0);
+      vmax0 = _mm512_mask_max_ps(vmax0, k0, vmax0, f0);
+      vmin1 = _mm512_mask_min_ps(vmin1, k1, vmin1, f1);
+      vmax1 = _mm512_mask_max_ps(vmax1, k1, vmax1, f1);
+      vmin2 = _mm512_mask_min_ps(vmin2, k2, vmin2, f2);
+      vmax2 = _mm512_mask_max_ps(vmax2, k2, vmax2, f2);
+      vmin3 = _mm512_mask_min_ps(vmin3, k3, vmin3, f3);
+      vmax3 = _mm512_mask_max_ps(vmax3, k3, vmax3, f3);
+    }
 
-      int64_t j = 0;
-      for (; j + 63 < N; j += 64) {
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __mmask16 k = finite_mask(f, abs_mask, vinf);
+      vmin0 = _mm512_mask_min_ps(vmin0, k, vmin0, f);
+      vmax0 = _mm512_mask_max_ps(vmax0, k, vmax0, f);
+    }
 
-        __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
-            reinterpret_cast<const __m256i *>(row_src + j)));
-        __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
-            reinterpret_cast<const __m256i *>(row_src + j + 16)));
-        __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
-            reinterpret_cast<const __m256i *>(row_src + j + 32)));
-        __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
-            reinterpret_cast<const __m256i *>(row_src + j + 48)));
+    vmin0 = _mm512_min_ps(_mm512_min_ps(vmin0, vmin1),
+                           _mm512_min_ps(vmin2, vmin3));
+    vmax0 = _mm512_max_ps(_mm512_max_ps(vmax0, vmax1),
+                           _mm512_max_ps(vmax2, vmax3));
 
-        if (use_scratch) {
-          _mm512_storeu_ps(f32_buf + j,      f0);
-          _mm512_storeu_ps(f32_buf + j + 16, f1);
-          _mm512_storeu_ps(f32_buf + j + 32, f2);
-          _mm512_storeu_ps(f32_buf + j + 48, f3);
-        }
+    float row_min = _mm512_reduce_min_ps(vmin0);
+    float row_max = _mm512_reduce_max_ps(vmax0);
 
-        __mmask16 k0 = finite_mask(f0, abs_mask, vinf);
-        __mmask16 k1 = finite_mask(f1, abs_mask, vinf);
-        __mmask16 k2 = finite_mask(f2, abs_mask, vinf);
-        __mmask16 k3 = finite_mask(f3, abs_mask, vinf);
-        vmin0 = _mm512_mask_min_ps(vmin0, k0, vmin0, f0);
-        vmax0 = _mm512_mask_max_ps(vmax0, k0, vmax0, f0);
-        vmin1 = _mm512_mask_min_ps(vmin1, k1, vmin1, f1);
-        vmax1 = _mm512_mask_max_ps(vmax1, k1, vmax1, f1);
-        vmin2 = _mm512_mask_min_ps(vmin2, k2, vmin2, f2);
-        vmax2 = _mm512_mask_max_ps(vmax2, k2, vmax2, f2);
-        vmin3 = _mm512_mask_min_ps(vmin3, k3, vmin3, f3);
-        vmax3 = _mm512_mask_max_ps(vmax3, k3, vmax3, f3);
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      if (std::isfinite(v)) {
+        row_min = std::min(row_min, v);
+        row_max = std::max(row_max, v);
       }
+    }
 
-      for (; j + 15 < N; j += 16) {
-        __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
-            reinterpret_cast<const __m256i *>(row_src + j)));
-        if (use_scratch) _mm512_storeu_ps(f32_buf + j, f);
-        __mmask16 k = finite_mask(f, abs_mask, vinf);
-        vmin0 = _mm512_mask_min_ps(vmin0, k, vmin0, f);
-        vmax0 = _mm512_mask_max_ps(vmax0, k, vmax0, f);
-      }
+    // -- Compute per-row scale and zero point -----------------------------
+    float scale;
+    int32_t zp;
+    compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
+    scales[m] = scale;
+    zps[m]    = zp;
 
-      vmin0 = _mm512_min_ps(_mm512_min_ps(vmin0, vmin1),
-                             _mm512_min_ps(vmin2, vmin3));
-      vmax0 = _mm512_max_ps(_mm512_max_ps(vmax0, vmax1),
-                             _mm512_max_ps(vmax2, vmax3));
+    // -- Pass 2: quantize with clamp (re-load BF16 from L1) --------------
+    __m512  vscale = _mm512_set1_ps(scale);
+    __m512i vzp  = _mm512_set1_epi32(zp);
+    __m512i vlo  = _mm512_set1_epi32(0);
+    __m512i vhi  = _mm512_set1_epi32(255);
+    bool cl_ok = (reinterpret_cast<uintptr_t>(row_dst) & 63) == 0;
 
-      float row_min = _mm512_reduce_min_ps(vmin0);
-      float row_max = _mm512_reduce_max_ps(vmax0);
-
-      for (; j < N; ++j) {
-        float v = bf16_scalar_to_f32(row_src[j]);
-        if (use_scratch) f32_buf[j] = v;
-        if (std::isfinite(v)) {
-          row_min = std::min(row_min, v);
-          row_max = std::max(row_max, v);
-        }
-      }
-
-      // -- Compute per-row scale and zero point ---------------------------
-      float scale;
-      int32_t zp;
-      compute_asymmetric_scale_zp(row_min, row_max, scale, zp);
-      scales[m] = scale;
-      zps[m]    = zp;
-
-      // -- Pass 2: quantize with clamp ------------------------------------
-      __m512  vscale = _mm512_set1_ps(scale);
-      __m512i vzp  = _mm512_set1_epi32(zp);
-      __m512i vlo  = _mm512_set1_epi32(0);
-      __m512i vhi  = _mm512_set1_epi32(255);
-      bool cl_ok = (reinterpret_cast<uintptr_t>(row_dst) & 63) == 0;
-
-      j = 0;
-      if (use_scratch) {
-        for (; j + 63 < N; j += 64) {
-          __m512i r0 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j), vscale)), vzp);
-          __m512i r1 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 16), vscale)), vzp);
-          __m512i r2 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 32), vscale)), vzp);
-          __m512i r3 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j + 48), vscale)), vzp);
-          r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
-          r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
-          r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
-          r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
-          store_4x16_u8(row_dst + j,
-                        _mm512_cvtusepi32_epi8(r0), _mm512_cvtusepi32_epi8(r1),
-                        _mm512_cvtusepi32_epi8(r2), _mm512_cvtusepi32_epi8(r3),
-                        cl_ok);
-        }
-        for (; j + 15 < N; j += 16) {
-          __m512i r = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(_mm512_loadu_ps(f32_buf + j), vscale)), vzp);
-          r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
-          _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
-                           _mm512_cvtusepi32_epi8(r));
-        }
-        for (; j < N; ++j) {
-          int32_t q = static_cast<int32_t>(
-              std::nearbyint(f32_buf[j] / scale)) + zp;
-          q = std::max(0, std::min(255, q));
-          row_dst[j] = static_cast<uint8_t>(q);
-        }
-      } else {
-        for (; j + 63 < N; j += 64) {
-          __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j)));
-          __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 16)));
-          __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 32)));
-          __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j + 48)));
-          __m512i r0 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(f0, vscale)), vzp);
-          __m512i r1 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(f1, vscale)), vzp);
-          __m512i r2 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(f2, vscale)), vzp);
-          __m512i r3 = _mm512_add_epi32(_mm512_cvtps_epi32(
-              _mm512_div_ps(f3, vscale)), vzp);
-          r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
-          r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
-          r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
-          r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
-          store_4x16_u8(row_dst + j,
-                        _mm512_cvtusepi32_epi8(r0), _mm512_cvtusepi32_epi8(r1),
-                        _mm512_cvtusepi32_epi8(r2), _mm512_cvtusepi32_epi8(r3),
-                        cl_ok);
-        }
-        for (; j + 15 < N; j += 16) {
-          __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
-              reinterpret_cast<const __m256i *>(row_src + j)));
-          __m512i r = _mm512_add_epi32(
-              _mm512_cvtps_epi32(_mm512_div_ps(f, vscale)), vzp);
-          r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
-          _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
-                           _mm512_cvtusepi32_epi8(r));
-        }
-        for (; j < N; ++j) {
-          float v = bf16_scalar_to_f32(row_src[j]);
-          int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
-          q = std::max(0, std::min(255, q));
-          row_dst[j] = static_cast<uint8_t>(q);
-        }
-      }
+    j = 0;
+    for (; j + 63 < N; j += 64) {
+      __m512 f0 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512 f1 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 16)));
+      __m512 f2 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 32)));
+      __m512 f3 = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j + 48)));
+      __m512i r0 = _mm512_add_epi32(_mm512_cvtps_epi32(
+          _mm512_div_ps(f0, vscale)), vzp);
+      __m512i r1 = _mm512_add_epi32(_mm512_cvtps_epi32(
+          _mm512_div_ps(f1, vscale)), vzp);
+      __m512i r2 = _mm512_add_epi32(_mm512_cvtps_epi32(
+          _mm512_div_ps(f2, vscale)), vzp);
+      __m512i r3 = _mm512_add_epi32(_mm512_cvtps_epi32(
+          _mm512_div_ps(f3, vscale)), vzp);
+      r0 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r0));
+      r1 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r1));
+      r2 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r2));
+      r3 = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r3));
+      store_4x16_u8(row_dst + j,
+                    _mm512_cvtusepi32_epi8(r0), _mm512_cvtusepi32_epi8(r1),
+                    _mm512_cvtusepi32_epi8(r2), _mm512_cvtusepi32_epi8(r3),
+                    cl_ok);
+    }
+    for (; j + 15 < N; j += 16) {
+      __m512 f = bf16x16_to_f32(_mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(row_src + j)));
+      __m512i r = _mm512_add_epi32(
+          _mm512_cvtps_epi32(_mm512_div_ps(f, vscale)), vzp);
+      r = _mm512_max_epi32(vlo, _mm512_min_epi32(vhi, r));
+      _mm_storeu_si128(reinterpret_cast<__m128i *>(row_dst + j),
+                       _mm512_cvtusepi32_epi8(r));
+    }
+    for (; j < N; ++j) {
+      float v = bf16_scalar_to_f32(row_src[j]);
+      int32_t q = static_cast<int32_t>(std::nearbyint(v / scale)) + zp;
+      q = std::max(0, std::min(255, q));
+      row_dst[j] = static_cast<uint8_t>(q);
     }
   }
 }
@@ -738,8 +609,9 @@ void dynamic_per_token_quant_bf16_u8_native(const uint16_t *src, uint8_t *dst,
 //   3. Min/Max with non-finite masking:  VMINPS{k}/VMAXPS{k}.
 //   4. 4x unrolling:  64 elements/iter for ILP.
 //   5. Explicit [0,255] clamp:  same as Kernel 3.
-//   6. Cache-line NT stores:  64B streaming writes.
-//   7. Adaptive threading + true division + banker's rounding.
+//   6. Cache-line stores:  64B aligned writes.
+//   7. OMP parallelization with default thread pool + true division +
+//      banker's rounding.
 //==============================================================================
 
 __attribute__((target("avx512f")))
@@ -748,9 +620,7 @@ void dynamic_per_token_quant_f32_u8_native(const float *src, uint8_t *dst,
                                             int64_t M, int64_t N) {
   const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
   const __m512  vinf     = _mm512_set1_ps(std::numeric_limits<float>::infinity());
-  int nthr = select_num_threads(M, N);
-
-  #pragma omp parallel for schedule(static) num_threads(nthr)
+  #pragma omp parallel for schedule(static)
   for (int64_t m = 0; m < M; ++m) {
     const float *row_src = src + m * N;
     uint8_t     *row_dst = dst + m * N;

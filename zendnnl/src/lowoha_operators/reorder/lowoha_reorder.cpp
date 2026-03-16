@@ -760,6 +760,8 @@ static void reorder_wrapper(const void *src, void *dst, size_t nelems,
  * dynamic quantization using the fused kernel that computes scale/zp and
  * quantizes in a single cache-friendly pass per row.
  *
+ * Each kernel manages its own OMP parallel region internally.
+ *
  * Supports both f32 and bf16 scale output buffers. When scale.dt is bf16,
  * an intermediate f32 buffer is used for kernel computation, then converted
  * to bf16 on output.
