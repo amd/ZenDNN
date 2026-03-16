@@ -87,9 +87,11 @@ if(FBGEMM_FOUND)
   )
 
   # Create imported target for asmjit (required)
+  # asmjit uses shm_open/shm_unlink from librt for virtual memory management
   add_library(fbgemm::asmjit STATIC IMPORTED GLOBAL)
   set_target_properties(fbgemm::asmjit PROPERTIES
     IMPORTED_LOCATION ${ASMJIT_LIB}
+    INTERFACE_LINK_LIBRARIES "rt"
   )
 
   # Build list of dependencies
