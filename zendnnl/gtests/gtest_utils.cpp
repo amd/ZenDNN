@@ -80,13 +80,8 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
           po_type = post_op_type_t::none;
         }
       }
-      else {
-        if (!cmd_lowoha.empty()) {
-          use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
-        }
-        else {
-          use_LOWOHA = rand() % 2;
-        }
+      else if (cmd_lowoha.empty()) {
+        use_LOWOHA = rand() % 2;
       }
     }
     else {
@@ -160,7 +155,7 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
       // native_gemm/native_brgemm are LOWOHA-only kernels, always force LOWOHA path
       use_LOWOHA = true;
     }
-    else {
+    else if (cmd_lowoha.empty()) {
       use_LOWOHA = rand() % 2;
     }
   }
@@ -1767,7 +1762,8 @@ status_t matmul_kernel_test(tensor_t &input_tensor, tensor_t &weight_tensor,
                             transA, transB,
                             static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                             alpha, A_data, lda, B_data, ldb, bias_data,  // No bias
-                            beta, C_data, ldc, (is_woq || is_wei_s8) ? true : rand() % 2 == 0 ? true : false,
+                            beta, C_data, ldc, (is_woq ||
+                                                is_wei_s8) ? true : rand() % 2 == 0 ? true : false,
                             batch_params, params);
         if (status != status_t::success) {
           if (status != status_t::isa_unsupported) {
