@@ -18,6 +18,7 @@
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include <cstring>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <immintrin.h>
 
@@ -117,13 +118,19 @@ void brgemm_tail_kernel(
     int K, int BK, int mr_count, int nr_count, float beta,
     const float * __restrict__ bias, fused_postop_t fused_op) {
 
+    static constexpr int MAX_MR = 12;
+    static constexpr int MAX_NV = 4;
+
     const int full_vecs = nr_count / 16;
     const int rem = nr_count & 15;
     const __mmask16 rem_mask = rem ? static_cast<__mmask16>((1u << rem) - 1)
                                    : static_cast<__mmask16>(0);
     const int nv = (nr_count + 15) / 16;
 
-    __m512 acc[12][4];
+    assert(mr_count >= 1 && mr_count <= MAX_MR);
+    assert(nv >= 1 && nv <= MAX_NV);
+
+    __m512 acc[MAX_MR][MAX_NV];
 
     if (beta != 0.0f) {
         __m512 bv = _mm512_set1_ps(beta);

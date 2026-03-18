@@ -624,6 +624,7 @@ data_type_t AITestUtils::get_input_dtype(DataTypeCombination combo) {
   case DataTypeCombination::F32_BF16_F32:
     return data_type_t::f32;
   case DataTypeCombination::BF16_BF16_BF16:
+  case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::BF16_F32_BF16:
     return data_type_t::bf16;
   default:
@@ -649,6 +650,7 @@ data_type_t AITestUtils::get_weight_dtype(DataTypeCombination combo) {
   case DataTypeCombination::BF16_F32_BF16:
     return data_type_t::f32;
   case DataTypeCombination::BF16_BF16_BF16:
+  case DataTypeCombination::BF16_BF16_F32:
   case DataTypeCombination::F32_BF16_F32:
     return data_type_t::bf16;
   default:
@@ -672,6 +674,7 @@ data_type_t AITestUtils::get_output_dtype(DataTypeCombination combo) {
   switch (combo) {
   case DataTypeCombination::F32_F32_F32:
   case DataTypeCombination::F32_BF16_F32:
+  case DataTypeCombination::BF16_BF16_F32:
     return data_type_t::f32;
   case DataTypeCombination::BF16_BF16_BF16:
   case DataTypeCombination::BF16_F32_BF16:
@@ -1726,9 +1729,9 @@ std::vector<DataTypeCombination> ParameterGenerator::supported_combinations = {
   DataTypeCombination::F32_F32_F32,
   DataTypeCombination::F32_BF16_F32,
   DataTypeCombination::BF16_BF16_BF16,
+  DataTypeCombination::BF16_BF16_F32,
   DataTypeCombination::BF16_F32_BF16,
   DataTypeCombination::S8_S8_S8
-  // Add more as supported by your kernels
 };
 
 // -----------------------------------------------------------------------------

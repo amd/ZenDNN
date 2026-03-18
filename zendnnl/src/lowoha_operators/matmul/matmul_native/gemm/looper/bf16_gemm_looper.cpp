@@ -26,7 +26,7 @@
 
 // STL and project headers BEFORE the pragma (these pull in <vector>, <string>)
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/planner/bf16_gemm_plan.hpp"
+#include "lowoha_operators/matmul/matmul_native/gemm/planner/gemm_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/kernel/bf16/bf16_gemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
@@ -690,17 +690,8 @@ void bf16_gemm_execute(
     const bool transB = desc.transB;
     const bool is_weights_const = desc.is_weights_const;
 
-    // Layer 1: Planner
+    // Layer 1: Planner (logs internally)
     BF16GemmPlan bp = plan_bf16_gemm(desc, uarch, params);
-
-    if (apilog_info_enabled()) {
-        apilog_info("Native BF16 GEMM plan: M=", desc.M, " N=", N, " K=", K,
-                    " MB=", bp.plan.MB, " NB=", bp.plan.NB, " KB=", bp.plan.KB,
-                    " MR=", bp.plan.MR, " NR=", bp.plan.NR,
-                    " NV=", bp.plan.NR / 16,
-                    " path=", bp.path_name,
-                    " threads=", bp.plan.num_threads);
-    }
 
     // Weight caching (VNNI prepack)
     static int32_t s_weight_cache =

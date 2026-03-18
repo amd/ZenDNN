@@ -15,6 +15,7 @@
  ******************************************************************************/
 
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_gemv_kcontiguous.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -31,6 +32,10 @@ PrepackedWeightCache &PrepackedWeightCache::instance() {
 const PrepackedWeight *PrepackedWeightCache::get_or_prepack(
   const PrepackedWeightKey &key, const float *weight) {
 
+  // TODO: The mutex is held during the O(K*N) packing below. For large
+  // weight matrices this blocks threads that need different keys.
+  // Consider per-key locking or double-checked locking to allow
+  // concurrent packing of independent weight matrices.
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = cache_.find(key);
   if (it != cache_.end())
@@ -166,6 +171,60 @@ const BF16PrepackedWeight *BF16PrepackedWeightCache::get_or_prepack(
   pw->n_panels = np;
 
   const BF16PrepackedWeight *raw = pw.get();
+  cache_[key] = std::move(pw);
+  return raw;
+}
+
+// ============================================================================
+// BF16 K-contiguous VNNI packed weight cache
+// ============================================================================
+
+BF16KContiguousWeightCache &BF16KContiguousWeightCache::instance() {
+  static BF16KContiguousWeightCache inst;
+  return inst;
+}
+
+const BF16KContiguousWeight *BF16KContiguousWeightCache::get_or_pack(
+  const PrepackedWeightKey &key, const uint16_t *weight) {
+
+  // Fast path: check cache under lock.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_.find(key);
+    if (it != cache_.end())
+      return it->second.get();
+  }
+
+  // Cache miss: pack outside the lock to avoid serializing threads.
+  const int K = key.K, N = key.N, ldb = key.ldb;
+  const bool transB = key.transB;
+  if (K <= 0 || N <= 0) return nullptr;
+  const int K_padded = (K + 1) & ~1;
+  const int N_padded = ((N + NR_PACK - 1) / NR_PACK) * NR_PACK;
+  const size_t total = static_cast<size_t>(K_padded) * N_padded;
+
+  uint16_t *buf = static_cast<uint16_t *>(
+    std::aligned_alloc(64, ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
+  if (!buf) return nullptr;
+
+  pack_b_kcontiguous_ext(weight, ldb, K, N, transB, buf);
+
+  auto pw = std::make_unique<BF16KContiguousWeight>();
+  pw->buf.reset(buf);
+  pw->data = buf;
+  pw->K = K;
+  pw->K_padded = K_padded;
+  pw->N = N;
+  pw->N_padded = N_padded;
+  pw->total = total;
+
+  // Re-acquire lock and insert (another thread may have raced).
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = cache_.find(key);
+  if (it != cache_.end())
+    return it->second.get();  // race loser — discard our pack, use winner's
+
+  const BF16KContiguousWeight *raw = pw.get();
   cache_[key] = std::move(pw);
   return raw;
 }

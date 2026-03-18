@@ -21,7 +21,7 @@
 //
 
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/gemm/planner/fp32_gemm_plan.hpp"
+#include "lowoha_operators/matmul/matmul_native/gemm/planner/gemm_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/kernel/fp32/fp32_gemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
@@ -455,15 +455,8 @@ void gemm_execute(
     const bool transB = desc.transB;
     const bool is_weights_const = desc.is_weights_const;
 
-    // Layer 1: Planner
+    // Layer 1: Planner (logs internally)
     FP32GemmPlan fp = plan_fp32_gemm(desc, uarch, params);
-
-    if (apilog_info_enabled()) {
-        apilog_info("Native FP32 GEMM plan: M=", desc.M, " N=", N, " K=", K,
-                    " MB=", fp.plan.MB, " NB=", fp.plan.NB, " KB=", fp.plan.KB,
-                    " MR=", fp.plan.MR, " NR=", fp.plan.NR,
-                    " threads=", fp.plan.num_threads);
-    }
 
     // Weight caching
     static int32_t s_weight_cache =

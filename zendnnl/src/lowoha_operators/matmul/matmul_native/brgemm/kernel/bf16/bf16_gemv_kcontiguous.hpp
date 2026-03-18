@@ -14,33 +14,34 @@
  * limitations under the License.
  ******************************************************************************/
 
-#ifndef MATMUL_NATIVE_PLANNER_FP32_GEMM_PLAN_HPP
-#define MATMUL_NATIVE_PLANNER_FP32_GEMM_PLAN_HPP
-
-#include "lowoha_operators/matmul/matmul_native/gemm/planner/gemm_planner.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
-#include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
-#include "lowoha_operators/matmul/lowoha_common.hpp"
+#pragma once
+#include <cstdint>
+#include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 
 namespace zendnnl {
 namespace lowoha {
 namespace matmul {
 namespace native {
 
-struct FP32GemmPlan {
-    BlockPlan plan;
-};
+/// K-contiguous GEMV kernel: computes C = A * B_kc + bias, with optional
+/// fused activation and beta scaling. Writes BF16 or FP32 output based on
+/// dst_is_bf16 flag (pass the corresponding pointer, nullptr for the other).
+void bf16_gemv_kcontiguous(
+    const uint16_t *__restrict__ A,
+    const uint16_t *__restrict__ B_kc,
+    uint16_t *__restrict__ C_bf16,
+    float *__restrict__ C_fp32,
+    const float *__restrict__ bias_f,
+    fused_postop_t fused_op,
+    float beta,
+    bool dst_is_bf16,
+    int K, int N);
 
-/// Build FP32 GEMM plan with plan caching.
-FP32GemmPlan plan_fp32_gemm(
-    const GemmDescriptor &desc,
-    const UarchParams &uarch,
-    const matmul_params &params);
-
+void pack_b_kcontiguous_ext(
+    const uint16_t *B, int ldb, int K, int N, bool transB,
+    uint16_t *packed);
 
 } // namespace native
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
-
-#endif // MATMUL_NATIVE_PLANNER_FP32_GEMM_PLAN_HPP

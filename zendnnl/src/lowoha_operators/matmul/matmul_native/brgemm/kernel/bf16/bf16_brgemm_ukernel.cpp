@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <cassert>
 #include <immintrin.h>
 
 namespace zendnnl {
@@ -199,13 +200,19 @@ void bf16_brgemm_tail_kernel(
     const float *__restrict__ bias, fused_postop_t fused_op,
     uint16_t *__restrict__ C_bf16, int ldc_bf16) {
 
+    static constexpr int MAX_MR = 12;
+    static constexpr int MAX_NV = 4;
+
     const int nv_full = nr_act / 16;
     const int nr_tail = nr_act % 16;
     const int nv = (nr_act + 15) / 16;
     const __mmask16 tail_mask = nr_tail
         ? static_cast<__mmask16>((1u << nr_tail) - 1) : 0;
 
-    __m512 acc[12][4];
+    assert(mr_act >= 1 && mr_act <= MAX_MR);
+    assert(nv >= 1 && nv <= MAX_NV);
+
+    __m512 acc[MAX_MR][MAX_NV];
     if (beta != 0.0f) {
         __m512 bv = _mm512_set1_ps(beta);
         for (int m = 0; m < mr_act; ++m) {

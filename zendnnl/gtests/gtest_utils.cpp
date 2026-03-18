@@ -47,7 +47,6 @@ MatmulType::MatmulType(uint32_t test_index, uint32_t total_tests, bool is_bmm) {
     std::uniform_int_distribution<int> thread_dist(1, max_threads);
     num_threads = thread_dist(gen);
   }
-
   if (!cmd_lowoha.empty()) {
     use_LOWOHA = (cmd_lowoha == "true") || (cmd_lowoha == "1");
   }
@@ -1043,7 +1042,7 @@ void PrintTo(const MatmulType &value, ::std::ostream *os) {
       << value.matmul_n << ", transA=" << value.transA << ", transB="
       << value.transB << ", alpha=" << value.alpha << ", beta=" << value.beta
       << ", postop=" << postOpsToStr(value.po_type)
-      << ", algo=" << static_cast<int>(value.algo)
+      << ", algo=" << algoToStr(value.algo)
       << ", src_dtype=" << dtype_info(value.source_dtype)
       << ", dst_dtype=" << dtype_info(value.output_dtype)
       << ", weight_granularity=" << static_cast<int>(value.weight_granularity)
@@ -1119,6 +1118,12 @@ matmul_algo_t strToAlgo(std::string str) {
   }
   if (str == "libxsmm_blocked") {
     return matmul_algo_t::libxsmm_blocked;
+  }
+  if (str == "native_gemm") {
+    return matmul_algo_t::native_gemm;
+  }
+  if (str == "native_brgemm") {
+    return matmul_algo_t::native_brgemm;
   }
   return matmul_algo_t::none;
 }

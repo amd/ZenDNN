@@ -19,6 +19,7 @@
 
 #include "lowoha_operators/matmul/matmul_native/common/gemm_descriptor.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/cost_model.hpp"
+#include "lowoha_operators/matmul/lowoha_common.hpp"
 
 namespace zendnnl {
 namespace lowoha {
@@ -30,19 +31,44 @@ struct BlockPlan {
   int MB, NB, KB;
   int MR, NR;
   int num_threads;
-  bool pack_a, pack_b;
 
   BlockPlan()
     : MB(0), NB(0), KB(0), MR(6), NR(16),
-      num_threads(1), pack_a(true), pack_b(true) {}
+      num_threads(1) {}
 };
 
-/// Compute a BlockPlan from the problem descriptor and hardware parameters.
+/// BF16 GEMM plan: base blocking + BF16-specific MR/NR, KB, decode path.
+struct BF16GemmPlan {
+    BlockPlan plan;
+    const char *path_name;
+    bool is_decode;
+    bool has_activation;
+    bool has_complex_activation;
+};
+
+/// FP32 GEMM plan: base blocking + FP32-specific NR selection.
+struct FP32GemmPlan {
+    BlockPlan plan;
+};
+
+/// Compute base blocking parameters (shared by BF16 and FP32).
 BlockPlan plan_blocks(const GemmDescriptor &desc, const UarchParams &uarch);
+
+/// Build BF16 GEMM plan with thread-local plan caching.
+BF16GemmPlan plan_bf16_gemm(
+    const GemmDescriptor &desc,
+    const UarchParams &uarch,
+    const matmul_params &params);
+
+/// Build FP32 GEMM plan with thread-local plan caching.
+FP32GemmPlan plan_fp32_gemm(
+    const GemmDescriptor &desc,
+    const UarchParams &uarch,
+    const matmul_params &params);
 
 } // namespace native
 } // namespace matmul
 } // namespace lowoha
 } // namespace zendnnl
 
-#endif // MATMUL_NATIVE_BLOCK_PLANNER_HPP
+#endif // MATMUL_NATIVE_GEMM_PLANNER_HPP

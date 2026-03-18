@@ -212,6 +212,7 @@ enum class MatrixDimensions : uint64_t {
 enum class DataTypeCombination {
   F32_F32_F32,   // Input, Weight, Output
   BF16_BF16_BF16,
+  BF16_BF16_F32,  // BF16 input/weight → F32 output (GEMV / inference)
   BF16_F32_BF16,
   F32_BF16_F32,
   S8_S8_S8,

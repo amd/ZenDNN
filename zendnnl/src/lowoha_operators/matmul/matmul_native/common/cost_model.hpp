@@ -29,7 +29,7 @@ struct UarchParams {
   int l1d_bytes;
   int l2_bytes;
   int l3_bytes_per_ccd;
-  int num_cores;
+  int num_cores;  ///< OMP thread count (may exceed physical cores with SMT)
   int fma_ports;
   int vec_width_bits;
   bool avx512f;

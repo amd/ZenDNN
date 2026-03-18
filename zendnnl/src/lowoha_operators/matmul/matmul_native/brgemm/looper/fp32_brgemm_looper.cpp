@@ -16,9 +16,8 @@
 
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/fp32_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/fp32_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/planner/fp32_brgemm_plan.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/fp32_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/planner/brgemm_planner.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/kernel/fp32/fp32_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
@@ -278,7 +277,7 @@ void brgemm_execute(
     const bool is_weights_const = desc.is_weights_const;
 
     // ── 1. BRGEMM plan ──
-    BrgemmPlan bplan = plan_brgemm(desc, uarch);
+    BrgemmPlan bplan = plan_fp32_brgemm(desc, uarch);
 
     // ── 2. B matrix prepacking ──
     //
@@ -350,6 +349,4 @@ void brgemm_execute(
 } // namespace native
 } // namespace matmul
 } // namespace lowoha
-
-
-} // namespace native
+} // namespace zendnnl

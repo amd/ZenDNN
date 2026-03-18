@@ -66,12 +66,16 @@ static int read_intel_cache_size(int level) {
 static UarchParams do_detect() {
   UarchParams p;
   auto &pinfo = zendnnl::common::zendnnl_platform_info();
+  // avx512f status includes OS XSAVE/OSXSAVE + XCR0 validation
+  // (verified inside platform_info), so sub-feature checks below
+  // only need to confirm the CPUID bit + avx512f gate.
   p.avx512f   = pinfo.get_avx512f_status();
-  // Note: num_cores is the OMP thread count, not physical core count.
+  // Note: num_cores is the OMP thread count (logical CPUs), not the
+  // physical core count. On SMT systems this may be 2x the core count.
+  // Planner code that computes threads_sharing_l3 should account for this.
   p.num_cores = omp_get_max_threads();
 
   uint32_t cpu_family = pinfo.get_cpu_family();
-  [[maybe_unused]] uint32_t cpu_model = pinfo.get_cpu_model();
 
   unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
   __cpuid(0, eax, ebx, ecx, edx);

@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <functional>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 
 namespace zendnnl {
@@ -76,6 +77,13 @@ struct PrepackedWeight {
 };
 
 /// Cache key — no NR dependency.
+///
+/// IMPORTANT: The key uses the raw weight pointer for identity. Callers
+/// must ensure pointer stability for the lifetime of cached entries: the
+/// same address must always refer to the same weight data. Frameworks
+/// that recycle memory via caching allocators (e.g., PyTorch) must
+/// guarantee this invariant when is_weights_const is true, or disable
+/// weight caching entirely.
 struct PrepackedWeightKey {
   const void *weight_ptr;
   int K, N, ldb;
@@ -108,6 +116,10 @@ public:
   static PrepackedWeightCache &instance();
   const PrepackedWeight *get_or_prepack(
     const PrepackedWeightKey &key, const float *weight);
+  /// Clear all cached entries. Must only be called when no thread is using
+  /// any previously returned pointer (e.g., between test cases or after a
+  /// global barrier). Violating this causes use-after-free.
+  void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
   PrepackedWeightCache(const PrepackedWeightCache &) = delete;
   PrepackedWeightCache &operator=(const PrepackedWeightCache &) = delete;
 private:
@@ -164,12 +176,62 @@ public:
   static BF16PrepackedWeightCache &instance();
   const BF16PrepackedWeight *get_or_prepack(
     const PrepackedWeightKey &key, const uint16_t *weight);
+  /// @copydoc PrepackedWeightCache::clear()
+  void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
   BF16PrepackedWeightCache(const BF16PrepackedWeightCache &) = delete;
   BF16PrepackedWeightCache &operator=(const BF16PrepackedWeightCache &) = delete;
 private:
   BF16PrepackedWeightCache() = default;
   std::unordered_map<PrepackedWeightKey,
              std::unique_ptr<BF16PrepackedWeight>,
+             PrepackedWeightKeyHash> cache_;
+  std::mutex mutex_;
+};
+
+// ============================================================================
+// BF16 K-contiguous VNNI packed weight cache (for GEMV / K-contiguous kernel)
+// ============================================================================
+
+/// BF16 K-contiguous VNNI packed weight buffer.
+///
+/// Layout: for each k-pair, ALL N columns (padded to NR_PACK=64) are contiguous:
+///   packed[kp * N_padded * 2 + n * 2 + 0] = B[2*kp  ][n]
+///   packed[kp * N_padded * 2 + n * 2 + 1] = B[2*kp+1][n]
+///
+/// N is padded to NR_PACK (64) boundary with zeros.
+/// K is padded to even for VNNI alignment.
+///
+/// This layout provides sequential memory access when iterating K-outer,
+/// N-inner — optimal for M=1 GEMV with L2-resident B.
+struct BF16KContiguousWeight {
+  std::unique_ptr<uint16_t[], AlignedFreeU16Deleter> buf;
+  const uint16_t *data;  ///< Points to buf.get()
+  int K;           ///< Original K
+  int K_padded;    ///< K rounded up to even
+  int N;           ///< Original N
+  int N_padded;    ///< N rounded up to NR_PACK (64)
+  size_t total;    ///< Total buffer size in uint16_t elements
+
+  /// N-stride in uint16_t units for one k-pair row.
+  int n_stride() const { return N_padded * VNNI_PAIR; }
+};
+
+/// Thread-safe singleton cache for BF16 K-contiguous packed weight matrices.
+/// bf16_gemv_direct() checks get_weight_cache() internally and falls back
+/// to the thread-local repack path when caching is disabled.
+class BF16KContiguousWeightCache {
+public:
+  static BF16KContiguousWeightCache &instance();
+  const BF16KContiguousWeight *get_or_pack(
+    const PrepackedWeightKey &key, const uint16_t *weight);
+  /// @copydoc PrepackedWeightCache::clear()
+  void clear() { std::lock_guard<std::mutex> lock(mutex_); cache_.clear(); }
+  BF16KContiguousWeightCache(const BF16KContiguousWeightCache &) = delete;
+  BF16KContiguousWeightCache &operator=(const BF16KContiguousWeightCache &) = delete;
+private:
+  BF16KContiguousWeightCache() = default;
+  std::unordered_map<PrepackedWeightKey,
+             std::unique_ptr<BF16KContiguousWeight>,
              PrepackedWeightKeyHash> cache_;
   std::mutex mutex_;
 };

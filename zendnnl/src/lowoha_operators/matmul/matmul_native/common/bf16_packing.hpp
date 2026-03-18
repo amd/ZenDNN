@@ -18,7 +18,6 @@
 #define MATMUL_NATIVE_COMMON_BF16_PACKING_HPP
 
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
-// Callers must enable AVX-512 via #pragma GCC target or __attribute__((target)).
 
 #include <cstdint>
 #include <cstring>
@@ -56,74 +55,8 @@ inline void pack_a_bf16_block(
     }
 }
 
-// Full B VNNI prepacking: pack entire BF16 B matrix into VNNI format
-[[maybe_unused]] inline void pack_b_vnni(
-    const uint16_t *B, int K, int N, int ldb, bool transB,
-    uint16_t *packed, int K_padded) {
-
-    const int np = (N + NR_PACK - 1) / NR_PACK;
-    const int k_pairs = K_padded / 2;
-    const int vnni_stride = NR_PACK * VNNI_PAIR;
-
-    for (int jp = 0; jp < np; ++jp) {
-        const int j0 = jp * NR_PACK;
-        const int nr_act = std::min(NR_PACK, N - j0);
-        uint16_t *dst = packed
-            + static_cast<size_t>(jp) * k_pairs * vnni_stride;
-
-        if (!transB && nr_act == NR_PACK) {
-            for (int kp = 0; kp < k_pairs; ++kp) {
-                uint16_t *d = dst + kp * vnni_stride;
-                const int k0 = kp * 2;
-                const int k1 = k0 + 1;
-                const uint16_t *row0 = (k0 < K) ? B + k0 * ldb + j0 : nullptr;
-                const uint16_t *row1 = (k1 < K) ? B + k1 * ldb + j0 : nullptr;
-
-                for (int n = 0; n < NR_PACK; n += 32) {
-                    __m512i r0 = row0 ? _mm512_loadu_si512(row0 + n)
-                                      : _mm512_setzero_si512();
-                    __m512i r1 = row1 ? _mm512_loadu_si512(row1 + n)
-                                      : _mm512_setzero_si512();
-                    __m512i lo = _mm512_unpacklo_epi16(r0, r1);
-                    __m512i hi = _mm512_unpackhi_epi16(r0, r1);
-                    const __m512i idx_lo = _mm512_setr_epi32(
-                        0,1,2,3, 16,17,18,19, 4,5,6,7, 20,21,22,23);
-                    const __m512i idx_hi = _mm512_setr_epi32(
-                        8,9,10,11, 24,25,26,27, 12,13,14,15, 28,29,30,31);
-                    __m512i out0 = _mm512_permutex2var_epi32(lo, idx_lo, hi);
-                    __m512i out1 = _mm512_permutex2var_epi32(lo, idx_hi, hi);
-                    _mm512_storeu_si512(d + n * VNNI_PAIR, out0);
-                    _mm512_storeu_si512(d + (n + 16) * VNNI_PAIR, out1);
-                }
-            }
-        } else {
-            for (int kp = 0; kp < k_pairs; ++kp) {
-                uint16_t *d = dst + kp * vnni_stride;
-                const int k0 = kp * 2;
-                const int k1 = k0 + 1;
-
-                for (int n = 0; n < nr_act; ++n) {
-                    uint16_t v0, v1;
-                    if (!transB) {
-                        v0 = (k0 < K) ? B[k0 * ldb + (j0 + n)] : 0;
-                        v1 = (k1 < K) ? B[k1 * ldb + (j0 + n)] : 0;
-                    } else {
-                        v0 = (k0 < K) ? B[(j0 + n) * ldb + k0] : 0;
-                        v1 = (k1 < K) ? B[(j0 + n) * ldb + k1] : 0;
-                    }
-                    d[n * VNNI_PAIR + 0] = v0;
-                    d[n * VNNI_PAIR + 1] = v1;
-                }
-                for (int n = nr_act; n < NR_PACK; ++n) {
-                    d[n * VNNI_PAIR + 0] = 0;
-                    d[n * VNNI_PAIR + 1] = 0;
-                }
-            }
-        }
-    }
-}
-
 // On-the-fly VNNI strip pack: pack NR_PACK columns for a K-block
+__attribute__((target("avx512f,avx512bw")))
 inline void pack_b_vnni_strip(
     const uint16_t *B, int ldb, bool transB,
     int col_start, int nr_act, int K, [[maybe_unused]] int K_padded,
@@ -183,6 +116,7 @@ inline void pack_b_vnni_strip(
 
 
 // BRGEMM overload: packs full K (no pc/kb subset)
+__attribute__((target("avx512f,avx512bw")))
 inline void pack_b_vnni_strip_full(
     const uint16_t *B, int ldb, bool transB,
     int col_start, int nr_act, int K, int K_padded,

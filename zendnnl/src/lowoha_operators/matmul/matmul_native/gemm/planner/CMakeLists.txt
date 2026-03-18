@@ -1,13 +1,9 @@
-# GEMM planners: base blocking + dtype-specific overrides
+# GEMM planner: base blocking + BF16/FP32 plan functions (unified file)
 set(sources
-  gemm_planner.cpp
-  bf16_gemm_plan.cpp
-  fp32_gemm_plan.cpp)
+  gemm_planner.cpp)
 
 set(headers
-  gemm_planner.hpp
-  bf16_gemm_plan.hpp
-  fp32_gemm_plan.hpp)
+  gemm_planner.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

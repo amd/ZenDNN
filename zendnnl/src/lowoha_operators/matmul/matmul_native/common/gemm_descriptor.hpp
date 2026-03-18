@@ -41,7 +41,6 @@ struct GemmDescriptor {
   const void *bias;
   bool is_weights_const;
   int num_threads;
-  std::vector<matmul_post_op> postops;
 
   GemmDescriptor()
     : M(0), N(0), K(0), lda(0), ldb(0), ldc(0),

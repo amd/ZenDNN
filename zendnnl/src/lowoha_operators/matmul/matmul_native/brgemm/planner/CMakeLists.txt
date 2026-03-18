@@ -1,13 +1,9 @@
-# BRGEMM planners: base blocking + dtype-specific overrides
+# BRGEMM planner: base blocking parameters
 set(sources
-  brgemm_planner.cpp
-  bf16_brgemm_plan.cpp
-  fp32_brgemm_plan.cpp)
+  brgemm_planner.cpp)
 
 set(headers
-  brgemm_planner.hpp
-  bf16_brgemm_plan.hpp
-  fp32_brgemm_plan.hpp)
+  brgemm_planner.hpp)
 
 if(ZENDNNL_LIB_BUILD_ARCHIVE)
   target_sources(zendnnl_archive

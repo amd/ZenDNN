@@ -43,9 +43,14 @@ struct BrgemmPlan {
   int num_threads;  ///< Thread count
 };
 
-/// Select BRGEMM blocking parameters.
-BrgemmPlan plan_brgemm(const GemmDescriptor &desc,
-                       const UarchParams &uarch);
+/// Select FP32 BRGEMM blocking parameters (MR=6, NR=16).
+BrgemmPlan plan_fp32_brgemm(const GemmDescriptor &desc,
+                            const UarchParams &uarch);
+
+/// Select BF16 BRGEMM blocking parameters (NR=64, VNNI layout).
+/// Computes MR, BK, NB, MB from scratch for BF16 dpbf16ps microkernels.
+BrgemmPlan plan_bf16_brgemm(const GemmDescriptor &desc,
+                            const UarchParams &uarch);
 
 } // namespace native
 } // namespace matmul

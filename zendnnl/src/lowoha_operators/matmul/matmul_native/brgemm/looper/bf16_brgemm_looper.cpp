@@ -14,10 +14,10 @@
  * limitations under the License.
  ******************************************************************************/
 
-// STL and project headers BEFORE the pragma (these pull in <vector>, <string>)
+// Project headers (these pull in <vector>, <string> etc. from STL)
 #include "lowoha_operators/matmul/matmul_native/brgemm/looper/bf16_brgemm_looper.hpp"
 #include "lowoha_operators/matmul/matmul_native/gemm/looper/bf16_gemm_looper.hpp"
-#include "lowoha_operators/matmul/matmul_native/brgemm/planner/bf16_brgemm_plan.hpp"
+#include "lowoha_operators/matmul/matmul_native/brgemm/planner/brgemm_planner.hpp"
 #include "lowoha_operators/matmul/matmul_native/brgemm/kernel/bf16/bf16_brgemm_ukernel.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/kernel_cache.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/postop.hpp"
@@ -29,10 +29,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 
-// Enable AVX-512 AFTER all STL headers to avoid always_inline ABI mismatch
-#pragma GCC target("avx512f,avx512bf16,avx512bw,avx512vl,fma")
-
+// All SIMD functions below use per-function __attribute__((target(...))).
+// No TU-wide pragma needed; bf16_packing.hpp functions are self-contained.
 #include <immintrin.h>
 #include "lowoha_operators/matmul/matmul_native/common/avx512_math.hpp"
 #include "lowoha_operators/matmul/matmul_native/common/bf16_packing.hpp"
@@ -99,8 +100,11 @@ static void bf16_brgemm_thread_loop(
     const int M = desc.M, N = desc.N, K = desc.K;
     const int lda = desc.lda, ldc = desc.ldc;
     const float alpha = desc.alpha;
-    const float beta = (desc.alpha != 1.0f && desc.beta != 0.0f)
-                       ? (desc.beta / desc.alpha) : desc.beta;
+    // When alpha != 1, the kernel computes C = (beta/alpha)*C_old + A*B,
+    // then the epilogue applies scale_tile(alpha) to recover the correct
+    // result: alpha*A*B + beta*C_old. Callers ensure alpha != 0.
+    const float beta = (alpha != 1.0f && desc.beta != 0.0f)
+                       ? (desc.beta / alpha) : desc.beta;
     const int MB = plan.MB, NB = plan.NB, BK = plan.BK;
     const int MR = plan.MR, NR = plan.NR;
     const int num_threads = plan.num_threads;
@@ -321,7 +325,88 @@ static void bf16_brgemm_thread_loop(
     };
 
     // ────────────────────────────────────────────────────────────────
-    // Fast path: prepacked weights + single MC tile + fusable postops.
+    // M=1 GEMV fast path: eliminates m_panels loop, branch checks,
+    // and per-strip postop/conversion. Single kernel call per NR strip
+    // with minimal pointer arithmetic.
+    // ────────────────────────────────────────────────────────────────
+    if (M == 1 && can_fuse && num_threads <= 1 && (prepacked_b || do_otf)) {
+        const int n_strips = (N + NR - 1) / NR;
+        const int n_full = N / NR;
+
+        // OTF buffer (reused across strips, only for non-prepacked)
+        uint16_t *otf_buf = nullptr;
+        bool m1_ok = true;
+        if (!prepacked_b && do_otf) {
+            static thread_local uint16_t *s_otf_m1 = nullptr;
+            static thread_local size_t s_otf_m1_cap = 0;
+            const size_t need = static_cast<size_t>(K_padded / 2) * NR_PACK * VNNI_PAIR;
+            if (s_otf_m1_cap < need) {
+                std::free(s_otf_m1);
+                s_otf_m1 = static_cast<uint16_t *>(std::aligned_alloc(
+                    64, ((need * sizeof(uint16_t) + 63) & ~size_t(63))));
+                s_otf_m1_cap = s_otf_m1 ? need : 0;
+            }
+            otf_buf = s_otf_m1;
+            if (!otf_buf) m1_ok = false;
+        }
+
+        if (m1_ok && !desc.transA) {
+            for (int js = 0; js < n_full; ++js) {
+                const int col = js * NR;
+                const uint16_t *pb;
+                if (prepacked_b) {
+                    const int panel_idx = col / NR_PACK;
+                    const int in_panel_off = col % NR_PACK;
+                    pb = prepacked_b->get_panel(0, panel_idx)
+                         + in_panel_off * VNNI_PAIR;
+                } else {
+                    pack_b_vnni_strip_full(B_raw, ldb, transB,
+                        col, std::min(NR_PACK, N - col), K, K_padded, otf_buf);
+                    pb = otf_buf;
+                }
+                hot_kernel(A, lda, pb, vnni_stride,
+                           C_fp32 + col, ldc_fp32, K, BK, beta,
+                           has_bias ? bias_f + col : nullptr,
+                           fused_op,
+                           can_direct_bf16 ? C_bf16_dst + col : nullptr,
+                           can_direct_bf16 ? ldc : 0);
+            }
+
+            if (n_full < n_strips) {
+                const int col = n_full * NR;
+                const int nr_act = N - col;
+                const uint16_t *pb;
+                if (prepacked_b) {
+                    const int panel_idx = col / NR_PACK;
+                    const int in_panel_off = col % NR_PACK;
+                    pb = prepacked_b->get_panel(0, panel_idx)
+                         + in_panel_off * VNNI_PAIR;
+                } else {
+                    pack_b_vnni_strip_full(B_raw, ldb, transB,
+                        col, std::min(NR_PACK, N - col), K, K_padded, otf_buf);
+                    pb = otf_buf;
+                }
+                bf16_brgemm_tail_kernel(A, lda, pb, vnni_stride,
+                    C_fp32 + col, ldc_fp32, K, BK, 1, nr_act, beta,
+                    has_bias ? bias_f + col : nullptr,
+                    fused_op,
+                    can_direct_bf16 ? C_bf16_dst + col : nullptr,
+                    can_direct_bf16 ? ldc : 0);
+            }
+
+            if (has_remaining_postops && C_fp32)
+                apply_postops_tile(C_fp32, ldc_fp32, 1, N, 0, 0,
+                                   nullptr, remaining_postops);
+            if (need_fp32_buf && !can_direct_bf16 && C_fp32)
+                convert_fp32_to_bf16_tile(C_fp32, ldc_fp32,
+                    static_cast<uint16_t *>(dst), ldc, 1, N);
+            return;
+        }
+        // OTF alloc failed — fall through to generic path
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // General fast path: prepacked weights + single MC tile + fusable postops.
     // Flat N-parallel loop — no tile dispatch lambda, no OTF checks.
     // ────────────────────────────────────────────────────────────────
     if (prepacked_b && can_fuse && ic_tiles == 1) {
@@ -471,119 +556,113 @@ void bf16_brgemm_execute(
         int b_panel_limit = (uarch.l2_bytes / 2)
                             / (NR_PACK * static_cast<int>(sizeof(uint16_t)));
         bool b_exceeds_l2 = (K > b_panel_limit);
-        bool decode_wide_n = (is_decode && K < N);
-
         bool small_n = (N < NR_PACK);
+        // Tiny-K wide-N decode (M>1): BRGEMM's per-panel overhead exceeds
+        // the compute per panel. GEMM's simpler loop is faster.
+        // M=1 is excluded: the BRGEMM M=1 fast path has minimal overhead
+        // and fuses postops with better accuracy than the GEMM fallback.
+        bool tiny_k_wide = (is_decode && M > 1 && K < 32 && N > K);
 
-        if (decode_wide_n || b_exceeds_l2 || small_n) {
+        if (b_exceeds_l2 || small_n || tiny_k_wide) {
             bf16_gemm_execute(desc, uarch, src, weight, dst, bias, params);
             return;
         }
     }
 
-    // ── 1. Plan (BF16-specific, mirroring GEMM's proven approach) ──
-    BrgemmPlan bplan = plan_brgemm(desc, uarch);
-    bplan.NR = 64;
-
-    // Adaptive MR: same logic as GEMM — prefer MR=6 for throughput,
-    // but use MR=4 when MR=6 creates badly unbalanced IC tiles.
-    if (is_decode) {
-        bplan.MR = M;
-    } else if (M % 6 == 0 || M >= 18) {
-        bplan.MR = 6;
-    } else if (M % 4 == 0) {
-        bplan.MR = 4;
-    } else if (M % 6 <= 3 && M > 12) {
-        bplan.MR = 4;
-    } else {
-        bplan.MR = 6;
-    }
-
-    // BK: maximize to keep accumulators live longer (BRGEMM's key advantage).
-    // Constraints: A panel (MR×BK×2) in L1, B panel (NR_PACK×BK×2) in L2.
-    {
-        int kb_a = static_cast<int>(0.8 * uarch.l1d_bytes)
-                   / std::max(bplan.MR * 2, 1);
-        int kb_b = (uarch.l2_bytes / 2)
-                   / (NR_PACK * static_cast<int>(sizeof(uint16_t)));
-        int bk_max = std::min(kb_a, kb_b);
-        bk_max = std::max(bk_max, 64);
-        bk_max = (bk_max + 1) & ~1;
-        if (K_padded <= bk_max) {
-            bplan.BK = K_padded;
-        } else {
-            int n_blk = (K_padded + bk_max - 1) / bk_max;
-            bplan.BK = ((K_padded + n_blk - 1) / n_blk + 1) & ~1;
-        }
-    }
-
-    // NB: re-align to NR=64. Keep FP32 planner's NB (usually >= 128)
-    // as a floor — larger NB reduces per-tile overhead.
-    bplan.NB = std::max((bplan.NB / bplan.NR) * bplan.NR, bplan.NR);
-    bplan.NB = std::min(bplan.NB, N);
-
-    if (!is_decode) {
-        int mb_budget = (uarch.l1d_bytes + uarch.l2_bytes)
-                        / std::max(bplan.NB * 4 + bplan.BK * 2, 1);
-        mb_budget = (mb_budget / bplan.MR) * bplan.MR;
-        mb_budget = std::max(mb_budget, bplan.MR);
-        bplan.MB = std::min(mb_budget, M);
-
-        // For large M with multi-threading: if the cache-based MB creates
-        // badly imbalanced IC tiles, reduce MB for better load balance.
-        // Preserve MB >= M for small M (enables the prepacked fast path).
-        if (bplan.num_threads > 1 && bplan.MB < M) {
-            int m_panels = (M + bplan.MR - 1) / bplan.MR;
-            int jc_tiles_now = (N + bplan.NB - 1) / bplan.NB;
-            int ic_tiles_now = (M + bplan.MB - 1) / bplan.MB;
-
-            // Check for imbalance: last IC tile much smaller than others
-            int last_ic_rows = M - (ic_tiles_now - 1) * bplan.MB;
-            bool imbalanced = (last_ic_rows < bplan.MB / 2)
-                              || (ic_tiles_now * jc_tiles_now < bplan.num_threads);
-
-            if (imbalanced) {
-                int target_tiles = std::max(2 * bplan.num_threads,
-                                            bplan.num_threads + jc_tiles_now);
-                int needed_ic = (target_tiles + jc_tiles_now - 1) / jc_tiles_now;
-                needed_ic = std::max(needed_ic, 2);
-                int ppb = std::max(m_panels / needed_ic, 1);
-                bplan.MB = ppb * bplan.MR;
-                bplan.MB = std::min(bplan.MB, M);
-            }
-        }
-    } else {
-        bplan.MB = M;
-    }
-
-    if (apilog_info_enabled()) {
-        int jt = (N + bplan.NB - 1) / bplan.NB;
-        int it = (M + bplan.MB - 1) / bplan.MB;
-        apilog_info("Native BF16 BRGEMM plan: M=", M, " N=", N, " K=", K,
-                    " MB=", bplan.MB, " NB=", bplan.NB, " BK=", bplan.BK,
-                    " MR=", bplan.MR, " NR=", bplan.NR,
-                    " ic=", it, " jc=", jt, " tiles=", it*jt,
-                    " threads=", bplan.num_threads);
-    }
+    // ── 1. Plan ──
+    BrgemmPlan bplan = plan_bf16_brgemm(desc, uarch);
 
     // ── 2. B VNNI prepack ──
+    // Strategy:
+    //   const weights + cache enabled → global cache (pack once, reuse)
+    //   mutable weights or cache off  → thread-local full prepack every call
+    // GEMM fallbacks (b_exceeds_l2/small_n/tiny_k_wide) are handled above;
+    // past this point, BRGEMM runs its own kernel with no further fallback.
     static int32_t s_weight_cache =
         matmul_config_t::instance().get_weight_cache();
-    static int32_t s_otf_bpack =
-        matmul_config_t::instance().get_otf_bpack();
     const BF16PrepackedWeight *prepacked_b = nullptr;
     const bool can_cache = is_weights_const && (s_weight_cache != 0);
+    const char *pack_source = "otf";
 
     if (can_cache) {
         PrepackedWeightKey bk{weight, K, N, desc.ldb, transB};
         prepacked_b = BF16PrepackedWeightCache::instance().get_or_prepack(
             bk, static_cast<const uint16_t *>(weight));
+        if (prepacked_b) pack_source = "global_cache";
     }
-    const bool do_otf = (!prepacked_b && s_otf_bpack != 0);
 
+    // Mutable weights (or cache disabled/failed): full prepack into
+    // thread-local buffer. Same panel layout as the global cache,
+    // repacked every call to reflect current weight data.
+    static thread_local std::unique_ptr<BF16PrepackedWeight> s_tl_prepack;
+    static thread_local int s_tl_cap_K = 0, s_tl_cap_N = 0;
+    if (!prepacked_b) {
+        const int np = (N + NR_PACK - 1) / NR_PACK;
+        const int k_pairs = K_padded / 2;
+        const int vnni_stride = NR_PACK * VNNI_PAIR;
+        const size_t total = static_cast<size_t>(np) * k_pairs * vnni_stride;
+
+        if (!s_tl_prepack || s_tl_cap_N < N || s_tl_cap_K < K) {
+            auto pw = std::make_unique<BF16PrepackedWeight>();
+            uint16_t *buf = static_cast<uint16_t *>(
+                std::aligned_alloc(64,
+                    ((total * sizeof(uint16_t) + 63) & ~size_t(63))));
+            if (buf) {
+                pw->buf.reset(buf);
+                pw->data = buf;
+                pw->K = K;
+                pw->K_padded = K_padded;
+                pw->N = N;
+                pw->n_panels = np;
+                s_tl_prepack = std::move(pw);
+                s_tl_cap_K = K;
+                s_tl_cap_N = N;
+            }
+        }
+        if (s_tl_prepack && s_tl_cap_N >= N && s_tl_cap_K >= K) {
+            const uint16_t *B_raw = static_cast<const uint16_t *>(weight);
+            const int ldb_val = desc.ldb;
+            uint16_t *buf = const_cast<uint16_t *>(s_tl_prepack->data);
+            const int cur_np = (N + NR_PACK - 1) / NR_PACK;
+            const int cur_kp = K_padded / 2;
+            for (int jp = 0; jp < cur_np; ++jp) {
+                const int j0 = jp * NR_PACK;
+                const int nr_act = std::min(NR_PACK, N - j0);
+                pack_b_vnni_strip_full(B_raw, ldb_val, transB,
+                    j0, nr_act, K, K_padded,
+                    buf + static_cast<size_t>(jp) * cur_kp * vnni_stride);
+            }
+            s_tl_prepack->K = K;
+            s_tl_prepack->K_padded = K_padded;
+            s_tl_prepack->N = N;
+            s_tl_prepack->n_panels = cur_np;
+            prepacked_b = s_tl_prepack.get();
+            pack_source = "thread_local_prepack";
+        }
+    }
+
+    // OTF is the last resort: global_cache → thread_local_prepack → OTF.
+    // Honor get_otf_bpack() for consistency with FP32 BRGEMM: if OTF
+    // packing is disabled and no prepacked B is available, fall back to
+    // the BF16 GEMM path which handles unpacked weights directly.
+    static int32_t s_otf_bpack =
+        matmul_config_t::instance().get_otf_bpack();
+    const bool do_otf = (!prepacked_b && s_otf_bpack != 0);
     if (!prepacked_b && !do_otf) {
         bf16_gemm_execute(desc, uarch, src, weight, dst, bias, params);
         return;
+    }
+
+    static bool s_log = apilog_info_enabled();
+    if (s_log) {
+        const char *path = (M == 1 && bplan.num_threads <= 1) ? "m1_fast"
+                         : (prepacked_b && bplan.num_threads <= 1) ? "prepacked_fast"
+                         : (bplan.num_threads > 1) ? "parallel"
+                         : "generic";
+        apilog_info("Native BF16 BRGEMM looper: M=", M, " N=", N, " K=", K,
+                    " pack=", pack_source, " path=", path,
+                    " is_weights_const=", is_weights_const ? "true" : "false",
+                    " dst=", (desc.dst_dt == data_type_t::bf16) ? "bf16" : "fp32");
     }
 
     bf16_brgemm_thread_loop(desc, bplan, uarch, src, weight, dst, bias,
